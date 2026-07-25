@@ -4867,6 +4867,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                          List<String> securityGroupIds, Boolean privateDnsEnabled,
                                          String policyDocument, List<Tag> endpointTags,
                                          List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
+        return createVpcEndpoint(region, vpcId, serviceName, endpointType, routeTableIds, subnetIds,
+                securityGroupIds, privateDnsEnabled, policyDocument, endpointTags, subnetConfigurations, null);
+    }
+
+    public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
+                                         List<String> routeTableIds, List<String> subnetIds,
+                                         List<String> securityGroupIds, Boolean privateDnsEnabled,
+                                         String policyDocument, List<Tag> endpointTags,
+                                         List<VpcEndpointSubnetConfiguration> subnetConfigurations, String ipAddressType) {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         for (String routeTableId : routeTableIds) {
@@ -4895,6 +4904,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         endpoint.setVpcId(vpcId);
         endpoint.setServiceName(serviceName);
         endpoint.setVpcEndpointType(endpointType != null && !endpointType.isBlank() ? endpointType : "Gateway");
+        endpoint.setIpAddressType(ipAddressType != null && !ipAddressType.isBlank() ? ipAddressType : "ipv4");
         boolean isInterface = "Interface".equalsIgnoreCase(endpoint.getVpcEndpointType());
         endpoint.setPrivateDnsEnabled(privateDnsEnabled != null ? privateDnsEnabled : isInterface);
         endpoint.setCreationTimestamp(Instant.now());
@@ -5090,7 +5100,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         List<VpcEndpoint> deleted = new ArrayList<>();
         for (String endpointId : endpointIds) {
             VpcEndpoint endpoint = getRequiredVpcEndpoint(region, endpointId);
-            endpoint.setState("deleted");
+            endpoint.setState("Deleted");
             vpcEndpoints.delete(key(region, endpointId));
             tags.delete(endpointId);
             deleted.add(endpoint);
@@ -9403,7 +9413,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 // rename: a caller sending the documented name fell through the default arm
                 // and got every endpoint back unfiltered. Renamed rather than aliased -
                 // there is no evidence real AWS accepts "state" here.
-                case "vpc-endpoint-state" -> matchesValue(values, endpoint.getState());
+                case "vpc-endpoint-state" -> matchesValue(values,
+                        endpoint.getState().substring(0, 1).toLowerCase(Locale.ROOT) + endpoint.getState().substring(1));
                 case "route-table-id" -> endpoint.getRouteTableIds().stream()
                         .anyMatch(routeTableId -> matchesValue(values, routeTableId));
                 case "subnet-id" -> endpoint.getSubnetIds().stream()

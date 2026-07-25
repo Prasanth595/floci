@@ -69,6 +69,13 @@ class Ec2ModifyVpcEndpointTest {
     }
 
     @Test
+    void endpointStatesUseAwsWireValues() {
+        Fixture f = fixture("10.89.0.0/16");
+        assertEquals("Available", xmlValue(describe(f.endpointId()), "state"));
+        assertEquals("Deleted", service.deleteVpcEndpoints("us-east-1", List.of(f.endpointId())).getFirst().getState());
+    }
+
+    @Test
     void addRouteTableIdAssociatesTheRouteTable() {
         Fixture f = fixture("10.90.0.0/16");
 
