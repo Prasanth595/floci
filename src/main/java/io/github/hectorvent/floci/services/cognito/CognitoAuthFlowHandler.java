@@ -657,6 +657,9 @@ final class CognitoAuthFlowHandler {
         if (!pool.getId().equals(parts[0])) {
             throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
         }
+        CognitoService.requireRefreshTokenOfClient(client, parts);
+        List<String> scopes = CognitoService.refreshTokenScopes(parts);
+        CognitoService.requireScopesStillAllowed(client, scopes);
         String username = parts[1];
         long iat;
         try {
@@ -685,14 +688,10 @@ final class CognitoAuthFlowHandler {
             throw ae;
         }
         CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user,
-                clientMetadata, "TokenGeneration_RefreshTokens", List.of());
-        Map<String, Object> auth = new HashMap<>();
-        auth.put("AccessToken", service.generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid));
-        auth.put("IdToken", service.generateSignedJwt(user, pool, "id", client, override, refreshTokenUuid));
-        auth.put("ExpiresIn", service.getAccessTokenExpiresInSeconds(client));
-        auth.put("TokenType", "Bearer");
+                clientMetadata, "TokenGeneration_RefreshTokens", scopes);
         Map<String, Object> result = new HashMap<>();
-        result.put("AuthenticationResult", auth);
+        result.put("AuthenticationResult", service.accessAndIdTokens(user, pool, client, override, refreshTokenUuid,
+                scopes, iat / 1000L));
         return result;
     }
 
@@ -2068,8 +2067,10 @@ final class CognitoAuthFlowHandler {
         return service.generateAuthResult(user, pool, client, override);
     }
 
-    CognitoService.ClaimsOverride preTokenGenerationForRefresh(UserPool pool, UserPoolClient client, CognitoUser user) {
-        return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_RefreshTokens", List.of());
+    /** {@code scopes} are those of the grant being refreshed, or null for a sign-in through the API. */
+    CognitoService.ClaimsOverride preTokenGenerationForRefresh(UserPool pool, UserPoolClient client, CognitoUser user,
+                                                               List<String> scopes) {
+        return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_RefreshTokens", scopes);
     }
 
     /**
