@@ -148,7 +148,7 @@ cross-resource references.
 | Route 53 | `HostedZone`, `RecordSet` |
 | Cloud Map | `HttpNamespace`, `PrivateDnsNamespace`, `PublicDnsNamespace`, `Service` |
 | API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage`, `Account`, `DomainName`, `BasePathMapping`, `GatewayResponse`, `ApiKey`, `UsagePlan`, `UsagePlanKey` |
-| API Gateway v2 | `Api`, `Authorizer`, `Route`, `Integration`, `Stage`, `Deployment`, `VpcLink` |
+| API Gateway v2 | `Api`, `Authorizer`, `Route`, `Integration`, `Stage`, `Deployment`, `DomainName`, `ApiMapping`, `VpcLink` |
 | AppSync | `GraphQLApi`, `GraphQLSchema`, `DataSource`, `FunctionConfiguration`, `Resolver`, `ApiKey`. `Ref` on `GraphQLApi` and `ApiKey` returns the id where AWS returns the ARN. See [AppSync](appsync.md#cloudformation) for `Ref` and `Fn::GetAtt` compared with AWS. |
 | Step Functions | `StateMachine` |
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
