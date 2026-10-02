@@ -416,7 +416,24 @@ Lambda. floci supports two shapes:
   default); a resource that never completes fails the stack rather than hanging.
 
 The handler's `Data` keys resolve through `Fn::GetAtt`, except keys that begin with `__Floci`. Floci
-reserves that prefix for its own resource state, which no template can read.
+reserves that prefix for its own resource state and ignores such keys.
+
+A failed stack update rolls back a custom resource whose handler was sent an `Update`, as
+CloudFormation does. This holds whether the handler applied the update and a later resource failed,
+or the handler answered `FAILED` itself. The handler is sent a second `Update` under the same
+`PhysicalResourceId`, with the old properties as `ResourceProperties` and the attempted ones as
+`OldResourceProperties`, so it can undo the change. A handler that answers `FAILED` to that rollback
+leaves the resource `UPDATE_FAILED` with its `Reason`, and the stack `UPDATE_ROLLBACK_FAILED`. The
+old properties still become the resource's own, as on AWS: a later `DeleteStack` sends them in its
+`Delete`, and the next update sends them as `OldResourceProperties`. An update whose handler returned
+a new `PhysicalResourceId` replaced the resource. Its rollback sends no `Update`: the new id gets a
+`Delete` with the attempted properties, and the resource goes back to the old id. CloudFormation sends
+that `Delete` in its `UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS` phase. Floci has no rollback
+cleanup phase and sends it during the rollback. As in that phase, a `Delete` the handler fails is
+logged and does not fail the rollback. When the rollback's own `Update` returns a new id, the id it
+was sent gets a `Delete` straight away for the same reason. An update that changes `ServiceToken`
+reaches no handler: it fails with `Modifying service token is not allowed.`, as on AWS, and its
+rollback sends nothing.
 
 ## Deleted Stacks
 
