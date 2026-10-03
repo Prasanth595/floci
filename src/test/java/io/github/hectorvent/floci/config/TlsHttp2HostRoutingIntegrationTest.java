@@ -1,7 +1,5 @@
 package io.github.hectorvent.floci.config;
 
-import io.github.hectorvent.floci.services.acm.CertificateGenerator;
-import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
@@ -11,7 +9,6 @@ import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
 import io.vertx.core.Vertx;
@@ -24,11 +21,10 @@ import io.vertx.core.net.PemTrustOptions;
 import io.vertx.core.net.SocketAddress;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -53,11 +49,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * certificate, so no DNS lookup is needed.
  */
 @QuarkusTest
-@TestProfile(TlsHttp2HostRoutingIntegrationTest.Profile.class)
+@TestProfile(SelfSignedTlsProfile.class)
 class TlsHttp2HostRoutingIntegrationTest {
 
-    static final Path DATA_DIR = Path.of("target", "floci-tls-http2-host-routing-test").toAbsolutePath();
-    static final Path TLS_DIR = DATA_DIR.resolve("tls");
     static final String API_DOMAIN = "api.h2-routing.example.test";
     private static final String REGION = "us-east-1";
 
@@ -73,13 +67,25 @@ class TlsHttp2HostRoutingIntegrationTest {
     @Inject
     CloudFrontService cloudFrontService;
 
+    /** What the test created, removed newest first: every class on this profile shares one application. */
+    private final List<Runnable> cleanup = new ArrayList<>();
+
+    @AfterEach
+    void removeWhatTheTestCreated() {
+        for (int i = cleanup.size() - 1; i >= 0; i--) {
+            cleanup.get(i).run();
+        }
+    }
+
     @Test
     void cloudFrontServesACannedSignedUrlOnEachLocalDeliveryHost() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
         String bucket = "cf-h2-" + suffix;
         s3Service.createBucket(bucket, REGION);
+        cleanup.add(() -> s3Service.deleteBucket(bucket));
         s3Service.putObject(bucket, "private/report.txt", ("H2-" + suffix).getBytes(StandardCharsets.UTF_8),
                 "text/plain", Map.of());
+        cleanup.add(() -> s3Service.deleteObject(bucket, "private/report.txt"));
 
         KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
         generator.initialize(2048);
@@ -91,10 +97,16 @@ class TlsHttp2HostRoutingIntegrationTest {
                 + Base64.getMimeEncoder().encodeToString(keyPair.getPublic().getEncoded())
                 + "\n-----END PUBLIC KEY-----");
         publicKey = cloudFrontService.createPublicKey(publicKey);
+        String publicKeyId = publicKey.getId();
+        cleanup.add(() -> cloudFrontService.deletePublicKey(publicKeyId,
+                cloudFrontService.getPublicKey(publicKeyId).getEtag()));
         KeyGroup keyGroup = new KeyGroup();
         keyGroup.setName("kg-" + suffix);
         keyGroup.setItems(List.of(publicKey.getId()));
         keyGroup = cloudFrontService.createKeyGroup(keyGroup);
+        String keyGroupId = keyGroup.getId();
+        cleanup.add(() -> cloudFrontService.deleteKeyGroup(keyGroupId,
+                cloudFrontService.getKeyGroup(keyGroupId).getEtag()));
 
         Origin origin = new Origin();
         origin.setId("o");
@@ -111,6 +123,9 @@ class TlsHttp2HostRoutingIntegrationTest {
         Distribution distribution = new Distribution();
         distribution.setConfig(config);
         distribution = cloudFrontService.createDistribution(distribution, Map.of());
+        String distributionId = distribution.getId();
+        // The test owns the distribution, so it skips the disable-then-delete round trip.
+        cleanup.add(() -> cloudFrontService.removeDistribution(distributionId));
 
         // A browser sends the host in lower case, and a canned policy signs the port too.
         String id = distribution.getId().toLowerCase(Locale.ROOT);
@@ -136,6 +151,7 @@ class TlsHttp2HostRoutingIntegrationTest {
                 .body("{\"name\":\"h2-host-routing\"}")
                 .when().post("/restapis")
                 .then().statusCode(201).extract().path("id");
+        cleanup.add(() -> given().when().delete("/restapis/" + apiId).then().statusCode(202));
         String rootId = given().when().get("/restapis/" + apiId + "/resources")
                 .then().statusCode(200).extract().path("item[0].id");
         String resourceId = given().contentType(ContentType.JSON)
@@ -163,9 +179,12 @@ class TlsHttp2HostRoutingIntegrationTest {
         given().contentType(ContentType.JSON)
                 .body("{\"domainName\":\"" + API_DOMAIN + "\"}")
                 .when().post("/domainnames").then().statusCode(201);
+        cleanup.add(() -> given().when().delete("/domainnames/" + API_DOMAIN).then().statusCode(202));
         given().contentType(ContentType.JSON)
                 .body("{\"basePath\":\"v1\",\"restApiId\":\"" + apiId + "\",\"stage\":\"dev\"}")
                 .when().post("/domainnames/" + API_DOMAIN + "/basepathmappings").then().statusCode(201);
+        cleanup.add(() -> given().when().delete("/domainnames/" + API_DOMAIN + "/basepathmappings/v1")
+                .then().statusCode(202));
 
         Http2Response response = getOverHttp2(API_DOMAIN, "/v1/ping");
         assertEquals(HttpVersion.HTTP_2, response.version());
@@ -181,7 +200,8 @@ class TlsHttp2HostRoutingIntegrationTest {
                 .setUseAlpn(true)
                 .setForceSni(true)
                 .setTrustOptions(new PemTrustOptions().addCertPath(
-                        FlociCertificateAuthority.loadOrCreate(TLS_DIR).certificatePath().toString()))
+                        FlociCertificateAuthority.loadOrCreate(Path.of(SelfSignedTlsProfile.TLS_DIR))
+                                .certificatePath().toString()))
                 .setVerifyHost(true)
                 .setProtocolVersion(HttpVersion.HTTP_2));
         try {
@@ -203,38 +223,5 @@ class TlsHttp2HostRoutingIntegrationTest {
 
     private static String cloudFrontBase64(byte[] bytes) {
         return Base64.getEncoder().encodeToString(bytes).replace('+', '-').replace('=', '_').replace('/', '~');
-    }
-
-    /**
-     * Boots with TLS on and a CA-issued leaf carrying the SANs TlsConfigSource writes, plus the API
-     * Gateway custom domain.
-     */
-    public static final class Profile implements QuarkusTestProfile {
-
-        static {
-            try {
-                Files.createDirectories(TLS_DIR);
-                FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(TLS_DIR);
-                List<String> sans = new ArrayList<>(TlsConfigSource.DEFAULT_SAN_HOSTNAMES);
-                sans.add(API_DOMAIN);
-                CertificateGenerator.GeneratedCertificate leaf = ca.issueServerCertificate("localhost", sans, KeyAlgorithm.RSA_2048, null);
-                Files.writeString(TLS_DIR.resolve("floci-server.crt"), leaf.certificatePem());
-                Files.writeString(TLS_DIR.resolve("floci-server.key"), leaf.privateKeyPem());
-            } catch (IOException e) {
-                throw new IllegalStateException("could not prepare the TLS fixtures", e);
-            }
-        }
-
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.tls.enabled", "true",
-                    "floci.tls.self-signed", "true",
-                    "floci.tls.aws-https-port", "0",
-                    "floci.storage.persistent-path", DATA_DIR.toString(),
-                    "quarkus.tls.key-store.pem.0.cert", TLS_DIR.resolve("floci-server.crt").toString(),
-                    "quarkus.tls.key-store.pem.0.key", TLS_DIR.resolve("floci-server.key").toString(),
-                    "quarkus.http.insecure-requests", "enabled");
-        }
     }
 }

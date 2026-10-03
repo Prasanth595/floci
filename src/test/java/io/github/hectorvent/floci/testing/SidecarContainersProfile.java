@@ -70,6 +70,15 @@ public class SidecarContainersProfile implements QuarkusTestProfile {
     }
 
     /**
+     * This run's namespace, for a profile of another kind whose classes start containers that need
+     * the same isolation. Its containers are then removed by {@link #requireDockerAndImage} too when
+     * a killed run leaves them behind.
+     */
+    public static String namespace() {
+        return NAMESPACE;
+    }
+
+    /**
      * Identifies this machine and process id namespace, the scope a process id is valid in. On
      * Linux the namespace is {@code /proc/self/ns/pid}; elsewhere the host name has to do alone.
      */
