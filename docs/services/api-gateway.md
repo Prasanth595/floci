@@ -633,7 +633,8 @@ several levels, such as `orders/v1`, which only the v2 API creates.
 mutual TLS, ownership verification certificates, an IP address type other than `ipv4` and a routing
 mode other than `API_MAPPING_ONLY`; an update replaces the configuration as a whole. As on AWS, a v2
 domain is regional: the `EDGE` endpoint type is refused, and any other one, `PRIVATE` included,
-gives a `REGIONAL` domain. The v2 API does not manage an edge-optimized domain, an HTTP API or a key
+gives a `REGIONAL` domain, whose certificate the v1 API reports as
+`regionalCertificateArn`. The v2 API does not manage an edge-optimized domain, an HTTP API or a key
 with several levels needs a domain on the `TLS_1_2` security policy (so such a domain cannot leave
 it), and a WebSocket API cannot share a domain with an HTTP or REST API.
 

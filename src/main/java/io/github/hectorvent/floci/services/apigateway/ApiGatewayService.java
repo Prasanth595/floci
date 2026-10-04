@@ -2041,6 +2041,14 @@ public class ApiGatewayService implements ResourceProvider {
 
     // ──────────────────────────── Custom Domains ────────────────────────────
 
+    /**
+     * A public custom domain's ARN, {@code arn:<partition>:apigateway:<region>::/domainnames/<name>},
+     * which both APIs report and CloudFormation's {@code DomainNameArn} returns.
+     */
+    public static String domainNameArn(String region, String domainName) {
+        return AwsArnUtils.Arn.of("apigateway", region, "", "/domainnames/" + domainName).toString();
+    }
+
     public CustomDomain createDomainName(String region, Map<String, Object> request) {
         String domainName = (String) request.get("domainName");
         if (domainName == null) throw new AwsException("BadRequestException", "domainName is required", 400);
@@ -2417,10 +2425,28 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     /**
+     * {@code UpdateDomainName} through the v2 API: a body with a configuration replaces the domain's
+     * as {@link #replaceV2DomainConfiguration} does. One without changes nothing, after the same
+     * refusals: of what Floci does not emulate, and of an edge-optimized domain, which the v2 API
+     * does not manage.
+     */
+    public CustomDomain updateV2DomainName(String region, String domainName, Map<String, Object> request) {
+        if (request.get("domainNameConfigurations") != null) {
+            return replaceV2DomainConfiguration(region, domainName, request);
+        }
+        rejectUnemulatedDomainInputs(request, Map.of());
+        CustomDomain domain = getDomainName(region, domainName);
+        requireRegionalDomain(domain);
+        return domain;
+    }
+
+    /**
      * Drives a domain's configuration to the one in a v2 {@code CreateDomainName} body, validated the
      * same way. This is what an update of {@code DomainNameConfigurations} does on AWS: the list is
      * replaced as a whole, so a certificate the body leaves out is cleared and a security policy it
-     * leaves out takes the {@code TLS_1_2} default. Tags are not touched.
+     * leaves out takes the {@code TLS_1_2} default. The domain is regional, so its certificate goes to
+     * the regional fields, and one left in the edge-optimized fields by an earlier v2 write is
+     * cleared with the rest. Tags are not touched.
      */
     public CustomDomain replaceV2DomainConfiguration(String region, String domainName,
                                                      Map<String, Object> request) {
@@ -2428,11 +2454,14 @@ public class ApiGatewayService implements ResourceProvider {
         String securityPolicy = (String) v1Request.getOrDefault("securityPolicy", TLS_1_2);
         synchronized (domainNameLock) {
             CustomDomain domain = getDomainName(region, domainName);
+            requireRegionalDomain(domain);
             if (!Objects.equals(securityPolicy, domain.getSecurityPolicy())) {
                 requireMappingsAllowSecurityPolicy(region, domainName, securityPolicy);
             }
-            domain.setCertificateArn((String) v1Request.get("certificateArn"));
-            domain.setCertificateName((String) v1Request.get("certificateName"));
+            domain.setCertificateArn(null);
+            domain.setCertificateName(null);
+            domain.setRegionalCertificateArn((String) v1Request.get("regionalCertificateArn"));
+            domain.setRegionalCertificateName((String) v1Request.get("regionalCertificateName"));
             domain.setSecurityPolicy(securityPolicy);
             applyEndpointType(domain, endpointTypeOf(v1Request), region);
             domainStore.put(domainKey(region, domainName), domain);
@@ -2460,10 +2489,11 @@ public class ApiGatewayService implements ResourceProvider {
         Map<String, Object> v1Request = new HashMap<>();
         v1Request.put("domainName", request.get("domainName"));
         copyIfPresent(request, v1Request, "tags", "tags");
-        copyIfPresent(configuration, v1Request, "certificateArn", "certificateArn");
-        copyIfPresent(configuration, v1Request, "certificateName", "certificateName");
         // An HTTP API domain is regional: API Gateway creates or keeps any other endpoint type it is
-        // given, PRIVATE or one it does not know, as REGIONAL (measured, eu-west-1, 2026-10-04).
+        // given, PRIVATE or one it does not know, as REGIONAL (measured, eu-west-1, 2026-10-04). Its
+        // certificate is the regional one, which the v1 API reports as regionalCertificateArn.
+        copyIfPresent(configuration, v1Request, "certificateArn", "regionalCertificateArn");
+        copyIfPresent(configuration, v1Request, "certificateName", "regionalCertificateName");
         v1Request.put("endpointType", "REGIONAL");
         copyIfPresent(configuration, v1Request, "securityPolicy", "securityPolicy");
         return v1Request;
@@ -2559,6 +2589,25 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     /**
+     * The v2 {@code UpdateApiMapping} from its request body: what the body leaves out keeps its value,
+     * as on AWS. The values it keeps are read under the lock the update takes, so two updates naming
+     * different fields of one mapping cannot write back each other's old values.
+     */
+    public StoredMapping updateApiMapping(String region, String domainName, String apiMappingId,
+                                          Map<String, Object> request) {
+        synchronized (domainNameLock) {
+            StoredMapping current = getApiMapping(region, domainName, apiMappingId);
+            String currentKey = canonicalBasePath(current.storedPath());
+            String apiMappingKey = request.containsKey("apiMappingKey")
+                    ? Objects.toString(request.get("apiMappingKey"), null)
+                    : ("(none)".equals(currentKey) ? null : currentKey);
+            String apiId = Objects.toString(request.get("apiId"), current.mapping().getRestApiId());
+            String stage = Objects.toString(request.get("stage"), current.mapping().getStage());
+            return updateApiMapping(region, domainName, apiMappingId, apiMappingKey, apiId, stage);
+        }
+    }
+
+    /**
      * Points a v2 API mapping at a new key, API and stage, the v2 {@code UpdateApiMapping}. The id
      * names the mapping rather than its key, so it stays with the record when the key changes, as on
      * AWS.
@@ -2635,11 +2684,6 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     /**
-     * The restrictions AWS puts on an API mapping: only a regional domain is reachable through the v2
-     * API, a key holds only the characters AWS allows and at most 300 of them, and an HTTP API or a
-     * key with more than one level needs a domain on the TLS 1.2 security policy.
-     */
-    /**
      * Refuses an API mapping key that API Gateway refuses, with its messages (measured, eu-west-1,
      * 2026-10-04). No key or an empty one is the root mapping, and so is a key of whitespace only
      * on a create; an update refuses that one.
@@ -2670,6 +2714,11 @@ public class ApiGatewayService implements ResourceProvider {
         }
     }
 
+    /**
+     * The restrictions AWS puts on an API mapping's domain: only a regional domain is reachable
+     * through the v2 API, and an HTTP API or a key with more than one level needs a domain on the
+     * TLS 1.2 security policy.
+     */
     private static void requireMappingAllowed(CustomDomain domain, String basePath, String apiType) {
         requireRegionalDomain(domain);
         boolean root = "(none)".equals(basePath);
@@ -2795,6 +2844,27 @@ public class ApiGatewayService implements ResourceProvider {
         // to choose between. The prefix keeps an empty stored path from producing an empty id.
         return "m" + HexFormat.of().formatHex(
                 (storedPath == null ? "" : storedPath).getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** The certificate a v2 domain configuration reports, see {@link #v2CertificateIsRegional}. */
+    public static String v2CertificateArn(CustomDomain domain) {
+        return v2CertificateIsRegional(domain) ? domain.getRegionalCertificateArn() : domain.getCertificateArn();
+    }
+
+    /** The certificate name a v2 domain configuration reports, see {@link #v2CertificateIsRegional}. */
+    public static String v2CertificateName(CustomDomain domain) {
+        return v2CertificateIsRegional(domain) ? domain.getRegionalCertificateName() : domain.getCertificateName();
+    }
+
+    /**
+     * The v1 model keeps an edge-optimized domain's certificate apart from a regional one's, and the
+     * v2 API reports whichever the domain uses. A regional domain the v2 API wrote before its
+     * certificate went to the regional fields still holds it in the edge-optimized ones, so those
+     * answer while the regional ones are empty.
+     */
+    private static boolean v2CertificateIsRegional(CustomDomain domain) {
+        return !"EDGE".equals(domain.getEndpointConfigurationType())
+                && (domain.getRegionalCertificateArn() != null || domain.getRegionalCertificateName() != null);
     }
 
     // ──────────────────────────── Custom Domain Resolution ────────────────────────────

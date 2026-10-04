@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService.StoredMapping;
@@ -171,7 +170,7 @@ public class ApiGatewayV2DomainCfnProvisioner implements CfnResourceProvisioner 
         }
         r.setPhysicalId(domainName);
         r.getAttributes().put("DomainNameArn",
-                AwsArnUtils.Arn.of("apigateway", ctx.region(), "", "/domainnames/" + domainName).toString());
+                ApiGatewayService.domainNameArn(ctx.region(), domainName));
         r.getAttributes().put("RegionalDomainName", orEmpty(provisioned.getRegionalDomainName()));
         r.getAttributes().put("RegionalHostedZoneId", orEmpty(provisioned.getRegionalHostedZoneId()));
         ReplacementCleanup.record(r, ctx, attributesBefore);
@@ -222,8 +221,8 @@ public class ApiGatewayV2DomainCfnProvisioner implements CfnResourceProvisioner 
         ObjectNode snapshot = MAPPER.createObjectNode();
         snapshot.put("region", region);
         snapshot.put("domainName", domain.getDomainName());
-        snapshot.put("certificateArn", domain.getCertificateArn());
-        snapshot.put("certificateName", domain.getCertificateName());
+        snapshot.put("certificateArn", ApiGatewayService.v2CertificateArn(domain));
+        snapshot.put("certificateName", ApiGatewayService.v2CertificateName(domain));
         snapshot.put("endpointType", domain.getEndpointConfigurationType());
         snapshot.put("securityPolicy", domain.getSecurityPolicy());
         ObjectNode tags = snapshot.putObject("tags");

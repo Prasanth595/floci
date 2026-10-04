@@ -106,13 +106,8 @@ class CloudControlServiceTest {
         CloudControlService.ProgressEvent pending = service.createResource("us-east-1", "111111111111",
                 "AWS::ApiGatewayV2::ApiMapping",
                 "{\"DomainName\":\"api.example.com\",\"ApiId\":\"a1b2c3\",\"Stage\":\"$default\"}");
-        CloudControlService.ProgressEvent completed = pending;
-        for (int i = 0; i < 20 && !"SUCCESS".equals(completed.operationStatus()); i++) {
-            Thread.sleep(10);
-            completed = service.requestStatus("111111111111", pending.requestToken());
-        }
-        assertEquals("SUCCESS", completed.operationStatus());
-        assertEquals(identifier, completed.identifier());
+        awaitSuccess(service, "111111111111", pending.requestToken());
+        assertEquals(identifier, service.requestStatus("111111111111", pending.requestToken()).identifier());
         String model = service.getResource("us-east-1", "111111111111",
                 "AWS::ApiGatewayV2::ApiMapping", identifier).properties();
         assertEquals("abc123", new ObjectMapper().readTree(model).path("ApiMappingId").asText());
@@ -123,6 +118,35 @@ class CloudControlServiceTest {
                 Map.of("ApiMappingId", "abc123"));
         assertThrows(AwsException.class, () -> service.getResource("us-east-1", "111111111111",
                 "AWS::ApiGatewayV2::ApiMapping", identifier));
+    }
+
+    /**
+     * A create that finished just before a restart is recorded while its request still reads
+     * IN_PROGRESS; recovery reports it done under the whole identifier, a compound one included.
+     */
+    @Test
+    void aRecoveredCreateKeepsItsCompoundIdentifier() {
+        AccountAwareStorageBackend<CloudControlService.PersistedRequest> requests =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        AccountAwareStorageBackend<CloudControlService.PersistedCreatedResource> created =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        String type = "AWS::ApiGatewayV2::ApiMapping";
+        String identifier = "abc123|api.example.com";
+        requests.putForAccount("111111111111", "token-1", new CloudControlService.PersistedRequest(
+                new CloudControlService.ProgressEvent(type, null, "token-1", "CREATE", "IN_PROGRESS",
+                        null, null, "111111111111"),
+                "us-east-1", "{\"DomainName\":\"api.example.com\"}", 1L));
+        created.putForAccount("111111111111", "us-east-1|" + type + "|" + identifier,
+                new CloudControlService.PersistedCreatedResource("token-1", "111111111111", "us-east-1", type,
+                        identifier, Map.of("ApiMappingId", "abc123"), "{\"ApiMappingId\":\"abc123\"}"));
+
+        CloudControlService restarted = new CloudControlService(
+                mock(S3Service.class), mock(Ec2Service.class), mock(IamService.class),
+                mock(CfnResourceDispatcher.class), new ObjectMapper(), requests, created);
+
+        CloudControlService.ProgressEvent recovered = restarted.requestStatus("111111111111", "token-1");
+        assertEquals("SUCCESS", recovered.operationStatus());
+        assertEquals(identifier, recovered.identifier());
     }
 
     @Test

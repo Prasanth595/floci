@@ -118,7 +118,7 @@ class ApiGatewayV2DomainCfnProvisionerTest {
         CustomDomain d = new CustomDomain();
         d.setDomainName(name);
         d.setEndpointConfigurationType("REGIONAL");
-        d.setCertificateArn(CERTIFICATE_ARN);
+        d.setRegionalCertificateArn(CERTIFICATE_ARN);
         d.setSecurityPolicy("TLS_1_2");
         d.setRegionalDomainName(name + ".regional.local");
         d.setRegionalHostedZoneId("Z2FDTNDATAQYL2");
@@ -220,7 +220,7 @@ class ApiGatewayV2DomainCfnProvisionerTest {
     void domainUpdateWithUnchangedNameReplacesItsConfigurationInPlace() {
         when(apiGateway.getDomainName(REGION, DOMAIN)).thenReturn(regionalDomain(DOMAIN));
         CustomDomain updated = regionalDomain(DOMAIN);
-        updated.setCertificateArn(RENEWED_CERTIFICATE_ARN);
+        updated.setRegionalCertificateArn(RENEWED_CERTIFICATE_ARN);
         when(apiGateway.replaceV2DomainConfiguration(eq(REGION), eq(DOMAIN), anyMap())).thenReturn(updated);
         StackResource r = provisionedDomain(DOMAIN);
 
@@ -315,7 +315,7 @@ class ApiGatewayV2DomainCfnProvisionerTest {
     @Test
     void domainInPlaceRollbackRestoresTheConfigurationAndTagsItHadBefore() {
         CustomDomain existing = regionalDomain(DOMAIN);
-        existing.setCertificateName("before");
+        existing.setRegionalCertificateName("before");
         when(apiGateway.getDomainName(REGION, DOMAIN)).thenReturn(existing);
         CustomDomain updated = regionalDomain(DOMAIN);
         updated.setTags(new LinkedHashMap<>(Map.of("stack", "my-stack", "team", "api")));

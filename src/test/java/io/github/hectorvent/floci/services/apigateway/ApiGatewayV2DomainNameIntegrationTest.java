@@ -13,6 +13,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 /**
  * Custom domain names and API mappings over the HTTP API (v2) endpoints.
@@ -619,6 +620,42 @@ class ApiGatewayV2DomainNameIntegrationTest {
         .then()
             .statusCode(400)
             .body("message", is("EDGE endpoint type is not supported for APIGatewayV2 domainName"));
+    }
+
+    /** A domain is one resource: a regional one's certificate is the v1 API's regional certificate. */
+    @Test
+    @Order(15)
+    void aRegionalDomainsCertificateIsTheSameThroughBothApis() {
+        String v2Created = "cert-v2.example.com";
+        createRegionalDomain(v2Created);
+        given()
+        .when()
+            .get("/domainnames/" + v2Created)
+        .then()
+            .statusCode(200)
+            .body("regionalCertificateArn", containsString("certificate/abc"))
+            .body("certificateArn", nullValue());
+
+        String v1Created = "cert-v1.example.com";
+        given()
+            .contentType(ContentType.JSON)
+            .body("""
+                    {"domainName":"%s",
+                     "regionalCertificateArn":"arn:aws:acm:us-east-1:000000000000:certificate/regional",
+                     "regionalCertificateName":"regional-name",
+                     "endpointConfiguration":{"types":["REGIONAL"]}}
+                    """.formatted(v1Created))
+        .when()
+            .post("/domainnames")
+        .then()
+            .statusCode(201);
+        given()
+        .when()
+            .get("/v2/domainnames/" + v1Created)
+        .then()
+            .statusCode(200)
+            .body("domainNameConfigurations[0].certificateArn", containsString("certificate/regional"))
+            .body("domainNameConfigurations[0].certificateName", is("regional-name"));
     }
 
     private static void createRegionalDomain(String domain) {

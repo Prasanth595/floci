@@ -215,6 +215,25 @@ class ApiGatewayV2ApiMappingServiceTest {
         assertEquals("REGIONAL", service.getDomainName(REGION, DOMAIN).getEndpointConfigurationType());
     }
 
+    /**
+     * UpdateDomainName through the v2 API is a v2 call like the others: refused on an
+     * edge-optimized domain, and refused for what Floci does not emulate even without a
+     * configuration to replace.
+     */
+    @Test
+    void aV2UpdateRefusesAnEdgeDomainAndWhatIsNotEmulated() {
+        v1Domain(DOMAIN, "EDGE", "TLS_1_2");
+        assertBadRequest(EDGE_MESSAGE, () -> service.updateV2DomainName(REGION, DOMAIN, Map.of(
+                "domainNameConfigurations",
+                List.of(Map.of("certificateArn", CERTIFICATE_ARN, "endpointType", "REGIONAL")))));
+        assertEquals("EDGE", service.getDomainName(REGION, DOMAIN).getEndpointConfigurationType());
+
+        v2Domain(OTHER_DOMAIN);
+        assertBadRequest("Mutual TLS authentication is not supported", () -> service.updateV2DomainName(REGION,
+                OTHER_DOMAIN, Map.of("mutualTlsAuthentication", Map.of("truststoreUri", "s3://bucket/key"))));
+        assertEquals(OTHER_DOMAIN, service.updateV2DomainName(REGION, OTHER_DOMAIN, Map.of()).getDomainName());
+    }
+
     /** Measured against API Gateway (eu-west-1, 2026-10-04), its messages included. */
     @Test
     void anApiMappingKeyIsCheckedAsApiGatewayChecksIt() {
@@ -319,8 +338,87 @@ class ApiGatewayV2ApiMappingServiceTest {
         CustomDomain replaced = service.replaceV2DomainConfiguration(REGION, DOMAIN, Map.of("domainName", DOMAIN,
                 "domainNameConfigurations", List.of(Map.of("certificateArn", CERTIFICATE_ARN))));
 
-        assertNull(replaced.getCertificateName(), "a field the configuration leaves out is cleared");
+        assertEquals(CERTIFICATE_ARN, replaced.getRegionalCertificateArn());
+        assertNull(replaced.getRegionalCertificateName(), "a field the configuration leaves out is cleared");
         assertEquals("TLS_1_2", replaced.getSecurityPolicy(), "an omitted security policy takes the default");
         assertEquals("REGIONAL", replaced.getEndpointConfigurationType());
+    }
+
+    @Test
+    void aV2DomainKeepsItsCertificateAsTheRegionalOne() {
+        service.createV2DomainName(REGION, Map.of("domainName", DOMAIN, "domainNameConfigurations",
+                List.of(Map.of("certificateArn", CERTIFICATE_ARN, "certificateName", "named"))));
+
+        CustomDomain domain = service.getDomainName(REGION, DOMAIN);
+
+        assertEquals(CERTIFICATE_ARN, domain.getRegionalCertificateArn());
+        assertEquals("named", domain.getRegionalCertificateName());
+        assertNull(domain.getCertificateArn(), "the edge-optimized certificate is not the regional domain's");
+        assertNull(domain.getCertificateName());
+        assertEquals(CERTIFICATE_ARN, ApiGatewayService.v2CertificateArn(domain));
+        assertEquals("named", ApiGatewayService.v2CertificateName(domain));
+    }
+
+    @Test
+    void theV2ApiReportsTheCertificateOfTheDomainsEndpointType() {
+        Map<String, Object> regional = new HashMap<>();
+        regional.put("domainName", DOMAIN);
+        regional.put("regionalCertificateArn", CERTIFICATE_ARN);
+        regional.put("endpointConfiguration", Map.of("types", List.of("REGIONAL")));
+        service.createDomainName(REGION, regional);
+        Map<String, Object> edge = new HashMap<>();
+        edge.put("domainName", OTHER_DOMAIN);
+        edge.put("certificateArn", "arn:aws:acm:us-east-1:000000000000:certificate/edge");
+        edge.put("regionalCertificateArn", CERTIFICATE_ARN);
+        edge.put("endpointConfiguration", Map.of("types", List.of("EDGE")));
+        service.createDomainName(REGION, edge);
+
+        assertEquals(CERTIFICATE_ARN, ApiGatewayService.v2CertificateArn(service.getDomainName(REGION, DOMAIN)));
+        assertEquals("arn:aws:acm:us-east-1:000000000000:certificate/edge",
+                ApiGatewayService.v2CertificateArn(service.getDomainName(REGION, OTHER_DOMAIN)));
+    }
+
+    @Test
+    void aDomainTheV2ApiWroteToTheEdgeFieldsKeepsItsCertificateUntilItIsReplaced() {
+        // How a v2 create stored a regional domain's certificate before it went to the regional fields.
+        Map<String, Object> earlier = new HashMap<>();
+        earlier.put("domainName", DOMAIN);
+        earlier.put("certificateArn", CERTIFICATE_ARN);
+        earlier.put("certificateName", "earlier");
+        earlier.put("endpointConfiguration", Map.of("types", List.of("REGIONAL")));
+        service.createDomainName(REGION, earlier);
+        assertEquals(CERTIFICATE_ARN, ApiGatewayService.v2CertificateArn(service.getDomainName(REGION, DOMAIN)));
+        assertEquals("earlier", ApiGatewayService.v2CertificateName(service.getDomainName(REGION, DOMAIN)));
+
+        CustomDomain replaced = service.replaceV2DomainConfiguration(REGION, DOMAIN, Map.of("domainName", DOMAIN,
+                "domainNameConfigurations", List.of(Map.of("securityPolicy", "TLS_1_2"))));
+
+        assertNull(replaced.getCertificateArn(), "the configuration is replaced as a whole");
+        assertNull(replaced.getCertificateName());
+        assertNull(ApiGatewayService.v2CertificateArn(replaced));
+    }
+
+    @Test
+    void anUpdateBodyKeepsWhatItLeavesOut() {
+        v2Domain(DOMAIN);
+        String apiId = api("HTTP", "$default");
+        v2Service.createStage(REGION, apiId, Map.of("stageName", "beta"));
+        String id = service.createApiMapping(REGION, DOMAIN, "v1", apiId, "$default").apiMappingId();
+
+        StoredMapping rekeyed = service.updateApiMapping(REGION, DOMAIN, id,
+                Map.of("apiId", apiId, "apiMappingKey", "v2"));
+        assertEquals("v2", rekeyed.storedPath());
+        assertEquals("$default", rekeyed.mapping().getStage(), "a stage the body leaves out is kept");
+
+        StoredMapping restaged = service.updateApiMapping(REGION, DOMAIN, id, Map.of("apiId", apiId, "stage", "beta"));
+        assertEquals("v2", restaged.storedPath(), "a key the body leaves out is kept");
+        assertEquals("beta", restaged.mapping().getStage());
+
+        Map<String, Object> toRoot = new HashMap<>();
+        toRoot.put("apiId", apiId);
+        toRoot.put("apiMappingKey", null);
+        assertEquals("(none)", service.updateApiMapping(REGION, DOMAIN, id, toRoot).storedPath(),
+                "a key the body names as null is the root");
+        assertEquals(id, service.getApiMapping(REGION, DOMAIN, id).apiMappingId());
     }
 }

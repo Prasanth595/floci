@@ -5,7 +5,6 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService.StoredMapping;
@@ -56,7 +55,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -1646,9 +1644,7 @@ public class ApiGatewayController {
                                        String body) {
         String region = regionResolver.resolveRegion(headers);
         Map<String, Object> request = readJsonBody(body);
-        CustomDomain domain = request.get("domainNameConfigurations") == null
-                ? service.getDomainName(region, domainName)
-                : service.replaceV2DomainConfiguration(region, domainName, request);
+        CustomDomain domain = service.updateV2DomainName(region, domainName, request);
         return Response.ok(toV2DomainNode(region, domain).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -1715,14 +1711,7 @@ public class ApiGatewayController {
                                      String body) {
         String region = regionResolver.resolveRegion(headers);
         Map<String, Object> request = readJsonBody(body);
-        StoredMapping current = service.getApiMapping(region, domainName, apiMappingId);
-        String currentKey = ApiGatewayService.canonicalBasePath(current.storedPath());
-        String apiMappingKey = request.containsKey("apiMappingKey")
-                ? Objects.toString(request.get("apiMappingKey"), null)
-                : ("(none)".equals(currentKey) ? null : currentKey);
-        String apiId = Objects.toString(request.get("apiId"), current.mapping().getRestApiId());
-        String stage = Objects.toString(request.get("stage"), current.mapping().getStage());
-        StoredMapping updated = service.updateApiMapping(region, domainName, apiMappingId, apiMappingKey, apiId, stage);
+        StoredMapping updated = service.updateApiMapping(region, domainName, apiMappingId, request);
         return Response.ok(toApiMappingNode(updated).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -2472,7 +2461,7 @@ public class ApiGatewayController {
     private ObjectNode toV2DomainNode(String region, CustomDomain d) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("domainName", d.getDomainName());
-        node.put("domainNameArn", AwsArnUtils.Arn.of("apigateway", region, "", "/domainnames/" + d.getDomainName()).toString());
+        node.put("domainNameArn", ApiGatewayService.domainNameArn(region, d.getDomainName()));
         node.put("apiMappingSelectionExpression", "$request.basepath");
         // AWS reports both of these on every domain.
         node.put("routingMode", "API_MAPPING_ONLY");
@@ -2483,11 +2472,13 @@ public class ApiGatewayController {
         configuration.put("endpointType", d.getEndpointConfigurationType());
         configuration.put("domainNameStatus", d.getDomainNameStatus());
         configuration.put("ipAddressType", "ipv4");
-        if (d.getCertificateArn() != null) {
-            configuration.put("certificateArn", d.getCertificateArn());
+        String certificateArn = ApiGatewayService.v2CertificateArn(d);
+        if (certificateArn != null) {
+            configuration.put("certificateArn", certificateArn);
         }
-        if (d.getCertificateName() != null) {
-            configuration.put("certificateName", d.getCertificateName());
+        String certificateName = ApiGatewayService.v2CertificateName(d);
+        if (certificateName != null) {
+            configuration.put("certificateName", certificateName);
         }
         if (d.getSecurityPolicy() != null) {
             configuration.put("securityPolicy", d.getSecurityPolicy());
@@ -2517,7 +2508,7 @@ public class ApiGatewayController {
     private ObjectNode toDomainNode(String region, CustomDomain d) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("domainName", d.getDomainName());
-        node.put("domainNameArn", AwsArnUtils.Arn.of("apigateway", region, "", "/domainnames/" + d.getDomainName()).toString());
+        node.put("domainNameArn", ApiGatewayService.domainNameArn(region, d.getDomainName()));
         node.put("domainNameStatus", d.getDomainNameStatus());
         node.put("endpointConfigurationType", d.getEndpointConfigurationType());
         node.putObject("endpointConfiguration").putArray("types").add(d.getEndpointConfigurationType());
