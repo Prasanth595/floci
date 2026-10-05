@@ -712,7 +712,7 @@ final class CognitoAuthFlowHandler {
                 clientMetadata, "TokenGeneration_RefreshTokens", scopes);
         Map<String, Object> result = new HashMap<>();
         result.put("AuthenticationResult", service.accessAndIdTokens(user, pool, client, override, refreshTokenUuid,
-                scopes, iat / 1000L));
+                scopes, CognitoService.refreshTokenAuthTime(parts, iat)));
         return result;
     }
 
