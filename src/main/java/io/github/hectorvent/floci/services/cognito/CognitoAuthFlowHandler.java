@@ -1004,10 +1004,10 @@ final class CognitoAuthFlowHandler {
         firePreAuthentication(pool, client, user, null, clientMetadata, false);
         VerificationCode.Purpose purpose = "EMAIL_OTP".equals(challengeName)
                 ? VerificationCode.Purpose.EMAIL_OTP : VerificationCode.Purpose.SMS_OTP;
-        Map<String, Object> customMessage = fireCustomMessage(pool, client, user, "CustomMessage_Authentication",
-                Map.of());
+        Map<String, Object> customMessage = customEmailSenderTakesOver(pool, deliveryMedium) ? Map.of()
+                : fireCustomMessage(pool, client, user, "CustomMessage_Authentication", Map.of());
         Map<String, String> challengeParams = new HashMap<>(
-                service.issueSignInOtp(pool, user, purpose, attributeName, deliveryMedium, customMessage));
+                service.issueSignInOtp(pool, client, user, purpose, attributeName, deliveryMedium, customMessage));
         challengeParams.put("USERNAME", user.getUsername());
         return userAuthChallengeResponse(pool, client, user, challengeName, available, challengeParams);
     }
@@ -1648,29 +1648,8 @@ final class CognitoAuthFlowHandler {
         if (functionRef == null) return TriggerResult.notConfigured();
 
         String region = regionForPool(pool);
-
-        Map<String, Object> event = new HashMap<>();
-        event.put("version", "1");
-        event.put("region", region);
-        event.put("userPoolId", pool.getId());
-        event.put("userName", user == null ? null : user.getUsername());
-        event.put("callerContext", Map.of(
-                "awsSdkVersion", "floci",
-                "clientId", client == null ? CLIENT_ID_NOT_APPLICABLE : client.getClientId()));
-        event.put("triggerSource", triggerSource);
-        Map<String, Object> req = new HashMap<>(request);
-        if (user != null) {
-            Map<String, String> userAttributes = new LinkedHashMap<>();
-            if (user.getAttributes() != null) {
-                userAttributes.putAll(user.getAttributes());
-            }
-            if ("PreAuthentication".equals(triggerKey)) {
-                userAttributes.put("cognito:user_status", user.getUserStatus());
-            }
-            req.put("userAttributes", userAttributes);
-        }
-        event.put("request", req);
-        event.put("response", new HashMap<>());
+        String clientId = client == null ? CLIENT_ID_NOT_APPLICABLE : client.getClientId();
+        Map<String, Object> event = triggerEvent(pool, clientId, user, triggerKey, triggerSource, request);
 
         try {
             byte[] payload = MAPPER.writeValueAsBytes(event);
@@ -1712,6 +1691,34 @@ final class CognitoAuthFlowHandler {
             LOG.warnv(e, "Cognito trigger {0} invocation failed", triggerKey);
             return TriggerResult.error(TriggerErrorKind.INVOCATION_FAILED, e.getMessage());
         }
+    }
+
+    /** The event every trigger receives: the common parameters around the trigger's own request. */
+    private Map<String, Object> triggerEvent(UserPool pool, String clientId, CognitoUser user, String triggerKey,
+                                             String triggerSource, Map<String, Object> request) {
+        Map<String, Object> event = new HashMap<>();
+        event.put("version", "1");
+        event.put("region", regionForPool(pool));
+        event.put("userPoolId", pool.getId());
+        event.put("userName", user == null ? null : user.getUsername());
+        event.put("callerContext", Map.of(
+                "awsSdkVersion", "floci",
+                "clientId", clientId));
+        event.put("triggerSource", triggerSource);
+        Map<String, Object> req = new HashMap<>(request);
+        if (user != null) {
+            Map<String, String> userAttributes = new LinkedHashMap<>();
+            if (user.getAttributes() != null) {
+                userAttributes.putAll(user.getAttributes());
+            }
+            if ("PreAuthentication".equals(triggerKey) || "CustomEmailSender".equals(triggerKey)) {
+                userAttributes.put("cognito:user_status", user.getUserStatus());
+            }
+            req.put("userAttributes", userAttributes);
+        }
+        event.put("request", req);
+        event.put("response", new HashMap<>());
+        return event;
     }
 
     private static String lambdaFunctionErrorMessage(InvokeResult result) {
@@ -1889,6 +1896,38 @@ final class CognitoAuthFlowHandler {
             return null;
         }
         return result.response();
+    }
+
+    boolean hasCustomEmailSender(UserPool pool) {
+        return lambdaService != null && resolveTriggerArn(pool, "CustomEmailSender") != null;
+    }
+
+    /** Whether a code going by {@code deliveryMedium} goes to the CustomEmailSender, so no CustomMessage shapes it. */
+    private boolean customEmailSenderTakesOver(UserPool pool, String deliveryMedium) {
+        return "EMAIL".equals(deliveryMedium) && hasCustomEmailSender(pool);
+    }
+
+    /**
+     * Hands an encrypted code to the pool's CustomEmailSender function, which delivers the email in
+     * Cognito's place. Cognito invokes custom sender triggers asynchronously, so the function's own
+     * outcome never reaches the caller; a function that cannot be invoked at all throws. As in the
+     * events Cognito sends, {@code clientMetadata} is null when the request carried none.
+     */
+    void fireCustomEmailSender(UserPool pool, String clientId, CognitoUser user, String triggerSource,
+                               String encryptedCode, Map<String, String> clientMetadata) {
+        Map<String, Object> req = new HashMap<>();
+        req.put("type", "customEmailSenderRequestV1");
+        req.put("code", encryptedCode);
+        req.put("clientMetadata", clientMetadata == null || clientMetadata.isEmpty() ? null : clientMetadata);
+        byte[] payload;
+        try {
+            payload = MAPPER.writeValueAsBytes(
+                    triggerEvent(pool, clientId, user, "CustomEmailSender", triggerSource, req));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot serialize the CustomEmailSender event", e);
+        }
+        lambdaService.invoke(regionForPool(pool), resolveTriggerArn(pool, "CustomEmailSender"), payload,
+                InvocationType.Event);
     }
 
     private CognitoService.ClaimsOverride firePreTokenGeneration(UserPool pool, UserPoolClient client, CognitoUser user,
@@ -2132,9 +2171,9 @@ final class CognitoAuthFlowHandler {
             return totpChallenge(pool, client, user, TotpPhase.CODE_REQUIRED, triggerSource, metadata);
         }
         boolean sms = "SMS_MFA".equals(factor);
-        Map<String, Object> customMessage = fireCustomMessage(pool, client, user, "CustomMessage_Authentication",
-                Map.of());
-        Map<String, String> parameters = new HashMap<>(service.issueMfaCode(pool, user,
+        Map<String, Object> customMessage = customEmailSenderTakesOver(pool, sms ? "SMS" : "EMAIL") ? Map.of()
+                : fireCustomMessage(pool, client, user, "CustomMessage_Authentication", Map.of());
+        Map<String, String> parameters = new HashMap<>(service.issueMfaCode(pool, client, user,
                 sms ? VerificationCode.Purpose.SMS_MFA : VerificationCode.Purpose.EMAIL_MFA,
                 sms ? "phone_number" : "email", sms ? "SMS" : "EMAIL", customMessage));
         parameters.put("USERNAME", user.getUsername());
@@ -2307,6 +2346,8 @@ final class CognitoAuthFlowHandler {
         if (cfg == null) return null;
         Object v = cfg.get(triggerKey);
         if (v instanceof String s && !s.isBlank()) return s;
+        // Custom sender triggers are configured as { LambdaArn, LambdaVersion }.
+        if (v instanceof Map<?, ?> m && m.get("LambdaArn") instanceof String arn && !arn.isBlank()) return arn;
         // V2 form: PreTokenGeneration is configured under "PreTokenGenerationConfig"
         // as { LambdaArn, LambdaVersion } (UpdateUserPool / UpdateUserPoolClient
         // API). Fall through so callers using the V1 key still work, and pick up
