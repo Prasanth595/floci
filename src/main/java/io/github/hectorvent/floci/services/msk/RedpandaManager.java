@@ -29,6 +29,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
@@ -217,9 +218,14 @@ public class RedpandaManager {
             hostListenerPorts.put(clusterIdentityKey(cluster), kafkaHostPort);
             dockerNetworkHosts.put(clusterIdentityKey(cluster), kafkaEndpoint.host());
             // GetBootstrapBrokers reports the Docker-network address unless the host listener
-            // was asked for explicitly, which keeps sibling containers working by default.
-            cluster.setBootstrapBrokers(config.services().msk().bootstrapHostname().isPresent()
-                    ? hostListenerAddr
+            // was asked for explicitly, which keeps sibling containers working by default. When
+            // it was, both listeners are listed: a client connects through whichever entry it can
+            // reach, and the broker then advertises that listener's address. The container name
+            // (not its IP) fails fast on the host, where it does not resolve, while an unroutable
+            // IP would wait for a connect timeout. It goes first for callers that read only the
+            // first entry, such as isReady's fallback after a restart.
+            cluster.setBootstrapBrokers(explicitBootstrapHostname().isPresent()
+                    ? containerName + ":" + KAFKA_PORT + "," + hostListenerAddr
                     : kafkaEndpoint.host() + ":" + kafkaEndpoint.port());
             LOG.infov("Redpanda host listener for MSK cluster {0} published at {1}",
                     cluster.getClusterName(), hostListenerAddr);
@@ -326,9 +332,12 @@ public class RedpandaManager {
      * {@code localhost}, which is where the published port lands on the Docker host.
      */
     private String hostListenerHostname() {
-        return config.services().msk().bootstrapHostname()
-                .filter(h -> !h.isBlank())
-                .orElse("localhost");
+        return explicitBootstrapHostname().orElse("localhost");
+    }
+
+    /** The configured bootstrap hostname, treating a blank value as unset. */
+    private Optional<String> explicitBootstrapHostname() {
+        return config.services().msk().bootstrapHostname().filter(h -> !h.isBlank());
     }
 
     private String clusterIdentityKey(MskCluster cluster) {

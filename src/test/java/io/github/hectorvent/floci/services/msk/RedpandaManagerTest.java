@@ -268,7 +268,7 @@ class RedpandaManagerTest {
     }
 
     @Test
-    void containerModeReportsHostListenerWhenBootstrapHostnameIsSet() {
+    void containerModeListsBothListenersWhenBootstrapHostnameIsSet() {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
         when(config.services().msk().bootstrapHostname()).thenReturn(Optional.of("kafka.local"));
         when(portAllocator.allocate(9300, 9399)).thenReturn(9302);
@@ -287,7 +287,30 @@ class RedpandaManagerTest {
         int flagIndex = spec.cmd().indexOf("--advertise-kafka-addr");
         assertEquals("internal://floci-aws-msk-abc123:9092,host://kafka.local:9302",
                 spec.cmd().get(flagIndex + 1));
-        assertEquals("kafka.local:9302", cluster.getBootstrapBrokers());
+        assertEquals("floci-aws-msk-abc123:9092,kafka.local:9302", cluster.getBootstrapBrokers(),
+                "both listeners are listed, the internal one first, so host and sibling-container "
+                        + "clients can each discover the broker");
+    }
+
+    @Test
+    void containerModeTreatsBlankBootstrapHostnameAsUnset() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(config.services().msk().bootstrapHostname()).thenReturn(Optional.of("  "));
+        when(portAllocator.allocate(9300, 9399)).thenReturn(9305);
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("container-459",
+                Map.of(KAFKA_PORT, new EndpointInfo("172.18.0.8", KAFKA_PORT))));
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+
+        MskCluster cluster = newCluster();
+        manager.startContainer(cluster);
+
+        verify(lifecycleManager).createAndStart(specCaptor.capture());
+        ContainerSpec spec = specCaptor.getValue();
+        int flagIndex = spec.cmd().indexOf("--advertise-kafka-addr");
+        assertEquals("internal://floci-aws-msk-abc123:9092,host://localhost:9305",
+                spec.cmd().get(flagIndex + 1));
+        assertEquals("172.18.0.8:9092", cluster.getBootstrapBrokers());
     }
 
     @Test

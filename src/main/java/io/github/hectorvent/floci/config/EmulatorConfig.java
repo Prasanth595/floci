@@ -1484,7 +1484,9 @@ public interface EmulatorConfig {
          * Docker host can reach it, and advertised as {@code <this hostname>:<port>}
          * ({@code localhost} when unset).
          *
-         * <p>When set, GetBootstrapBrokers returns that host-listener address. When unset, it
+         * <p>When set, GetBootstrapBrokers returns both listeners,
+         * {@code <container-name>:9092,<this hostname>:<port>}, so clients on the Docker host
+         * and in sibling containers can each discover the broker. When unset or blank, it
          * returns the broker's Docker-network address, which sibling containers use.
          * Env: FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME
          */
