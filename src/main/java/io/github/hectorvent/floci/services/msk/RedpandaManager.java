@@ -145,59 +145,63 @@ public class RedpandaManager {
                 config.services().msk().kafkaHostPortMax());
         String hostListenerAddr = hostListenerHostname() + ":" + kafkaHostPort;
 
-        // Build command
-        List<String> cmd = new ArrayList<>(List.of(
-                "redpanda", "start", "--overprovisioned", "--smp", "1",
-                "--memory", "512M", "--reserve-memory", "0M"));
-        if (inContainer) {
-            cmd.addAll(List.of(
-                    "--kafka-addr",
-                    "internal://0.0.0.0:" + KAFKA_PORT + ",host://0.0.0.0:" + KAFKA_HOST_LISTENER_PORT,
-                    "--advertise-kafka-addr",
-                    "internal://" + containerName + ":" + KAFKA_PORT + ",host://" + hostListenerAddr));
-        } else {
-            cmd.addAll(List.of("--advertise-kafka-addr", "localhost:" + kafkaHostPort));
-        }
-
-        // Build container spec. In native mode the Kafka port itself is published. In
-        // container mode the internal listener stays on the Docker network and only the
-        // host listener is published.
-        ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
-                .withName(containerName)
-                .withDockerNetwork(config.services().dockerNetwork())
-                .withLogRotation()
-                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "msk", cluster.getClusterName(),
-                        AwsArnUtils.accountOrDefault(cluster.getClusterArn(), regionResolver.getAccountId()),
-                        AwsArnUtils.regionOrDefault(cluster.getClusterArn(), regionResolver.getDefaultRegion())));
-
-        if (!inContainer) {
-            specBuilder.withPortBinding(KAFKA_PORT, kafkaHostPort).withDynamicPort(ADMIN_PORT);
-        } else {
-            specBuilder.withExposedPort(KAFKA_PORT)
-                    .withPortBinding(KAFKA_HOST_LISTENER_PORT, kafkaHostPort)
-                    .withExposedPort(ADMIN_PORT);
-        }
-
-        // Handle persistence mounting
-        if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.applyNamedVolume(specBuilder, lifecycleManager,
-                    resolveVolumeName(cluster), "/var/lib/redpanda/data");
-        } else {
-            // Legacy host-path mode: host-persistent-path is an absolute path
-            String hostDataPath = legacyCompatibleHostPath(cluster).toAbsolutePath().toString();
-            if (!containerDetector.isRunningInContainer()) {
-                ContainerStorageHelper.ensureHostDir(hostDataPath);
-            }
-            specBuilder.withBind(hostDataPath, "/var/lib/redpanda/data");
-        }
-
-        specBuilder.withCmd(cmd);
-        ContainerSpec spec = specBuilder.build();
-
-        // Create and start container
+        // Everything from here to createAndStart can fail (ensureVolume calls Docker, and
+        // tryStartContainer swallows the failure when Docker is unreachable), so the port is
+        // released on any of it. The try must end at createAndStart: once the container is
+        // running it holds the port, and releasing it would let another cluster be given it.
         ContainerInfo info;
         try {
+            // Build command
+            List<String> cmd = new ArrayList<>(List.of(
+                    "redpanda", "start", "--overprovisioned", "--smp", "1",
+                    "--memory", "512M", "--reserve-memory", "0M"));
+            if (inContainer) {
+                cmd.addAll(List.of(
+                        "--kafka-addr",
+                        "internal://0.0.0.0:" + KAFKA_PORT + ",host://0.0.0.0:" + KAFKA_HOST_LISTENER_PORT,
+                        "--advertise-kafka-addr",
+                        "internal://" + containerName + ":" + KAFKA_PORT + ",host://" + hostListenerAddr));
+            } else {
+                cmd.addAll(List.of("--advertise-kafka-addr", "localhost:" + kafkaHostPort));
+            }
+
+            // Build container spec. In native mode the Kafka port itself is published. In
+            // container mode the internal listener stays on the Docker network and only the
+            // host listener is published.
+            ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
+                    .withName(containerName)
+                    .withDockerNetwork(config.services().dockerNetwork())
+                    .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "msk", cluster.getClusterName(),
+                            AwsArnUtils.accountOrDefault(cluster.getClusterArn(), regionResolver.getAccountId()),
+                            AwsArnUtils.regionOrDefault(cluster.getClusterArn(), regionResolver.getDefaultRegion())));
+
+            if (!inContainer) {
+                specBuilder.withPortBinding(KAFKA_PORT, kafkaHostPort).withDynamicPort(ADMIN_PORT);
+            } else {
+                specBuilder.withExposedPort(KAFKA_PORT)
+                        .withPortBinding(KAFKA_HOST_LISTENER_PORT, kafkaHostPort)
+                        .withExposedPort(ADMIN_PORT);
+            }
+
+            // Handle persistence mounting
+            if (ContainerStorageHelper.isNamedVolumeMode(config)) {
+                ContainerStorageHelper.applyNamedVolume(specBuilder, lifecycleManager,
+                        resolveVolumeName(cluster), "/var/lib/redpanda/data");
+            } else {
+                // Legacy host-path mode: host-persistent-path is an absolute path
+                String hostDataPath = legacyCompatibleHostPath(cluster).toAbsolutePath().toString();
+                if (!containerDetector.isRunningInContainer()) {
+                    ContainerStorageHelper.ensureHostDir(hostDataPath);
+                }
+                specBuilder.withBind(hostDataPath, "/var/lib/redpanda/data");
+            }
+
+            specBuilder.withCmd(cmd);
+            ContainerSpec spec = specBuilder.build();
+
+            // Create and start container
             info = lifecycleManager.createAndStart(spec);
         } catch (RuntimeException e) {
             portAllocator.release(kafkaHostPort);

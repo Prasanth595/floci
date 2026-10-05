@@ -37,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -337,6 +338,20 @@ class RedpandaManagerTest {
         assertThrows(RuntimeException.class, () -> manager.startContainer(newCluster()));
 
         verify(portAllocator).release(9303);
+    }
+
+    @Test
+    void releasesHostPortWhenVolumeSetupFailsBeforeStart() {
+        when(config.storage().hostPersistentPath()).thenReturn("");
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(9306);
+        doThrow(new RuntimeException("Docker unreachable"))
+                .when(lifecycleManager).ensureVolume("floci-aws-msk-abc123");
+
+        assertThrows(RuntimeException.class, () -> manager.startContainer(newCluster()));
+
+        verify(portAllocator).release(9306);
+        verify(lifecycleManager, never()).createAndStart(any());
     }
 
     @Test
