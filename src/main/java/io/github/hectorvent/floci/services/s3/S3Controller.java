@@ -111,7 +111,7 @@ public class S3Controller {
     private static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter
             .ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
             .withZone(ZoneId.of("UTC"));
-    private static final DateTimeFormatter RFC_822 = DateTimeFormatter
+    static final DateTimeFormatter RFC_822 = DateTimeFormatter
             .ofPattern("EEE, dd MMM yyyy HH:mm:ss z", Locale.US)
             .withZone(ZoneId.of("GMT"));
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -2939,6 +2939,7 @@ public class S3Controller {
         appendSseCustomerHeaders(resp, obj);
         appendChecksumHeaders(resp, obj.getChecksum());
         appendLockHeaders(resp, obj);
+        appendExpirationHeader(resp, obj);
     }
 
     // includeChecksum must be false for a range the stored checksum does not describe:
@@ -2983,6 +2984,14 @@ public class S3Controller {
             appendChecksumHeaders(resp, obj.getChecksum());
         }
         appendLockHeaders(resp, obj);
+        appendExpirationHeader(resp, obj);
+    }
+
+    private void appendExpirationHeader(Response.ResponseBuilder resp, S3Object obj) {
+        String expiration = s3Service.expirationHeader(obj);
+        if (expiration != null) {
+            resp.header("x-amz-expiration", expiration);
+        }
     }
 
     private void appendSseCustomerHeaders(Response.ResponseBuilder resp, S3Object obj) {
