@@ -1,10 +1,6 @@
 package io.github.hectorvent.floci.services.msk;
 
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.command.InspectContainerCmd;
-import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.model.ExposedPort;
-import com.github.dockerjava.api.model.Ports;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -184,18 +180,8 @@ class RedpandaManagerTest {
     void isReadyPollsTheCorrectAdminReadinessPathInNativeMode() throws Exception {
         int adminHostPort = startFakeAdminServer();
 
-        when(containerDetector.isRunningInContainer()).thenReturn(false);
-
-        DockerClient dockerClient = mock(DockerClient.class);
-        InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class);
-        InspectContainerResponse inspect = mock(InspectContainerResponse.class, RETURNS_DEEP_STUBS);
-
-        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
-        when(dockerClient.inspectContainerCmd("container-id")).thenReturn(inspectCmd);
-        when(inspectCmd.exec()).thenReturn(inspect);
-        when(inspect.getNetworkSettings().getPorts().getBindings()).thenReturn(Map.of(
-                ExposedPort.tcp(RedpandaManager.ADMIN_PORT),
-                new Ports.Binding[] { new Ports.Binding("0.0.0.0", String.valueOf(adminHostPort)) }));
+        when(lifecycleManager.resolveEndpoint("container-id", RedpandaManager.ADMIN_PORT))
+                .thenReturn(new EndpointInfo("localhost", adminHostPort));
 
         MskCluster cluster = newCluster();
         cluster.setContainerId("container-id");
@@ -204,6 +190,35 @@ class RedpandaManagerTest {
         assertTrue(manager.isReady(cluster),
                 "isReady() should report ready once /v1/status/ready answers 200; "
                         + "if it regresses to polling /ready (which always 404s), this assertion fails");
+    }
+
+    @Test
+    void adminReadyUrlResolvesFromThePersistedContainerIdAfterRestart() {
+        when(lifecycleManager.resolveEndpoint("container-460", RedpandaManager.ADMIN_PORT))
+                .thenReturn(new EndpointInfo("172.18.0.9", RedpandaManager.ADMIN_PORT));
+
+        // A cluster record as a killed Floci left it: still CREATING, with a host-form bootstrap
+        // string, and nothing in this freshly constructed manager's memory about its container.
+        MskCluster cluster = newCluster();
+        cluster.setContainerId("container-460");
+        cluster.setBootstrapBrokers("localhost:9300");
+
+        assertEquals("http://172.18.0.9:9644/v1/status/ready", manager.adminReadyUrl(cluster),
+                "readiness must not depend on in-memory state or on the bootstrap string's format");
+    }
+
+    @Test
+    void isReadyReportsNotReadyWhenTheContainerIsGone() {
+        when(lifecycleManager.resolveEndpoint("container-461", RedpandaManager.ADMIN_PORT))
+                .thenThrow(new NotFoundException("No such container: container-461"));
+
+        MskCluster cluster = newCluster();
+        cluster.setContainerId("container-461");
+        cluster.setBootstrapBrokers("172.18.0.10:9092");
+
+        assertFalse(manager.isReady(cluster),
+                "a failed endpoint lookup must not escape into the readiness poller, "
+                        + "which would abandon its pass over the remaining clusters");
     }
 
     @Test

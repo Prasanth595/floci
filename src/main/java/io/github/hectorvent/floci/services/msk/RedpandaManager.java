@@ -1,9 +1,5 @@
 package io.github.hectorvent.floci.services.msk;
 
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.model.ExposedPort;
-import com.github.dockerjava.api.model.Ports;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -54,10 +50,8 @@ public class RedpandaManager {
     private final PortAllocator portAllocator;
     private final Map<String, Closeable> logStreams = new ConcurrentHashMap<>();
     // Container mode only, keyed like logStreams: the host port the host listener is published
-    // on (not recoverable from the bootstrap string, which may be the Docker-network address),
-    // and the broker's Docker-network address (not recoverable from a host-form bootstrap string).
+    // on (not recoverable from the bootstrap string, which may be the Docker-network address).
     private final Map<String, Integer> hostListenerPorts = new ConcurrentHashMap<>();
-    private final Map<String, String> dockerNetworkHosts = new ConcurrentHashMap<>();
     private volatile boolean dockerUnavailableLogged;
 
     @Inject
@@ -216,14 +210,13 @@ public class RedpandaManager {
 
         if (inContainer) {
             hostListenerPorts.put(clusterIdentityKey(cluster), kafkaHostPort);
-            dockerNetworkHosts.put(clusterIdentityKey(cluster), kafkaEndpoint.host());
             // GetBootstrapBrokers reports the Docker-network address unless the host listener
             // was asked for explicitly, which keeps sibling containers working by default. When
             // it was, both listeners are listed: a client connects through whichever entry it can
             // reach, and the broker then advertises that listener's address. The container name
             // (not its IP) fails fast on the host, where it does not resolve, while an unroutable
             // IP would wait for a connect timeout. It goes first for callers that read only the
-            // first entry, such as isReady's fallback after a restart.
+            // first entry.
             cluster.setBootstrapBrokers(explicitBootstrapHostname().isPresent()
                     ? containerName + ":" + KAFKA_PORT + "," + hostListenerAddr
                     : kafkaEndpoint.host() + ":" + kafkaEndpoint.port());
@@ -251,30 +244,12 @@ public class RedpandaManager {
     }
 
     public boolean isReady(MskCluster cluster) {
-        String bootstrap = cluster.getBootstrapBrokers();
-        if (bootstrap == null) {
+        if (cluster.getBootstrapBrokers() == null) {
             return false;
         }
 
-        // Derive admin URL from the container
-        String adminUrl;
-        if (!containerDetector.isRunningInContainer()) {
-            DockerClient dockerClient = lifecycleManager.getDockerClient();
-            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(cluster.getContainerId()).exec();
-            Map<ExposedPort, Ports.Binding[]> bindings = inspect.getNetworkSettings().getPorts().getBindings();
-            Ports.Binding[] binding = bindings.get(ExposedPort.tcp(ADMIN_PORT));
-            if (binding != null && binding.length > 0) {
-                adminUrl = "http://localhost:" + binding[0].getHostPortSpec() + ADMIN_READY_PATH;
-            } else {
-                return false;
-            }
-        } else {
-            String containerIp = dockerNetworkHosts.getOrDefault(
-                    clusterIdentityKey(cluster), bootstrap.split(":")[0]);
-            adminUrl = "http://" + containerIp + ":" + ADMIN_PORT + ADMIN_READY_PATH;
-        }
-
         try {
+            String adminUrl = adminReadyUrl(cluster);
             HttpURLConnection conn = (HttpURLConnection) URI.create(adminUrl).toURL().openConnection();
             conn.setRequestMethod("GET");
             conn.setConnectTimeout(1000);
@@ -299,8 +274,19 @@ public class RedpandaManager {
         releaseKafkaHostPort(cluster);
     }
 
+    /**
+     * The broker's admin readiness URL, resolved from the persisted container id the same way
+     * container start resolves endpoints: the bound host port in native mode, the container's
+     * reachable address in container mode. Nothing is kept in memory, so it still works for a
+     * cluster left in CREATING by a Floci process that was killed and restarted, and an IP is
+     * used rather than the container name, which Docker's default bridge network does not resolve.
+     */
+    String adminReadyUrl(MskCluster cluster) {
+        EndpointInfo admin = lifecycleManager.resolveEndpoint(cluster.getContainerId(), ADMIN_PORT);
+        return "http://" + admin.host() + ":" + admin.port() + ADMIN_READY_PATH;
+    }
+
     private void releaseKafkaHostPort(MskCluster cluster) {
-        dockerNetworkHosts.remove(clusterIdentityKey(cluster));
         if (containerDetector.isRunningInContainer()) {
             Integer hostPort = hostListenerPorts.remove(clusterIdentityKey(cluster));
             if (hostPort != null) {
