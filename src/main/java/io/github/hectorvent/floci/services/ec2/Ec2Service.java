@@ -4630,6 +4630,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public Vpc createVpc(String region, String requestedCidrBlock, boolean isDefault,
                          boolean amazonProvidedIpv6CidrBlock) {
+        return createVpc(region, requestedCidrBlock, isDefault, amazonProvidedIpv6CidrBlock, null);
+    }
+
+    /**
+     * @param instanceTenancy {@code default}, {@code dedicated} or {@code host} as CreateVpc's
+     *                        InstanceTenancy parameter; null means {@code default}.
+     */
+    public Vpc createVpc(String region, String requestedCidrBlock, boolean isDefault,
+                         boolean amazonProvidedIpv6CidrBlock, String instanceTenancy) {
         // AWS stores the CIDR in canonical form: "100.68.0.18/18" becomes "100.68.0.0/18".
         String cidrBlock = canonicalizeIpv4Cidr(requestedCidrBlock);
         ensureDefaultResources(region);
@@ -4639,6 +4648,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         vpc.setCidrBlock(cidrBlock);
         vpc.setState("available");
         vpc.setDefault(isDefault);
+        if (instanceTenancy != null && !instanceTenancy.isBlank()) {
+            vpc.setInstanceTenancy(instanceTenancy);
+        }
         vpc.setOwnerId(callerAccountId());
         vpc.setRegion(region);
         vpc.getCidrBlockAssociationSet().add(
@@ -4796,6 +4808,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             case "enableDnsHostnames"                  -> vpc.setEnableDnsHostnames(Boolean.parseBoolean(value));
             case "enableNetworkAddressUsageMetrics"    -> vpc.setEnableNetworkAddressUsageMetrics(Boolean.parseBoolean(value));
         }
+        vpcs.put(key(region, vpcId), vpc);
+    }
+
+    /**
+     * ModifyVpcTenancy: only {@code dedicated} to {@code default} is allowed, as on AWS
+     * (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ModifyVpcTenancy.html).
+     */
+    public void modifyVpcTenancy(String region, String vpcId, String instanceTenancy) {
+        ensureDefaultResources(region);
+        Vpc vpc = getRequiredVpc(region, vpcId);
+        if (!"default".equals(instanceTenancy)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + instanceTenancy + ") for parameter instanceTenancy is invalid. "
+                            + "Only 'default' is supported.", 400);
+        }
+        vpc.setInstanceTenancy(instanceTenancy);
         vpcs.put(key(region, vpcId), vpc);
     }
 
