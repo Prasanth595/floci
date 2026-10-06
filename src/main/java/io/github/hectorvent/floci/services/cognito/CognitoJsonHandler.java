@@ -1562,7 +1562,8 @@ public class CognitoJsonHandler {
                 request.path("UserPoolId").asText(),
                 request.path("Username").asText(),
                 mfaSettingsUpdate(request.path("EmailMfaSettings")),
-                mfaSettingsUpdate(request.path("SoftwareTokenMfaSettings")));
+                mfaSettingsUpdate(request.path("SoftwareTokenMfaSettings")),
+                webAuthnMfaEnabled(request));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -1570,7 +1571,8 @@ public class CognitoJsonHandler {
         service.setUserMFAPreference(
                 request.path("AccessToken").asText(),
                 mfaSettingsUpdate(request.path("EmailMfaSettings")),
-                mfaSettingsUpdate(request.path("SoftwareTokenMfaSettings")));
+                mfaSettingsUpdate(request.path("SoftwareTokenMfaSettings")),
+                webAuthnMfaEnabled(request));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -1578,6 +1580,12 @@ public class CognitoJsonHandler {
         return new CognitoService.MfaSettingsUpdate(
                 settings.has("Enabled") ? settings.path("Enabled").asBoolean() : null,
                 settings.has("PreferredMfa") ? settings.path("PreferredMfa").asBoolean() : null);
+    }
+
+    /** {@code WebAuthnMfaSettings.Enabled}, or null when the request leaves passkey MFA as it is. */
+    private static Boolean webAuthnMfaEnabled(JsonNode request) {
+        JsonNode settings = request.path("WebAuthnMfaSettings");
+        return settings.has("Enabled") ? settings.path("Enabled").asBoolean() : null;
     }
 
     private Response handleStartWebAuthnRegistration(JsonNode request) {
