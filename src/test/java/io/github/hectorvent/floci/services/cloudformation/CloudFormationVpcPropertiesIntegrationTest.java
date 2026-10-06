@@ -1,11 +1,9 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
-
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -25,7 +23,6 @@ class CloudFormationVpcPropertiesIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/eu-west-3/cloudformation/aws4_request";
     private static final String EC2_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/eu-west-3/ec2/aws4_request";
-    private static final Pattern VPC_ID = Pattern.compile("<OutputValue>(vpc-[0-9a-f]+)</OutputValue>");
 
     private static String template(String name, String extraTags) {
         return """
@@ -60,11 +57,10 @@ class CloudFormationVpcPropertiesIntegrationTest {
         cfn("CreateStack", stackName, template(name, ", {\"Key\": \"team\", \"Value\": \"blue\"}"))
                 .statusCode(200);
         String described = describeStacks(stackName, "CREATE_COMPLETE");
-        Matcher m = VPC_ID.matcher(described);
-        assertTrue(m.find(), "stack output should carry the vpc id: " + described);
-        String vpcId = m.group(1);
-        assertTrue(described.contains("<OutputValue>acl-"), "DefaultNetworkAcl should resolve: " + described);
-        assertTrue(described.contains("<OutputValue>vpc-cidr-assoc-"),
+        String vpcId = output(described, "VpcId");
+        assertTrue(vpcId.startsWith("vpc-"), "stack output should carry the vpc id: " + vpcId);
+        assertTrue(output(described, "Acl").startsWith("acl-"), "DefaultNetworkAcl should resolve: " + described);
+        assertTrue(output(described, "Assoc").startsWith("vpc-cidr-assoc-"),
                 "CidrBlockAssociations should resolve: " + described);
 
         given()
@@ -143,5 +139,10 @@ class CloudFormationVpcPropertiesIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
             .extract().asString();
+    }
+
+    private static String output(String describeStacksXml, String key) {
+        return XmlPath.from(describeStacksXml).getString("DescribeStacksResponse.DescribeStacksResult.Stacks.member"
+                + ".Outputs.member.find { it.OutputKey == '" + key + "' }.OutputValue");
     }
 }

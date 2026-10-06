@@ -4633,6 +4633,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return createVpc(region, requestedCidrBlock, isDefault, amazonProvidedIpv6CidrBlock, null);
     }
 
+    private static String requireVpcTenancy(String instanceTenancy) {
+        if (instanceTenancy == null || instanceTenancy.isBlank()) {
+            return "default";
+        }
+        if (!List.of("default", "dedicated", "host").contains(instanceTenancy)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + instanceTenancy + ") for parameter instanceTenancy is invalid. "
+                            + "Valid values are: default, dedicated, host.", 400);
+        }
+        return instanceTenancy;
+    }
+
     /**
      * @param instanceTenancy {@code default}, {@code dedicated} or {@code host} as CreateVpc's
      *                        InstanceTenancy parameter; null means {@code default}.
@@ -4648,9 +4660,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         vpc.setCidrBlock(cidrBlock);
         vpc.setState("available");
         vpc.setDefault(isDefault);
-        if (instanceTenancy != null && !instanceTenancy.isBlank()) {
-            vpc.setInstanceTenancy(instanceTenancy);
-        }
+        vpc.setInstanceTenancy(requireVpcTenancy(instanceTenancy));
         vpc.setOwnerId(callerAccountId());
         vpc.setRegion(region);
         vpc.getCidrBlockAssociationSet().add(
@@ -4822,6 +4832,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterValue",
                     "Value (" + instanceTenancy + ") for parameter instanceTenancy is invalid. "
                             + "Only 'default' is supported.", 400);
+        }
+        if (!"dedicated".equals(vpc.getInstanceTenancy())) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + instanceTenancy + ") for parameter instanceTenancy is invalid. "
+                            + "The instance tenancy of a VPC can only be changed from 'dedicated' to 'default'.", 400);
         }
         vpc.setInstanceTenancy(instanceTenancy);
         vpcs.put(key(region, vpcId), vpc);

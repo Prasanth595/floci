@@ -37,6 +37,7 @@ import java.util.stream.Collectors;
 public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
 
     private static final String DEFAULT_TENANCY = "default";
+    private static final String DEDICATED_TENANCY = "dedicated";
 
     private final Ec2Service ec2Service;
 
@@ -61,18 +62,19 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
                 ? reconciled
                 : ec2Service.createVpc(region, cidr, false, false, desiredTenancy);
         String vpcId = vpc.getVpcId();
-        if (reconciled != null && !desiredTenancy.equals(vpc.getInstanceTenancy())) {
+        if (reconciled != null && isDedicatedToDefault(vpc, desiredTenancy)) {
             ec2Service.modifyVpcTenancy(region, vpcId, desiredTenancy);
         }
 
         // AWS defaults for a non-default VPC: DnsSupport on, DnsHostnames off. A template that
-        // omits the property gets the default, as CloudFormation applies it on every update too.
-        String dnsSupport = ctx.resolveOptional(props, "EnableDnsSupport");
-        String dnsHostnames = ctx.resolveOptional(props, "EnableDnsHostnames");
+        // omits the property (or resolves it to AWS::NoValue, which the engine renders blank) gets
+        // the default, as CloudFormation applies it on every update too.
+        String dnsSupport = ctx.resolveOrDefault(props, "EnableDnsSupport", "true");
+        String dnsHostnames = ctx.resolveOrDefault(props, "EnableDnsHostnames", "false");
         ec2Service.modifyVpcAttribute(region, vpcId, "enableDnsSupport",
-                String.valueOf(dnsSupport == null || Boolean.parseBoolean(dnsSupport)));
+                String.valueOf(Boolean.parseBoolean(dnsSupport)));
         ec2Service.modifyVpcAttribute(region, vpcId, "enableDnsHostnames",
-                String.valueOf(dnsHostnames != null && Boolean.parseBoolean(dnsHostnames)));
+                String.valueOf(Boolean.parseBoolean(dnsHostnames)));
 
         Ec2Tags.reconcile(ec2Service, region, vpcId, ctx.resolveTags(props, "Tags"));
 
@@ -107,8 +109,8 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
      * security group that referenced the old one.
      *
      * <p>Returns {@code null} for a fresh create, for a CidrBlock change or an InstanceTenancy
-     * change other than to {@code default} (which AWS treats as a replacement), or when the VPC is
-     * gone from the backend - the caller then creates.
+     * change other than {@code dedicated} to {@code default} (which AWS treats as a replacement),
+     * or when the VPC is gone from the backend - the caller then creates.
      *
      * <p>The prior id is the one the context captured, not the one on the {@link StackResource}:
      * {@code provision} assigns the new id onto that resource as it runs, so a resource-derived
@@ -130,10 +132,15 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
                 && !CidrCanonicalizer.sameBlock(cidr, existing.getCidrBlock())) {
             return null;
         }
-        if (!tenancy.equals(existing.getInstanceTenancy()) && !DEFAULT_TENANCY.equals(tenancy)) {
+        // ModifyVpcTenancy only goes dedicated -> default; every other tenancy change replaces.
+        if (!tenancy.equals(existing.getInstanceTenancy()) && !isDedicatedToDefault(existing, tenancy)) {
             return null;
         }
         return existing;
+    }
+
+    private static boolean isDedicatedToDefault(Vpc existing, String desiredTenancy) {
+        return DEDICATED_TENANCY.equals(existing.getInstanceTenancy()) && DEFAULT_TENANCY.equals(desiredTenancy);
     }
 
     // No delete override: the switch this replaces had no AWS::EC2::VPC delete arm,
