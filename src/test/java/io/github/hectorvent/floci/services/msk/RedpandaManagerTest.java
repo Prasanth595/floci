@@ -181,7 +181,7 @@ class RedpandaManagerTest {
     void isReadyPollsTheCorrectAdminReadinessPathInNativeMode() throws Exception {
         int adminHostPort = startFakeAdminServer();
 
-        when(lifecycleManager.resolveEndpoint("container-id", RedpandaManager.ADMIN_PORT))
+        when(lifecycleManager.resolveEndpoint("container-id", RedpandaManager.ADMIN_PORT, null))
                 .thenReturn(new EndpointInfo("localhost", adminHostPort));
 
         MskCluster cluster = newCluster();
@@ -194,8 +194,9 @@ class RedpandaManagerTest {
     }
 
     @Test
-    void adminReadyUrlResolvesFromThePersistedContainerIdAfterRestart() {
-        when(lifecycleManager.resolveEndpoint("container-460", RedpandaManager.ADMIN_PORT))
+    void adminReadyUrlResolvesFromThePersistedContainerIdOnTheBrokersNetworkAfterRestart() {
+        when(config.services().dockerNetwork()).thenReturn(Optional.of("floci-net"));
+        when(lifecycleManager.resolveEndpoint("container-460", RedpandaManager.ADMIN_PORT, "floci-net"))
                 .thenReturn(new EndpointInfo("172.18.0.9", RedpandaManager.ADMIN_PORT));
 
         // A cluster record as a killed Floci left it: still CREATING, with a host-form bootstrap
@@ -210,7 +211,7 @@ class RedpandaManagerTest {
 
     @Test
     void isReadyReportsNotReadyWhenTheContainerIsGone() {
-        when(lifecycleManager.resolveEndpoint("container-461", RedpandaManager.ADMIN_PORT))
+        when(lifecycleManager.resolveEndpoint("container-461", RedpandaManager.ADMIN_PORT, null))
                 .thenThrow(new NotFoundException("No such container: container-461"));
 
         MskCluster cluster = newCluster();

@@ -284,9 +284,14 @@ public class RedpandaManager {
      * reachable address in container mode. Nothing is kept in memory, so it still works for a
      * cluster left in CREATING by a Floci process that was killed and restarted, and an IP is
      * used rather than the container name, which Docker's default bridge network does not resolve.
+     *
+     * <p>The network startContainer put the broker on is preferred, as it was when createAndStart
+     * resolved the Kafka endpoint: in container mode the broker publishes the host listener, so
+     * it is on the default bridge as well, and the bridge address is not one Floci can reach.
      */
     String adminReadyUrl(MskCluster cluster) {
-        EndpointInfo admin = lifecycleManager.resolveEndpoint(cluster.getContainerId(), ADMIN_PORT);
+        String network = containerBuilder.resolveDockerNetwork(config.services().dockerNetwork()).orElse(null);
+        EndpointInfo admin = lifecycleManager.resolveEndpoint(cluster.getContainerId(), ADMIN_PORT, network);
         return "http://" + admin.host() + ":" + admin.port() + ADMIN_READY_PATH;
     }
 
