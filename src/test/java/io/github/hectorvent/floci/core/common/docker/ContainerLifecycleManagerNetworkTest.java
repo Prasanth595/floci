@@ -27,6 +27,7 @@ import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -243,7 +244,7 @@ class ContainerLifecycleManagerNetworkTest {
         when(inspect.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("bridge"));
         when(inspect.getNetworkSettings()).thenReturn(networks);
         // Docker lists a container's networks by name, so the default bridge usually comes first.
-        Map<String, ContainerNetwork> attached = new java.util.LinkedHashMap<>();
+        Map<String, ContainerNetwork> attached = new LinkedHashMap<>();
         attached.put("bridge", new ContainerNetwork().withIpv4Address("172.17.0.4"));
         attached.put("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.4"));
         when(networks.getNetworks()).thenReturn(attached);
