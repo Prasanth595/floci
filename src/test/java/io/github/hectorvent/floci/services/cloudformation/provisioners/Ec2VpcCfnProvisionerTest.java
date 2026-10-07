@@ -238,26 +238,13 @@ class Ec2VpcCfnProvisionerTest {
         assertEquals("vpc-existing", kept.getPhysicalId());
         verify(ec2).modifyVpcTenancy(REGION, "vpc-existing", "default");
 
+        // Now a default VPC asked to become dedicated: the only in-place direction is dedicated->default.
+        dedicated.setInstanceTenancy("default");
         stubCreate(vpc("vpc-replaced", "10.0.0.0/16"));
         StackResource replaced = provision("vpc-existing", """
-                {"CidrBlock": "10.0.0.0/16", "InstanceTenancy": "host"}""");
+                {"CidrBlock": "10.0.0.0/16", "InstanceTenancy": "dedicated"}""");
         assertEquals("vpc-replaced", replaced.getPhysicalId());
-        verify(ec2).createVpc(eq(REGION), eq("10.0.0.0/16"), eq(false), eq(false), eq("host"));
-    }
-
-    @Test
-    void hostToDefaultReplacesBecauseModifyVpcTenancyOnlyGoesFromDedicated() {
-        Vpc host = vpc("vpc-existing", "10.0.0.0/16");
-        host.setInstanceTenancy("host");
-        when(ec2.describeVpcs(REGION, List.of("vpc-existing"), Map.of())).thenReturn(List.of(host));
-        stubCreate(vpc("vpc-replaced", "10.0.0.0/16"));
-
-        StackResource r = provision("vpc-existing", """
-                {"CidrBlock": "10.0.0.0/16", "InstanceTenancy": "default"}""");
-
-        verify(ec2, never()).modifyVpcTenancy(anyString(), anyString(), anyString());
-        verify(ec2).createVpc(REGION, "10.0.0.0/16", false, false, "default");
-        assertEquals("vpc-replaced", r.getPhysicalId());
+        verify(ec2).createVpc(eq(REGION), eq("10.0.0.0/16"), eq(false), eq(false), eq("dedicated"));
     }
 
     @Test

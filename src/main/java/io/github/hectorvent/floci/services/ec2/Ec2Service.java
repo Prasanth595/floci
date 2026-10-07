@@ -4633,20 +4633,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return createVpc(region, requestedCidrBlock, isDefault, amazonProvidedIpv6CidrBlock, null);
     }
 
+    /**
+     * CreateVpc takes {@code default} or {@code dedicated} only: "The host value cannot be used with
+     * this parameter" (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateVpc.html).
+     */
     private static String requireVpcTenancy(String instanceTenancy) {
         if (instanceTenancy == null || instanceTenancy.isBlank()) {
             return "default";
         }
-        if (!List.of("default", "dedicated", "host").contains(instanceTenancy)) {
+        if (!List.of("default", "dedicated").contains(instanceTenancy)) {
             throw new AwsException("InvalidParameterValue",
                     "Value (" + instanceTenancy + ") for parameter instanceTenancy is invalid. "
-                            + "Valid values are: default, dedicated, host.", 400);
+                            + "Valid values are: default, dedicated.", 400);
         }
         return instanceTenancy;
     }
 
     /**
-     * @param instanceTenancy {@code default}, {@code dedicated} or {@code host} as CreateVpc's
+     * @param instanceTenancy {@code default} or {@code dedicated} as CreateVpc's
      *                        InstanceTenancy parameter; null means {@code default}.
      */
     public Vpc createVpc(String region, String requestedCidrBlock, boolean isDefault,

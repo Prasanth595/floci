@@ -142,7 +142,7 @@ class Ec2ServiceTest {
     }
 
     @Test
-    void createVpcAcceptsOnlyTheThreeTenanciesAndDefaultsWhenOmitted() {
+    void createVpcAcceptsDefaultOrDedicatedAndDefaultsWhenOmitted() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
@@ -150,13 +150,18 @@ class Ec2ServiceTest {
 
         assertEquals("default", service.createVpc(region, "10.90.0.0/16", false, false, null).getInstanceTenancy());
         assertEquals("default", service.createVpc(region, "10.91.0.0/16", false, false, " ").getInstanceTenancy());
-        assertEquals("host", service.createVpc(region, "10.92.0.0/16", false, false, "host").getInstanceTenancy());
+        assertEquals("dedicated", service.createVpc(region, "10.92.0.0/16", false, false, "dedicated").getInstanceTenancy());
 
-        AwsException error = assertThrows(AwsException.class,
+        AwsException bogus = assertThrows(AwsException.class,
                 () -> service.createVpc(region, "10.93.0.0/16", false, false, "bogus"));
-        assertEquals("InvalidParameterValue", error.getErrorCode());
-        assertEquals(400, error.getHttpStatus());
-        assertTrue(error.getMessage().contains("Value (bogus) for parameter instanceTenancy is invalid"));
+        assertEquals("InvalidParameterValue", bogus.getErrorCode());
+        assertEquals(400, bogus.getHttpStatus());
+        assertTrue(bogus.getMessage().contains("Value (bogus) for parameter instanceTenancy is invalid"));
+
+        // The EC2 reference: "The host value cannot be used with this parameter."
+        AwsException host = assertThrows(AwsException.class,
+                () -> service.createVpc(region, "10.96.0.0/16", false, false, "host"));
+        assertEquals("InvalidParameterValue", host.getErrorCode());
     }
 
     @Test
@@ -166,15 +171,14 @@ class Ec2ServiceTest {
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
         String region = "us-east-1";
         String dedicated = service.createVpc(region, "10.94.0.0/16", false, false, "dedicated").getVpcId();
-        String host = service.createVpc(region, "10.95.0.0/16", false, false, "host").getVpcId();
+        String alreadyDefault = service.createVpc(region, "10.95.0.0/16", false, false, "default").getVpcId();
 
         service.modifyVpcTenancy(region, dedicated, "default");
         assertEquals("default", service.requireVpc(region, dedicated).getInstanceTenancy());
 
-        AwsException fromHost = assertThrows(AwsException.class,
-                () -> service.modifyVpcTenancy(region, host, "default"));
-        assertEquals("InvalidParameterValue", fromHost.getErrorCode());
-        assertEquals("host", service.requireVpc(region, host).getInstanceTenancy());
+        AwsException fromDefault = assertThrows(AwsException.class,
+                () -> service.modifyVpcTenancy(region, alreadyDefault, "default"));
+        assertEquals("InvalidParameterValue", fromDefault.getErrorCode());
 
         AwsException toDedicated = assertThrows(AwsException.class,
                 () -> service.modifyVpcTenancy(region, dedicated, "dedicated"));
