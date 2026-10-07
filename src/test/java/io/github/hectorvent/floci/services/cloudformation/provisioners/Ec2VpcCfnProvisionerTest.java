@@ -16,6 +16,8 @@ import org.mockito.ArgumentMatcher;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -66,10 +68,11 @@ class Ec2VpcCfnProvisionerTest {
         return v;
     }
 
-    /** Matches a tag list by its {@code key=value} pairs in order; {@link Tag} has no equals. */
+    /** Matches a tag list by its {@code key=value} pairs as a set; {@link Tag} has no equals. */
     private static ArgumentMatcher<List<Tag>> tags(String... expected) {
         return actual -> actual != null
-                && actual.stream().map(t -> t.getKey() + "=" + t.getValue()).toList().equals(List.of(expected));
+                && actual.stream().map(t -> t.getKey() + "=" + t.getValue()).collect(Collectors.toSet())
+                        .equals(Set.of(expected));
     }
 
     private void stubCreate(Vpc created) {

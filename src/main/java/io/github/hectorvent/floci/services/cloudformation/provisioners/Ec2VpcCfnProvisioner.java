@@ -58,7 +58,7 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
         String tenancy = ctx.resolveOptional(props, "InstanceTenancy");
         String desiredTenancy = tenancy == null || tenancy.isBlank() ? DEFAULT_TENANCY : tenancy;
         Vpc reconciled = existingVpcToReconcile(ctx.isUpdate() ? ctx.priorPhysicalId() : null, cidr, desiredTenancy, region);
-        final Vpc vpc = reconciled != null
+        Vpc vpc = reconciled != null
                 ? reconciled
                 : ec2Service.createVpc(region, cidr, false, false, desiredTenancy);
         String vpcId = vpc.getVpcId();
