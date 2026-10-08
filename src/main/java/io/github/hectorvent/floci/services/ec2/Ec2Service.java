@@ -4475,10 +4475,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (options == null) {
             return;
         }
-        requireMetadataOptionValue("HttpTokens", options.getHttpTokens(), "optional", "required");
-        requireMetadataOptionValue("HttpEndpoint", options.getHttpEndpoint(), "enabled", "disabled");
-        requireMetadataOptionValue("HttpProtocolIpv6", options.getHttpProtocolIpv6(), "enabled", "disabled");
-        requireMetadataOptionValue("InstanceMetadataTags", options.getInstanceMetadataTags(), "enabled", "disabled");
+        requireParameterValue("HttpTokens", options.getHttpTokens(), "optional", "required");
+        requireParameterValue("HttpEndpoint", options.getHttpEndpoint(), "enabled", "disabled");
+        requireParameterValue("HttpProtocolIpv6", options.getHttpProtocolIpv6(), "enabled", "disabled");
+        requireParameterValue("InstanceMetadataTags", options.getInstanceMetadataTags(), "enabled", "disabled");
         Integer hopLimit = options.getHttpPutResponseHopLimit();
         if (hopLimit != null && (hopLimit < 1 || hopLimit > 64)) {
             throw new AwsException("InvalidParameterValue",
@@ -4487,7 +4487,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    private static void requireMetadataOptionValue(String parameter, String value, String... allowed) {
+    /** Rejects a value outside an enumerated parameter's allowed set with EC2's InvalidParameterValue. */
+    private static void requireParameterValue(String parameter, String value, String... allowed) {
         if (value == null || List.of(allowed).contains(value)) {
             return;
         }
@@ -4638,15 +4639,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * this parameter" (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateVpc.html).
      */
     private static String requireVpcTenancy(String instanceTenancy) {
-        if (instanceTenancy == null || instanceTenancy.isBlank()) {
-            return "default";
-        }
-        if (!List.of("default", "dedicated").contains(instanceTenancy)) {
-            throw new AwsException("InvalidParameterValue",
-                    "Value (" + instanceTenancy + ") for parameter instanceTenancy is invalid. "
-                            + "Valid values are: default, dedicated.", 400);
-        }
-        return instanceTenancy;
+        String tenancy = instanceTenancy == null || instanceTenancy.isBlank() ? "default" : instanceTenancy;
+        requireParameterValue("instanceTenancy", tenancy, "default", "dedicated");
+        return tenancy;
     }
 
     /**

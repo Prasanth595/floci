@@ -158,13 +158,13 @@ class Ec2VpcCfnProvisionerTest {
         stubCreate(vpc("vpc-new", "10.0.0.0/16"));
 
         provision(null, """
-                {"CidrBlock": "10.0.0.0/16", "EnableDnsHostnames": true, "EnableDnsSupport": "false",
+                {"CidrBlock": "10.0.0.0/16", "EnableDnsHostnames": true, "EnableDnsSupport": "true",
                  "InstanceTenancy": "dedicated",
                  "Tags": [{"Key": "Name", "Value": "my-vpc"}, {"Key": "env", "Value": "dev"}]}""");
 
         verify(ec2).createVpc(REGION, "10.0.0.0/16", false, false, "dedicated");
         verify(ec2).modifyVpcAttribute(REGION, "vpc-new", "enableDnsHostnames", "true");
-        verify(ec2).modifyVpcAttribute(REGION, "vpc-new", "enableDnsSupport", "false");
+        verify(ec2).modifyVpcAttribute(REGION, "vpc-new", "enableDnsSupport", "true");
         verify(ec2).createTags(eq(REGION), eq(List.of("vpc-new")), argThat(tags("Name=my-vpc", "env=dev")));
     }
 
