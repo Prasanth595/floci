@@ -1082,7 +1082,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 AwsArnUtils.Arn parsed = AwsArnUtils.parse(sourceIdentifier);
                 // A snapshot copies within its partition only, so a source ARN naming another
                 // partition than the target region's is not a snapshot this copy can read.
-                if (!AwsRegions.partitionFor(targetRegion).equals(parsed.partition())
+                if (!regionResolver.partitionForRegion(targetRegion).equals(parsed.partition())
                         || !"rds".equals(parsed.service())
                         || !parsed.resource().startsWith("snapshot:")) {
                     throw new IllegalArgumentException("not an RDS snapshot ARN");
