@@ -432,7 +432,7 @@ public class SesService {
         // resolved before the message has been read.
         SmtpRelay.ParsedRawMessage parsed = SmtpRelay.parseRawMessage(raw.data());
         SmtpRelay.RawMessageHeaders headers = parsed.headers();
-        SesAddressSyntax.requireRaw(request, parsed.message());
+        SesAddressSyntax.requireRaw(request, raw, parsed.message());
         // AWS accepts the configuration set either as a request field or as the
         // X-SES-CONFIGURATION-SET header on the message itself; the request field wins.
         String requestedConfigSet = firstNonBlank(request.configurationSetName(), headers.configurationSet());

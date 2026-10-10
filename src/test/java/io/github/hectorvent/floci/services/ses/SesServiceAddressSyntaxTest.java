@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 
@@ -26,8 +27,11 @@ class SesServiceAddressSyntaxTest {
     private static final String TO = "success@simulator.amazonses.com";
     private static final String NON_ASCII_LOCAL = "やまだ@" + DOMAIN;
     private static final String NO_AT = "sender." + DOMAIN;
+    private static final String EMPTY_DOMAIN = "sender@";
+    private static final String NON_ASCII_DOMAIN = "sender@例え.jp";
     private static final String MISSING_FINAL_DOMAIN = "Missing final '@domain'";
     private static final String LOCAL_CONTROL = "Local address contains control or whitespace";
+    private static final String INVALID_FROM = "Invalid From address provided.";
     private static final EmailContent.Simple SIMPLE =
             new EmailContent.Simple("Subject", "body", null, List.of());
 
@@ -120,6 +124,46 @@ class SesServiceAddressSyntaxTest {
     void rawSend_fromHeaderIsChecked() {
         assertRejects(MISSING_FINAL_DOMAIN, () -> service.sendEmail(request(null)
                 .content(raw(NO_AT, TO)).build()));
+    }
+
+    @Test
+    void rawSend_fromHeaderKeepsJavaMailMessagesWithOrWithoutSender() {
+        for (String source : Arrays.asList(null, SENDER)) {
+            assertRejects("Missing domain", () -> service.sendEmail(request(source)
+                    .content(fromHeaderRaw(EMPTY_DOMAIN, false)).build()));
+            assertRejects(LOCAL_CONTROL, () -> service.sendEmail(request(source)
+                    .content(fromHeaderRaw(NON_ASCII_LOCAL, false)).build()));
+            assertRejects("Domain contains control or whitespace", () -> service.sendEmail(request(source)
+                    .content(fromHeaderRaw(NON_ASCII_DOMAIN, false)).build()));
+        }
+    }
+
+    @Test
+    void v2RawSend_fromHeaderWithoutAtKeepsJavaMailMessage() {
+        assertRejects(MISSING_FINAL_DOMAIN, () -> service.sendEmail(request(null)
+                .content(fromHeaderRaw(NO_AT, true)).build()));
+    }
+
+    @Test
+    void v2RawSend_otherFromHeaderViolationsAreAnInvalidFromAddress() {
+        for (String from : List.of(EMPTY_DOMAIN, NON_ASCII_LOCAL, NON_ASCII_DOMAIN)) {
+            assertRejects(INVALID_FROM, () -> service.sendEmail(request(null)
+                    .content(fromHeaderRaw(from, true)).build()));
+        }
+    }
+
+    @Test
+    void v2RawSend_fromHeaderIsNotCheckedWhenSenderIsGiven() {
+        for (String from : List.of(NO_AT, EMPTY_DOMAIN, NON_ASCII_LOCAL, NON_ASCII_DOMAIN)) {
+            assertDoesNotThrow(() -> service.sendEmail(request(SENDER)
+                    .content(fromHeaderRaw(from, true)).build()));
+        }
+    }
+
+    @Test
+    void v2RawSend_malformedSenderKeepsJavaMailMessage() {
+        assertRejects("Missing domain", () -> service.sendEmail(request(EMPTY_DOMAIN)
+                .content(fromHeaderRaw(SENDER, true)).build()));
     }
 
     @Test
@@ -218,6 +262,11 @@ class SesServiceAddressSyntaxTest {
 
     private static EmailContent.Raw raw(String from, String to) {
         return raw(from, to, "");
+    }
+
+    private static EmailContent.Raw fromHeaderRaw(String from, boolean fromHeaderAsFallback) {
+        return new EmailContent.Raw(Base64.getEncoder().encodeToString(("From: " + from + "\r\nTo: " + TO
+                + "\r\nSubject: s\r\n\r\nbody").getBytes(StandardCharsets.UTF_8)), fromHeaderAsFallback);
     }
 
     private static EmailContent.Raw raw(String from, String to, String extraHeaders) {

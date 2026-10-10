@@ -34,8 +34,16 @@ final class SesSendAddresses {
      */
     static void forEachRaw(SendEmailRequest request, Message message, List<String> headerNames,
                            Consumer<String> check) {
+        forEachRaw(request, message, headerNames, check, check);
+    }
+
+    /**
+     * A raw send whose From header addresses go to their own check.
+     */
+    static void forEachRaw(SendEmailRequest request, Message message, List<String> headerNames,
+                           Consumer<String> fromHeaderCheck, Consumer<String> check) {
         check.accept(request.source());
-        forEachHeaderAddress(message, "From", check);
+        forEachHeaderAddress(message, "From", fromHeaderCheck);
         forEachRecipient(request, check);
         for (String name : headerNames) {
             forEachHeaderAddress(message, name, check);
