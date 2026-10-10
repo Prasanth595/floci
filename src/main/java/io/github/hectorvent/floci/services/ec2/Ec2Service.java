@@ -4880,6 +4880,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterValue",
                     "IpAddressType must be ipv4, ipv6, or dualstack.", 400);
         }
+        if ("Interface".equalsIgnoreCase(endpointType)
+                && ipAddressType != null && !"ipv4".equals(ipAddressType)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Floci currently supports only ipv4 for interface VPC endpoints.", 400);
+        }
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         for (String routeTableId : routeTableIds) {
@@ -9417,8 +9422,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 // rename: a caller sending the documented name fell through the default arm
                 // and got every endpoint back unfiltered. Renamed rather than aliased -
                 // there is no evidence real AWS accepts "state" here.
-                case "vpc-endpoint-state" -> matchesValue(values,
-                        endpoint.getState().substring(0, 1).toLowerCase(Locale.ROOT) + endpoint.getState().substring(1));
+                case "vpc-endpoint-state" -> {
+                    String state = endpoint.getState();
+                    String filterState = state == null || state.isEmpty() ? state
+                            : state.substring(0, 1).toLowerCase(Locale.ROOT) + state.substring(1);
+                    yield matchesValue(values, filterState);
+                }
                 case "route-table-id" -> endpoint.getRouteTableIds().stream()
                         .anyMatch(routeTableId -> matchesValue(values, routeTableId));
                 case "subnet-id" -> endpoint.getSubnetIds().stream()

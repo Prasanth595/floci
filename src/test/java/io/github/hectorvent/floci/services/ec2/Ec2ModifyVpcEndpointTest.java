@@ -7,6 +7,7 @@ import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
@@ -22,6 +23,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.xml.HasXPath.hasXPath;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
  * ModifyVpcEndpoint. A gateway endpoint is normally declared with its route tables and
@@ -92,6 +94,50 @@ class Ec2ModifyVpcEndpointTest {
                 "Filter.1.Name", "vpc-endpoint-state", "Filter.1.Value.1", "available");
         assertEquals(f.endpointId(), xmlValue(filtered, "vpcEndpointId"));
         assertEquals("ipv4", xmlValue(filtered, "ipAddressType"));
+    }
+
+    @Test
+    void mixedCaseEndpointStateKeepsDocumentedFilterSpelling() throws Exception {
+        Fixture f = fixture("10.82.0.0/16");
+        VpcEndpoint saved = service.describeVpcEndpoints("us-east-1", List.of(f.endpointId()), Map.of()).getFirst();
+        objectMapper.readerForUpdating(saved).readValue("{\"state\":\"PendingAcceptance\"}");
+        String filtered = ec2("DescribeVpcEndpoints", "VpcEndpointId.1", f.endpointId(),
+                "Filter.1.Name", "vpc-endpoint-state", "Filter.1.Value.1", "pendingAcceptance");
+        assertEquals(f.endpointId(), xmlValue(filtered, "vpcEndpointId"));
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void missingSavedEndpointStateDoesNotBreakFilters(String state) throws Exception {
+        Fixture f = fixture("10.84.0.0/16");
+        VpcEndpoint saved = service.describeVpcEndpoints("us-east-1", List.of(f.endpointId()), Map.of()).getFirst();
+        objectMapper.readerForUpdating(saved).readValue(state == null ? "{\"state\":null}" : "{\"state\":\"\"}");
+        String filtered = ec2("DescribeVpcEndpoints", "VpcEndpointId.1", f.endpointId(),
+                "Filter.1.Name", "vpc-endpoint-state", "Filter.1.Value.1", "available");
+        assertNull(xmlValue(filtered, "vpcEndpointId"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ipv6", "dualstack"})
+    void unsupportedInterfaceAddressTypeDoesNotCreateResources(String ipAddressType) {
+        String vpcId = xmlValue(ec2("CreateVpc", "CidrBlock", "10.83.0.0/16"), "vpcId");
+        int before = service.describeVpcEndpoints("us-east-1", List.of(), Map.of()).size();
+        int interfacesBefore = service.endpointNetworkInterfaces("us-east-1").size();
+        int tagsBefore = service.describeTags("us-east-1", Map.of()).size();
+        given().header("Authorization", AUTH_HEADER)
+                .formParam("Action", "CreateVpcEndpoint")
+                .formParam("VpcId", vpcId)
+                .formParam("ServiceName", "com.amazonaws.us-east-1.s3")
+                .formParam("VpcEndpointType", "Interface")
+                .formParam("IpAddressType", ipAddressType)
+                .formParam("TagSpecification.1.ResourceType", "vpc-endpoint")
+                .formParam("TagSpecification.1.Tag.1.Key", "Name")
+                .formParam("TagSpecification.1.Tag.1.Value", "unsupported-address-type")
+                .when().post("/").then().statusCode(400)
+                .body(hasXPath("//*[local-name()='Code']", equalTo("InvalidParameterValue")));
+        assertEquals(before, service.describeVpcEndpoints("us-east-1", List.of(), Map.of()).size());
+        assertEquals(interfacesBefore, service.endpointNetworkInterfaces("us-east-1").size());
+        assertEquals(tagsBefore, service.describeTags("us-east-1", Map.of()).size());
     }
 
     @ParameterizedTest
