@@ -1,9 +1,13 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,6 +35,9 @@ class Ec2ModifyVpcEndpointTest {
 
     @Inject
     Ec2Service service;
+
+    @Inject
+    ObjectMapper objectMapper;
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
@@ -73,6 +80,46 @@ class Ec2ModifyVpcEndpointTest {
         Fixture f = fixture("10.89.0.0/16");
         assertEquals("Available", xmlValue(describe(f.endpointId()), "state"));
         assertEquals("Deleted", service.deleteVpcEndpoints("us-east-1", List.of(f.endpointId())).getFirst().getState());
+    }
+
+    @Test
+    void savedEndpointStateDecodesAndStillMatchesLowercaseFilter() throws Exception {
+        Fixture f = fixture("10.86.0.0/16");
+        VpcEndpoint saved = service.describeVpcEndpoints("us-east-1", List.of(f.endpointId()), Map.of()).getFirst();
+        objectMapper.readerForUpdating(saved).readValue("{\"state\":\"available\"}");
+        assertEquals("Available", xmlValue(describe(f.endpointId()), "state"));
+        String filtered = ec2("DescribeVpcEndpoints", "VpcEndpointId.1", f.endpointId(),
+                "Filter.1.Name", "vpc-endpoint-state", "Filter.1.Value.1", "available");
+        assertEquals(f.endpointId(), xmlValue(filtered, "vpcEndpointId"));
+        assertEquals("ipv4", xmlValue(filtered, "ipAddressType"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ipv4", "ipv6", "dualstack"})
+    void endpointIpAddressTypeRoundTrips(String ipAddressType) {
+        String vpcId = xmlValue(ec2("CreateVpc", "CidrBlock", "10.87.0.0/16"), "vpcId");
+        String created = ec2("CreateVpcEndpoint", "VpcId", vpcId,
+                "ServiceName", "com.amazonaws.us-east-1.s3", "IpAddressType", ipAddressType);
+        assertEquals(ipAddressType, xmlValue(created, "ipAddressType"));
+        assertEquals(ipAddressType, xmlValue(describe(xmlValue(created, "vpcEndpointId")), "ipAddressType"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bogus", "IPv4", "", " "})
+    void invalidEndpointIpAddressTypeDoesNotCreateResources(String ipAddressType) {
+        String vpcId = xmlValue(ec2("CreateVpc", "CidrBlock", "10.88.0.0/16"), "vpcId");
+        int before = service.describeVpcEndpoints("us-east-1", List.of(), Map.of()).size();
+        given().header("Authorization", AUTH_HEADER)
+                .formParam("Action", "CreateVpcEndpoint")
+                .formParam("VpcId", vpcId)
+                .formParam("ServiceName", "com.amazonaws.us-east-1.s3")
+                .formParam("IpAddressType", ipAddressType)
+                .formParam("TagSpecification.1.ResourceType", "vpc-endpoint")
+                .formParam("TagSpecification.1.Tag.1.Key", "Name")
+                .formParam("TagSpecification.1.Tag.1.Value", "invalid-ip-type")
+                .when().post("/").then().statusCode(400)
+                .body(hasXPath("//*[local-name()='Code']", equalTo("InvalidParameterValue")));
+        assertEquals(before, service.describeVpcEndpoints("us-east-1", List.of(), Map.of()).size());
     }
 
     @Test
