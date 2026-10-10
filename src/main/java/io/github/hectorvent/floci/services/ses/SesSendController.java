@@ -134,7 +134,9 @@ public class SesSendController {
                     throw new AwsException("BadRequestException",
                             "Content.Raw.Data is required.", 400);
                 }
-                sesService.checkTenantRawSendAccess(tenantName, fromEmailAddress, rawData,
+                boolean hasDestination =
+                        !toAddresses.isEmpty() || !ccAddresses.isEmpty() || !bccAddresses.isEmpty();
+                sesService.checkTenantRawSendAccess(tenantName, fromEmailAddress, rawData, hasDestination,
                         configurationSetName, regionResolver.getAccountId(), region);
                 messageId = sesService.sendEmail(sendRequest.content(new EmailContent.Raw(rawData)).build());
             } else if (content.has("Simple")) {
