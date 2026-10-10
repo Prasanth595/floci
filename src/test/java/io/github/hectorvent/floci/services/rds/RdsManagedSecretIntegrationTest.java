@@ -1,10 +1,8 @@
 package io.github.hectorvent.floci.services.rds;
 
-import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.testing.RdsMockProfile;
-import io.quarkus.arc.Arc;
-import io.quarkus.arc.ManagedContext;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
@@ -55,9 +53,11 @@ class RdsManagedSecretIntegrationTest {
                     .allocatedStorage(20)
                     .manageMasterUserPassword(true)).dbInstance();
             try {
-                String keyArn = kmsService.describeKeyForAccount("alias/aws/secretsmanager", region, account).getArn();
+                String keyArn = RequestScopes.callAs(account, region,
+                        () -> kmsService.describeKey("alias/aws/secretsmanager", region).getArn());
                 assertEquals(keyArn, instance.masterUserSecret().kmsKeyId());
-                clearSavedKey(account, () -> rdsService.getDbInstance(id, region).setMasterUserSecretKmsKeyId(null));
+                RequestScopes.runAs(account, region,
+                        () -> rdsService.getDbInstance(id, region).setMasterUserSecretKmsKeyId(null));
                 rdsService.backfillManagedSecretOwnership();
                 assertEquals(keyArn, rds.describeDBInstances(request -> request.dbInstanceIdentifier(id))
                         .dbInstances().getFirst().masterUserSecret().kmsKeyId());
@@ -70,7 +70,8 @@ class RdsManagedSecretIntegrationTest {
                         .manageMasterUserPassword(true)).dbCluster();
                 try {
                     assertEquals(keyArn, cluster.masterUserSecret().kmsKeyId());
-                    clearSavedKey(account, () -> rdsService.getDbCluster(id, region).setMasterUserSecretKmsKeyId(null));
+                    RequestScopes.runAs(account, region,
+                            () -> rdsService.getDbCluster(id, region).setMasterUserSecretKmsKeyId(null));
                     rdsService.backfillManagedSecretOwnership();
                     assertEquals(keyArn, rds.describeDBClusters(request -> request.dbClusterIdentifier(id))
                             .dbClusters().getFirst().masterUserSecret().kmsKeyId());
@@ -79,25 +80,6 @@ class RdsManagedSecretIntegrationTest {
                 }
             } finally {
                 rds.deleteDBInstance(request -> request.dbInstanceIdentifier(id).skipFinalSnapshot(true));
-            }
-        }
-    }
-
-    private void clearSavedKey(String account, Runnable clear) {
-        ManagedContext context = Arc.container().requestContext();
-        boolean active = context.isActive();
-        if (!active) {
-            context.activate();
-        }
-        RequestContext request = Arc.container().instance(RequestContext.class).get();
-        String previousAccount = request.getAccountId();
-        try {
-            request.setAccountId(account);
-            clear.run();
-        } finally {
-            request.setAccountId(previousAccount);
-            if (!active) {
-                context.terminate();
             }
         }
     }

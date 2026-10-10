@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.docker.ContainerLiveness;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
@@ -2561,8 +2562,8 @@ public class RdsService implements Resettable, ResourceProvider {
         try {
             Secret secret = secretsManagerService.describeSecret(secretArn, region);
             String keyId = secret.getKmsKeyId();
-            return keyId != null ? keyId : kmsService.describeKeyForAccount("alias/aws/secretsmanager",
-                    region, accountIdFromArn(secretArn)).getArn();
+            return keyId != null ? keyId : RequestScopes.callAs(accountIdFromArn(secretArn), region,
+                    () -> kmsService.describeKey("alias/aws/secretsmanager", region).getArn());
         } catch (RuntimeException e) {
             // Old metadata remains readable if its secret or key is temporarily unavailable.
             LOG.debugv(e, "Could not recover the managed key for secret {0}", secretArn);

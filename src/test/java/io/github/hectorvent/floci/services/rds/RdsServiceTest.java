@@ -1286,7 +1286,7 @@ class RdsServiceTest {
         secret.setKmsKeyId(customKey ? expectedKey : null);
         KmsKey key = new KmsKey();
         key.setArn(expectedKey);
-        doReturn(key).when(kmsService).describeKeyForAccount("alias/aws/secretsmanager", "cn-north-1", "222222222222");
+        doReturn(key).when(kmsService).describeKey("alias/aws/secretsmanager", "cn-north-1");
         when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("stored-key"), any(), eq("rds"), any()))
                 .thenReturn(secret);
         RdsService service = newService(containerManager, proxyManager,
@@ -1328,7 +1328,7 @@ class RdsServiceTest {
         if (customKey) {
             verifyNoInteractions(kmsService);
         } else {
-            verify(kmsService).describeKeyForAccount("alias/aws/secretsmanager", "cn-north-1", "222222222222");
+            verify(kmsService).describeKey("alias/aws/secretsmanager", "cn-north-1");
         }
     }
 
@@ -1578,7 +1578,7 @@ class RdsServiceTest {
         KmsKey key = new KmsKey();
         key.setArn("arn:aws:kms:us-east-1:123456789012:key/restored-default");
         when(secretsManager.describeSecret(restoredArn, "us-east-1")).thenReturn(restored);
-        when(kmsService.describeKeyForAccount("alias/aws/secretsmanager", "us-east-1", "123456789012"))
+        when(kmsService.describeKey("alias/aws/secretsmanager", "us-east-1"))
                 .thenReturn(key);
 
         service.restorePersistedRuntime();
