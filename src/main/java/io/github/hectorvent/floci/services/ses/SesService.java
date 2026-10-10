@@ -469,8 +469,7 @@ public class SesService {
                 ? destinations
                 : SendEmailRequest.recipients(headers.to(), headers.cc(), headers.bcc());
         if (effectiveDestinations.isEmpty()) {
-            throw new AwsException("InvalidParameterValue",
-                    "At least one destination address is required.", 400);
+            throw new AwsException("InvalidParameterValue", "Missing required header 'To'.", 400);
         }
         // Resolve suppression before recording the message so a bad ListManagementOptions (e.g. an
         // unknown contact list) fails the whole send without leaving an orphaned SentEmail record.
