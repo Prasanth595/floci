@@ -123,8 +123,8 @@ public class IotMqttBrokerService implements Resettable {
     static final String CONNECTION_LOST = "CONNECTION_LOST";
     static final String MQTT_KEEP_ALIVE_TIMEOUT = "MQTT_KEEP_ALIVE_TIMEOUT";
     static final String PRESENCE_TOPIC_PREFIX = "$aws/events/presence/";
-    private static final String DUPLICATE_CLIENTID = "DUPLICATE_CLIENTID";
-    private static final String API_INITIATED_DISCONNECT = "API_INITIATED_DISCONNECT";
+    static final String DUPLICATE_CLIENTID = "DUPLICATE_CLIENTID";
+    static final String API_INITIATED_DISCONNECT = "API_INITIATED_DISCONNECT";
     private static final String CLIENT_ERROR = "CLIENT_ERROR";
     private static final long KEEP_ALIVE_SLACK_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
 
@@ -145,6 +145,8 @@ public class IotMqttBrokerService implements Resettable {
     private final Object sessionLock = new Object();
     /** The last lifecycle event versionNumber per client id; neither a state reset nor a broker restart clears it. */
     private final Map<String, Long> presenceVersions = new ConcurrentHashMap<>();
+    /** How a client id's last session in an account and region ended, for fleet indexing; a state reset clears it. */
+    private final Map<HistoryKey, Connectivity> lastDisconnects = new ConcurrentHashMap<>();
     private final AtomicInteger pendingRuleEvaluations = new AtomicInteger();
     private final AtomicBoolean ruleEvaluationsThrottled = new AtomicBoolean();
     /**
@@ -219,11 +221,12 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     /**
-     * The broker keeps nothing in Floci storage; a reset only suspends rules, in
-     * {@link #beforeReset()}.
+     * The broker keeps nothing in Floci storage; a reset forgets how earlier sessions ended, and
+     * suspends rules in {@link #beforeReset()}. Live sessions stay connected.
      */
     @Override
     public void clear() {
+        lastDisconnects.clear();
     }
 
     synchronized void startIfEnabled() {
@@ -405,6 +408,21 @@ public class IotMqttBrokerService implements Resettable {
         return Optional.of(new ConnectionInfo(session.clientId(), session.sourceIp(), session.sourcePort()));
     }
 
+    /**
+     * A client id's connection as fleet indexing reports it in an account and region: its live
+     * session, else how its last one ended. Empty when it has not connected there since the last
+     * reset. A plaintext session counts in the default account and region, as the broker's shadow
+     * topics do; a TLS session in its certificate's.
+     */
+    Optional<Connectivity> connectivity(String accountId, String region, String clientId) {
+        ClientSession session = sessionsByClient.get(clientId);
+        if (session != null && session.endpoint().isConnected()
+                && accountId.equals(session.accountId()) && region.equals(session.region())) {
+            return Optional.of(session.connected());
+        }
+        return Optional.ofNullable(lastDisconnects.get(new HistoryKey(accountId, region, clientId)));
+    }
+
     List<String> listSubscriptions(String clientId) {
         return subscriptionsByClient.getOrDefault(clientId, Map.of()).keySet().stream()
                 .sorted()
@@ -425,10 +443,10 @@ public class IotMqttBrokerService implements Resettable {
         SocketAddress remoteAddress = endpoint.remoteAddress();
         String sourceIp = remoteAddress == null ? null : remoteAddress.host();
         int sourcePort = remoteAddress == null ? -1 : remoteAddress.port();
-        String principal = null;
+        IotService.RegisteredDevice device = null;
         if (verifyDevice) {
-            principal = admittedDevice(endpoint, clientId, sourceIp);
-            if (principal == null) {
+            device = admittedDevice(endpoint, clientId, sourceIp);
+            if (device == null) {
                 endpoint.reject(endpoint.protocolVersion() == 5
                         ? MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED_5
                         : MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED);
@@ -447,7 +465,7 @@ public class IotMqttBrokerService implements Resettable {
                 return;
             }
         }
-        admit(endpoint, principal, sourceIp, sourcePort, connectNanos);
+        admit(endpoint, device, sourceIp, sourcePort, connectNanos);
     }
 
     /**
@@ -489,15 +507,18 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     /**
-     * {@code principal} is the certificate id a TLS client was admitted with, null otherwise.
+     * {@code device} is the registered device a TLS client was admitted as, null otherwise; its
+     * certificate id is the session's principal, and its account and region the session's.
      * {@code clientIp} and {@code clientPort} are the address the client connected from: the
      * socket's, or for a WebSocket client the one the bridge recorded at the upgrade, as the
      * bridge's own socket is loopback. {@code connectNanos} is when the CONNECT arrived, which
      * the keep-alive runs from.
      */
-    private void admit(MqttEndpoint endpoint, String principal, String clientIp, int clientPort, long connectNanos) {
+    private void admit(MqttEndpoint endpoint, IotService.RegisteredDevice device, String clientIp, int clientPort,
+                       long connectNanos) {
         String clientId = endpoint.clientIdentifier();
         boolean cleanSession = endpoint.isCleanSession();
+        String principal = device == null ? null : device.certificate().getCertificateId();
         ClientSession session;
         ClientSession replaced = null;
         synchronized (sessionLock) {
@@ -512,7 +533,11 @@ public class IotMqttBrokerService implements Resettable {
                     principal,
                     versionNumber,
                     new AtomicBoolean(),
-                    new AtomicLong(connectNanos));
+                    new AtomicLong(connectNanos),
+                    device == null ? config.defaultAccountId() : device.accountId(),
+                    device == null ? config.defaultRegion() : device.region(),
+                    System.currentTimeMillis(),
+                    endpoint.keepAliveTimeSeconds());
             ClientSession previous = sessionsByClient.put(clientId, session);
             if (previous != null && previous.endpoint() != endpoint) {
                 endSession(previous, DUPLICATE_CLIENTID);
@@ -553,12 +578,12 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     /**
-     * The certificate id of the device behind the connection when it may connect, otherwise null.
+     * The registered device behind the connection when it may connect, otherwise null.
      * A failure while deciding refuses the client rather than leaving the CONNECT unanswered. A
      * refusal is the client's own doing and reaches it as the CONNACK, so it is logged at debug
      * only: the CONNECT is reachable by anyone.
      */
-    private String admittedDevice(MqttEndpoint endpoint, String clientId, String sourceIp) {
+    private IotService.RegisteredDevice admittedDevice(MqttEndpoint endpoint, String clientId, String sourceIp) {
         try {
             Optional<IotService.RegisteredDevice> device = presentedDevice(endpoint);
             if (device.isEmpty()) {
@@ -570,7 +595,7 @@ public class IotMqttBrokerService implements Resettable {
                 LOG.debugv("IoT MQTT TLS client {0} refused: iot:Connect is not allowed for {1}", clientId, certificateId);
                 return null;
             }
-            return certificateId;
+            return device.get();
         } catch (RuntimeException e) {
             LOG.warnv(e, "IoT MQTT TLS client {0} refused: device verification failed: {1}", clientId, e.getMessage());
             return null;
@@ -784,14 +809,16 @@ public class IotMqttBrokerService implements Resettable {
 
     /**
      * Ends the session once: the first reason reported wins, and only that one publishes the
-     * disconnected event and gets true. The versionNumber counts up only while the session is still
-     * the client id's current one, so a session replaced by a newer connection leaves it alone.
+     * disconnected event, records how the session ended for fleet indexing, and gets true. The
+     * versionNumber counts up only while the session is still the client id's current one, so a
+     * session replaced by a newer connection leaves it alone.
      */
     private boolean endSession(ClientSession session, String reason) {
         synchronized (sessionLock) {
             if (!session.ended().compareAndSet(false, true)) {
                 return false;
             }
+            lastDisconnects.put(session.historyKey(), session.disconnected(reason));
             if (sessionsByClient.remove(session.clientId(), session)) {
                 presenceVersions.computeIfPresent(session.clientId(), (id, version) -> version + 1);
             }
@@ -906,12 +933,36 @@ public class IotMqttBrokerService implements Resettable {
             String principalIdentifier,
             long versionNumber,
             AtomicBoolean ended,
-            AtomicLong lastPacketNanos) {
+            AtomicLong lastPacketNanos,
+            String accountId,
+            String region,
+            long connectedAt,
+            int keepAliveDuration) {
+
+        HistoryKey historyKey() {
+            return new HistoryKey(accountId, region, clientId);
+        }
+
+        Connectivity connected() {
+            return new Connectivity(true, connectedAt, null, keepAliveDuration, cleanSession);
+        }
+
+        Connectivity disconnected(String reason) {
+            return new Connectivity(false, System.currentTimeMillis(), reason, keepAliveDuration, cleanSession);
+        }
+    }
+
+    private record HistoryKey(String accountId, String region, String clientId) {
     }
 
     private record Subscription(String topicFilter, int qos) {
     }
 
     record ConnectionInfo(String clientId, String address, int port) {
+    }
+
+    /** Timestamps are epoch milliseconds: the connect while connected, the disconnect after. */
+    record Connectivity(boolean connected, long timestamp, String disconnectReason, int keepAliveDuration,
+                        boolean cleanSession) {
     }
 }
