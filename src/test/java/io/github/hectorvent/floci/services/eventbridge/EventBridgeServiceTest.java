@@ -1399,4 +1399,60 @@ class EventBridgeServiceTest {
         List<ApiDestination> prefixed = service.listApiDestinations("prefix-", null, REGION);
         assertEquals(2, prefixed.size());
     }
+
+    // ──────────────────────────── PutEvents MalformedDetail ────────────────────────────
+
+    @Test
+    void putEventsRejectsMalformedDetailWithErrorCode() {
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Source", "s", "DetailType", "d", "Detail", "{")
+        );
+
+        EventBridgeService.PutEventsResult result = service.putEvents(entries, REGION);
+
+        assertEquals(1, result.failedCount());
+        assertEquals(1, result.entries().size());
+        Map<String, String> entry = result.entries().getFirst();
+        assertNull(entry.get("EventId"));
+        assertEquals("MalformedDetail", entry.get("ErrorCode"));
+        assertNotNull(entry.get("ErrorMessage"));
+    }
+
+    @Test
+    void putEventsMalformedDetailDoesNotBlockValidEntriesInSameBatch() {
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Source", "good", "DetailType", "d", "Detail", "{\"ok\":true}"),
+                Map.of("Source", "bad", "DetailType", "d", "Detail", "{"),
+                Map.of("Source", "also-good", "DetailType", "d", "Detail", "{}")
+        );
+
+        EventBridgeService.PutEventsResult result = service.putEvents(entries, REGION);
+
+        assertEquals(1, result.failedCount());
+        assertEquals(3, result.entries().size());
+
+        assertNotNull(result.entries().get(0).get("EventId"));
+        assertNull(result.entries().get(0).get("ErrorCode"));
+
+        assertNull(result.entries().get(1).get("EventId"));
+        assertEquals("MalformedDetail", result.entries().get(1).get("ErrorCode"));
+
+        assertNotNull(result.entries().get(2).get("EventId"));
+        assertNull(result.entries().get(2).get("ErrorCode"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{", "not json at all", "[}", "{\"key\": }", "{'single': 'quotes'}"})
+    void putEventsRejectsVariousFormsOfInvalidDetailJson(String malformedDetail) {
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Source", "s", "DetailType", "d", "Detail", malformedDetail)
+        );
+
+        EventBridgeService.PutEventsResult result = service.putEvents(entries, REGION);
+
+        assertEquals(1, result.failedCount());
+        Map<String, String> entry = result.entries().getFirst();
+        assertEquals("MalformedDetail", entry.get("ErrorCode"));
+        assertNull(entry.get("EventId"));
+    }
 }

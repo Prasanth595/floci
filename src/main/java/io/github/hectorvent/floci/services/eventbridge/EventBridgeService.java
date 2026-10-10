@@ -787,6 +787,16 @@ public class EventBridgeService implements ResourceProvider {
             // delivered envelope would correctly carry the call's region/account, giving an
             // inconsistent observable.
             Map<String, Object> entry = new HashMap<>(originalEntry);
+
+            if (!isValidDetailJson(entry)) {
+                Map<String, String> errorEntry = new HashMap<>();
+                errorEntry.put("ErrorCode", "MalformedDetail");
+                errorEntry.put("ErrorMessage", "The JSON provided is not valid.");
+                resultEntries.add(errorEntry);
+                failed++;
+
+                continue;
+            }
             if (isBlank(entry.get("Region"))) {
                 entry.put("Region", isBlank(region) ? regionResolver.getDefaultRegion() : region);
             }
@@ -840,6 +850,21 @@ public class EventBridgeService implements ResourceProvider {
         }
 
         return new PutEventsResult(failed, resultEntries);
+    }
+
+    private boolean isValidDetailJson(Map<String, Object> detail) {
+        String jsonString = (String) detail.get("Detail");
+
+        if (jsonString == null || jsonString.trim().isEmpty()) {
+            return false;
+        }
+
+        try {
+            objectMapper.readTree(jsonString);
+            return true;
+        } catch (JsonProcessingException e) {
+            return false;
+        }
     }
 
     // ──────────────────────────── Pattern Matching ────────────────────────────
