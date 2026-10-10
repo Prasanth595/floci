@@ -164,7 +164,6 @@ public class ResourceArnBuilder {
      * exists to close.
      */
     static final Map<String, String> UNRESOLVED_TYPES = Map.of(
-            "access-report", "GenerateOrganizationsAccessReport is not dispatched",
             "delegation-request", "the delegation request family is not dispatched",
             "role-template", "GetRoleTemplateVersion is not dispatched");
 
@@ -182,10 +181,12 @@ public class ResourceArnBuilder {
     static final Map<String, String> IAM_ARN_PARAMETERS = iamArnParameters();
 
     /**
-     * The actions resolved by a branch of their own in {@link #buildIamArns}, because the request
-     * identifies the resource without naming it: a service principal for
-     * {@code CreateServiceLinkedRole}, an access key id for {@code GetAccessKeyLastUsed}, and a
-     * deletion task id for {@code GetServiceLinkedRoleDeletionStatus}.
+     * The actions resolved by a branch of their own in {@link #buildIamArns}, because what the
+     * request carries is not an IAM entity's name: a service principal for
+     * {@code CreateServiceLinkedRole}, an access key id for {@code GetAccessKeyLastUsed}, a
+     * deletion task id for {@code GetServiceLinkedRoleDeletionStatus}, and an Organizations
+     * entity path for {@code GenerateOrganizationsAccessReport}, whose resource lives in another
+     * service's tree.
      *
      * <p>The resolver is the value rather than a branch elsewhere, so this cannot become a list
      * that says an action is handled while the dispatch has nothing for it. The keys are also what
@@ -196,7 +197,9 @@ public class ResourceArnBuilder {
             "CreateServiceLinkedRole", ResourceArnBuilder::serviceLinkedRoleArn,
             "GetAccessKeyLastUsed",
             (self, ctx, region, accountId) -> self.accessKeyOwnerArn(ctx, accountId),
-            "GetServiceLinkedRoleDeletionStatus", ResourceArnBuilder::deletionTaskRoleArn);
+            "GetServiceLinkedRoleDeletionStatus", ResourceArnBuilder::deletionTaskRoleArn,
+            "GenerateOrganizationsAccessReport",
+            ResourceArnBuilder::organizationsAccessReportArn);
 
     /** How one of {@link #DERIVED_RESOLVERS} reads its resource out of the request. */
     interface DerivedResolver {
@@ -463,6 +466,22 @@ public class ResourceArnBuilder {
                 .flatMap(userName -> storedIamEntity("user", userName, accountId))
                 .map(stored -> List.of(stored.arn()))
                 .orElse(List.of("*"));
+    }
+
+    /**
+     * The report {@code GenerateOrganizationsAccessReport} would produce. The reference spells the
+     * type as {@code access-report/${EntityPath}}, so the resource is the Organizations entity
+     * path the request carries and there is no IAM {@code Path} to read: the slashes inside it are
+     * the organization's own tree, not an IAM path.
+     */
+    private List<String> organizationsAccessReportArn(ContainerRequestContext ctx, String region,
+                                                      String accountId) {
+        String entityPath = RequestBodyReader.formField(ctx, "EntityPath");
+        if (entityPath == null || entityPath.isBlank()) {
+            return List.of("*");
+        }
+        return List.of(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
+                "access-report/" + entityPath).toString());
     }
 
     /** A request's Path as it appears in an ARN: slash-delimited, defaulting to a bare slash. */
