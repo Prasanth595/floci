@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Stage 1: Build
 FROM eclipse-temurin:25-jdk-noble AS build
 WORKDIR /build
@@ -85,8 +84,7 @@ EXPOSE 6399
 
 # Probe every 50 ms while Floci starts, so a wait for "healthy" ends right after startup instead of
 # at the first 5 s check. The start period must stay above the 5 s fallback in healthcheck.sh.
-# Docker Engine before 25.0 ignores --start-interval when it runs the image. Building needs BuildKit,
-# which the syntax line above lets older engines use.
+# Docker Engine before 25.0 ignores --start-interval when it runs the image, and cannot build this file.
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 --start-period=10s --start-interval=50ms CMD ["/usr/local/bin/healthcheck.sh"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
