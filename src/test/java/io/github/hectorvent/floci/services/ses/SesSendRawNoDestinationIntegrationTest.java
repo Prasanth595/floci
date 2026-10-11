@@ -91,6 +91,25 @@ class SesSendRawNoDestinationIntegrationTest {
     }
 
     @Test
+    void v2SendEmail_rawWithNonArrayDestinationMember_returnsSerializationException() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH)
+            .body("""
+                {
+                    "FromEmailAddress": "sender@example.com",
+                    "Destination": {"ToAddresses": "bad-shape"},
+                    "Content": {"Raw": {"Data": "%s"}}
+                }
+                """.formatted(rawData("From: sender@example.com\r\nTo: " + TO + "\r\n")))
+        .when()
+            .post("/v2/email/outbound-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
     void v2SendEmail_rawWithoutDestination_checksHeaderRecipientSyntax() {
         given()
             .contentType("application/json")
