@@ -32,6 +32,7 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -1305,7 +1306,7 @@ public class IamQueryHandler {
     }
 
     private Response handleGetRole(MultivaluedMap<String, String> params) {
-        IamRole role = iamService.getRole(getParam(params, "RoleName"));
+        IamRole role = iamService.getValidatedRole(getParam(params, "RoleName"));
         String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
         return Response.ok(AwsQueryResponse.envelope("GetRole", AwsNamespaces.IAM, result)).build();
     }
@@ -2936,7 +2937,7 @@ public class IamQueryHandler {
 
     private String isoDate(Instant instant) {
         if (instant == null) return "";
-        return DateTimeFormatter.ISO_INSTANT.format(instant);
+        return DateTimeFormatter.ISO_INSTANT.format(instant.truncatedTo(ChronoUnit.MILLIS));
     }
 
     /** For a member AWS types as a blob, which the Query protocol carries base64-encoded. */

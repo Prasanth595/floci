@@ -342,6 +342,41 @@ public class CodeArtifactController {
         return ok(single("package", packageDescription(described)));
     }
 
+    @DELETE
+    @Path("/v1/package")
+    public Response deletePackage(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                  @QueryParam("domain-owner") String domainOwner,
+                                  @QueryParam("repository") String repository,
+                                  @QueryParam("format") String format,
+                                  @QueryParam("namespace") String namespace,
+                                  @QueryParam("package") String packageName) {
+        String region = regionResolver.resolveRegion(headers);
+        CodeArtifactService.PackageDescription deleted = service.deletePackage(region, domain, domainOwner,
+                repository, format, namespace, packageName);
+        return ok(single("deletedPackage", deletedPackageDescription(deleted)));
+    }
+
+    @POST
+    @Path("/v1/package")
+    public Response putPackageOriginConfiguration(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                                  @QueryParam("domain-owner") String domainOwner,
+                                                  @QueryParam("repository") String repository,
+                                                  @QueryParam("format") String format,
+                                                  @QueryParam("namespace") String namespace,
+                                                  @QueryParam("package") String packageName, String body) {
+        JsonNode req = readTree(body);
+        JsonNode restrictions = req.get("restrictions");
+        String region = regionResolver.resolveRegion(headers);
+        CodeArtifactService.PackageDescription described = service.putPackageOriginConfiguration(region, domain,
+                domainOwner, repository, format, namespace, packageName, text(restrictions, "publish"),
+                text(restrictions, "upstream"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode restrictionsNode = response.putObject("originConfiguration").putObject("restrictions");
+        restrictionsNode.put("publish", described.publishRestriction());
+        restrictionsNode.put("upstream", described.upstreamRestriction());
+        return ok(response);
+    }
+
     @GET
     @Path("/v1/package/version")
     public Response describePackageVersion(@Context HttpHeaders headers, @QueryParam("domain") String domain,
@@ -505,6 +540,25 @@ public class CodeArtifactController {
             node.put("namespace", described.namespace());
         }
         node.put("name", described.packageName());
+        ObjectNode restrictions = node.putObject("originConfiguration").putObject("restrictions");
+        restrictions.put("publish", described.publishRestriction());
+        restrictions.put("upstream", described.upstreamRestriction());
+        return node;
+    }
+
+    /**
+     * {@code PackageSummary}, real AWS's response type for {@code deletedPackage}, names the
+     * package's name field {@code package}, not {@code name}: a different field name than
+     * {@code PackageDescription} uses for the same data in {@code DescribePackage}'s response,
+     * confirmed against the API reference.
+     */
+    private ObjectNode deletedPackageDescription(CodeArtifactService.PackageDescription described) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("format", described.format());
+        if (described.namespace() != null) {
+            node.put("namespace", described.namespace());
+        }
+        node.put("package", described.packageName());
         ObjectNode restrictions = node.putObject("originConfiguration").putObject("restrictions");
         restrictions.put("publish", described.publishRestriction());
         restrictions.put("upstream", described.upstreamRestriction());
