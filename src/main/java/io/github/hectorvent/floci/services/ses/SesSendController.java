@@ -136,11 +136,10 @@ public class SesSendController {
                     throw new AwsException("BadRequestException",
                             "Content.Raw.Data is required.", 400);
                 }
-                boolean hasDestination =
-                        !toAddresses.isEmpty() || !ccAddresses.isEmpty() || !bccAddresses.isEmpty();
-                sesService.checkTenantRawSendAccess(tenantName, fromEmailAddress, rawData, hasDestination,
-                        configurationSetName, regionResolver.getAccountId(), region);
-                messageId = sesService.sendEmail(sendRequest.content(new EmailContent.Raw(rawData)).build());
+                SendEmailRequest rawRequest = sendRequest.content(new EmailContent.Raw(rawData)).build();
+                sesService.checkTenantRawSendAccess(tenantName, fromEmailAddress, rawData,
+                        rawRequest.hasRecipients(), configurationSetName, regionResolver.getAccountId(), region);
+                messageId = sesService.sendEmail(rawRequest);
             } else if (content.has("Simple")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     // AWS returns BadRequestException with a null message body here.

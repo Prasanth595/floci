@@ -423,11 +423,9 @@ public class SesService {
     private String sendRawEmail(SendEmailRequest request, EmailContent.Raw raw) {
         String source = request.source();
         String region = request.region();
-        List<String> destinations = request.recipients();
         if (raw.data() == null || raw.data().isBlank()) {
             throw new AwsException("InvalidParameterValue", "RawMessage.Data is required.", 400);
         }
-        boolean hasExplicitDestinations = destinations != null && !destinations.isEmpty();
         boolean sourceOmitted = source == null || source.isBlank();
         // The MIME headers are always parsed: X-SES-CONFIGURATION-SET can name the configuration
         // set that decides whether events are published at all, so the configuration set cannot be
@@ -465,8 +463,8 @@ public class SesService {
             effectiveConfigSet = resolveDefaultConfigurationSet(requestedConfigSet, effectiveSource, region);
             configSetService.validateForSending(effectiveConfigSet, region);
         }
-        List<String> effectiveDestinations = hasExplicitDestinations
-                ? destinations
+        List<String> effectiveDestinations = request.hasRecipients()
+                ? request.recipients()
                 : SendEmailRequest.recipients(headers.to(), headers.cc(), headers.bcc());
         if (effectiveDestinations.isEmpty()) {
             throw new AwsException("InvalidParameterValue", "Missing required header 'To'.", 400);
