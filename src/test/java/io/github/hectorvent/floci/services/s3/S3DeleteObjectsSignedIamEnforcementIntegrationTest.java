@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -82,6 +83,28 @@ class S3DeleteObjectsSignedIamEnforcementIntegrationTest {
         assertEquals(List.of(), result.getList("DeleteResult.Deleted.Key"));
         assertDenied(result, "shared.txt");
         assertPresent(bucket, "shared.txt", ownerCredentials.signer());
+    }
+
+    // The IAM layer skips an access key it does not know, as it skips an unsigned request, so with S3
+    // auth enforcement on it is S3's own request authentication that refuses the batch outright.
+    @Test
+    void anAccessKeyNoOneIssuedIsRefusedBeforeAnyKeyIsDeleted() {
+        String bucket = uniqueName("delobj-unknown-key");
+        createBucket(bucket, ROOT_SIGNER);
+        put(bucket, "kept.txt", ROOT_SIGNER);
+        S3RequestSigner unknown = S3RequestSigner.signedAs("AKIAUNKNOWNDELOBJ001", "not-a-real-secret");
+
+        given()
+                .filter(unknown)
+                .contentType("application/xml")
+                .body("<Delete><Object><Key>kept.txt</Key></Object></Delete>")
+        .when()
+                .post("/" + bucket + "?delete")
+        .then()
+                .statusCode(403)
+                .body("Error.Code", equalTo("InvalidAccessKeyId"));
+
+        assertPresent(bucket, "kept.txt", ROOT_SIGNER);
     }
 
     private static void assertDenied(XmlPath result, String key) {

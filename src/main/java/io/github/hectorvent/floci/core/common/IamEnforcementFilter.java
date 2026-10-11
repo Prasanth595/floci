@@ -849,8 +849,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (rawScope == null) {
             return;
         }
-        // Canonicalised as filter() does, so a signing alias (s3express) finds the resource
-        // policies its canonical service (s3) supplies.
+        // Canonicalised as filter() does, so a signing alias (s3express) is refused below with its
+        // canonical service's (s3) error codes.
         String credentialScope = catalog.canonicalCredentialScope(rawScope);
 
         String accountId = resolveCredentialAccountId(akid, authorizationHeader);
@@ -911,8 +911,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             String effectiveOwnerAccountId = resourceOwnerAccountId;
             List<String> policyDocs = null;
             if (effectiveDecision == null) {
+                // Resource policies belong to the service that owns the resource, which is the action's
+                // service, not whichever service the caller signed for. filter() picks them by the route's
+                // serving service for the same reason; a credential scoped to another service, or to a
+                // signing alias such as s3express, would otherwise see no bucket policy at all.
+                String resourcePolicyScope = catalog.canonicalCredentialScope(action.split(":", 2)[0]);
                 List<ResourcePolicyProvider.ResourcePolicy> resourcePolicies = resolveResourcePolicies(
-                        credentialScope, resource);
+                        resourcePolicyScope, resource);
                 effectiveOwnerAccountId = resourcePolicies.isEmpty()
                         ? null : resourcePolicies.getFirst().ownerAccountId();
                 policyDocs = resourcePolicies.stream()

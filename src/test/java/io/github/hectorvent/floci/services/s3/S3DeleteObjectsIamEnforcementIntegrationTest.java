@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.xml.XmlPath;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.net.URLEncoder;
@@ -160,6 +161,35 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
         assertBucketPolicyDenyApplies("s3express", "delobj-express");
     }
 
+    // A REST JSON service's scope never reaches an S3 route (AwsRestRouteScopeFilter answers it 404),
+    // so ssm stands in for the other services a caller can still sign an S3 request for.
+    @Test
+    void aBucketPolicyDenyAppliesToACredentialScopedToAnotherService() {
+        assertBucketPolicyDenyApplies("ssm", "delobj-other-scope");
+    }
+
+    @Test
+    void bypassingGovernanceRetentionNeedsTheBypassPermission() {
+        String bucket = bucket("delobj-governance");
+        enableVersioning(bucket);
+        String versionId = putGovernanceRetained(bucket, "retained.txt");
+        String user = uniqueName("delobj-governance");
+        String accessKeyId = createUser(user);
+        String objects = "arn:aws:s3:::" + bucket + "/*";
+
+        userPolicy(user, allow("s3:DeleteObjectVersion", objects) + "," + deny("s3:BypassGovernanceRetention", objects));
+        XmlPath denied = deleteObjects(accessKeyId, "s3", bucket, false, true, versionEntry("retained.txt", versionId));
+        assertEquals(List.of(), denied.getList("DeleteResult.Deleted.Key"));
+        assertDenied(denied, "retained.txt");
+        assertVersionPresent(bucket, "retained.txt", versionId);
+
+        userPolicy(user, allow(List.of("s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"), objects));
+        XmlPath allowed = deleteObjects(accessKeyId, "s3", bucket, false, true, versionEntry("retained.txt", versionId));
+        assertEquals(List.of("retained.txt"), allowed.getList("DeleteResult.Deleted.Key"));
+        assertEquals(List.of(versionId), allowed.getList("DeleteResult.Deleted.VersionId"));
+        assertEquals(List.of(), allowed.getList("DeleteResult.Error.Key"));
+    }
+
     @Test
     void aPresignedRequestIsAuthorizedPerKey() {
         String bucket = bucket("delobj-presigned");
@@ -169,16 +199,28 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
         String accessKeyId = createUser(user);
         userPolicy(user, allow("s3:DeleteObject", "arn:aws:s3:::" + bucket + "/allowed/*"));
 
-        String response = given()
-                .urlEncodingEnabled(false)
-                .contentType("application/xml")
-                .body(deleteBody(false, entry("allowed/a.txt"), entry("protected/b.txt")))
-        .when()
-                .post(presignedDeletePath(bucket, accessKeyId))
-        .then()
-                .statusCode(200)
-                .extract().asString();
-        XmlPath result = XmlPath.from(response);
+        XmlPath result = presignedDeleteObjects(given(), bucket, accessKeyId,
+                entry("allowed/a.txt"), entry("protected/b.txt"));
+
+        assertEquals(List.of("allowed/a.txt"), result.getList("DeleteResult.Deleted.Key"));
+        assertDenied(result, "protected/b.txt");
+        assertGone(bucket, "allowed/a.txt");
+        assertPresent(bucket, "protected/b.txt");
+    }
+
+    // The filter treats an empty Authorization header as absent and evaluates the query credential,
+    // so the per-key checks must read the same credential rather than the empty header.
+    @Test
+    void aPresignedRequestWithAnEmptyAuthorizationHeaderIsStillAuthorizedPerKey() {
+        String bucket = bucket("delobj-presigned-empty");
+        put(bucket, "allowed/a.txt");
+        put(bucket, "protected/b.txt");
+        String user = uniqueName("delobj-presigned-empty");
+        String accessKeyId = createUser(user);
+        userPolicy(user, allow("s3:DeleteObject", "arn:aws:s3:::" + bucket + "/allowed/*"));
+
+        XmlPath result = presignedDeleteObjects(given().header("Authorization", ""), bucket, accessKeyId,
+                entry("allowed/a.txt"), entry("protected/b.txt"));
 
         assertEquals(List.of("allowed/a.txt"), result.getList("DeleteResult.Deleted.Key"));
         assertDenied(result, "protected/b.txt");
@@ -214,12 +256,34 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
 
     private static XmlPath deleteObjects(String accessKeyId, String signingScope, String bucket, boolean quiet,
                                          String... entries) {
-        String response = given()
-                .header("Authorization", auth(accessKeyId, signingScope))
+        return deleteObjects(accessKeyId, signingScope, bucket, quiet, false, entries);
+    }
+
+    private static XmlPath deleteObjects(String accessKeyId, String signingScope, String bucket, boolean quiet,
+                                         boolean bypassGovernanceRetention, String... entries) {
+        RequestSpecification request = given().header("Authorization", auth(accessKeyId, signingScope));
+        if (bypassGovernanceRetention) {
+            request.header("x-amz-bypass-governance-retention", "true");
+        }
+        String response = request
                 .contentType("application/xml")
                 .body(deleteBody(quiet, entries))
         .when()
                 .post("/" + bucket + "?delete")
+        .then()
+                .statusCode(200)
+                .extract().asString();
+        return XmlPath.from(response);
+    }
+
+    private static XmlPath presignedDeleteObjects(RequestSpecification request, String bucket, String accessKeyId,
+                                                  String... entries) {
+        String response = request
+                .urlEncodingEnabled(false)
+                .contentType("application/xml")
+                .body(deleteBody(false, entries))
+        .when()
+                .post(presignedDeletePath(bucket, accessKeyId))
         .then()
                 .statusCode(200)
                 .extract().asString();
@@ -271,6 +335,15 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
                 .extract().header("x-amz-version-id");
     }
 
+    private static String putGovernanceRetained(String bucket, String key) {
+        return given().header("Authorization", auth(ADMIN, "s3"))
+                .header("x-amz-object-lock-mode", "GOVERNANCE")
+                .header("x-amz-object-lock-retain-until-date", "2099-01-01T00:00:00Z")
+                .body("seed")
+                .when().put("/" + bucket + "/" + key).then().statusCode(200)
+                .extract().header("x-amz-version-id");
+    }
+
     private static void enableVersioning(String bucket) {
         given().header("Authorization", auth(ADMIN, "s3")).contentType("application/xml")
                 .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
@@ -307,6 +380,10 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
     private static String allow(List<String> actions, String resource) {
         String actionList = String.join("\",\"", actions);
         return "{\"Effect\":\"Allow\",\"Action\":[\"" + actionList + "\"],\"Resource\":\"" + resource + "\"}";
+    }
+
+    private static String deny(String action, String resource) {
+        return "{\"Effect\":\"Deny\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}";
     }
 
     private static void userPolicy(String user, String statement) {

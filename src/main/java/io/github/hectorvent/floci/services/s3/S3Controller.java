@@ -1604,8 +1604,14 @@ public class S3Controller {
         S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                 s3Service.isAuthEnforced(), httpHeaders, uriInfo);
         s3Service.authorizeSignedRequest(authorization);
+        // A blank header counts as absent, as it does in IamEnforcementFilter.filter(), so a presigned
+        // request cannot shed its query credential, and with it every per-key check, by adding one.
+        String authorizationHeader = httpHeaders.getHeaderString("Authorization");
+        if (authorizationHeader != null && authorizationHeader.isBlank()) {
+            authorizationHeader = null;
+        }
         String iamCredential = IamEnforcementFilter.requestAuthorization(
-                httpHeaders.getHeaderString("Authorization"), uriInfo.getQueryParameters());
+                authorizationHeader, uriInfo.getQueryParameters());
         List<XmlParser.KeyVersion> authorizedEntries = new ArrayList<>();
         List<S3Service.DeleteError> authorizationErrors = new ArrayList<>();
         for (XmlParser.KeyVersion entry : entries) {
@@ -1615,6 +1621,9 @@ public class S3Controller {
                 authorizeDeleteETagRead(bucket, entry.key(), entry.eTag(), authorization);
                 if (bypass && s3Service.isGovernanceRetentionActive(
                         bucket, entry.key(), entry.versionId())) {
+                    // The bypass is a permission of its own, so IAM evaluates it against the caller's
+                    // policies as it does the delete, not only the bucket-policy check that follows.
+                    authorizeEntryIdentity(iamCredential, "s3:BypassGovernanceRetention", bucket, entry.key());
                     s3Service.authorizeObjectWrite(bucket, entry.key(),
                             "s3:BypassGovernanceRetention", authorization);
                 }
@@ -1692,14 +1701,18 @@ public class S3Controller {
      * reads "Access Denied", not the filter's message for a whole-request denial.
      */
     private void authorizeDeleteEntryIdentity(String iamCredential, String bucket, XmlParser.KeyVersion entry) {
-        String resource = S3PublicAccessEvaluator.objectArn(
-                s3Service.bucketPartition(bucket), bucket, entry.key());
         String action = entry.versionId() == null ? "s3:DeleteObject" : "s3:DeleteObjectVersion";
+        authorizeEntryIdentity(iamCredential, action, bucket, entry.key());
+        if (isETagCondition(entry.eTag())) {
+            authorizeEntryIdentity(iamCredential, "s3:GetObject", bucket, entry.key());
+        }
+    }
+
+    /** Evaluates one action on one DeleteObjects entry's object, answering a denial as S3 does per key. */
+    private void authorizeEntryIdentity(String iamCredential, String action, String bucket, String key) {
+        String resource = S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key);
         try {
             iamEnforcementFilter.authorizeAdditionalResource(iamCredential, action, resource);
-            if (isETagCondition(entry.eTag())) {
-                iamEnforcementFilter.authorizeAdditionalResource(iamCredential, "s3:GetObject", resource);
-            }
         } catch (AwsException e) {
             if ("AccessDenied".equals(e.getErrorCode())) {
                 throw new AwsException("AccessDenied", "Access Denied", 403);
