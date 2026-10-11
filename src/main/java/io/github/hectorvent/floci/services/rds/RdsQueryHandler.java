@@ -1697,8 +1697,7 @@ public class RdsQueryHandler {
         }
         String dbInstanceClass = params.getFirst("DBInstanceClass");
         String availabilityZone = params.getFirst("AvailabilityZone");
-        String multiAzStr = params.getFirst("MultiAZ");
-        boolean multiAz = multiAzStr != null && Boolean.parseBoolean(multiAzStr);
+        boolean multiAz = Boolean.TRUE.equals(parseOptionalBoolean(params, "MultiAZ"));
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
 
         List<String> vpcSecurityGroupIds = new ArrayList<>();
@@ -2354,7 +2353,7 @@ public class RdsQueryHandler {
                     parseOptionalBoolean(params, "UseLatestRestorableTime"),
                     optionalInt(params.getFirst("Port")), params.getFirst("DBSubnetGroupName"),
                     params.getFirst("DBClusterParameterGroupName"),
-                    optionalBoolean(params.getFirst("EnableIAMDatabaseAuthentication")),
+                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
                     params.getFirst("EngineMode"), parseTags(params), region);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterToPointInTime", AwsNamespaces.RDS,
                     dbClusterXml(cluster))).build();
@@ -2379,7 +2378,7 @@ public class RdsQueryHandler {
                 params.getFirst("DatabaseName"), params.getFirst("DBSubnetGroupName"),
                 params.getFirst("DBClusterParameterGroupName"),
                 params.getFirst("AvailabilityZones.member.1"),
-                optionalBoolean(params.getFirst("EnableIAMDatabaseAuthentication")),
+                parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
                 params.getFirst("EngineMode"), parseTags(params), region);
         return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterFromSnapshot", AwsNamespaces.RDS,
                 dbClusterXml(cluster))).build();
