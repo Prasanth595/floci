@@ -16,8 +16,9 @@ import java.util.List;
  * the local part, a missing {@code @}, an empty domain, and such a character in the domain. A
  * display name or a comment may hold any character, and a quoted local part is not inspected
  * except for a CR or LF, which AWS rejects with its own wording even before whitespace.
- * Of the raw headers, only From, To, Cc and Bcc were probed, so only those are checked. The v2
- * controller remaps the code to BadRequestException.
+ * In a raw message AWS checks the From, To, Cc and Bcc headers (probe-confirmed);
+ * the Reply-To and Return-Path headers were not probed and are left unchecked. The v2 controller
+ * remaps the code to BadRequestException.
  */
 final class SesAddressSyntax {
 
