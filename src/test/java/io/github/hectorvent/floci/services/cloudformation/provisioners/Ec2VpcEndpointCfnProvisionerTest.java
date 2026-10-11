@@ -44,6 +44,7 @@ class Ec2VpcEndpointCfnProvisionerTest {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> fakeResolve(inv.getArgument(0)));
         when(engine.resolveNode(any())).thenAnswer(inv -> fakeResolveNode(inv.getArgument(0)));
+        when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(inv -> fakeResolveNode(inv.getArgument(0)));
         // Same contract as the real resolveJsonAttribute: resolve the tree, then unwrap a
         // textual result rather than re-serialising it (#2317's double-encoding trap).
         when(engine.resolveJsonAttribute(any())).thenAnswer(inv -> {

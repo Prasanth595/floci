@@ -54,7 +54,9 @@ public class Ec2VpcEndpointCfnProvisioner implements CfnResourceProvisioner {
         Boolean privateDnsEnabled = privateDns != null && !privateDns.isBlank()
                 ? Boolean.parseBoolean(privateDns)
                 : null;
-        String ipAddressType = ctx.resolveOptional(props, "IpAddressType");
+        JsonNode addressTypeNode = ctx.engine().resolveNodeOmittingNoValue(props.get("IpAddressType"));
+        String ipAddressType = addressTypeNode == null || addressTypeNode.isNull() || addressTypeNode.isMissingNode()
+                ? null : addressTypeNode.asText();
         if ("not-specified".equals(ipAddressType)) {
             ipAddressType = null;
         }

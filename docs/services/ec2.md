@@ -112,7 +112,7 @@ Notes and limitations:
 
 EC2 containers receive `AWS_EC2_METADATA_SERVICE_ENDPOINT` for IMDS and `AWS_ENDPOINT_URL` for AWS service API calls back to Floci.
 
-CloudFormation `AWS::EC2::VPCEndpoint` resolves `IpAddressType` on create and update, including parameter references. Omission or `not-specified` uses the default `ipv4`. Updates retain the existing replacement behavior; synthetic interfaces remain IPv4-only.
+CloudFormation `AWS::EC2::VPCEndpoint` resolves `IpAddressType` on create and update, including parameter references. Omission, a selected `AWS::NoValue` branch, or `not-specified` uses the default `ipv4`; an explicitly empty value is rejected. Updates retain the existing replacement behavior; synthetic interfaces remain IPv4-only.
 
 ## Instance Metadata Service (IMDS)
 
