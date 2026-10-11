@@ -447,6 +447,24 @@ class ApiGatewayPutRestApiMergeAuthorizationTest {
     }
 
     @Test
+    void putRestApiPlainApiKeySecurityRequiresApiKeyForMergeAndOverwrite() throws Exception {
+        for (String mode : List.of("merge", "overwrite")) {
+            for (String spec : List.of(API_KEY_SPEC, ROOT_API_KEY_SPEC)) {
+                String apiId = importApi();
+                try {
+                    putSpec(apiId, mode, spec);
+                    JsonNode method = getJson(methodPath(apiId));
+                    assertAll(
+                            () -> assertEquals("NONE", method.path("authorizationType").asText()),
+                            () -> assertTrue(method.path("apiKeyRequired").asBoolean()));
+                } finally {
+                    given().delete("/restapis/" + apiId).then().statusCode(202);
+                }
+            }
+        }
+    }
+
+    @Test
     void retainedCognitoSchemeKeepsItsAuthorizationType() throws Exception {
         String apiId = importApi(COGNITO_SPEC);
         try {
