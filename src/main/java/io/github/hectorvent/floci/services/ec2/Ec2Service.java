@@ -4800,13 +4800,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public VpcCidrBlockAssociation associateVpcCidrBlock(String region, String vpcId, String cidrBlock) {
         ensureDefaultResources(region);
-        Vpc vpc = getRequiredVpc(region, vpcId);
-
-        VpcCidrBlockAssociation assoc = new VpcCidrBlockAssociation(
-                "vpc-cidr-assoc-" + randomHex(8), cidrBlock);
-        vpc.getCidrBlockAssociationSet().add(assoc);
-        vpcs.put(key(region, vpcId), vpc);
-        return assoc;
+        synchronized (attachmentTopologyLock(region)) {
+            synchronized (lockFor(key(region, vpcId))) {
+                Vpc vpc = getRequiredVpc(region, vpcId);
+                VpcCidrBlockAssociation assoc = new VpcCidrBlockAssociation(
+                        "vpc-cidr-assoc-" + randomHex(8), cidrBlock);
+                vpc.getCidrBlockAssociationSet().add(assoc);
+                vpcs.put(key(region, vpcId), vpc);
+                return assoc;
+            }
+        }
     }
 
     /**
@@ -4816,11 +4819,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     public VpcIpv6CidrBlockAssociation associateAmazonProvidedIpv6CidrBlock(String region, String vpcId) {
         ensureDefaultResources(region);
-        Vpc vpc = getRequiredVpc(region, vpcId);
-        VpcIpv6CidrBlockAssociation assoc = amazonProvidedIpv6Association(region);
-        vpc.getIpv6CidrBlockAssociationSet().add(assoc);
-        vpcs.put(key(region, vpcId), vpc);
-        return assoc;
+        synchronized (attachmentTopologyLock(region)) {
+            synchronized (lockFor(key(region, vpcId))) {
+                Vpc vpc = getRequiredVpc(region, vpcId);
+                VpcIpv6CidrBlockAssociation assoc = amazonProvidedIpv6Association(region);
+                vpc.getIpv6CidrBlockAssociationSet().add(assoc);
+                vpcs.put(key(region, vpcId), vpc);
+                return assoc;
+            }
+        }
     }
 
     /**
@@ -4841,13 +4848,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public void disassociateVpcCidrBlock(String region, String associationId) {
         ensureDefaultResources(region);
-        for (Vpc vpc : vpcs.scan(k -> true)) {
-            if (vpc.getRegion().equals(region)) {
-                vpc.getCidrBlockAssociationSet().removeIf(a -> a.getAssociationId().equals(associationId));
-                // The same operation disassociates either family; AWS takes one association id and
-                // does not ask which set it belongs to.
-                vpc.getIpv6CidrBlockAssociationSet().removeIf(a -> a.getAssociationId().equals(associationId));
-                vpcs.put(key(region, vpc.getVpcId()), vpc);
+        synchronized (attachmentTopologyLock(region)) {
+            for (Vpc vpc : vpcs.scan(k -> true)) {
+                if (vpc.getRegion().equals(region)) {
+                    synchronized (lockFor(key(region, vpc.getVpcId()))) {
+                        vpc.getCidrBlockAssociationSet().removeIf(a -> a.getAssociationId().equals(associationId));
+                        // The same operation disassociates either family; AWS takes one association id and
+                        // does not ask which set it belongs to.
+                        vpc.getIpv6CidrBlockAssociationSet().removeIf(a -> a.getAssociationId().equals(associationId));
+                        vpcs.put(key(region, vpc.getVpcId()), vpc);
+                    }
+                }
             }
         }
     }

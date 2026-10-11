@@ -47,10 +47,12 @@ import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
+import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import org.awaitility.Awaitility;
 import org.bouncycastle.openssl.PEMKeyPair;
 import org.bouncycastle.openssl.PEMParser;
 import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
@@ -72,6 +74,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
 
@@ -86,6 +89,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -794,7 +798,7 @@ class Ec2ServiceTest {
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
         String vpcId = service.createVpc("us-east-1", "10.0.0.0/16", false).getVpcId();
-        for (String cidr : List.of("192.168.1.0/24", "10.0.0.0/15", "10.1.0.0/24")) {
+        for (String cidr : List.of("192.168.1.0/24", "10.0.0.0/15", "10.1.0.0/24", "2001:db8::/56")) {
             AwsException error = assertThrows(AwsException.class,
                     () -> service.createSubnet("us-east-1", vpcId, cidr, "us-east-1a"));
             assertEquals("InvalidSubnet.Range", error.getErrorCode());
@@ -818,6 +822,52 @@ class Ec2ServiceTest {
         service.disassociateVpcCidrBlock("us-east-1", associationId);
         assertEquals("InvalidSubnet.Range", assertThrows(AwsException.class,
                 () -> service.createSubnet("us-east-1", vpcId, "192.168.2.0/24", "us-east-1a")).getErrorCode());
+    }
+
+    @Test
+    void cidrAssociationEditsWaitForSubnetContainmentValidation() throws Exception {
+        for (boolean remove : List.of(false, true)) {
+            Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                    mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                    new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+            Vpc vpc = service.createVpc("us-east-1", "10.0.0.0/16", false);
+            String associationId = service.associateVpcCidrBlock("us-east-1", vpc.getVpcId(), "192.168.0.0/16")
+                    .getAssociationId();
+            CountDownLatch scanning = new CountDownLatch(1);
+            CountDownLatch resume = new CountDownLatch(1);
+            VpcCidrBlockAssociation first = spy(vpc.getCidrBlockAssociationSet().getFirst());
+            doAnswer(call -> {
+                scanning.countDown();
+                assertTrue(resume.await(15, TimeUnit.SECONDS));
+                return call.callRealMethod();
+            }).when(first).getCidrBlockState();
+            vpc.getCidrBlockAssociationSet().set(0, first);
+            AtomicReference<Thread> editor = new AtomicReference<>();
+            ExecutorService workers = Executors.newFixedThreadPool(2);
+            try {
+                Future<Subnet> creating = workers.submit(() ->
+                        service.createSubnet("us-east-1", vpc.getVpcId(), "192.168.1.0/24", "us-east-1a"));
+                assertTrue(scanning.await(5, TimeUnit.SECONDS));
+                Future<?> editing = workers.submit(() -> {
+                    editor.set(Thread.currentThread());
+                    if (remove) {
+                        service.disassociateVpcCidrBlock("us-east-1", associationId);
+                    } else {
+                        service.associateVpcCidrBlock("us-east-1", vpc.getVpcId(), "198.18.0.0/16");
+                    }
+                });
+                Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> editing.isDone()
+                        || (editor.get() != null && editor.get().getState() == Thread.State.BLOCKED));
+                assertFalse(editing.isDone(), "CIDR edits must not mutate the list while subnet validation scans it");
+                resume.countDown();
+                assertEquals("192.168.1.0/24", creating.get(5, TimeUnit.SECONDS).getCidrBlock());
+                editing.get(5, TimeUnit.SECONDS);
+            } finally {
+                resume.countDown();
+                workers.shutdownNow();
+                assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
+            }
+        }
     }
 
     @Test
