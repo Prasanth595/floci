@@ -57,6 +57,8 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
 
         assertEquals(List.of("allowed/a.txt"), result.getList("DeleteResult.Deleted.Key"));
         assertDenied(result, "protected/b.txt");
+        assertEquals(List.of(), result.getList("DeleteResult.Error.VersionId"),
+                "an entry naming no version reports none");
         assertGone(bucket, "allowed/a.txt");
         assertPresent(bucket, "protected/b.txt");
     }
@@ -82,15 +84,20 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
     void anEntryNamingAVersionNeedsDeleteObjectVersion() {
         String bucket = bucket("delobj-version");
         enableVersioning(bucket);
+        String olderVersionId = put(bucket, "versioned.txt");
         String versionId = put(bucket, "versioned.txt");
         String user = uniqueName("delobj-version");
         String accessKeyId = createUser(user);
         String objects = "arn:aws:s3:::" + bucket + "/*";
 
         userPolicy(user, allow("s3:DeleteObject", objects));
-        XmlPath denied = deleteObjects(accessKeyId, "s3", bucket, false, versionEntry("versioned.txt", versionId));
+        XmlPath denied = deleteObjects(accessKeyId, "s3", bucket, false,
+                versionEntry("versioned.txt", olderVersionId), versionEntry("versioned.txt", versionId));
         assertEquals(List.of(), denied.getList("DeleteResult.Deleted.Key"));
-        assertDenied(denied, "versioned.txt");
+        assertEquals(List.of("AccessDenied", "AccessDenied"), denied.getList("DeleteResult.Error.Code"));
+        assertEquals(List.of(olderVersionId, versionId), denied.getList("DeleteResult.Error.VersionId"),
+                "each error names the version it refused");
+        assertVersionPresent(bucket, "versioned.txt", olderVersionId);
         assertVersionPresent(bucket, "versioned.txt", versionId);
 
         userPolicy(user, allow("s3:DeleteObjectVersion", objects));
