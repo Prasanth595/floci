@@ -173,16 +173,16 @@ public class AppConfigService {
         // profile just because its bare profileId is guessed/known. A profileId that doesn't
         // exist at all is still an idempotent no-op, matching deleteApplication's convention;
         // only an existing-but-wrongly-scoped one is rejected.
-        ConfigurationProfile profile = profileStore.get(profileIdentifier).orElse(null);
-        if (profile != null) {
-            if (!profile.getApplicationId().equals(appId)) {
-                throw new AwsException("ResourceNotFoundException", "Configuration profile not found in this application", 404);
-            }
-        } else {
-            profile = listConfigurationProfiles(appId).stream()
+        ConfigurationProfile exactProfile = profileStore.get(profileIdentifier).orElse(null);
+        ConfigurationProfile profile = exactProfile != null && appId.equals(exactProfile.getApplicationId())
+                ? exactProfile
+                : listConfigurationProfiles(appId).stream()
                     .filter(candidate -> profileIdentifier.equals(candidate.getName()))
                     .findFirst()
                     .orElse(null);
+        if (profile == null && exactProfile != null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Configuration profile not found in this application", 404);
         }
         if (profile == null) {
             return;

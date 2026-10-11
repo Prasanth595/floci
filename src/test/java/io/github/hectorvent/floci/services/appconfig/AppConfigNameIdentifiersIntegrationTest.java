@@ -140,4 +140,44 @@ class AppConfigNameIdentifiersIntegrationTest {
                 .when().get("/applications/" + applicationId)
                 .then().statusCode(404);
     }
+
+    @Test
+    void deleteProfileByNameIgnoresAnotherApplicationsMatchingProfileId() {
+        String applicationId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"profile-collision-target-app\"}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .extract().path("Id");
+        String otherApplicationId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"profile-collision-other-app\"}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .extract().path("Id");
+        String otherProfileId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"other-profile\",\"LocationUri\":\"hosted\",\"Type\":\"AWS.Freeform\"}")
+                .when().post("/applications/" + otherApplicationId + "/configurationprofiles")
+                .then().statusCode(201)
+                .extract().path("Id");
+        String targetProfileId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"" + otherProfileId
+                        + "\",\"LocationUri\":\"hosted\",\"Type\":\"AWS.Freeform\"}")
+                .when().post("/applications/" + applicationId + "/configurationprofiles")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        given()
+                .when().delete("/applications/" + applicationId + "/configurationprofiles/" + otherProfileId)
+                .then().statusCode(204);
+
+        given()
+                .when().get("/applications/" + applicationId + "/configurationprofiles/" + targetProfileId)
+                .then().statusCode(404);
+        given()
+                .when().get("/applications/" + otherApplicationId + "/configurationprofiles/" + otherProfileId)
+                .then().statusCode(200);
+    }
 }
