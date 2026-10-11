@@ -70,10 +70,10 @@ class ByteRangeTest {
     }
 
     @Test
-    void anythingButOneValidRangeIsInvalid() {
+    void anythingButOneValidRangeIsTheWholeObject() {
         for (String header : List.of("bytes=5-2", "bytes=0-1,4-5", "bytes=abc", "bytes=-", "bytes=1",
-                "bytes=--5", "bytes=+1-2", "bytes=")) {
-            assertOutcome(Outcome.INVALID, header, 100);
+                "bytes=--5", "bytes=+1-2", "bytes=", "bytes=-1-", "bytes=0--1")) {
+            assertOutcome(Outcome.WHOLE, header, 100);
         }
     }
 

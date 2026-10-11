@@ -1126,7 +1126,7 @@ public class S3Controller {
             emitCloudTrailEvent("GetObject", bucket, key, 0L, totalSize, null, null);
             return fullObjectResponse(obj, body, overrides, includeChecksum);
         }
-        if (resolution.outcome() != ByteRange.Outcome.PART) {
+        if (resolution.outcome() == ByteRange.Outcome.NOT_SATISFIABLE) {
             emitCloudTrailEvent("GetObject", bucket, key, 0L, 0L,
                     "InvalidRange", ByteRange.NOT_SATISFIABLE_MESSAGE);
             return invalidRangeResponse(rangeHeader, totalSize);
@@ -1150,9 +1150,22 @@ public class S3Controller {
         if (obj.getVersionId() != null) {
             resp.header("x-amz-version-id", obj.getVersionId());
         }
-        // includeChecksum=false: the stored checksum covers the whole object, not this range.
-        appendObjectHeaders(resp, obj, overrides, false);
+        appendObjectHeaders(resp, obj, overrides, includeChecksum && rangeCarriesObjectChecksum(range, obj));
         return resp.build();
+    }
+
+    /**
+     * Whether the stored checksum is the checksum of {@code range}: S3 returns a part's checksum for a
+     * range aligned with a single part, and the whole of an object stored in one request, or completed
+     * from one part, is that part, whose checksum a full-object checksum of the object is. A composite
+     * checksum is not that of any one part, nor is a checksum of an object of several parts, so their
+     * ranges get none.
+     */
+    private static boolean rangeCarriesObjectChecksum(ByteRange range, S3Object obj) {
+        S3Checksum checksum = obj.getChecksum();
+        return range.first() == 0 && range.last() == obj.getSize() - 1
+                && (obj.getParts() == null || obj.getParts().size() <= 1)
+                && checksum != null && checksum.getChecksumType() != ChecksumType.COMPOSITE;
     }
 
     private Response websiteObjectResponse(S3Service.ObjectRead read, ResponseHeaderOverrides overrides) {
@@ -1249,14 +1262,14 @@ public class S3Controller {
             // "If the Range is satisfiable, only the ContentLength is affected in the response. If the
             // Range is not satisfiable, S3 returns a 416." A Range that is not one valid range is ignored.
             long contentLength = obj.getSize();
-            boolean ranged = false;
+            boolean checksumDescribesRange = true;
             String rangeHeader = httpHeaders.getHeaderString("Range");
             if (ByteRange.inBytes(rangeHeader) && ByteRange.rangeApplies(
                     httpHeaders.getHeaderString("If-Range"), obj.getETag(), obj.getLastModified())) {
                 ByteRange.Resolution resolution = ByteRange.resolve(rangeHeader, obj.getSize());
                 if (resolution.outcome() == ByteRange.Outcome.PART) {
                     contentLength = resolution.range().length();
-                    ranged = true;
+                    checksumDescribesRange = rangeCarriesObjectChecksum(resolution.range(), obj);
                 } else if (resolution.outcome() == ByteRange.Outcome.NOT_SATISFIABLE) {
                     emitCloudTrailEvent("HeadObject", bucket, key, 0L, 0L,
                             "InvalidRange", ByteRange.NOT_SATISFIABLE_MESSAGE);
@@ -1272,8 +1285,8 @@ public class S3Controller {
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
-            // As on a ranged GetObject, the stored checksum covers the whole object, not the range.
-            boolean includeChecksum = !ranged
+            // As on a ranged GetObject, the stored checksum is sent only for a range it describes.
+            boolean includeChecksum = checksumDescribesRange
                     && "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, uriInfo, "x-amz-checksum-mode"));
             appendObjectHeaders(resp, obj, overrides, includeChecksum);
             emitCloudTrailEvent("HeadObject", bucket, key, 0L, obj.getSize(), null, null);
@@ -2720,9 +2733,9 @@ public class S3Controller {
         appendLockHeaders(resp, obj);
     }
 
-    // includeChecksum must be false for partial (206) responses: obj.getChecksum() is the
-    // whole-object checksum, which does not match the range bytes returned. SDKs that
-    // validate it against the received body fail. Real S3 omits it on ranged responses.
+    // includeChecksum must be false for a range the stored checksum does not describe:
+    // obj.getChecksum() is the whole-object checksum, which does not match the range bytes
+    // returned. SDKs that validate it against the received body fail. Real S3 omits it there.
     private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj, ResponseHeaderOverrides overrides,
                                      boolean includeChecksum) {
         if (obj.getStorageClass() != null) {

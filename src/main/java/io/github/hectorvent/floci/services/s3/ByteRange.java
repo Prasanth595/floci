@@ -25,11 +25,12 @@ public record ByteRange(long first, long last) {
     private static final Pattern SPEC = Pattern.compile("(\\d*)-(\\d*)");
 
     /**
-     * What a {@code Range} header asks of an object: a part of it, the whole of it (no header, a
-     * unit other than bytes, or a suffix of an empty object), a range that starts past its end, or
-     * something that is not one valid range, such as several ranges or a last byte before the first.
+     * What a {@code Range} header asks of an object: a part of it, the whole of it, or a range that
+     * starts past its end. The whole object is asked for by no header, a unit other than bytes, a
+     * suffix of an empty object, or anything that is not one valid range, such as several ranges or
+     * a last byte before the first, which S3 answers as a request without a {@code Range}.
      */
-    public enum Outcome { PART, WHOLE, NOT_SATISFIABLE, INVALID }
+    public enum Outcome { PART, WHOLE, NOT_SATISFIABLE }
 
     /** A resolved {@code Range} header; {@code range} is set only for {@link Outcome#PART}. */
     public record Resolution(Outcome outcome, ByteRange range) {
@@ -102,7 +103,7 @@ public record ByteRange(long first, long last) {
         }
         Matcher matcher = SPEC.matcher(header.substring(UNIT.length()).trim());
         if (!matcher.matches() || (matcher.group(1).isEmpty() && matcher.group(2).isEmpty())) {
-            return new Resolution(Outcome.INVALID, null);
+            return new Resolution(Outcome.WHOLE, null);
         }
         long first;
         long last;
@@ -120,7 +121,7 @@ public record ByteRange(long first, long last) {
             first = position(matcher.group(1));
             last = matcher.group(2).isEmpty() ? Long.MAX_VALUE : position(matcher.group(2));
             if (last < first) {
-                return new Resolution(Outcome.INVALID, null);
+                return new Resolution(Outcome.WHOLE, null);
             }
             last = Math.min(last, size - 1);
         }
