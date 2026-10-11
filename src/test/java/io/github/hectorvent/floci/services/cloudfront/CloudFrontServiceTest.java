@@ -202,6 +202,54 @@ class CloudFrontServiceTest {
     }
 
     @Test
+    void createFunction_unknownRuntime_isRejected() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontFunction function = new CloudFrontFunction();
+        function.setName("routing");
+        function.setRuntime("python3");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createFunction(function));
+
+        assertEquals("InvalidArgument", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertThrows(AwsException.class, () -> service.describeFunction("routing", null));
+    }
+
+    @Test
+    void createFunction_supportedRuntimes_areAccepted() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        for (String runtime : List.of("cloudfront-js-1.0", "cloudfront-js-2.0")) {
+            CloudFrontFunction function = new CloudFrontFunction();
+            function.setName("routing-" + runtime);
+            function.setRuntime(runtime);
+
+            assertEquals(runtime, service.createFunction(function).getRuntime());
+        }
+    }
+
+    @Test
+    void updateFunction_unknownRuntime_isRejectedAndKeepsTheFunction() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontFunction function = new CloudFrontFunction();
+        function.setName("routing");
+        function.setFunctionCode("first");
+        function.setRuntime("cloudfront-js-2.0");
+        String etag = service.createFunction(function).getEtag();
+        CloudFrontFunction update = new CloudFrontFunction();
+        update.setFunctionCode("second");
+        update.setRuntime("python3");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunction("routing", etag, update));
+
+        assertEquals("InvalidArgument", error.getErrorCode());
+        CloudFrontFunction kept = service.describeFunction("routing", null);
+        assertEquals("first", kept.getFunctionCode());
+        assertEquals("cloudfront-js-2.0", kept.getRuntime());
+        assertEquals(etag, kept.getEtag());
+    }
+
+    @Test
     void listFunctionsWithoutStageReturnsDevelopmentAndLive() {
         CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
         CloudFrontFunction function = new CloudFrontFunction();
