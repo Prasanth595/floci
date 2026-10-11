@@ -100,8 +100,8 @@ public class RuleScheduler implements Resettable {
                                     Supplier<ScheduleData> dataSupplier) {
         long intervalMs = ScheduleExpressionParser.parseRateToMillis(scheduleExpr);
 
-        tick(dataSupplier);
-        long timerId = vertx.setPeriodic(intervalMs, id -> tick(dataSupplier));
+        tick(ruleArn, dataSupplier);
+        long timerId = vertx.setPeriodic(intervalMs, id -> tick(ruleArn, dataSupplier));
         scheduleContexts.put(ruleArn, new ScheduleContext(timerId, scheduleExpr));
         LOG.debugv("Started rate scheduler for rule {0} with interval {1}ms", ruleArn, intervalMs);
     }
@@ -124,7 +124,7 @@ public class RuleScheduler implements Resettable {
         }
 
         long timerId = vertx.setTimer(delayMs, id -> {
-            tick(dataSupplier);
+            tick(ruleArn, dataSupplier);
             ScheduleContext current = scheduleContexts.get(ruleArn);
             if (current != null && current.timerId() == id) {
                 scheduleCronFire(ruleArn, scheduleExpr, dataSupplier, current);
@@ -150,12 +150,12 @@ public class RuleScheduler implements Resettable {
         }
     }
 
-    private void tick(Supplier<ScheduleData> dataSupplier) {
+    private void tick(String ruleArn, Supplier<ScheduleData> dataSupplier) {
         ScheduleData data = dataSupplier.get();
         
         if (data == null || data.rule == null) {
-            LOG.debugv("Rule no longer exists, stopping scheduler");
-            stopScheduler(data != null && data.rule != null ? data.rule.getArn() : null);
+            LOG.debugv("Rule {0} no longer exists, stopping scheduler", ruleArn);
+            stopScheduler(ruleArn);
             return;
         }
 

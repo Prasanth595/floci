@@ -113,6 +113,25 @@ class RuleSchedulerTest {
         assertFalse(scheduler.isRunning(RULE_ARN), "a stop racing the re-arm must not leave the new timer recorded");
     }
 
+    @Test
+    void ruleGoneWithoutDeleteRuleStopsItsTimerOnTheNextTick() {
+        Vertx vertx = mock(Vertx.class);
+        ArgumentCaptor<Handler<Long>> fire = timerHandlerCaptor();
+        when(vertx.setPeriodic(anyLong(), fire.capture())).thenReturn(1L);
+
+        // A storage reset or restore removes the rule without going through DeleteRule, so the
+        // scheduler only learns about it when its timer next fires.
+        AtomicReference<Rule> currentRule = new AtomicReference<>(enabledRule());
+        RuleScheduler scheduler = newScheduler(vertx, new StoppingInvoker(() -> { }));
+        scheduler.startScheduler(RULE_ARN, "rate(1 minute)", () -> toScheduleData(currentRule.get()));
+        currentRule.set(null);
+
+        fire.getValue().handle(1L);
+
+        verify(vertx).cancelTimer(1L);
+        assertFalse(scheduler.isRunning(RULE_ARN), "a rule that no longer exists must not keep its timer");
+    }
+
     @SuppressWarnings("unchecked")
     private static ArgumentCaptor<Handler<Long>> timerHandlerCaptor() {
         return ArgumentCaptor.forClass(Handler.class);
