@@ -846,8 +846,8 @@ public class ApiGatewayExecuteController {
      * entirely from mapping templates and explicit {@code integration.request.*} parameter
      * mappings — inbound headers and query parameters that were <em>not</em> mapped are not
      * forwarded. The backend's response then runs through the method's integration responses, where
-     * {@code selectionPattern} is matched against the backend's HTTP status code (for
-     * {@code AWS}/Lambda integrations it is matched against the error message instead).
+     * {@code selectionPattern} is matched against the backend's HTTP status code.
+     * Lambda integrations use error text instead.
      */
     private Response invokeHttpIntegration(GatewayResponseScope scope, String region, String apiId,
                                            String httpMethod, String path,
@@ -1753,6 +1753,7 @@ public class ApiGatewayExecuteController {
         // "Action=SendMessage&..."). Action-style URIs (arn:...:{service}:action/{Action})
         // carry the action in the URI and render a JSON body.
         Response serviceResponse;
+        int serviceStatus = 500;
         String errorType = null;
         String errorMessage = null;
         try {
@@ -1794,6 +1795,7 @@ public class ApiGatewayExecuteController {
                 serviceResponse = serviceRouter.invoke(target.service(), target.action(), requestJson, region);
             }
         } catch (AwsException e) {
+            serviceStatus = e.getHttpStatus();
             errorType = e.getErrorCode();
             errorMessage = e.getMessage();
             serviceResponse = null;
@@ -1805,7 +1807,6 @@ public class ApiGatewayExecuteController {
 
         // Build response body string
         String responseBodyStr;
-        int serviceStatus;
         if (serviceResponse != null) {
             serviceStatus = serviceResponse.getStatus();
             Object entity = serviceResponse.getEntity();
@@ -1836,19 +1837,16 @@ public class ApiGatewayExecuteController {
                 }
             }
         } else {
-            serviceStatus = 500;
             responseBodyStr = String.format("{\"errorMessage\":\"%s\",\"errorType\":\"%s\"}",
                     errorMessage != null ? errorMessage.replace("\"", "\\\"") : "Unknown error",
                     errorType != null ? errorType : "UnknownError");
         }
 
-        // AWS matches selectionPattern against the error response body/message for AWS/Lambda
-        // integrations. We match against both errorType and errorMessage to catch patterns like
-        // ".*ResourceNotFoundException.*". (HTTP integrations match the status code instead —
-        // see invokeHttpIntegration.)
         String errorMatchString = errorType != null
                 ? errorType + (errorMessage != null ? ": " + errorMessage : "")
                 : errorMessage;
+        String selectionMatchString = "lambda".equals(target.service())
+                ? errorMatchString : Integer.toString(serviceStatus);
 
         // Case-insensitive: an integration.response.header.X-Foo mapping must resolve regardless of
         // the casing the backend or client library used for the header name.
@@ -1865,7 +1863,7 @@ public class ApiGatewayExecuteController {
                 vtlAuthorizerContext, httpRequestMappingContext(scope, requestId, authorizerResult));
 
         int fallbackStatus = errorType != null ? 500 : (serviceStatus >= 400 ? serviceStatus : 200);
-        return mapIntegrationResponse(integration, errorMatchString, responseBodyStr, fallbackStatus,
+        return mapIntegrationResponse(integration, selectionMatchString, responseBodyStr, fallbackStatus,
                 serviceResponseHeaders, responseMappingCtx, MediaType.APPLICATION_JSON);
     }
 
@@ -1929,8 +1927,8 @@ public class ApiGatewayExecuteController {
      * {@code $context.responseOverride} assignments and {@code responseParameters} header mappings.
      *
      * @param selectionMatchString what {@code selectionPattern} regexes are tested against — the
-     *                             error message for {@code AWS}/Lambda integrations, the backend's
-     *                             HTTP status code for {@code HTTP} integrations
+     *                             error text for Lambda integrations, the backend's HTTP status
+     *                             code for other {@code AWS} and {@code HTTP} integrations
      * @param fallbackStatus       status used when no integration response is configured or matched
      */
     private Response mapIntegrationResponse(Integration integration, String selectionMatchString,
