@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM registry.access.redhat.com/ubi9-micro:9.8
 
 # Automatically set by Docker BuildKit to "amd64" or "arm64"
@@ -45,8 +46,10 @@ LABEL org.opencontainers.image.title="Floci" \
 
 EXPOSE 4566
 
-# Probe every 50 ms while Floci starts, so a wait for "healthy" ends right after startup
-# instead of at the first 5 s check. Docker Engine before 25.0 ignores --start-interval.
+# Probe every 50 ms while Floci starts, so a wait for "healthy" ends right after startup instead of
+# at the first 5 s check. The start period must stay above the 5 s fallback in healthcheck.sh.
+# Docker Engine before 25.0 ignores --start-interval when it runs the image. Building needs BuildKit,
+# which the syntax line above lets older engines use.
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 --start-period=10s --start-interval=50ms CMD ["/usr/local/bin/healthcheck.sh"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
