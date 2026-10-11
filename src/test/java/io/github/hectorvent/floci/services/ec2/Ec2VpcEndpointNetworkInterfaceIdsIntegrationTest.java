@@ -174,7 +174,7 @@ class Ec2VpcEndpointNetworkInterfaceIdsIntegrationTest {
         String vpcId = createVpc("10.78.0.0/16");
         String ipv6Block = associateIpv6Block(vpcId);
         String subnetId = ec2Value("CreateSubnet", "CreateSubnetResponse.subnet.subnetId",
-                "VpcId", vpcId, "Ipv6CidrBlock", ipv6SubnetCidr(ipv6Block, 0),
+                "VpcId", vpcId, "Ipv6CidrBlock", ipv6SubnetCidr(ipv6Block, 0), "Ipv6Native", "true",
                 "AvailabilityZone", "us-east-1a");
 
         String endpointId = ec2Value("CreateVpcEndpoint",
@@ -202,10 +202,10 @@ class Ec2VpcEndpointNetworkInterfaceIdsIntegrationTest {
         String vpcId = createVpc("10.79.0.0/16");
         String ipv6Block = associateIpv6Block(vpcId);
         String subnetA = ec2Value("CreateSubnet", "CreateSubnetResponse.subnet.subnetId",
-                "VpcId", vpcId, "Ipv6CidrBlock", ipv6SubnetCidr(ipv6Block, 0),
+                "VpcId", vpcId, "Ipv6CidrBlock", ipv6SubnetCidr(ipv6Block, 0), "Ipv6Native", "true",
                 "AvailabilityZone", "us-east-1a");
         String subnetB = ec2Value("CreateSubnet", "CreateSubnetResponse.subnet.subnetId",
-                "VpcId", vpcId, "Ipv6CidrBlock", ipv6SubnetCidr(ipv6Block, 1),
+                "VpcId", vpcId, "Ipv6CidrBlock", ipv6SubnetCidr(ipv6Block, 1), "Ipv6Native", "true",
                 "AvailabilityZone", "us-east-1b");
 
         String endpointId = ec2Value("CreateVpcEndpoint",
