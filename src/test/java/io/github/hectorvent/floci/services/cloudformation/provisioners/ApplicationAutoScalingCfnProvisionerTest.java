@@ -19,7 +19,6 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -45,7 +44,7 @@ class ApplicationAutoScalingCfnProvisionerTest {
             new ApplicationAutoScalingCfnProvisioner(service, mapper);
 
     /** Stands in for the template's parameters, so {"Ref": "TargetCpu"} has something to become. */
-    private static final Map<String, String> REFS = Map.of("TargetCpu", "70", "Env", "prod");
+    private static final Map<String, String> REFS = Map.of("TargetCpu", "70", "Env", "prod", "Suspend", "true");
 
     private ProvisionContext ctx() {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -293,17 +292,16 @@ class ApplicationAutoScalingCfnProvisionerTest {
     void anIntrinsicInsideSuspendedStateIsResolvedToo() {
         StackResource r = resource(ApplicationAutoScalingCfnProvisioner.SCALABLE_TARGET, "Target");
         ObjectNode props = targetProps();
-        // "true" through the engine, where asBoolean() on the raw object node would be false.
         props.putObject("SuspendedState").putObject("DynamicScalingInSuspended").put("Ref", "Suspend");
-        ObjectNode withValue = mapper.createObjectNode();
-        withValue.setAll(props);
 
-        provisioner.provision(r, withValue, ctx());
+        provisioner.provision(r, props, ctx());
 
         ArgumentCaptor<SuspendedState> captor = ArgumentCaptor.forClass(SuspendedState.class);
         verify(service).registerScalableTarget(any(), any(), any(), any(), any(), any(),
                 captor.capture(), any(), any());
-        assertNotNull(captor.getValue());
+        // The flag itself, not just that a block arrived: read raw, {"Ref": "Suspend"} is an
+        // object whose asBoolean() is false, and the block is an object either way.
+        assertTrue(captor.getValue().isDynamicScalingInSuspended());
     }
 
     @Test
