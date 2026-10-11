@@ -789,6 +789,38 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void createSubnetRejectsCidrOutsideVpcWithoutStoringSubnet() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.0.0.0/16", false).getVpcId();
+        for (String cidr : List.of("192.168.1.0/24", "10.0.0.0/15", "10.1.0.0/24")) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.createSubnet("us-east-1", vpcId, cidr, "us-east-1a"));
+            assertEquals("InvalidSubnet.Range", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+        }
+        assertTrue(service.describeSubnets("us-east-1", List.of(), Map.of()).stream()
+                .noneMatch(subnet -> vpcId.equals(subnet.getVpcId())));
+    }
+
+    @Test
+    void createSubnetAllowsPrimaryAndSecondaryBlocksButNotDisassociatedBlocks() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.0.0.0/16", false).getVpcId();
+        String associationId = service.associateVpcCidrBlock("us-east-1", vpcId, "192.168.0.0/16").getAssociationId();
+        assertEquals("10.0.255.0/24",
+                service.createSubnet("us-east-1", vpcId, "10.0.255.9/24", "us-east-1a").getCidrBlock());
+        assertEquals("192.168.1.0/24",
+                service.createSubnet("us-east-1", vpcId, "192.168.1.9/24", "us-east-1a").getCidrBlock());
+        service.disassociateVpcCidrBlock("us-east-1", associationId);
+        assertEquals("InvalidSubnet.Range", assertThrows(AwsException.class,
+                () -> service.createSubnet("us-east-1", vpcId, "192.168.2.0/24", "us-east-1a")).getErrorCode());
+    }
+
+    @Test
     void createSubnetAllowsConflictingCidrsInDifferentVpcs() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
