@@ -4867,6 +4867,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                          List<String> securityGroupIds, Boolean privateDnsEnabled,
                                          String policyDocument, List<Tag> endpointTags,
                                          List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
+        return createVpcEndpoint(region, vpcId, serviceName, endpointType, routeTableIds, subnetIds,
+                securityGroupIds, privateDnsEnabled, policyDocument, endpointTags, subnetConfigurations, null);
+    }
+
+    public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
+                                         List<String> routeTableIds, List<String> subnetIds,
+                                         List<String> securityGroupIds, Boolean privateDnsEnabled,
+                                         String policyDocument, List<Tag> endpointTags,
+                                         List<VpcEndpointSubnetConfiguration> subnetConfigurations, String ipAddressType) {
+        validateVpcEndpointIpAddressType(ipAddressType);
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         for (String routeTableId : routeTableIds) {
@@ -4895,6 +4905,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         endpoint.setVpcId(vpcId);
         endpoint.setServiceName(serviceName);
         endpoint.setVpcEndpointType(endpointType != null && !endpointType.isBlank() ? endpointType : "Gateway");
+        endpoint.setIpAddressType(ipAddressType != null ? ipAddressType : "ipv4");
         boolean isInterface = "Interface".equalsIgnoreCase(endpoint.getVpcEndpointType());
         endpoint.setPrivateDnsEnabled(privateDnsEnabled != null ? privateDnsEnabled : isInterface);
         endpoint.setCreationTimestamp(Instant.now());
@@ -4913,6 +4924,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             vpcEndpoints.put(key(region, endpoint.getVpcEndpointId()), endpoint);
         }
         return endpoint;
+    }
+
+    private static void validateVpcEndpointIpAddressType(String ipAddressType) {
+        if (ipAddressType != null && !Set.of("ipv4", "ipv6", "dualstack").contains(ipAddressType)) {
+            throw new AwsException("InvalidParameterValue",
+                    "IpAddressType must be ipv4, ipv6, or dualstack.", 400);
+        }
     }
 
     /**
@@ -4940,6 +4958,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                          List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
                                          String policyDocument, Boolean resetPolicy, Boolean privateDnsEnabled,
                                          List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
+        return modifyVpcEndpoint(region, endpointId, addRouteTableIds, removeRouteTableIds,
+                addSubnetIds, removeSubnetIds, addSecurityGroupIds, removeSecurityGroupIds,
+                policyDocument, resetPolicy, privateDnsEnabled, subnetConfigurations, null);
+    }
+
+    public VpcEndpoint modifyVpcEndpoint(String region, String endpointId,
+                                         List<String> addRouteTableIds, List<String> removeRouteTableIds,
+                                         List<String> addSubnetIds, List<String> removeSubnetIds,
+                                         List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
+                                         String policyDocument, Boolean resetPolicy, Boolean privateDnsEnabled,
+                                         List<VpcEndpointSubnetConfiguration> subnetConfigurations, String ipAddressType) {
         // VpcEndpointId is the one required member of ModifyVpcEndpointRequest. The model
         // requires it to be present, not to be non-empty, so only an absent value is a
         // MissingParameter; a present-but-unknown id is an InvalidVpcEndpointId.NotFound.
@@ -4947,6 +4976,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("MissingParameter",
                     "The request must contain the parameter VpcEndpointId", 400);
         }
+        validateVpcEndpointIpAddressType(ipAddressType);
         ensureDefaultResources(region);
         // Terraform declares each aws_vpc_endpoint_route_table_association as its own
         // resource and applies them in parallel, so several ModifyVpcEndpoint calls land
@@ -4958,7 +4988,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return modifyVpcEndpointLocked(region, endpointId,
                     addRouteTableIds, removeRouteTableIds, addSubnetIds, removeSubnetIds,
                     addSecurityGroupIds, removeSecurityGroupIds,
-                    policyDocument, resetPolicy, privateDnsEnabled, subnetConfigurations);
+                    policyDocument, resetPolicy, privateDnsEnabled, subnetConfigurations, ipAddressType);
         }
     }
 
@@ -4968,7 +4998,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                 List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
                                                 String policyDocument, Boolean resetPolicy,
                                                 Boolean privateDnsEnabled,
-                                                List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
+                                                List<VpcEndpointSubnetConfiguration> subnetConfigurations,
+                                                String ipAddressType) {
         VpcEndpoint endpoint = getRequiredVpcEndpoint(region, endpointId);
 
         // Validate every referenced id before mutating anything, so a request naming one
@@ -4989,6 +5020,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         applyIdChanges(endpoint.getSecurityGroupIds(), addSecurityGroupIds, removeSecurityGroupIds);
         applySubnetConfigurations(endpoint, subnetConfigurations, removeSubnetIds);
 
+        if (ipAddressType != null) {
+            endpoint.setIpAddressType(ipAddressType);
+        }
         if (Boolean.TRUE.equals(resetPolicy)) {
             endpoint.setPolicyDocument(null);
         } else if (policyDocument != null) {

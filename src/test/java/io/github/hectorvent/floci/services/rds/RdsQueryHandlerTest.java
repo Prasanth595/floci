@@ -1592,6 +1592,58 @@ class RdsQueryHandlerTest {
                 eq(1800), eq(false), eq(Map.of()), eq("us-west-2"), isNull(), isNull());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"RequireTLS", "DebugLogging"})
+    void createDbProxyRejectsMalformedBooleanFlagsBeforeCallingService(String parameter) {
+        when(service.createDbProxy(any(), any(), anyBoolean(), anyBoolean(), any(), any(),
+                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(), any(), any()))
+                .thenReturn(new DbProxy());
+        for (String invalid : List.of("yes", "", "1", "0", " true", "false ", "not-a-boolean")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle("DBProxyName", "app-proxy");
+            p.putSingle("EngineFamily", "POSTGRESQL");
+            p.putSingle(parameter, invalid);
+
+            Response response = handler.handle("CreateDBProxy", p, "us-west-2");
+
+            assertEquals(400, response.getStatus(), parameter + "=" + invalid);
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(body.contains(parameter + " must be true or false."));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void createDbProxyBooleanFlagsPreserveValuesAndDefaults(String value) {
+        boolean enabled = Boolean.parseBoolean(value);
+        DbProxy proxy = new DbProxy();
+        proxy.setRequireTls(enabled);
+        proxy.setDebugLogging(enabled);
+        when(service.createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(enabled), eq(false),
+                isNull(), isNull(), eq(List.of()), eq(List.of()), eq(List.of()), eq(1800),
+                eq(enabled), eq(Map.of()), eq("us-west-2"), isNull(), isNull())).thenReturn(proxy);
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBProxyName", "app-proxy");
+        p.putSingle("EngineFamily", "POSTGRESQL");
+        if (value != null) {
+            p.putSingle("RequireTLS", value);
+            p.putSingle("DebugLogging", value);
+        }
+
+        Response response = handler.handle("CreateDBProxy", p, "us-west-2");
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<RequireTLS>" + enabled + "</RequireTLS>"));
+        assertTrue(body.contains("<DebugLogging>" + enabled + "</DebugLogging>"));
+        verify(service).createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(enabled), eq(false),
+                isNull(), isNull(), eq(List.of()), eq(List.of()), eq(List.of()), eq(1800),
+                eq(enabled), eq(Map.of()), eq("us-west-2"), isNull(), isNull());
+    }
+
     @Test
     void createDbProxyRejectsInvalidNetworkTypeValuesBeforeCallingService() {
         // TargetConnectionNetworkType has no DUAL value on real AWS (only EndpointNetworkType does).

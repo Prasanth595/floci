@@ -24,11 +24,13 @@ order:
   - AWS::ECS
   - AWS::EKS
   - AWS::RDS
+  - AWS::ElastiCache
   - AWS::Redshift
   - AWS::RedshiftServerless
   - AWS::EC2
   - AWS::ElasticLoadBalancingV2
   - AWS::AutoScaling
+  - AWS::ApplicationAutoScaling
   - AWS::Route53
   - AWS::ServiceDiscovery
   - AWS::ApiGateway
@@ -84,6 +86,8 @@ type_order:
   AWS::EKS: [Cluster, Nodegroup]
   AWS::RDS:
     [DBInstance, DBCluster, DBSubnetGroup, DBParameterGroup, DBClusterParameterGroup]
+  AWS::ElastiCache:
+    [CacheCluster, SubnetGroup]
   AWS::Redshift:
     [Cluster, ClusterParameterGroup, ClusterSubnetGroup, ClusterSecurityGroup]
   AWS::RedshiftServerless:
@@ -94,6 +98,7 @@ type_order:
      VPCGatewayAttachment, VPCEndpoint, NetworkAcl, NetworkAclEntry, SubnetNetworkAclAssociation,
      FlowLog]
   AWS::ElasticLoadBalancingV2: [LoadBalancer, TargetGroup, Listener, ListenerRule]
+  AWS::ApplicationAutoScaling: [ScalableTarget, ScalingPolicy]
   AWS::AutoScaling: [LaunchConfiguration, AutoScalingGroup, LifecycleHook]
   AWS::Route53: [HostedZone, RecordSet]
   AWS::ApiGateway: [RestApi, Resource, Authorizer, Method, Deployment, Stage, Account, DomainName, BasePathMapping, GatewayResponse]
@@ -110,6 +115,7 @@ service_labels:
   AWS::ApiGateway: API Gateway (v1)
   AWS::ApiGatewayV2: API Gateway v2
   AWS::AppSync: AppSync
+  AWS::ApplicationAutoScaling: Application Auto Scaling
   AWS::AutoScaling: Auto Scaling
   AWS::Batch: Batch
   AWS::Backup: Backup
@@ -137,6 +143,7 @@ service_labels:
   AWS::KinesisFirehose: Kinesis Data Firehose
   AWS::Lambda: Lambda
   AWS::Logs: CloudWatch Logs
+  AWS::ElastiCache: ElastiCache
   AWS::Organizations: Organizations
   AWS::Pipes: Pipes
   AWS::RDS: RDS
@@ -163,8 +170,10 @@ notes:
   AWS::Lambda::EventSourceMapping: 'SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored'
   AWS::Lambda::Alias: also what SAM's `AutoPublishAlias` expands into
   AWS::EC2::SecurityGroup: inline `SecurityGroupIngress`/`SecurityGroupEgress` supported
+  AWS::ApplicationAutoScaling::ScalableTarget: '`ScheduledActions` are accepted and not run; Floci has no scheduled scaling'
   AWS::RDS::DBInstance: starts a real container
   AWS::RDS::DBCluster: starts a real container
+  AWS::ElastiCache::CacheCluster: 'starts a real container; modifying an existing cluster in place is not supported'
   AWS::Redshift::ClusterSecurityGroup: accepted; no EC2-Classic security group model
   AWS::Redshift::Cluster: single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported
   AWS::RedshiftServerless::Namespace: 'ManageAdminPassword is accepted and not applied; GetAtt uses the dotted Namespace.* form'
@@ -178,6 +187,7 @@ notes:
   Custom::DynamoDBReplica: applied natively against DynamoDB, not via a provider Lambda
   AWS::Cognito::UserPool: '`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`'
   AWS::Events::Archive: '`KmsKeyIdentifier` is ignored'
+  AWS::CloudFront::Function: '`KeyValueStoreAssociations` is ignored'
 
 # Trailing prose appended to a row after its type list, for behaviour that belongs to the service
 # rather than to one type.

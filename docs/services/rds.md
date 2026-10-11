@@ -177,6 +177,13 @@ checked against the instance's other window. Modifications apply immediately —
     `arn:aws:rds:<region>:<account>:cluster-snapshot:<name>`. RDS reserved instances aren't
     modeled (there's no reserved-instance API), so tagging doesn't apply to them.
 
+## DB proxy boolean parameters
+
+`CreateDBProxy` accepts `true` or `false` (case-insensitive) for `RequireTLS` and
+`DebugLogging`, defaulting each omitted flag to `false`. Other values, including empty
+strings, return `InvalidParameterValue` before a proxy is created. `ModifyDBProxy`
+uses the same boolean parsing and preserves an omitted flag's current value.
+
 ## Event notification subscriptions
 
 The four subscription actions manage the resource itself. **Nothing is published to the topic.**

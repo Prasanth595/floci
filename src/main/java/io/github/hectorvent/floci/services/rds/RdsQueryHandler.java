@@ -1786,8 +1786,8 @@ public class RdsQueryHandler {
         validateDbProxyNetworkType(targetConnectionNetworkType, "TargetConnectionNetworkType", false, "IPV4 or IPV6");
         String name = params.getFirst("DBProxyName");
         String engineFamily = params.getFirst("EngineFamily");
-        boolean requireTls = "true".equalsIgnoreCase(params.getFirst("RequireTLS"));
-        boolean debugLogging = "true".equalsIgnoreCase(params.getFirst("DebugLogging"));
+        boolean requireTls = Boolean.TRUE.equals(parseOptionalBoolean(params, "RequireTLS"));
+        boolean debugLogging = Boolean.TRUE.equals(parseOptionalBoolean(params, "DebugLogging"));
         int idleClientTimeout = 1800;
         String idleClientTimeoutValue = params.getFirst("IdleClientTimeout");
         if (idleClientTimeoutValue != null) {

@@ -49,6 +49,7 @@ import software.amazon.awssdk.services.datasync.DataSyncClient;
 import software.amazon.awssdk.services.detective.DetectiveClient;
 import software.amazon.awssdk.services.dlm.DlmClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.services.dynamodb.streams.DynamoDbStreamsClient;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
@@ -713,6 +714,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static DynamoDbStreamsClient dynamoDbStreamsClient() {
+        return DynamoDbStreamsClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static LambdaClient lambdaClient() {
         return LambdaClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1041,6 +1050,10 @@ public final class TestFixtures {
         if (tokens == null || tokens.isEmpty()) {
             throw new IllegalStateException("CreateEmailIdentity did not return DKIM tokens for " + domain);
         }
+        String signingHostedZone = identity.dkimAttributes().signingHostedZone();
+        if (signingHostedZone == null || signingHostedZone.isBlank()) {
+            throw new IllegalStateException("CreateEmailIdentity did not return SigningHostedZone for " + domain);
+        }
 
         try (Route53Client route53 = route53Client()) {
             CreateHostedZoneResponse zone = route53.createHostedZone(CreateHostedZoneRequest.builder()
@@ -1056,7 +1069,7 @@ public final class TestFixtures {
                                     .type(RRType.CNAME)
                                     .ttl(300L)
                                     .resourceRecords(ResourceRecord.builder()
-                                            .value(token + ".dkim.amazonses.com")
+                                            .value(token + "." + signingHostedZone)
                                             .build())
                                     .build())
                             .build())

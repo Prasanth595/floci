@@ -20,6 +20,7 @@
         <apicurio.version>2.6.13.Final</apicurio.version>
         <everit.json.schema.version>1.14.6</everit.json.schema.version>
         <wire.version>6.4.7</wire.version>
+        <aws.sdk.version>2.55.11</aws.sdk.version>
     </properties>
 
     <dependencyManagement>
@@ -326,6 +327,12 @@
 
         <!-- Testing -->
         <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>elasticache</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit</artifactId>
             <scope>test</scope>
@@ -338,6 +345,18 @@
         <dependency>
             <groupId>io.rest-assured</groupId>
             <artifactId>rest-assured</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>rds</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>url-connection-client</artifactId>
+            <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -451,6 +470,8 @@
                     <argLine>@{argLine} -Xmx6g</argLine>
                     <systemPropertyVariables>
                         <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                        <!-- An ARN minted with a blank region fails the test that reached it (BlankRegionGuard). -->
+                        <io.github.hectorvent.floci.arn.fail-on-blank-region>true</io.github.hectorvent.floci.arn.fail-on-blank-region>
                     </systemPropertyVariables>
                     <!-- Abort a hung test with a thread dump instead of letting CI's job timeout kill
                          the shard silently. Set here rather than in junit-platform.properties, which

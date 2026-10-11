@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
+import io.github.hectorvent.floci.services.applicationautoscaling.ApplicationAutoScalingService;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.backup.BackupService;
@@ -20,6 +21,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewa
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayUsagePlanCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayV2CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AppSyncCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.ApplicationAutoScalingCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingGroupCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingScalingPolicyCfnProvisioner;
@@ -56,6 +58,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.EcrCfnPro
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCapacityCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EksCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.ElastiCacheCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ElbV2CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsArchiveCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
@@ -114,6 +117,8 @@ import io.github.hectorvent.floci.services.ec2.FlowLogService;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.eks.EksService;
+import io.github.hectorvent.floci.services.elasticache.ElastiCacheMemcachedService;
+import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
@@ -183,6 +188,7 @@ final class CfnProvisionerFixture {
         private EventBridgeService eventBridgeService;
         private ApiGatewayService apiGatewayService;
         private ApiGatewayV2Service apiGatewayV2Service;
+        private ApplicationAutoScalingService applicationAutoScalingService;
         private EcrService ecrService;
         private PipesService pipesService;
         private CognitoService cognitoService;
@@ -223,6 +229,8 @@ final class CfnProvisionerFixture {
         private SqsService sqsService;
         private WafV2Service wafV2Service;
         private BackupService backupService;
+        private ElastiCacheService elastiCacheService;
+        private ElastiCacheMemcachedService elastiCacheMemcachedService;
         private RedshiftService redshiftService;
         private RedshiftServerlessService redshiftServerlessService;
         private CloudMapService cloudMapService;
@@ -353,6 +361,9 @@ final class CfnProvisionerFixture {
                 discovered.add(new ApiGatewayGatewayResponseCfnProvisioner(apiGatewayService));
                 discovered.add(new ApiGatewayRestApiCfnProvisioner(apiGatewayService, s3Service, objectMapper));
             }
+            if (applicationAutoScalingService != null) {
+                discovered.add(new ApplicationAutoScalingCfnProvisioner(applicationAutoScalingService, objectMapper));
+            }
             if (apiGatewayV2Service != null) {
                 discovered.add(new ApiGatewayV2CfnProvisioner(apiGatewayV2Service, s3Service, objectMapper));
             }
@@ -441,6 +452,9 @@ final class CfnProvisionerFixture {
             if (transferService != null) {
                 discovered.add(new TransferCfnProvisioner(transferService));
             }
+            if (elastiCacheService != null && elastiCacheMemcachedService != null) {
+                discovered.add(new ElastiCacheCfnProvisioner(elastiCacheService, elastiCacheMemcachedService));
+            }
             if (redshiftService != null) {
                 discovered.add(new RedshiftClusterCfnProvisioner(redshiftService));
             }
@@ -505,6 +519,11 @@ final class CfnProvisionerFixture {
 
         public Builder apiGateway(ApiGatewayService v) {
             this.apiGatewayService = v;
+            return this;
+        }
+
+        public Builder applicationAutoScaling(ApplicationAutoScalingService v) {
+            this.applicationAutoScalingService = v;
             return this;
         }
 
@@ -700,6 +719,17 @@ final class CfnProvisionerFixture {
 
         public Builder backup(BackupService v) {
             this.backupService = v;
+            return this;
+        }
+
+        /** The cache cluster provisioner needs both engines' services; name this and elastiCacheMemcached. */
+        public Builder elastiCache(ElastiCacheService s) {
+            this.elastiCacheService = s;
+            return this;
+        }
+
+        public Builder elastiCacheMemcached(ElastiCacheMemcachedService s) {
+            this.elastiCacheMemcachedService = s;
             return this;
         }
 
