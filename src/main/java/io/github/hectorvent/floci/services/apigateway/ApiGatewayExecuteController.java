@@ -1754,6 +1754,7 @@ public class ApiGatewayExecuteController {
         // carry the action in the URI and render a JSON body.
         Response serviceResponse;
         int serviceStatus = 500;
+        String backendStatusMatchString = null;
         String errorType = null;
         String errorMessage = null;
         try {
@@ -1796,6 +1797,7 @@ public class ApiGatewayExecuteController {
             }
         } catch (AwsException e) {
             serviceStatus = e.getHttpStatus();
+            backendStatusMatchString = Integer.toString(serviceStatus);
             errorType = e.getErrorCode();
             errorMessage = e.getMessage();
             serviceResponse = null;
@@ -1809,6 +1811,7 @@ public class ApiGatewayExecuteController {
         String responseBodyStr;
         if (serviceResponse != null) {
             serviceStatus = serviceResponse.getStatus();
+            backendStatusMatchString = Integer.toString(serviceStatus);
             Object entity = serviceResponse.getEntity();
             if (entity instanceof JsonNode jsonNode) {
                 try {
@@ -1846,7 +1849,7 @@ public class ApiGatewayExecuteController {
                 ? errorType + (errorMessage != null ? ": " + errorMessage : "")
                 : errorMessage;
         String selectionMatchString = "lambda".equals(target.service())
-                ? errorMatchString : Integer.toString(serviceStatus);
+                ? errorMatchString : backendStatusMatchString;
 
         // Case-insensitive: an integration.response.header.X-Foo mapping must resolve regardless of
         // the casing the backend or client library used for the header name.

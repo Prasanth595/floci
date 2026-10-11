@@ -96,6 +96,20 @@ class ApiGatewayAwsStatusSelectionIntegrationTest {
     }
 
     @Test
+    void malformedActionRequestDoesNotMatchBackendStatusPattern() {
+        // Replacing the default 200 entry leaves only the backend-status pattern.
+        String apiId = awsApi(Map.of(
+                "type", "AWS",
+                "httpMethod", "POST",
+                "uri", "arn:aws:apigateway:us-east-1:sqs:action/SendMessage",
+                "requestTemplates", Map.of("application/json", "not-json")), 200, "5\\d{2}");
+
+        given().contentType(ContentType.JSON).body(MESSAGE)
+                .post("/execute-api/" + apiId + "/test/send")
+                .then().statusCode(500).body(containsString("InternalError"));
+    }
+
+    @Test
     void lambdaSuccessDoesNotMatchHttpStatusPattern() {
         when(lambdaService.invoke(eq("us-east-1"), eq(LAMBDA_FUNCTION), any(byte[].class),
                 eq(InvocationType.RequestResponse)))
