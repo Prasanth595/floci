@@ -129,6 +129,25 @@ class SesSendRawNoDestinationIntegrationTest {
     }
 
     @Test
+    void v2SendEmail_rawWithoutDestination_checksCcHeaderRecipientSyntax() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH)
+            .body("""
+                {
+                    "FromEmailAddress": "sender@example.com",
+                    "Content": {"Raw": {"Data": "%s"}}
+                }
+                """.formatted(rawData("From: sender@example.com\r\nCc: やまだ@simulator.amazonses.com\r\n")))
+        .when()
+            .post("/v2/email/outbound-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Local address contains control or whitespace"));
+    }
+
+    @Test
     void v1SendRawEmail_withoutAnyRecipient_returnsMissingToHeader() {
         given()
             .contentType("application/x-www-form-urlencoded")
