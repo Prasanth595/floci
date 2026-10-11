@@ -97,6 +97,19 @@ import static org.mockito.Mockito.when;
 class Ec2ServiceTest {
 
     @Test
+    void legacySpotServiceCallerRetainsTextUserData() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String id = service.requestSpotInstances("us-east-1", "0.05", 1, null, null,
+                "ami-1234567890abcdef0", "t3.micro", null, null, List.of(), "legacy", null,
+                List.of(), List.of()).getFirst().getInstanceId();
+        Instance instance = service.getInstance("us-east-1", id).orElseThrow();
+        assertEquals("legacy", instance.getUserData());
+        assertEquals("bGVnYWN5", instance.getEncodedUserData());
+    }
+
+    @Test
     void createAndDescribeVpcsDoNotContactDockerEvenOnFirstUse() {
         EmulatorConfig config = mockConfig(false);
         EmulatorConfig.VpcNetworksConfig networks = mock(EmulatorConfig.VpcNetworksConfig.class);
