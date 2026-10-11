@@ -69,6 +69,7 @@ class Ec2MetadataUserDataTest {
         HttpResponse<byte[]> response = getUserData(null);
         assertEquals(200, response.statusCode());
         assertArrayEquals(original, response.body());
+        assertEquals("application/octet-stream", response.headers().firstValue("content-type").orElseThrow());
     }
 
     @Test
@@ -124,6 +125,21 @@ class Ec2MetadataUserDataTest {
         HttpResponse<byte[]> response = getUserData(null);
         assertEquals(200, response.statusCode());
         assertArrayEquals(data, response.body());
+    }
+
+    @Test
+    void malformedStoredEncodingFallsBackToSavedText() throws Exception {
+        instance.setEncodedUserData("not-base64!");
+        instance.setUserData("saved text 雪");
+        HttpResponse<byte[]> response = getUserData(null);
+        assertEquals(200, response.statusCode());
+        assertArrayEquals(instance.getUserData().getBytes(StandardCharsets.UTF_8), response.body());
+    }
+
+    @Test
+    void malformedStoredEncodingWithoutSavedTextRemainsNotFound() throws Exception {
+        instance.setEncodedUserData("not-base64!");
+        assertEquals(404, getUserData(null).statusCode());
     }
 
     @Test

@@ -417,7 +417,12 @@ public class Ec2MetadataServer {
         String encoded = inst.getEncodedUserData();
         byte[] userData;
         if (encoded != null) {
-            userData = encoded.isBlank() ? null : Base64.getDecoder().decode(encoded);
+            try {
+                userData = encoded.isBlank() ? null : Base64.getDecoder().decode(encoded);
+            } catch (IllegalArgumentException e) {
+                LOG.warnv("Ignoring malformed saved user-data encoding for instance {0}", inst.getInstanceId());
+                userData = inst.getUserData() == null ? null : inst.getUserData().getBytes(StandardCharsets.UTF_8);
+            }
         } else {
             userData = inst.getUserData() == null ? null : inst.getUserData().getBytes(StandardCharsets.UTF_8);
         }
