@@ -1288,7 +1288,7 @@ public class RdsQueryHandler {
         }
         try {
             DbParameterGroup group = service.resetDbParameterGroup(name,
-                    Boolean.parseBoolean(params.getFirst("ResetAllParameters")), parameterNames(params), region);
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "ResetAllParameters")), parameterNames(params), region);
             String result = new XmlBuilder()
                     .elem("DBParameterGroupName", group.getDbParameterGroupName())
                     .build();
@@ -1443,7 +1443,7 @@ public class RdsQueryHandler {
         }
         try {
             DbClusterParameterGroup group = service.resetDbClusterParameterGroup(name,
-                    Boolean.parseBoolean(params.getFirst("ResetAllParameters")), parameterNames(params), region);
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "ResetAllParameters")), parameterNames(params), region);
             String result = new XmlBuilder()
                     .elem("DBClusterParameterGroupName", group.getDbClusterParameterGroupName())
                     .build();

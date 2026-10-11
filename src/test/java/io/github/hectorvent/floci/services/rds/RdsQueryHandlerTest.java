@@ -65,6 +65,70 @@ class RdsQueryHandlerTest {
 
     @ParameterizedTest
     @CsvSource({
+            "ResetDBParameterGroup, DBParameterGroupName",
+            "ResetDBClusterParameterGroup, DBClusterParameterGroupName"
+    })
+    void parameterResetRejectsMalformedBooleanBeforeServiceCalls(String action, String nameParameter) {
+        DbParameterGroup instanceGroup = new DbParameterGroup();
+        instanceGroup.setDbParameterGroupName("custom-group");
+        DbClusterParameterGroup clusterGroup = new DbClusterParameterGroup();
+        clusterGroup.setDbClusterParameterGroupName("custom-group");
+        when(service.resetDbParameterGroup(any(), anyBoolean(), anyList(), any())).thenReturn(instanceGroup);
+        when(service.resetDbClusterParameterGroup(any(), anyBoolean(), anyList(), any())).thenReturn(clusterGroup);
+        for (String invalid : List.of("yes", "", "1", "0", " true", "false ", "not-a-boolean")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle(nameParameter, "custom-group");
+            p.putSingle("ResetAllParameters", invalid);
+            p.putSingle("Parameters.Parameter.1.ParameterName", "max_connections");
+
+            Response response = handler.handle(action, p, "us-west-2");
+
+            assertEquals(400, response.getStatus(), action + ": " + invalid);
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(body.contains("ResetAllParameters must be true or false."));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void parameterResetPreservesBooleanValuesAndOmission(String value) {
+        boolean resetAll = Boolean.parseBoolean(value);
+        DbParameterGroup instanceGroup = new DbParameterGroup();
+        instanceGroup.setDbParameterGroupName("custom-group");
+        DbClusterParameterGroup clusterGroup = new DbClusterParameterGroup();
+        clusterGroup.setDbClusterParameterGroupName("custom-group");
+        List<String> names = resetAll ? List.of() : List.of("max_connections");
+        when(service.resetDbParameterGroup("custom-group", resetAll, names, "us-west-2"))
+                .thenReturn(instanceGroup);
+        when(service.resetDbClusterParameterGroup("custom-group", resetAll, names, "us-west-2"))
+                .thenReturn(clusterGroup);
+        for (String nameParameter : List.of("DBParameterGroupName", "DBClusterParameterGroupName")) {
+            String action = nameParameter.equals("DBParameterGroupName")
+                    ? "ResetDBParameterGroup" : "ResetDBClusterParameterGroup";
+            MultivaluedMap<String, String> p = params();
+            p.putSingle(nameParameter, "custom-group");
+            if (value != null) {
+                p.putSingle("ResetAllParameters", value);
+            }
+            if (!resetAll) {
+                p.putSingle("Parameters.Parameter.1.ParameterName", "max_connections");
+            }
+
+            Response response = handler.handle(action, p, "us-west-2");
+
+            assertEquals(200, response.getStatus());
+            assertTrue(((String) response.getEntity()).contains("<" + nameParameter
+                    + ">custom-group</" + nameParameter + ">"));
+        }
+        verify(service).resetDbParameterGroup("custom-group", resetAll, names, "us-west-2");
+        verify(service).resetDbClusterParameterGroup("custom-group", resetAll, names, "us-west-2");
+    }
+
+    @ParameterizedTest
+    @CsvSource({
             "CreateDBInstance, MultiAZ",
             "CreateDBInstance, EnableIAMDatabaseAuthentication",
             "CreateDBInstance, ManageMasterUserPassword",
