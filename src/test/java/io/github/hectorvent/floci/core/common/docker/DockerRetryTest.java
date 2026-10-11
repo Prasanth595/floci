@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.net.BindException;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -184,5 +185,15 @@ class DockerRetryTest {
                 new RuntimeException(new SocketException("No such file or directory"))));
         assertFalse(DockerRetry.isTransientIo(
                 new IOException("Broken pipe", new SocketException("NO SUCH FILE OR DIRECTORY"))));
+    }
+
+    @Test
+    void isTransientIo_dockerSocketPermissionDenied_isNotTransient() {
+        // The socket file exists but this process may not open it: a retry cannot change that.
+        assertFalse(DockerRetry.isTransientIo(new BindException("Permission denied")));
+        assertFalse(DockerRetry.isTransientIo(
+                new RuntimeException(new BindException("Permission denied"))));
+        assertFalse(DockerRetry.isTransientIo(
+                new IOException("Broken pipe", new SocketException("PERMISSION DENIED"))));
     }
 }

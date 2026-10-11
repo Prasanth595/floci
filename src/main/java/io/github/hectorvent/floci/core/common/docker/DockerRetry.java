@@ -73,8 +73,8 @@ public final class DockerRetry {
     /**
      * True when {@code t} (or any cause in its chain) is a transient docker I/O failure worth
      * retrying, an {@link IOException} such as {@code Broken pipe} / {@code Connection reset},
-     * possibly wrapped by docker-java in a {@link RuntimeException}. A missing docker socket file
-     * is never transient.
+     * possibly wrapped by docker-java in a {@link RuntimeException}. A docker socket file that is
+     * missing, or that this process may not open, is never transient.
      */
     public static boolean isTransientIo(Throwable t) {
         // InterruptedIOException covers both a genuine thread interruption (masking it would
@@ -95,7 +95,7 @@ public final class DockerRetry {
             if (c instanceof LocalFailure) {
                 return false;
             }
-            if (isMissingSocket(c)) {
+            if (isUnusableSocket(c)) {
                 return false;
             }
             if (c.getCause() == c) {
@@ -126,13 +126,18 @@ public final class DockerRetry {
 
     /**
      * True when {@code t} reports that the docker socket file does not exist ({@code No such
-     * file or directory}), as when Floci runs without a mounted docker socket. A retry cannot
-     * create the file, so retrying only delays the failure: six attempts held Floci's startup
-     * for about 15 seconds.
+     * file or directory}), as when Floci runs without a mounted docker socket, or that this
+     * process may not open it ({@code Permission denied}). A retry cannot create the file or
+     * change the process's permissions, so retrying only delays the failure: six attempts held
+     * Floci's startup, and each docker call of its shutdown, for about 15 seconds.
      */
-    private static boolean isMissingSocket(Throwable t) {
+    private static boolean isUnusableSocket(Throwable t) {
         String m = t.getMessage();
-        return m != null && m.toLowerCase(Locale.ROOT).contains("no such file or directory");
+        if (m == null) {
+            return false;
+        }
+        String lower = m.toLowerCase(Locale.ROOT);
+        return lower.contains("no such file or directory") || lower.contains("permission denied");
     }
 
     /**
