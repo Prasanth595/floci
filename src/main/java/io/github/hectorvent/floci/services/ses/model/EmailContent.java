@@ -49,13 +49,17 @@ public sealed interface EmailContent {
      * to the MIME headers when that list is empty. It ignores {@code replyToAddresses}: the
      * message carries its own Reply-To header. {@code fromHeaderAsFallback} marks a v2 send, which
      * reads the From header only in place of a missing sender parameter: it skips the header's
-     * syntax check when the sender is given and words a malformed one as an invalid From address
-     * (probe-confirmed). A v1 send always checks the header with JavaMail's messages.
+     * syntax and length checks when the sender is given and words a malformed one as an invalid
+     * From address (probe-confirmed). A v1 send always checks the header with JavaMail's messages.
      */
     record Raw(String data, boolean fromHeaderAsFallback) implements EmailContent {
 
         public Raw(String data) {
             this(data, false);
+        }
+
+        public boolean checksFromHeader(boolean sourceOmitted) {
+            return !fromHeaderAsFallback || sourceOmitted;
         }
     }
 }

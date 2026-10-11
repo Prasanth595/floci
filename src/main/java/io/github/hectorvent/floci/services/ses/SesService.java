@@ -432,7 +432,7 @@ public class SesService {
         // resolved before the message has been read.
         SmtpRelay.ParsedRawMessage parsed = SmtpRelay.parseRawMessage(raw.data());
         SmtpRelay.RawMessageHeaders headers = parsed.headers();
-        SesAddressSyntax.requireRaw(request, raw, parsed.message());
+        SesAddressSyntax.requireRaw(request, raw, sourceOmitted, parsed.message());
         // AWS accepts the configuration set either as a request field or as the
         // X-SES-CONFIGURATION-SET header on the message itself; the request field wins.
         String requestedConfigSet = firstNonBlank(request.configurationSetName(), headers.configurationSet());
@@ -454,7 +454,7 @@ public class SesService {
             // both with this message.
             throw new AwsException("InvalidParameterValue", "Missing required header 'From'.", 400);
         }
-        SesAddressLength.requireRaw(request, parsed.message());
+        SesAddressLength.requireRaw(request, raw, sourceOmitted, parsed.message());
         // FromEmailAddress was omitted, so the configuration set couldn't be resolved from the
         // sender until the MIME "From" was parsed. Re-resolve from the effective sender now so an
         // email identity's default configuration set still applies to a Raw send without an

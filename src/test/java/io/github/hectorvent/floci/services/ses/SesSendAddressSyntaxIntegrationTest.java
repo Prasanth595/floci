@@ -319,6 +319,27 @@ class SesSendAddressSyntaxIntegrationTest {
             .body("MessageId", notNullValue());
     }
 
+    @Test
+    void v2SendEmailRaw_overLimitFromHeaderIsNotMeasuredWithFromEmailAddress() {
+        String from = "A".repeat(321 - " <sender@example.com>".length()) + " <sender@example.com>";
+
+        given()
+            .contentType("application/json; charset=UTF-8")
+            .header("Authorization", AUTH)
+            .body("""
+                {
+                    "FromEmailAddress": "sender@example.com",
+                    "Destination": {"ToAddresses": ["%s"]},
+                    "Content": {"Raw": {"Data": "%s"}}
+                }
+                """.formatted(TO, rawMessage(from)))
+        .when()
+            .post("/v2/email/outbound-emails")
+        .then()
+            .statusCode(200)
+            .body("MessageId", notNullValue());
+    }
+
     @ParameterizedTest
     @CsvSource({
         "sender.example.com, Missing final '@domain'",

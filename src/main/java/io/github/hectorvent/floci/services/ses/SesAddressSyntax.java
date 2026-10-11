@@ -22,12 +22,11 @@ import java.util.function.Consumer;
  * the Reply-To and Return-Path headers were not probed and are left unchecked. The v2 controller
  * remaps the code to BadRequestException. A v2 raw send checks its From header only without a
  * sender parameter, and then answers an invalid From address for every violation but a missing
- * {@code @} (probe-confirmed).
+ * {@code @} (probe-confirmed for the four JavaMail messages; a quoted CR or LF is assumed to follow).
  */
 final class SesAddressSyntax {
 
     private static final List<String> RAW_CHECKED_HEADERS = List.of("To", "Cc", "Bcc");
-    private static final String MISSING_FINAL_DOMAIN = "Missing final '@domain'";
 
     private SesAddressSyntax() {
     }
@@ -36,26 +35,25 @@ final class SesAddressSyntax {
         SesSendAddresses.forEachEnvelope(request, SesAddressSyntax::require);
     }
 
-    static void requireRaw(SendEmailRequest request, EmailContent.Raw raw, Message message) {
-        SesSendAddresses.forEachRaw(request, message, RAW_CHECKED_HEADERS, fromHeaderCheck(request, raw),
+    static void requireRaw(SendEmailRequest request, EmailContent.Raw raw, boolean sourceOmitted,
+                           Message message) {
+        SesSendAddresses.forEachRaw(request, message, RAW_CHECKED_HEADERS, fromHeaderCheck(raw, sourceOmitted),
                 SesAddressSyntax::require);
     }
 
-    private static Consumer<String> fromHeaderCheck(SendEmailRequest request, EmailContent.Raw raw) {
-        if (!raw.fromHeaderAsFallback()) {
-            return SesAddressSyntax::require;
+    private static Consumer<String> fromHeaderCheck(EmailContent.Raw raw, boolean sourceOmitted) {
+        if (!raw.checksFromHeader(sourceOmitted)) {
+            return SesSendAddresses.UNCHECKED;
         }
-        if (request.source() != null && !request.source().isBlank()) {
-            return address -> { };
-        }
-        return SesAddressSyntax::requireFallbackFrom;
+        return raw.fromHeaderAsFallback() ? SesAddressSyntax::requireFallbackFrom : SesAddressSyntax::require;
     }
 
     private static void requireFallbackFrom(String address) {
-        String violation = violation(address);
+        Violation violation = classify(address);
         if (violation != null) {
-            throw new AwsException("InvalidParameterValue",
-                    MISSING_FINAL_DOMAIN.equals(violation) ? violation : "Invalid From address provided.", 400);
+            throw new AwsException("InvalidParameterValue", violation == Violation.MISSING_AT
+                    ? violation.message(address)
+                    : "Invalid From address provided.", 400);
         }
     }
 
@@ -99,6 +97,11 @@ final class SesAddressSyntax {
      * is blank (a missing address is reported by the caller's own required-field check).
      */
     static String violation(String address) {
+        Violation violation = classify(address);
+        return violation == null ? null : violation.message(address);
+    }
+
+    private static Violation classify(String address) {
         if (address == null || address.isBlank()) {
             return null;
         }
@@ -113,27 +116,41 @@ final class SesAddressSyntax {
                 quoted = !quoted;
             } else if (quoted) {
                 if (c == '\r' || c == '\n') {
-                    return "Invalid email address " + address + ".";
+                    return Violation.QUOTED_NEWLINE;
                 }
             } else if (c == '@') {
                 break;
             } else if (isControlOrWhitespace(c)) {
-                return "Local address contains control or whitespace";
+                return Violation.LOCAL_CONTROL;
             }
         }
         if (i >= addrSpec.length()) {
-            return MISSING_FINAL_DOMAIN;
+            return Violation.MISSING_AT;
         }
         String domain = addrSpec.substring(i + 1);
         if (domain.isEmpty()) {
-            return "Missing domain";
+            return Violation.MISSING_DOMAIN;
         }
         for (int j = 0; j < domain.length(); j++) {
             if (isControlOrWhitespace(domain.charAt(j))) {
-                return "Domain contains control or whitespace";
+                return Violation.DOMAIN_CONTROL;
             }
         }
         return null;
+    }
+
+    private enum Violation {
+        QUOTED_NEWLINE, LOCAL_CONTROL, MISSING_AT, MISSING_DOMAIN, DOMAIN_CONTROL;
+
+        String message(String address) {
+            return switch (this) {
+                case QUOTED_NEWLINE -> "Invalid email address " + address + ".";
+                case LOCAL_CONTROL -> "Local address contains control or whitespace";
+                case MISSING_AT -> "Missing final '@domain'";
+                case MISSING_DOMAIN -> "Missing domain";
+                case DOMAIN_CONTROL -> "Domain contains control or whitespace";
+            };
+        }
     }
 
     private static boolean isControlOrWhitespace(char c) {
