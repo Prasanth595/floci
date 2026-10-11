@@ -82,7 +82,9 @@ EXPOSE 6397
 EXPOSE 6398
 EXPOSE 6399
 
-HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
+# Probe every 50 ms while Floci starts, so a wait for "healthy" ends right after startup
+# instead of at the first 5 s check. Docker Engine before 25.0 ignores --start-interval.
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 --start-period=10s --start-interval=50ms \
     CMD wget -q --spider http://localhost:4566/_floci/health || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
