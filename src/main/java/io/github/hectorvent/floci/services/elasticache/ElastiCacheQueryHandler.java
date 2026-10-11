@@ -50,15 +50,18 @@ public class ElastiCacheQueryHandler {
     private final ElastiCacheService service;
     private final ElastiCacheMemcachedService memcachedService;
     private final RegionResolver regionResolver;
+    private final ElastiCacheServerlessQueryHandler serverlessHandler;
 
     @Inject
     public ElastiCacheQueryHandler(SigV4Validator sigV4Validator, ElastiCacheService service,
                                    ElastiCacheMemcachedService memcachedService,
-                                   RegionResolver regionResolver) {
+                                   RegionResolver regionResolver,
+                                   ElastiCacheServerlessQueryHandler serverlessHandler) {
         this.sigV4Validator = sigV4Validator;
         this.service = service;
         this.memcachedService = memcachedService;
         this.regionResolver = regionResolver;
+        this.serverlessHandler = serverlessHandler;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -78,6 +81,8 @@ public class ElastiCacheQueryHandler {
             case "ModifyUserGroup"            -> handleModifyUserGroup(params);
             case "DeleteUserGroup"            -> handleDeleteUserGroup(params);
             case "CreateCacheCluster"         -> handleCreateCacheCluster(params, region);
+            case "CreateServerlessCache", "DescribeServerlessCaches", "ModifyServerlessCache", "DeleteServerlessCache" ->
+                    serverlessHandler.handle(action, params);
             case "DescribeCacheClusters"      -> handleDescribeCacheClusters(params);
             case "DeleteCacheCluster"         -> handleDeleteCacheCluster(params);
             case "CreateCacheSubnetGroup"     -> handleCreateCacheSubnetGroup(params);
@@ -396,7 +401,10 @@ public class ElastiCacheQueryHandler {
             xml.elem("member", replicationGroupId);
         }
         xml.end("ReplicationGroups");
-        xml.start("ServerlessCaches").end("ServerlessCaches");
+        xml.raw(memberListXml("ServerlessCaches", g.getServerlessCacheEngines().keySet().stream()
+                .map(key -> key.contains("/") ? key.substring(key.indexOf('/') + 1) : key)
+                .distinct()
+                .toList()));
         xml.elem("ARN", g.getArn());
         return xml.build();
     }
@@ -762,6 +770,9 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             }
 
             Map<String, String> tags = Map.of();
+            if ("serverlesscache".equals(arn[5])) {
+                tags = serverlessHandler.getTags(arn[6]);
+            }
             if ("replicationgroup".equals(arn[5])) {
                 // the store keys groups by id alone; the record must be the one the ARN names
                 ReplicationGroup group = service.getReplicationGroup(arn[6]);
@@ -782,9 +793,12 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                     }
                     tags = cluster.getTags();
                 } else if (service.listMemberCacheClusters(arn[6]).isEmpty()) {
-                    // Memcached clusters and replication group members carry no tags, but they do
-                    // exist. Only an id no source knows is a not-found.
-                    memcachedService.getCacheCluster(arn[6]);
+                    CacheCluster mcCluster = memcachedService.getCacheCluster(arn[6]);
+                    if (mcCluster.getArn() != null && !mcCluster.getArn().equalsIgnoreCase(resourceName)) {
+                        throw new AwsException("CacheClusterNotFound",
+                                "Cache cluster " + arn[6] + " not found.", 404);
+                    }
+                    tags = mcCluster.getTags();
                 }
             }
             if ("subnetgroup".equals(arn[5])) {

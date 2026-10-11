@@ -181,6 +181,20 @@ checked against the instance's other window. Modifications apply immediately —
     `arn:aws:rds:<region>:<account>:cluster-snapshot:<name>`. RDS reserved instances aren't
     modeled (there's no reserved-instance API), so tagging doesn't apply to them.
 
+## Boolean parameters
+
+The following parameters accept `true` or `false` (case-insensitive). Other values,
+including empty strings, return `InvalidParameterValue` before changing resources.
+
+| Actions | Parameters | When omitted |
+|---|---|---|
+| `CreateDBProxy` | `RequireTLS`, `DebugLogging` | Defaults to `false` |
+| `ModifyDBProxy` | `RequireTLS`, `DebugLogging` | Preserves the current value |
+| `ResetDBParameterGroup`, `ResetDBClusterParameterGroup` | `ResetAllParameters` | Defaults to `false`; named parameter resets keep their existing behavior |
+
+Malformed reset flags leave saved parameter overrides unchanged.
+
+
 ## Event notification subscriptions
 
 The four subscription actions manage the resource itself. **Nothing is published to the topic.**
@@ -693,7 +707,7 @@ On PostgreSQL, the token names a database role (`DBUser`) and the session runs a
 
 Underneath, the proxy reaches the container as the master user and hands the session over to the token's role, so an IAM session that talks its way back to the master role, via `RESET SESSION AUTHORIZATION` and its variants, is terminated with `FATAL: permission denied to set session authorization` rather than being allowed to regain superuser. `SET ROLE` is untouched: PostgreSQL still permission-checks it against the token's role, exactly as on RDS. One difference from RDS: the proxy learns of the switch from PostgreSQL's own report, so when several statements are batched into a single query after the switch, their results are returned before the session is closed.
 
-The parameters a PostgreSQL client sends when it connects (`options` such as `-c search_path=app`, `application_name`, and any other run-time parameter) apply to the session as they do on RDS, with one exception: an IAM session for a role other than the master starts without them. The proxy would have to apply them while the session is still the master's, and a `-c role=<master>` among them would outlive the handover. Set them with `SET` once connected instead.
+The parameters a PostgreSQL client sends when it connects (`options` such as `-c search_path=app`, `application_name`, and any other run-time parameter) apply to the session as they do on RDS. An IAM session for a role other than the master gets them once the session has been handed over to the token's role, applied with `set_config()` so PostgreSQL checks each one against that role's privileges, and a parameter PostgreSQL refuses fails the login with PostgreSQL's own error, as it would at startup. A `session_authorization` naming any other role is refused with `permission denied to set session authorization` before anything is applied, since PostgreSQL would authorize it against the master the proxy connected as. Because those sessions have already started, three things differ from RDS: `options` may carry only `-c name=value` and `--name=value` switches, a parameter that can only be set at connection start is refused with `cannot be set after connection start`, and `replication` connections are refused. And because the values are set with `set_config()` rather than at startup, `RESET` (and `RESET ALL`) takes such a parameter back to the server default, not to the value the client connected with: after `-c search_path=app`, `RESET search_path` gives `"$user", public` where RDS keeps `app`.
 
 On MySQL, `AWSAuthenticationPlugin` is proprietary to RDS and ships in no public MySQL build, so
 `CREATE USER ... IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'` would fail against the container

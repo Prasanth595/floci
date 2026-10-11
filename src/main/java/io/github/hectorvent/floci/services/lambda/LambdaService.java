@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
@@ -54,6 +55,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -88,6 +90,17 @@ public class LambdaService implements ResourceProvider {
                     + "\\d{12}:access-point/fsap-[a-f0-9]{17}$");
     private static final Pattern FILE_SYSTEM_LOCAL_MOUNT_PATH = Pattern.compile("^/mnt/[A-Za-z0-9._-]+$");
     private static final Pattern LOG_GROUP_PATTERN = Pattern.compile("[.\\-_/#A-Za-z0-9]+");
+    // The model's Topic shape: 1-249 characters, pattern [^.]([a-zA-Z0-9\-_.]+); Topics holds at most 1.
+    private static final Pattern TOPIC_PATTERN = Pattern.compile("[^.]([a-zA-Z0-9\\-_.]+)");
+    private static final int MAX_TOPIC_LENGTH = 249;
+    private static final int MAX_TOPICS = 1;
+    private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
+    // UpdateFunctionCode S3Bucket (3-63 characters, [0-9A-Za-z\.\-_]*(?<!\.)) and S3Key (1-1024) shapes.
+    private static final Pattern S3_BUCKET_PATTERN = Pattern.compile("[0-9A-Za-z\\.\\-_]*(?<!\\.)");
+    // Create/UpdateAlias FunctionVersion (VersionWithLatestPublished: 1-1024, pattern below) and Description (max 256).
+    private static final Pattern ALIAS_FUNCTION_VERSION_PATTERN = Pattern.compile("(\\$LATEST(\\.PUBLISHED)?|[0-9]+)");
+    private static final int DEFAULT_SQS_BATCH_SIZE = 10;
+    private static final int DEFAULT_STREAM_BATCH_SIZE = 100;
     // The model's own Role pattern, which AWS quotes verbatim in its validation message; it
     // already accepts every partition.
     private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
@@ -117,6 +130,11 @@ public class LambdaService implements ResourceProvider {
     private static final Pattern LIST_ESM_FUNCTION_NAME_PATTERN = Pattern.compile(
             "^(arn:(aws[a-zA-Z-]*)?:lambda:)?((eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1}:)?(\\d{12}:)?"
                     + "(function:)?([a-zA-Z0-9-_\\.]+)(:(\\$LATEST(\\.PUBLISHED)?|[a-zA-Z0-9-_]+))?$");
+    // AddPermission members: botocore's PrincipalOrgID, SourceOwner and EventSourceToken shapes.
+    private static final Pattern PRINCIPAL_ORG_ID_PATTERN = Pattern.compile("o-[a-z0-9]{10,32}");
+    private static final Pattern ACCOUNT_ID_PATTERN = Pattern.compile("\\d{12}");
+    private static final Pattern EVENT_SOURCE_TOKEN_PATTERN = Pattern.compile("[a-zA-Z0-9._\\-]+");
+    private static final int MAX_EVENT_SOURCE_TOKEN_LENGTH = 256;
 
     /** botocore lambda/2015-03-31 Runtime shape enum, kept in sync with service-2.json. */
     static final List<String> RUNTIME_VALUES = List.of(
@@ -739,6 +757,7 @@ public class LambdaService implements ResourceProvider {
         String imageUri = (String) request.get("ImageUri");
         String s3Bucket = (String) request.get("S3Bucket");
         String s3Key = (String) request.get("S3Key");
+        validateS3CodeLocation(s3Bucket, s3Key);
 
         requireMatchingRevisionId(fn, request);
 
@@ -1375,6 +1394,11 @@ public class LambdaService implements ResourceProvider {
         boolean hasEventSourceArn = request.containsKey("EventSourceArn") && request.get("EventSourceArn") != null;
         boolean isSelfManagedKafka = hasKafkaSource || hasTopics;
 
+        // The SourceAccessConfigurations cap applies to every source type, not only self-managed Kafka
+        if (request.get("SourceAccessConfigurations") instanceof List<?> accessToCap) {
+            validateMaxItems(accessToCap, "sourceAccessConfigurations", MAX_SOURCE_ACCESS_CONFIGURATIONS);
+        }
+
         String eventSourceArn;
         String resolvedRegion;
         Map<String, Object> selfManagedEventSource = null;
@@ -1429,6 +1453,7 @@ public class LambdaService implements ResourceProvider {
                 throw new AwsException("InvalidParameterValueException",
                         "Topics must be a non-empty list of strings", 400);
             }
+            validateTopicConstraints(topicList);
             List<String> validatedTopics = new ArrayList<>();
             for (Object item : topicList) {
                 if (!(item instanceof String s) || s.isBlank()) {
@@ -1490,7 +1515,10 @@ public class LambdaService implements ResourceProvider {
 
         ResolvedFunctionTarget target = resolveFunctionTarget(resolvedRegion, fnRef);
 
-        int batchSize = toInt(request.get("BatchSize"), 10);
+        // The model documents a per-source default: 10 for SQS, 100 for every other source type.
+        int defaultBatchSize = eventSourceArn != null && eventSourceArn.contains(":sqs:")
+                ? DEFAULT_SQS_BATCH_SIZE : DEFAULT_STREAM_BATCH_SIZE;
+        int batchSize = toInt(request.get("BatchSize"), defaultBatchSize);
         Integer maximumBatchingWindowInSeconds = parseMaximumBatchingWindow(request);
         boolean enabled = !Boolean.FALSE.equals(request.get("Enabled"));
 
@@ -2150,6 +2178,7 @@ public class LambdaService implements ResourceProvider {
                 throw new AwsException("InvalidParameterValueException",
                         "Topics must be a non-empty list of strings", 400);
             }
+            validateTopicConstraints(topicList);
             List<String> validatedTopics = new ArrayList<>();
             for (Object item : topicList) {
                 if (!(item instanceof String s) || s.isBlank()) {
@@ -2168,6 +2197,7 @@ public class LambdaService implements ResourceProvider {
                     throw new AwsException("InvalidParameterValueException",
                             "SourceAccessConfigurations must be a list", 400);
                 }
+                validateMaxItems(accessList, "sourceAccessConfigurations", MAX_SOURCE_ACCESS_CONFIGURATIONS);
                 List<Map<String, Object>> typedAccess = new ArrayList<>();
                 for (Object item : accessList) {
                     if (!(item instanceof Map<?, ?> m)) {
@@ -2721,11 +2751,7 @@ public class LambdaService implements ResourceProvider {
         if (!(requireListOrNull(value, field) instanceof List<?> list)) {
             return;
         }
-        if (list.size() > maxItems) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
-                            + "Member must have length less than or equal to " + maxItems, 400);
-        }
+        validateMaxItems(list, field, maxItems);
         for (Object item : list) {
             validateEnum(item, field + ".member", allowed);
         }
@@ -2748,11 +2774,7 @@ public class LambdaService implements ResourceProvider {
         if (!(requireListOrNull(value, field) instanceof List<?> list)) {
             return;
         }
-        if (list.size() > maxItems) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
-                            + "Member must have length less than or equal to " + maxItems, 400);
-        }
+        validateMaxItems(list, field, maxItems);
         for (Object item : list) {
             validatePattern(item, field + ".member", pattern);
         }
@@ -2768,7 +2790,51 @@ public class LambdaService implements ResourceProvider {
         }
     }
 
-    private static void validateMaxLength(Object value, String field, int maxLength) {
+    /** Topics: at most MAX_TOPICS entries, each 1 to MAX_TOPIC_LENGTH characters matching TOPIC_PATTERN. */
+    private static void validateTopicConstraints(List<?> topics) {
+        for (Object topic : topics) {
+            if (topic instanceof String s) {
+                validateNonEmpty(s, "topics.member", false);
+            }
+        }
+        validateArnList(topics, "topics", TOPIC_PATTERN, MAX_TOPICS);
+        for (Object topic : topics) {
+            validateMaxLength(topic, "topics.member", MAX_TOPIC_LENGTH);
+        }
+    }
+
+    private static void validateS3CodeLocation(String bucket, String key) {
+        if (bucket != null) {
+            if (bucket.length() < 3) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + bucket + "' at 's3Bucket' failed to satisfy constraint: "
+                                + "Member must have length greater than or equal to 3", 400);
+            }
+            validateMaxLength(bucket, "s3Bucket", 63);
+            validatePattern(bucket, "s3Bucket", S3_BUCKET_PATTERN);
+        }
+        if (key != null) {
+            validateNonEmpty(key, "s3Key", false);
+            validateMaxLength(key, "s3Key", 1024);
+        }
+    }
+
+    private static void validateAliasMembers(String functionVersion, String description) {
+        validateNonEmpty(functionVersion, "functionVersion", false);
+        validateMaxLength(functionVersion, "functionVersion", 1024);
+        validatePattern(functionVersion, "functionVersion", ALIAS_FUNCTION_VERSION_PATTERN);
+        validateMaxLength(description, "description", 256);
+    }
+
+    private static void validateMaxItems(List<?> list, String field, int maxItems) {
+        if (list.size() > maxItems) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
+                            + "Member must have length less than or equal to " + maxItems, 400);
+        }
+    }
+
+    static void validateMaxLength(Object value, String field, int maxLength) {
         if (!(value instanceof String s) || s.length() <= maxLength) {
             return;
         }
@@ -2899,6 +2965,7 @@ public class LambdaService implements ResourceProvider {
                                    String functionVersion, String description,
                                    java.util.Map<String, Double> routingConfig) {
         validateAliasName(aliasName);
+        validateAliasMembers(functionVersion, description);
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
         if (aliasStore != null && aliasStore.get(region, functionName, aliasName).isPresent()) {
@@ -2940,6 +3007,7 @@ public class LambdaService implements ResourceProvider {
                                    String functionVersion, String description,
                                    java.util.Map<String, Double> routingConfig) {
         validateAliasName(aliasName);
+        validateAliasMembers(functionVersion, description);
         LambdaAlias alias = getAlias(region, functionName, aliasName);
         if (functionVersion != null) alias.setFunctionVersion(functionVersion);
         if (description != null) alias.setDescription(description);
@@ -3531,6 +3599,7 @@ public class LambdaService implements ResourceProvider {
     }
 
     public Map<String, Object> addPermission(String region, String functionName, String qualifier, Map<String, Object> request) {
+        validatePermissionConditions(request);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
         LambdaFunction observed = getFunction(region, ref.name());
         synchronized (lockForPolicyMutation(observed.getFunctionArn())) {
@@ -3551,25 +3620,16 @@ public class LambdaService implements ResourceProvider {
 
             String principal = (String) request.get("Principal");
             String action = (String) request.get("Action");
-            String sourceArn = (String) request.get("SourceArn");
-            String sourceAccount = (String) request.get("SourceAccount");
 
-            Map<String, Object> statement = new java.util.LinkedHashMap<>();
+            Map<String, Object> statement = new LinkedHashMap<>();
             statement.put("Sid", statementId);
             statement.put("Effect", "Allow");
-            if (principal != null && principal.contains(".")) {
-                statement.put("Principal", Map.of("Service", principal));
-            } else if (principal != null && principal.startsWith("arn:")) {
-                statement.put("Principal", Map.of("AWS", principal));
-            } else {
-                statement.put("Principal", principal);
-            }
+            statement.put("Principal", permissionPrincipal(principal, region));
             statement.put("Action", action);
             statement.put("Resource", resourceArn);
-            if (sourceArn != null) {
-                statement.put("Condition", Map.of("ArnLike", Map.of("AWS:SourceArn", sourceArn)));
-            } else if (sourceAccount != null) {
-                statement.put("Condition", Map.of("StringEquals", Map.of("AWS:SourceAccount", sourceAccount)));
+            Map<String, Object> condition = permissionCondition(request);
+            if (!condition.isEmpty()) {
+                statement.put("Condition", condition);
             }
 
             fn.getPolicies().add(statement);
@@ -3577,6 +3637,76 @@ public class LambdaService implements ResourceProvider {
             LOG.infov("Added permission {0} to function {1}", statementId, functionName);
             return statement;
         }
+    }
+
+    /** The model constraints on the AddPermission members that become conditions. */
+    private static void validatePermissionConditions(Map<String, Object> request) {
+        validatePattern(request.get("SourceAccount"), "sourceAccount", ACCOUNT_ID_PATTERN);
+        validatePattern(request.get("PrincipalOrgID"), "principalOrgID", PRINCIPAL_ORG_ID_PATTERN);
+        validateEnum(request.get("FunctionUrlAuthType"), "functionUrlAuthType", FUNCTION_URL_AUTH_TYPE_VALUES);
+        validateMaxLength(request.get("EventSourceToken"), "eventSourceToken", MAX_EVENT_SOURCE_TOKEN_LENGTH);
+        validatePattern(request.get("EventSourceToken"), "eventSourceToken", EVENT_SOURCE_TOKEN_PATTERN);
+    }
+
+    /**
+     * The statement's Principal as AWS writes it: an ARN, or an account ID as that account's root
+     * ARN, is an {@code AWS} principal, a domain-style name is a {@code Service}, and anything else
+     * (such as {@code *}) is kept as given. ARNs are checked first because an IAM role, user or
+     * session name may contain a dot.
+     */
+    private static Object permissionPrincipal(String principal, String region) {
+        if (principal == null) {
+            return null;
+        }
+        if (principal.startsWith("arn:")) {
+            return Map.of("AWS", principal);
+        }
+        if (ACCOUNT_ID_PATTERN.matcher(principal).matches()) {
+            String partition = AwsRegions.partitionFor(region);
+            return Map.of("AWS", AwsArnUtils.Arn.global(partition, "iam", principal, "root").toString());
+        }
+        if (principal.contains(".")) {
+            return Map.of("Service", principal);
+        }
+        return principal;
+    }
+
+    /**
+     * The statement's Condition, in the layout AWS writes: {@code SourceArn} under {@code ArnLike},
+     * the other string members under {@code StringEquals}, and {@code InvokedViaFunctionUrl} under
+     * {@code Bool} as the string {@code "true"}. Empty when the request carries none of them.
+     */
+    private static Map<String, Object> permissionCondition(Map<String, Object> request) {
+        Map<String, Object> stringEquals = new LinkedHashMap<>();
+        String sourceAccount = (String) request.get("SourceAccount");
+        if (sourceAccount != null) {
+            stringEquals.put("AWS:SourceAccount", sourceAccount);
+        }
+        String functionUrlAuthType = (String) request.get("FunctionUrlAuthType");
+        if (functionUrlAuthType != null) {
+            stringEquals.put("lambda:FunctionUrlAuthType", functionUrlAuthType);
+        }
+        String principalOrgId = (String) request.get("PrincipalOrgID");
+        if (principalOrgId != null) {
+            stringEquals.put("aws:PrincipalOrgID", principalOrgId);
+        }
+        String eventSourceToken = (String) request.get("EventSourceToken");
+        if (eventSourceToken != null) {
+            stringEquals.put("lambda:EventSourceToken", eventSourceToken);
+        }
+
+        Map<String, Object> condition = new LinkedHashMap<>();
+        if (!stringEquals.isEmpty()) {
+            condition.put("StringEquals", stringEquals);
+        }
+        String sourceArn = (String) request.get("SourceArn");
+        if (sourceArn != null) {
+            condition.put("ArnLike", Map.of("AWS:SourceArn", sourceArn));
+        }
+        if (Boolean.TRUE.equals(request.get("InvokedViaFunctionUrl"))) {
+            condition.put("Bool", Map.of("lambda:InvokedViaFunctionUrl", "true"));
+        }
+        return condition;
     }
 
     public Map<String, Object> getPolicy(String region, String functionName, String qualifier) {

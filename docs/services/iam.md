@@ -65,6 +65,8 @@ type.
 | UntagRole | Removes tags from an IAM role. |
 | ListRoleTags | Lists tags stored for an IAM role. |
 
+`CreateRole` and every action that takes a `RoleName` (`GetRole`, `DeleteRole`, `UpdateRole`, `TagRole`, `AttachRolePolicy`, `PutRolePolicy` and the rest) check it as AWS does: 1-64 characters of `[\w+=,.@-]`, otherwise `ValidationError`. A colon is never valid, so no role can take the name of the EC2 instance identity role, `aws:ec2-instance`.
+
 ### Policies
 
 | Action | Description |
@@ -635,12 +637,35 @@ certificate body, certificate chain, or private key".
 `ServerCertificateId` uses AWS's `ASCA` prefix for certificates. `GetAccountSummary`'s
 `ServerCertificates` count is backed by this store rather than reporting zero.
 
-`DeleteServerCertificate` returns `DeleteConflict` while the certificate is in use, as AWS does.
+`DeleteServerCertificate` returns `DeleteConflict` while the certificate is in use, which is an
+intentional deviation rather than a recorded AWS answer. `DeleteConflict` is modeled on the
+operation, but the API Reference describes it only as "attached subordinate entities" without saying
+what counts as one for a certificate, and the operation's own page warns that if Elastic Load
+Balancing "doesn't detect the deletion of bound certificates, it may continue to use the
+certificates", which reads as the delete going through. The refusal is kept because a caller is
+better served by it than by a dangling reference, not because AWS is known to answer it.
 Services that reference a certificate (ELB Classic listeners, ELBv2 listeners, CloudFront
 distributions) report it through `ServerCertificateReferenceProvider`, which IAM consults without
 depending on them. In the other direction, ELB Classic rejects a listener whose `SSLCertificateId`
 names no certificate with `CertificateNotFound`, and CloudFront rejects an unknown
 `ViewerCertificate.IAMCertificateId` with `InvalidViewerCertificate`.
+
+Those two directions have to be one step, not two. A referring service checks the certificate and
+then saves the resource that names it, so a delete running in between sees no reference, removes the
+certificate, and leaves the resource holding something that is gone. CloudFront and ELB Classic
+therefore perform that check and the write while holding the lock the delete takes, which leaves
+only the two orders that make sense: the delete loses and answers `DeleteConflict`, or it wins and
+the create is refused for a certificate that no longer exists. ELBv2 does not validate certificate
+references at all, so a listener there can still name a certificate that was never present, even
+though `CertificateNotFound` is modeled on `CreateListener`, `ModifyListener` and
+`AddListenerCertificates`.
+
+Only a write that names an IAM certificate takes the lock. A listener with no certificate, a
+listener served by ACM, a removal, or a distribution without an `IAMCertificateId` cannot leave a
+resource holding a deleted certificate, and making those wait on a certificate delete, or it on
+them, would buy nothing. The delete reads a snapshot of each load balancer's listeners rather than
+the live list, so an unguarded write cannot end its walk in `ConcurrentModificationException`
+either, which no mapper covers and which would surface as an unmapped 500.
 
 ### SSH Public Keys
 
@@ -689,9 +714,12 @@ because listing goes through the user.
 marks it optional and it resolves from the access key that signed the request. That is the opposite
 of the signing-certificate operations, where it is optional throughout.
 
-Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
-owning user's ARN, along with every other IAM action except the server-certificate operations, which
-is the general gap tracked in [#4979](https://github.com/floci-io/floci/issues/4979).
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against the owning user's
+ARN, which is the resource type the Service Authorization Reference gives them, so a statement
+naming one user binds to that user. `ListSSHPublicKeys` with `UserName` omitted names the user who
+signed the request, resolved from the access key in the credential, so a statement naming that user
+binds to it as well. The wildcard stands only when the signer is not an IAM user, an account's root
+stand-in and a session credential having no user record to name.
 
 ### Signing Certificates
 
@@ -734,10 +762,10 @@ date, and `N/A` when the certificate is not `Active`, which is how the User Guid
 `GetAccountSummary`'s `AccountSigningCertificatesPresent` is unaffected: it reports the account root
 user's certificates, and Floci does not model root credentials.
 
-Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
-owning user's ARN, along with every other IAM action except the server-certificate operations. That
-is the general gap tracked in [#4979](https://github.com/floci-io/floci/issues/4979), not something
-specific to signing certificates.
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against the owning user's
+ARN. `UserName` is optional throughout, and a request that omits it names the user who signed the
+request, resolved from the access key in the credential, so those bind to that user rather than to
+`*`.
 
 ### Service-Specific Credentials
 
@@ -856,9 +884,9 @@ was minted rather than re-derived from the new name, because it is what the call
 with and rewriting it would break a working credential; AWS does not document which way it goes, so
 this is a choice rather than a sourced behaviour.
 
-Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
-owning user's ARN, as the general gap in
-[#4979](https://github.com/floci-io/floci/issues/4979) describes.
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against the owning user's
+ARN, which when `UserName` is omitted is the ARN of the user who signed the request, resolved from
+the access key in the credential.
 
 ## AWS Managed Policies
 
@@ -879,7 +907,7 @@ Floci seeds a catalog of commonly-used AWS managed policies at startup. These ar
 **Other execution roles**
 `AmazonS3ObjectLambdaExecutionRolePolicy` · `CloudWatchLambdaInsightsExecutionRolePolicy` · `CloudWatchLambdaApplicationSignalsExecutionRolePolicy` · `AWSConfigRulesExecutionRole` · `AWSMSKReplicatorExecutionRole` · `AWS-SSM-DiagnosisAutomation-ExecutionRolePolicy` · `AWS-SSM-RemediationAutomation-ExecutionRolePolicy` · `AmazonSageMakerGeospatialExecutionRole` · `AmazonSageMakerCanvasEMRServerlessExecutionRolePolicy` · `SageMakerStudioBedrockFunctionExecutionRolePolicy` · `SageMakerStudioDomainExecutionRolePolicy` · `SageMakerStudioQueryExecutionRolePolicy` · `AmazonDataZoneDomainExecutionRolePolicy` · `AmazonBedrockAgentCoreMemoryBedrockModelInferenceExecutionRolePolicy` · `AWSPartnerCentralSellingResourceSnapshotJobExecutionRolePolicy`
 
-Every catalog entry carries the real policy document of its current default version, generated from the public [iam-dataset](https://github.com/iann0036/iam-dataset), so `GetPolicyVersion` returns the same statements a real account would and enforcement mode evaluates them faithfully.
+Every catalog entry carries the real policy document of its current default version, generated from the public [iam-dataset](https://github.com/iann0036/iam-dataset), so `GetPolicyVersion` returns the same statements a real account would and enforcement mode evaluates them faithfully. The catalog, its documents and its version data are regenerated from that dataset with `make aws-data-sync` (`tools/aws/regen_managed_policies.py`).
 
 ### Version numbers
 
@@ -1004,35 +1032,70 @@ These identities always bypass enforcement (backward-compatible defaults):
 | Identity | Behaviour |
 |---|---|
 | Access key `test` (the default dev credential) | Always allowed — no policy lookup |
-| Access key that exists nowhere | **Rejected** with `403`: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services |
+| Access key that exists nowhere | **Rejected** with `403`, `sts:GetCallerIdentity` included: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services. A presigned POST, whose credential is in the form body, is left to S3's own presigned-POST check |
+| Inactive access key | **Rejected** the same way, until the key is activated again |
+| Expired session credentials | **Rejected** with `403 ExpiredTokenException`, or `400 ExpiredToken` for S3, rather than as a key that exists nowhere, for as long as Floci still holds the session |
+| `Authorization` header with no readable credential: no access key (a Bearer token, SigV2, a credential without the SigV4 scheme or without its key), or a scope missing a part such as its `aws4_request` terminator, or an empty header. An empty header next to a presigned URL's `X-Amz-Credential` defers to that credential | **Rejected** with `400`: `AuthorizationHeaderMalformed` for S3 (`AuthorizationQueryParametersError` when the credential is a presigned URL's `X-Amz-Credential`), `IncompleteSignature` for Query services, `IncompleteSignatureException` for JSON services. A REST request is rejected only when the header claims SigV4; otherwise it is treated as unsigned (see [Unsigned requests](#unsigned-requests)) |
 | Credential the filter cannot map to policies, such as a session carrying no role ARN | Allowed: it is a real credential, so rejecting it would refuse an authenticated caller |
-| No `Authorization` header | Allowed — unauthenticated path (e.g. health checks) |
+| No `Authorization` header | **Rejected** for a JSON, CBOR or Query management call, unless AWS serves the operation without credentials. Allowed for a REST request such as a health check (see [Unsigned requests](#unsigned-requests)) |
 | Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
 
-**IAM's own resources are mostly not named.** When enforcement evaluates a request, the target
-resource comes from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB,
-Kinesis, Secrets Manager, SSM, KMS, and, within IAM, only the server-certificate operations. Every
-other IAM action is evaluated against `*`, so a statement naming a specific user, role, policy,
-instance profile, MFA device or identity provider does not constrain it: a `Deny` on
-`arn:aws:iam::123456789012:user/bob` does not stop `DeleteUser` from running, and an `Allow`
-scoped to one role does not limit `DeleteRole` to it. Action-level matching works normally, so
-denying `iam:DeleteUser` outright does take effect; it is only the resource half that is missing.
+**IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
+from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets
+Manager, SSM, KMS and IAM. Within IAM the resource type each action is evaluated against is the one
+the Service Authorization Reference gives it, so a statement naming a specific user, role, group,
+instance profile, managed policy, MFA device, identity provider or server certificate constrains
+it: a `Deny` on `arn:aws:iam::123456789012:user/bob` stops `DeleteUser` for Bob and leaves other
+users alone, and an `Allow` scoped to one role limits `DeleteRole` to it.
 
-This is the behaviour IAM has always had here rather than a recent change, and it errs toward
-permissive, which is the direction worth knowing about. Closing it means mapping the resource of
-every dispatched IAM action, which is tracked in
-[#4979](https://github.com/floci-io/floci/issues/4979) rather than bundled into the
-server-certificate work that mapped the first few.
+The resource type is not the parameter the action happens to take. `AddUserToGroup` and
+`RemoveUserFromGroup` are evaluated against the group, `AddRoleToInstanceProfile` and
+`RemoveRoleFromInstanceProfile` against the instance profile, and `EnableMFADevice`,
+`DeactivateMFADevice` and `ResyncMFADevice` against the user rather than the device. An action
+acting on something that already exists is checked against that resource's stored ARN, path and
+partition included; a create is checked against an ARN minted from the request's own `Path`, since
+reading a stored path would authorize a create into a path the policy does not name.
 
-**A certificate rename names two resources.** `UpdateServerCertificate` is evaluated against both
-the certificate's current ARN and the ARN that `NewServerCertificateName` or `NewPath` would
-produce, because AWS requires the principal to hold permission on the old name and the new one: a
-principal allowed to update `ProductionCert` but not `ProdCert` cannot rename the first into the
-second. A request naming several resources is authorized once per resource, so a `Deny` on either
-name refuses the rename, and the certificate keeps its original name and path. An update that
-changes neither the name nor the path names a single resource. The destination ARN is built beside
-the stored one, keeping the certificate's own partition and account, since a rename moves a
-certificate within an account rather than between partitions.
+Which type each action takes is vendored, not written out in Java:
+`src/main/resources/aws/iam-action-resources.json` is generated by
+`tools/aws/regen_iam_action_resources.py` from AWS's Service Reference Information for IAM, and
+carries every published action with the resource types it is authorized against, plus the ARN
+format of each type. `make iam-action-resources-check` gates its shape offline on every pull
+request and `make iam-action-resources-verify` checks every claim in it against AWS weekly, so a
+type that drifts from what AWS publishes fails in CI rather than authorizing against the wrong
+resource. What stays in Java is the half that is Floci's: the request parameter each type's name
+arrives in, the creates, the actions whose request carries an ARN, and the resource types that
+belong only to actions Floci does not dispatch. `IamActionResourcesTest` checks the one against
+the other, so a regeneration that introduces a resource type nothing resolves fails a test naming
+it rather than quietly putting that action back on `*`.
+
+The nineteen user actions whose `UserName` the model marks optional, `GetUser`, `ListAccessKeys` and
+`CreateAccessKey` among them, resolve to the user who signed the request when it is omitted, which
+is the user AWS acts on. The access key id in the credential names that identity, the same lookup
+`GetAccessKeyLastUsed` makes on a key passed as a parameter, and the user's stored ARN is then the
+resource. The wildcard still stands when the signer is not an IAM user: an account's root stand-in
+and a session credential have no user record to name.
+
+What resolves to `*` is what the reference gives no resource type, such as `ListUsers`,
+`GetAccountSummary` and `SimulateCustomPolicy`. Every other mapped action takes its parameter as a
+required member, so it always resolves.
+
+A resource of `*` is matched as that literal string, because the evaluator globs the statement's
+pattern against the request's resource and not the other way round. So a statement whose `Resource`
+names an ARN applies to such a request in neither direction: a `Deny` on one of those actions does
+not refuse it, and an `Allow` does not permit it either.
+
+**A rename names two resources.** `UpdateUser`, `UpdateGroup` and `UpdateServerCertificate` are
+evaluated against both the resource's current ARN and the ARN the new name or `NewPath` would
+produce, because AWS requires the principal to hold permission on the old name and the new one.
+`UpdateUser`'s reference says the requester "must have appropriate permissions on both the source
+object and the target object", and `UpdateGroup`'s that a principal allowed to update the old group
+but not the new one has the update fail. So a principal allowed to update `ProductionCert` but not
+`ProdCert` cannot rename the first into the second. A request naming several resources is
+authorized once per resource, so a `Deny` on either name refuses the rename and the resource keeps
+its original name and path. An update that changes neither the name nor the path names a single
+resource. The destination ARN is built beside the stored one, keeping the resource's own partition
+and account, since a rename moves a resource within an account rather than between partitions.
 
 **Exception:** a bare 12-digit account-id key that equals its own account and sits under
 an effective SCP ceiling is **not** treated as an unknown key — it is evaluated against
@@ -1229,6 +1292,15 @@ function URLs, CloudFront serving, the Cognito OIDC endpoints and Floci's own he
 of which are unsigned by design, and a REST request does not say which service will serve it. An
 unsigned REST call therefore still reaches the service, including an unsigned S3 call.
 
+**A header with no readable credential does not get around this.** An `Authorization` header that
+names no access key (a Bearer token, SigV2, a credential without the SigV4 scheme or without its
+key), or whose SigV4 scope is missing a part, is refused on the same management calls with
+`400 IncompleteSignature`, the error AWS gives a header it cannot read. A REST request carrying one
+is refused only when the header claims SigV4 and the route maps to an IAM action. Otherwise it is
+treated as unsigned, because AppSync, CodeArtifact's package endpoints, Identity Store's SCIM
+endpoint and API Gateway's authorizers take Bearer and Basic tokens of their own. An empty header
+is refused the same way, unless a presigned URL's `X-Amz-Credential` is there to read instead.
+
 ## Bypass rules
 
 Enforcement is deliberately permissive in a few cases, so that enabling it does not break workloads
@@ -1236,11 +1308,14 @@ the emulator cannot reason about:
 
 | Case | Behaviour |
 | --- | --- |
-| Unresolvable action | Allowed. An action the registry cannot resolve is not evaluated. |
+| Unresolvable action | Allowed. An action the registry cannot resolve is not evaluated. The credential is still checked on an RPC call, as in the rows below. A REST request is left alone, as an unsigned one is: the filter cannot tell it from the API Gateway execute path, Lambda function URLs and the other paths it sees that are unsigned by design. |
 | No `Authorization` header, RPC protocol | **Rejected** with `403 MissingAuthenticationToken`, unless the operation is one AWS itself serves without credentials. |
 | No `Authorization` header, REST protocol | Allowed. This filter also sees the API Gateway execute path, Lambda function URLs, CloudFront serving and the Cognito OIDC endpoints, which are unsigned by design. |
-| `sts:GetCallerIdentity` | Always allowed — AWS returns caller identity even when a policy denies it. |
-| Access key that exists nowhere | **Rejected** with `403`, in each protocol's own vocabulary: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services. Allowing it would let any string authorize the request. |
+| `sts:GetCallerIdentity` | No policy is evaluated: AWS returns caller identity even when a policy denies it. The credential is still checked: a key that exists nowhere or is inactive, an expired session, or a header with no readable credential is refused as below. |
+| Access key that exists nowhere | **Rejected** with `403`, in each protocol's own vocabulary: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services. Allowing it would let any string authorize the request. A presigned POST is the exception: its credential is in the form body, so a key that exists nowhere, or a credential that cannot be read, is left to S3's own presigned-POST check, and uploads as an unsigned request would when that check is off. An inactive key or an expired session is refused there as everywhere else. |
+| Inactive access key | **Rejected** the same way: a deactivated key can no longer be used by API calls until it is activated again. |
+| Expired session credentials | **Rejected** with `403 ExpiredTokenException`, or `400 ExpiredToken` for S3. Once Floci has removed an expired session it no longer knows the key, and answers as for one that exists nowhere. |
+| `Authorization` header with no readable credential | **Rejected** with `400`, in each protocol's own vocabulary: `AuthorizationHeaderMalformed` for S3 (`AuthorizationQueryParametersError` when the credential is a presigned URL's `X-Amz-Credential`), `IncompleteSignature` for Query services, `IncompleteSignatureException` for JSON services. Without a key or a scope there is nothing to check, so allowing it would skip enforcement altogether. As with no header, an operation AWS serves without credentials is left alone, and a REST request is rejected only when the header claims SigV4. |
 | Known credential with no mappable caller context | Allowed. A stored session carrying no role ARN is a real credential, so it is not treated as unauthenticated. |
 | Bare account-id key with no SCP ceiling | Allowed. With no organization or SCP enforcement off, the account root keeps the historical bypass. |
 | Bare account-id key **with** an SCP ceiling | Enforced as the account root, bounded by the SCP chain. |
