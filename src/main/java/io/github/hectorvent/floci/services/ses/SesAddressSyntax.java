@@ -35,14 +35,13 @@ final class SesAddressSyntax {
         SesSendAddresses.forEachEnvelope(request, SesAddressSyntax::require);
     }
 
-    static void requireRaw(SendEmailRequest request, EmailContent.Raw raw, boolean sourceOmitted,
-                           Message message) {
-        SesSendAddresses.forEachRaw(request, message, RAW_CHECKED_HEADERS, fromHeaderCheck(raw, sourceOmitted),
+    static void requireRaw(SendEmailRequest request, EmailContent.Raw raw, Message message) {
+        SesSendAddresses.forEachRaw(request, message, RAW_CHECKED_HEADERS, fromHeaderCheck(request, raw),
                 SesAddressSyntax::require);
     }
 
-    private static Consumer<String> fromHeaderCheck(EmailContent.Raw raw, boolean sourceOmitted) {
-        if (!raw.checksFromHeader(sourceOmitted)) {
+    private static Consumer<String> fromHeaderCheck(SendEmailRequest request, EmailContent.Raw raw) {
+        if (!raw.checksFromHeader(request.hasSource())) {
             return SesSendAddresses.UNCHECKED;
         }
         return raw.fromHeaderAsFallback() ? SesAddressSyntax::requireFallbackFrom : SesAddressSyntax::require;

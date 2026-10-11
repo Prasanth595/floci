@@ -33,10 +33,9 @@ final class SesAddressLength {
      * encoded and escaped quotes count (probe-confirmed). Each address of a header is checked on its
      * own, so a header listing several short addresses passes however long it is.
      */
-    static void requireRaw(SendEmailRequest request, EmailContent.Raw raw, boolean sourceOmitted,
-                           Message message) {
+    static void requireRaw(SendEmailRequest request, EmailContent.Raw raw, Message message) {
         SesSendAddresses.forEachRaw(request, message, RAW_RECIPIENT_HEADERS,
-                raw.checksFromHeader(sourceOmitted) ? SesAddressLength::require : SesSendAddresses.UNCHECKED,
+                raw.checksFromHeader(request.hasSource()) ? SesAddressLength::require : SesSendAddresses.UNCHECKED,
                 SesAddressLength::require);
     }
 

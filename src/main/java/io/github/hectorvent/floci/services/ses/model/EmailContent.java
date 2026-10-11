@@ -58,8 +58,8 @@ public sealed interface EmailContent {
             this(data, false);
         }
 
-        public boolean checksFromHeader(boolean sourceOmitted) {
-            return !fromHeaderAsFallback || sourceOmitted;
+        public boolean checksFromHeader(boolean senderGiven) {
+            return !fromHeaderAsFallback || !senderGiven;
         }
     }
 }
