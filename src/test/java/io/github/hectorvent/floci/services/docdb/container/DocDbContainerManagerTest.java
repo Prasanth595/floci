@@ -15,6 +15,8 @@ import org.mockito.Mockito;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -24,8 +26,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -150,6 +156,44 @@ class DocDbContainerManagerTest {
     }
 
     private DocDbContainerManager newManager(ContainerLifecycleManager lifecycleManager) {
+        return newManager(lifecycleManager, new RegionResolver("us-east-1", "000000000000"));
+    }
+
+    @Test
+    void sameNamedClustersHaveIndependentContainersAcrossAccountsAndRegions() throws IOException {
+        try (ServerSocket backend = new ServerSocket(0)) {
+            ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+            List<String> names = new ArrayList<>();
+            doAnswer(call -> {
+                names.add(call.getArgument(0));
+                return null;
+            }).when(lifecycle).removeIfExists(anyString());
+            when(lifecycle.createAndStart(any())).thenAnswer(call ->
+                    new ContainerLifecycleManager.ContainerInfo("container-" + names.size(), Map.of(27017,
+                            new ContainerLifecycleManager.EndpointInfo("127.0.0.1", backend.getLocalPort()))));
+            RegionResolver resolver = mock(RegionResolver.class);
+            DocDbContainerManager manager = newManager(lifecycle, resolver);
+            List<DocDbContainerHandle> handles = new ArrayList<>();
+            for (String account : List.of("111111111111", "222222222222")) {
+                when(resolver.getAccountId()).thenReturn(account);
+                for (String region : List.of("us-east-1", "eu-west-1")) {
+                    handles.add(manager.start("shared", "mongo:7.0", "admin", "secret", region));
+                }
+            }
+            assertEquals(4, names.stream().distinct().count());
+            assertEquals("floci-aws-docdb-111111111111-us-east-1-shared", names.getFirst());
+            // Delete reconstructs the handle from persisted metadata, outside its original scope.
+            DocDbContainerHandle first = handles.getFirst();
+            manager.stop(new DocDbContainerHandle(first.getContainerId(), "shared", first.getHost(), first.getPort()));
+            verify(lifecycle, never()).stopAndRemove(eq(handles.get(1).getContainerId()), any());
+            manager.stopAll();
+            for (DocDbContainerHandle handle : handles) {
+                verify(lifecycle, times(1)).stopAndRemove(handle.getContainerId(), handle.getLogStream());
+            }
+        }
+    }
+
+    private DocDbContainerManager newManager(ContainerLifecycleManager lifecycleManager, RegionResolver resolver) {
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
@@ -166,6 +210,6 @@ class DocDbContainerManagerTest {
         when(docdb.dockerNetwork()).thenReturn(Optional.empty());
 
         return new DocDbContainerManager(containerBuilder, lifecycleManager, logStreamer,
-                mock(ContainerDetector.class), config, new RegionResolver("us-east-1", "000000000000"));
+                mock(ContainerDetector.class), config, resolver);
     }
 }
