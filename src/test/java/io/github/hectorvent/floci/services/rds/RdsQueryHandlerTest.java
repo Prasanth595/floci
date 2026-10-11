@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.rds.model.EventSubscription;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -61,6 +62,57 @@ class RdsQueryHandlerTest {
         docDbHandler = mock(DocDbQueryHandler.class);
         neptuneHandler = mock(NeptuneQueryHandler.class);
         handler = new RdsQueryHandler(service, config, docDbHandler, neptuneHandler);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CreateEventSubscription", "ModifyEventSubscription"})
+    void eventSubscriptionEnabledRejectsMalformedValuesBeforeServiceCalls(String action) {
+        for (String invalid : List.of("yes", "", " true ")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle("SubscriptionName", "events");
+            p.putSingle("SnsTopicArn", "arn:aws:sns:us-east-1:000000000000:events");
+            p.putSingle("Enabled", invalid);
+            Response response = handler.handle(action, p, "us-east-1");
+            assertEquals(400, response.getStatus());
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(body.contains("Enabled must be true or false."));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void createEventSubscriptionEnabledPreservesValuesAndOmission(String value) {
+        Boolean expected = value == null ? null : Boolean.valueOf(value);
+        when(service.createEventSubscription(eq("us-east-1"), eq("events"), isNull(), isNull(),
+                anyList(), anyList(), eq(expected), anyMap())).thenReturn(new EventSubscription());
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("SubscriptionName", "events");
+        if (value != null) {
+            p.putSingle("Enabled", value);
+        }
+        assertEquals(200, handler.handle("CreateEventSubscription", p, "us-east-1").getStatus());
+        verify(service).createEventSubscription(eq("us-east-1"), eq("events"), isNull(), isNull(),
+                anyList(), anyList(), eq(expected), anyMap());
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void modifyEventSubscriptionEnabledPreservesValuesAndOmission(String value) {
+        Boolean expected = value == null ? null : Boolean.valueOf(value);
+        when(service.modifyEventSubscription(eq("us-east-1"), eq("events"), isNull(), isNull(),
+                anyList(), eq(expected))).thenReturn(new EventSubscription());
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("SubscriptionName", "events");
+        if (value != null) {
+            p.putSingle("Enabled", value);
+        }
+        assertEquals(200, handler.handle("ModifyEventSubscription", p, "us-east-1").getStatus());
+        verify(service).modifyEventSubscription(eq("us-east-1"), eq("events"), isNull(), isNull(),
+                anyList(), eq(expected));
     }
 
     @ParameterizedTest

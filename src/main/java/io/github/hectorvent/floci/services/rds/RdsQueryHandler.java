@@ -313,7 +313,7 @@ public class RdsQueryHandler {
                 params.getFirst("SourceType"),
                 memberList(params, "SourceIds"),
                 memberList(params, "EventCategories"),
-                optionalBoolean(params.getFirst("Enabled")),
+                parseOptionalBoolean(params, "Enabled"),
                 parseTags(params));
         return Response.ok(AwsQueryResponse.envelope("CreateEventSubscription", AwsNamespaces.RDS,
                 new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
@@ -325,7 +325,7 @@ public class RdsQueryHandler {
                 params.getFirst("SnsTopicArn"),
                 params.getFirst("SourceType"),
                 memberList(params, "EventCategories"),
-                optionalBoolean(params.getFirst("Enabled")));
+                parseOptionalBoolean(params, "Enabled"));
         return Response.ok(AwsQueryResponse.envelope("ModifyEventSubscription", AwsNamespaces.RDS,
                 new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
     }
