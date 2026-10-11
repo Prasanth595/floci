@@ -6249,6 +6249,9 @@ public class Ec2QueryHandler {
         String subnetId = p.getFirst("LaunchSpecification.SubnetId");
         List<String> securityGroupIds = getList(p, "LaunchSpecification.SecurityGroupId");
         String userDataEncoded = p.getFirst("LaunchSpecification.UserData");
+        if (userDataEncoded != null && !userDataEncoded.isEmpty() && userDataEncoded.isBlank()) {
+            userDataEncoded = null;
+        }
         String userData = Ec2UserDataDecoder.decode(userDataEncoded);
         String iamInstanceProfileArn = p.getFirst("LaunchSpecification.IamInstanceProfile.Arn");
 

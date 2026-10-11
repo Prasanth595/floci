@@ -40,7 +40,7 @@ class Ec2Tests {
     }
 
     @Test
-    @Order(0)
+    @Order(-1)
     void spotRequestsPreserveOriginalUserData() {
         String encoded = "/w";
         SpotInstanceRequest request = ec2.requestSpotInstances(RequestSpotInstancesRequest.builder()

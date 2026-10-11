@@ -122,6 +122,34 @@ class Ec2UserDataAttributeIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {" ", " \t\r\n"})
+    void spotLaunchTreatsWhitespaceUserDataAsAbsent(String encoded) {
+        Response response = given().header("Authorization", AUTH).formParam("Action", "RequestSpotInstances")
+                .formParam("LaunchSpecification.ImageId", "ami-0abcdef1234567890")
+                .formParam("LaunchSpecification.InstanceType", "t3.micro")
+                .formParam("LaunchSpecification.UserData", encoded).post("/");
+        response.then().statusCode(200);
+        String id = response.path("RequestSpotInstancesResponse.spotInstanceRequestSet.item.instanceId");
+        String requestId = response.path("RequestSpotInstancesResponse.spotInstanceRequestSet.item.spotInstanceRequestId");
+        try {
+            response.then().body("RequestSpotInstancesResponse.spotInstanceRequestSet.item.launchSpecification.userData.size()",
+                    equalTo(0));
+            given().header("Authorization", AUTH).formParam("Action", "DescribeSpotInstanceRequests")
+                    .formParam("SpotInstanceRequestId.1", requestId).post("/").then().statusCode(200)
+                    .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item.launchSpecification.userData.size()",
+                            equalTo(0));
+            given().header("Authorization", AUTH).formParam("Action", "DescribeInstanceAttribute")
+                    .formParam("InstanceId", id).formParam("Attribute", "userData")
+                    .post("/").then().statusCode(200)
+                    .body("DescribeInstanceAttributeResponse.userData.value.size()", equalTo(0));
+        } finally {
+            terminate(id);
+            given().header("Authorization", AUTH).formParam("Action", "CancelSpotInstanceRequests")
+                    .formParam("SpotInstanceRequestId.1", requestId).post("/").then().statusCode(200);
+        }
+    }
+
     @Test
     void spotLaunchRejectsInvalidEncodedUserDataBeforeCreatingRequests() {
         for (String encoded : new String[]{"not-base64!", "H4sI", Base64.getEncoder().encodeToString(new byte[16385])}) {
