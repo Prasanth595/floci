@@ -115,7 +115,7 @@ class CognitoUserPoolDomainIntegrationTest {
 
     @Test
     @Order(4)
-    void deletePrefixDomainSucceeds() {
+    void deletePrefixDomainSucceeds() throws Exception {
         cognitoAction("DeleteUserPoolDomain", """
                 {
                   "Domain": "%s",
@@ -124,6 +124,13 @@ class CognitoUserPoolDomainIntegrationTest {
                 """.formatted(prefixDomain, poolId))
                 .then()
                 .statusCode(200);
+
+        JsonNode userPool = cognitoJson("DescribeUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(poolId)).path("UserPool");
+        assertNull(userPool.get("Domain"));
     }
 
     @Test
@@ -397,5 +404,61 @@ class CognitoUserPoolDomainIntegrationTest {
                 """.formatted(poolId))
                 .then()
                 .statusCode(200);
+    }
+
+    @Test
+    @Order(18)
+    void samePoolIdInDifferentAccountsReturnsOnlyThatAccountsDomain() throws Exception {
+        String accountB = "111122223333";
+        String sharedPoolId = "us-east-1_shared" + UUID.randomUUID().toString().substring(0, 8);
+        String defaultDomain = "floci-default-" + UUID.randomUUID().toString().substring(0, 8);
+        String accountBDomain = "floci-accountb-" + UUID.randomUUID().toString().substring(0, 8);
+        cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "DefaultAccountSharedPool",
+                  "UserPoolTags": { "floci:override-id": "%s" }
+                }
+                """.formatted(sharedPoolId));
+        CognitoCustomDomainFixtures.awsJsonAs(accountB, CognitoCustomDomainFixtures.COGNITO, "CreateUserPool", """
+                {
+                  "PoolName": "AccountBSharedPool",
+                  "UserPoolTags": { "floci:override-id": "%s" }
+                }
+                """.formatted(sharedPoolId));
+
+        try {
+            cognitoJson("CreateUserPoolDomain", """
+                    { "Domain": "%s", "UserPoolId": "%s" }
+                    """.formatted(defaultDomain, sharedPoolId));
+            CognitoCustomDomainFixtures.awsJsonAs(accountB, CognitoCustomDomainFixtures.COGNITO,
+                    "CreateUserPoolDomain", """
+                            { "Domain": "%s", "UserPoolId": "%s" }
+                            """.formatted(accountBDomain, sharedPoolId));
+
+            JsonNode defaultPool = cognitoJson("DescribeUserPool", """
+                    { "UserPoolId": "%s" }
+                    """.formatted(sharedPoolId)).path("UserPool");
+            JsonNode accountBPool = CognitoCustomDomainFixtures.awsJsonAs(accountB,
+                    CognitoCustomDomainFixtures.COGNITO, "DescribeUserPool", """
+                            { "UserPoolId": "%s" }
+                            """.formatted(sharedPoolId)).path("UserPool");
+            assertEquals(defaultDomain, defaultPool.path("Domain").asText());
+            assertEquals(accountBDomain, accountBPool.path("Domain").asText());
+        } finally {
+            CognitoCustomDomainFixtures.awsActionAs(accountB, CognitoCustomDomainFixtures.COGNITO,
+                    "DeleteUserPoolDomain", """
+                            { "Domain": "%s", "UserPoolId": "%s" }
+                            """.formatted(accountBDomain, sharedPoolId)).then().statusCode(200);
+            cognitoAction("DeleteUserPoolDomain", """
+                    { "Domain": "%s", "UserPoolId": "%s" }
+                    """.formatted(defaultDomain, sharedPoolId)).then().statusCode(200);
+            CognitoCustomDomainFixtures.awsActionAs(accountB, CognitoCustomDomainFixtures.COGNITO,
+                    "DeleteUserPool", """
+                            { "UserPoolId": "%s" }
+                            """.formatted(sharedPoolId)).then().statusCode(200);
+            cognitoAction("DeleteUserPool", """
+                    { "UserPoolId": "%s" }
+                    """.formatted(sharedPoolId)).then().statusCode(200);
+        }
     }
 }

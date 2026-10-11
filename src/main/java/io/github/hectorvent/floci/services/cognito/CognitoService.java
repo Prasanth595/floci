@@ -141,6 +141,7 @@ public class CognitoService implements ResourceProvider {
     private final StorageBackend<String, CognitoUser> userStore;
     private final StorageBackend<String, CognitoGroup> groupStore;
     private final StorageBackend<String, RevokedTokenInfo> revokedTokenStore;
+    private final Map<DomainAccount, Map<String, UserPoolDomainNames>> domainNamesByAccount = new ConcurrentHashMap<>();
     private final String baseUrl;
     private final String cloudFrontDomainSuffix;
     private final RegionResolver regionResolver;
@@ -1675,6 +1676,7 @@ public class CognitoService implements ResourceProvider {
                 registerCertificateUse(userPoolDomain.getCertificateArn(), userPoolDomain);
             }
             domainStore.put(domain, userPoolDomain);
+            addDomainNameToIndex(userPoolDomain);
         }
         // Outside the lock: the reissue blocks until the HTTPS listener has switched certificates.
         // A prefix domain is served under amazoncognito.com on AWS, not by Floci; a custom domain is.
@@ -1730,22 +1732,71 @@ public class CognitoService implements ResourceProvider {
     }
 
     public UserPoolDomainNames findDomainNamesForPool(String poolId) {
-        String domain = null;
-        String customDomain = null;
-        for (UserPoolDomain userPoolDomain : allDomains()) {
-            if (!poolId.equals(userPoolDomain.getUserPoolId())) {
-                continue;
-            }
-            if (userPoolDomain.isCustomDomain() && customDomain == null) {
-                customDomain = userPoolDomain.getDomain();
-            } else if (!userPoolDomain.isCustomDomain() && domain == null) {
-                domain = userPoolDomain.getDomain();
+        DomainAccount account = currentDomainAccount();
+        Map<String, UserPoolDomainNames> namesByPool = domainNamesByAccount.get(account);
+        if (namesByPool == null) {
+            synchronized (domainLock) {
+                namesByPool = domainNamesByAccount.get(account);
+                if (namesByPool == null) {
+                    namesByPool = buildDomainNamesIndex(account.accountId());
+                    domainNamesByAccount.put(account, namesByPool);
+                }
             }
         }
-        return new UserPoolDomainNames(domain, customDomain);
+        return namesByPool.getOrDefault(poolId, new UserPoolDomainNames(null, null));
     }
 
     public record UserPoolDomainNames(String domain, String customDomain) { }
+
+    private record DomainAccount(String partition, String accountId) { }
+
+    private DomainAccount currentDomainAccount() {
+        return new DomainAccount(regionResolver.getPartition(), regionResolver.getAccountId());
+    }
+
+    private Map<String, UserPoolDomainNames> buildDomainNamesIndex(String accountId) {
+        List<UserPoolDomain> domains;
+        if (domainStore instanceof AccountAwareStorageBackend<UserPoolDomain> aware) {
+            List<UserPoolDomain> accountDomains = new ArrayList<>(aware.scanForAccount(accountId, key -> true));
+            accountDomains.addAll(aware.scanUnscopedLegacy(domain -> accountId.equals(domain.getAwsAccountId())));
+            domains = accountDomains;
+        } else {
+            domains = domainStore.scan(key -> true);
+        }
+        Map<String, UserPoolDomainNames> namesByPool = new HashMap<>();
+        for (UserPoolDomain userPoolDomain : domains) {
+            UserPoolDomainNames names = namesByPool.getOrDefault(userPoolDomain.getUserPoolId(),
+                    new UserPoolDomainNames(null, null));
+            if (userPoolDomain.isCustomDomain() && names.customDomain() == null) {
+                names = new UserPoolDomainNames(names.domain(), userPoolDomain.getDomain());
+            } else if (!userPoolDomain.isCustomDomain() && names.domain() == null) {
+                names = new UserPoolDomainNames(userPoolDomain.getDomain(), names.customDomain());
+            }
+            namesByPool.put(userPoolDomain.getUserPoolId(), names);
+        }
+        return Map.copyOf(namesByPool);
+    }
+
+    private void addDomainNameToIndex(UserPoolDomain userPoolDomain) {
+        Map<String, UserPoolDomainNames> namesByPool = domainNamesByAccount.get(currentDomainAccount());
+        if (namesByPool == null) {
+            return;
+        }
+        Map<String, UserPoolDomainNames> updatedNamesByPool = new HashMap<>(namesByPool);
+        UserPoolDomainNames names = updatedNamesByPool.getOrDefault(userPoolDomain.getUserPoolId(),
+                new UserPoolDomainNames(null, null));
+        if (userPoolDomain.isCustomDomain() && names.customDomain() == null) {
+            names = new UserPoolDomainNames(names.domain(), userPoolDomain.getDomain());
+        } else if (!userPoolDomain.isCustomDomain() && names.domain() == null) {
+            names = new UserPoolDomainNames(userPoolDomain.getDomain(), names.customDomain());
+        }
+        updatedNamesByPool.put(userPoolDomain.getUserPoolId(), names);
+        domainNamesByAccount.put(currentDomainAccount(), Map.copyOf(updatedNamesByPool));
+    }
+
+    private void invalidateDomainNamesIndex() {
+        domainNamesByAccount.remove(currentDomainAccount());
+    }
 
     private List<UserPoolDomain> allDomains() {
         return domainStore instanceof AccountAwareStorageBackend<UserPoolDomain> aware
@@ -1810,7 +1861,10 @@ public class CognitoService implements ResourceProvider {
         if (!userPoolDomain.getUserPoolId().equals(userPoolId)) {
             throw new AwsException("ResourceNotFoundException", "Domain does not exist", 400);
         }
-        domainStore.delete(domain);
+        synchronized (domainLock) {
+            domainStore.delete(domain);
+            invalidateDomainNamesIndex();
+        }
         if (userPoolDomain.isCustomDomain()) {
             acmService.removeInUseBy(userPoolDomain.getCertificateArn(),
                     cloudFrontDistributionArn(regionResolver.getPartition(), userPoolDomain), CERTIFICATE_REGION);
