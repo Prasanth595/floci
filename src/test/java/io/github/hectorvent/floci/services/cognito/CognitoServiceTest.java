@@ -34,6 +34,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.lang.management.ManagementFactory;
@@ -240,6 +241,51 @@ class CognitoServiceTest {
         service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "TempPass1!");
         service.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
         return pool;
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"alice smith@example.com", "alice", "alice@", "@example.com",
+            "alice@@example.com", "alice@example.com\n", "alice@example.com\u0000", "alice@exa mple.com"})
+    @SuppressWarnings("unchecked")
+    void malformedEmailsAreRejectedBeforeAnyUserOrAttributeIsStored(String email) {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "email-client", false);
+        Map<String, Object> auth = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        String token = (String) ((Map<String, Object>) auth.get("AuthenticationResult")).get("AccessToken");
+        Map<String, String> attributes = Map.of("email", email, "name", "must-not-be-saved");
+        for (Runnable operation : List.<Runnable>of(
+                () -> service.adminCreateUser(pool.getId(), "invalid-admin", attributes, "TempPass1!"),
+                () -> service.signUp(client.getClientId(), "invalid-signup", "Pass1234!", attributes),
+                () -> service.adminUpdateUserAttributes(pool.getId(), "alice", attributes),
+                () -> service.updateUserAttributes(token, attributes))) {
+            AwsException error = assertThrows(AwsException.class, operation::run);
+            assertEquals("InvalidParameterException", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+        }
+        assertEquals(1, userStore.keys().size());
+        CognitoUser unchanged = service.adminGetUser(pool.getId(), "alice");
+        assertEquals("alice@example.com", unchanged.getAttributes().get("email"));
+        assertFalse(unchanged.getAttributes().containsKey("name"));
+        assertTrue(unchanged.getPendingAttributes().isEmpty());
+    }
+
+    @Test
+    void emailLengthUsesCognitoLimitAndBlankSelfServiceUpdateStillDeletes() {
+        UserPool pool = createPoolAndUser();
+        String validLongEmail = "a".repeat(2036) + "@example.com";
+        assertEquals(2048, validLongEmail.length());
+        service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("email", validLongEmail));
+        assertEquals(validLongEmail, service.adminGetUser(pool.getId(), "alice").getAttributes().get("email"));
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                () -> service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("email", "a" + validLongEmail)))
+                .getErrorCode());
+        UserPoolClient client = openClient(service, pool.getId(), "email-client", false);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> auth = (Map<String, Object>) service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")).get("AuthenticationResult");
+        service.updateUserAttributes((String) auth.get("AccessToken"), Map.of("email", ""));
+        assertNull(service.adminGetUser(pool.getId(), "alice").getAttributes().get("email"));
     }
 
     private UserPool createPoolWithStrictPasswordPolicy() {
@@ -4478,12 +4524,12 @@ class CognitoServiceTest {
                 Map.of("PoolName", "TestPool", "AliasAttributes", List.of("email")),
                 "us-east-1"
         );
-        service.adminCreateUser(pool.getId(), "shared-lookup", Map.of("email", "owner@example.com"), null);
+        service.adminCreateUser(pool.getId(), "shared-lookup@example.com", Map.of("email", "owner@example.com"), null);
         service.adminCreateUser(pool.getId(), "alice",
-                Map.of("email", "shared-lookup", "email_verified", "true"), null);
+                Map.of("email", "shared-lookup@example.com", "email_verified", "true"), null);
 
         AwsException ex = assertThrows(AwsException.class,
-                () -> service.adminGetUser(pool.getId(), "shared-lookup"));
+                () -> service.adminGetUser(pool.getId(), "shared-lookup@example.com"));
         assertEquals("InvalidParameterException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
@@ -4494,13 +4540,13 @@ class CognitoServiceTest {
                 Map.of("PoolName", "TestPool", "AliasAttributes", List.of("email")),
                 "us-east-1"
         );
-        service.adminCreateUser(pool.getId(), "shared-lookup", Map.of("email", "owner@example.com"), null);
+        service.adminCreateUser(pool.getId(), "shared-lookup@example.com", Map.of("email", "owner@example.com"), null);
         service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), null);
         service.adminUpdateUserAttributes(pool.getId(), "alice",
-                Map.of("email", "shared-lookup", "email_verified", "true"));
+                Map.of("email", "shared-lookup@example.com", "email_verified", "true"));
 
         AwsException ex = assertThrows(AwsException.class,
-                () -> service.adminGetUser(pool.getId(), "shared-lookup"));
+                () -> service.adminGetUser(pool.getId(), "shared-lookup@example.com"));
         assertEquals("InvalidParameterException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }

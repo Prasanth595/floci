@@ -112,6 +112,10 @@ public class CognitoService implements ResourceProvider {
     private static final List<String> DELIVERY_MEDIUMS = List.of("SMS", "EMAIL");
     // JVM-local stripes bound lock memory without retaining one lock for every user key.
     private static final int USER_LOCK_STRIPES = 512;
+    // A Cognito email attribute is one address, not an SES display-name or recipient list.
+    private static final Pattern EMAIL_ATTRIBUTE_PATTERN =
+            Pattern.compile("[^\\s\\p{Cntrl}@<>,;]+@[^\\s\\p{Cntrl}@<>,;]+");
+    private static final int EMAIL_ATTRIBUTE_MAX_LENGTH = 2048;
     /**
      * No configured CloudFront suffix, for the test constructors: the suffix then follows the
      * request's partition. CDI wires {@code floci.services.cloudfront.domain-suffix}.
@@ -2328,6 +2332,8 @@ public class CognitoService implements ResourceProvider {
             resolvedAttributes.put("sub", canonicalUsername);
         }
 
+        validateEmailAttribute(resolvedAttributes, false);
+
         CognitoUser user = new CognitoUser();
         user.setUsername(canonicalUsername);
         user.setUserPoolId(pool.getId());
@@ -2628,6 +2634,7 @@ public class CognitoService implements ResourceProvider {
             String userPoolId, String username, Map<String, String> attributes) {
         CognitoUser user = adminGetUser(userPoolId, username);
         UserPool pool = describeUserPool(userPoolId);
+        validateEmailAttribute(attributes, true);
         if (usesAliasUsernames(pool)) {
             for (String aliasAttribute : pool.getUsernameAttributes()) {
                 String newValue = attributes.get(aliasAttribute);
@@ -3261,6 +3268,8 @@ public class CognitoService implements ResourceProvider {
         } else if (userStore.get(userKey(userPoolId, username)).isPresent()) {
             throw new AwsException("UsernameExistsException", "User already exists", 400);
         }
+
+        validateEmailAttribute(resolvedAttributes, false);
 
         String key = userKey(userPoolId, canonicalUsername);
 
@@ -4043,6 +4052,7 @@ public class CognitoService implements ResourceProvider {
             String poolId, String username, Map<String, String> attributes) {
         UserPool pool = describeUserPool(poolId);
         CognitoUser currentUser = adminGetUser(poolId, username);
+        validateEmailAttribute(attributes, true);
 
         // Validate every entry (alias availability) before mutating the user or issuing any
         // verification code. Otherwise a later entry failing leaves an earlier entry's code
@@ -4111,6 +4121,21 @@ public class CognitoService implements ResourceProvider {
         updatedUser.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(poolId, updatedUser.getUsername()), updatedUser);
         return deliveryDetails;
+    }
+
+    private static void validateEmailAttribute(Map<String, String> attributes, boolean allowDeletion) {
+        if (attributes == null || !attributes.containsKey("email")) {
+            return;
+        }
+        String email = attributes.get("email");
+        if (allowDeletion && "".equals(email)) {
+            return;
+        }
+        // Use Cognito's 2048-character attribute limit, not SES's envelope-address limit.
+        if (email == null || email.length() > EMAIL_ATTRIBUTE_MAX_LENGTH
+                || !EMAIL_ATTRIBUTE_PATTERN.matcher(email).matches()) {
+            throw new AwsException("InvalidParameterException", "Invalid email address format.", 400);
+        }
     }
 
     public void deleteUserAttributes(String accessToken, List<String> attributeNames) {
