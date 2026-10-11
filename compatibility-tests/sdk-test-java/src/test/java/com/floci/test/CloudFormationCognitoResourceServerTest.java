@@ -1,11 +1,16 @@
 package com.floci.test;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.CloudFormationException;
 import software.amazon.awssdk.services.cloudformation.model.Output;
@@ -266,6 +271,91 @@ class CloudFormationCognitoResourceServerTest {
         assertThat(identifiers(p1)).containsExactly(identifier);
         assertThat(identifiers(p2)).isEmpty();
         assertStackDeletionClearsBothPools();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @DisplayName("Explicit and resolved null Scopes fail without clearing the existing server")
+    void nullScopesUpdatesPreserveTheExistingConfiguration(boolean conditional) throws Exception {
+        String identifier = stackName + "-api";
+        List<Parameter> original = parameters(identifier, p1, "Original API", "read", "Read access", true, false, false);
+        createStack(original);
+        String invalidTemplate = nullScopesTemplate(conditional);
+
+        cfn.updateStack(r -> r.stackName(stackName).templateBody(invalidTemplate)
+                .parameters(parameters(identifier, p1, "Changed API", "write", "Write access", true, false, false)));
+        awaitStatus("UPDATE_ROLLBACK_COMPLETE");
+
+        assertThat(failedEvents()).contains("Scopes must be a list");
+        assertIdentity(identifier);
+        assertServer(p1, identifier, "Original API", "read", "Read access");
+        updateStack(parameters(identifier, p1, "Recovered API", "write", "Write access", true, false, false),
+                "UPDATE_COMPLETE");
+        assertServer(p1, identifier, "Recovered API", "write", "Write access");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @DisplayName("A missing old server does not block an Identifier or UserPoolId replacement")
+    void replacingAnExternallyDeletedServerCreatesTheNewAddress(boolean changePool) throws InterruptedException {
+        String original = stackName + "-api";
+        String targetIdentifier = changePool ? original : stackName + "-replacement";
+        String targetPool = changePool ? p2 : p1;
+        createStack(parameters(original, p1, "Original API", "read", "Read access", true, false, false));
+        cognito.deleteResourceServer(r -> r.userPoolId(p1).identifier(original));
+
+        updateStack(parameters(targetIdentifier, targetPool, "Replacement API", "write", "Write access",
+                true, false, false), "UPDATE_COMPLETE");
+
+        assertIdentity(targetIdentifier);
+        assertServer(targetPool, targetIdentifier, "Replacement API", "write", "Write access");
+        assertServerNotFound(p1, original);
+        deleteStack();
+        assertServerNotFound(targetPool, targetIdentifier);
+    }
+
+    @Test
+    @DisplayName("A same-address update still fails when its backing server was deleted")
+    void updatingAMissingServerAtTheSameAddressStillFails() throws InterruptedException {
+        String identifier = stackName + "-api";
+        createStack(parameters(identifier, p1, "Original API", "read", "Read access", true, false, false));
+        cognito.deleteResourceServer(r -> r.userPoolId(p1).identifier(identifier));
+
+        updateStack(parameters(identifier, p1, "Changed API", "write", "Write access", true, false, false),
+                "UPDATE_ROLLBACK_COMPLETE");
+
+        assertIdentity(identifier);
+        assertServerNotFound(p1, identifier);
+    }
+
+    @Test
+    @DisplayName("Rollback of a missing-old replacement restores its address and deletes only the new server")
+    void failedDependentResourceRollsBackAReplacementWhoseOldServerWasDeleted() throws InterruptedException {
+        String identifier = stackName + "-api";
+        createStack(parameters(identifier, p1, "Original API", "read", "Read access", true, false, false));
+        cognito.deleteResourceServer(r -> r.userPoolId(p1).identifier(identifier));
+
+        updateStack(parameters(identifier, p2, "Replacement API", "write", "Write access", true, false, true),
+                "UPDATE_ROLLBACK_COMPLETE");
+
+        assertDependentFailure();
+        assertIdentity(identifier);
+        assertServerNotFound(p1, identifier);
+        assertServerNotFound(p2, identifier);
+        assertStackDeletionClearsBothPools();
+    }
+
+    private static String nullScopesTemplate(boolean conditional) throws JsonProcessingException {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode template = (ObjectNode) mapper.readTree(TEMPLATE);
+        ObjectNode properties = (ObjectNode) template.path("Resources").path("Server").path("Properties");
+        if (conditional) {
+            properties.putObject("Scopes").putArray("Fn::If")
+                    .add("IncludeScopes").addNull().add(mapper.createArrayNode());
+        } else {
+            properties.putNull("Scopes");
+        }
+        return template.toString();
     }
 
     private static List<Parameter> parameters(String identifier, String userPoolId, String name, String scopeName,

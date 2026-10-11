@@ -235,6 +235,128 @@ class CognitoResourceServerCfnProvisionerTest {
         verifyNoInteractions(cognito);
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rejectsNullScopesBeforeCreateOrUpdate(boolean update) {
+        ObjectNode properties = properties(POOL, IDENTIFIER, "Changed API");
+        properties.putNull("Scopes");
+        StackResource resource = resource(update ? IDENTIFIER : null, update ? POOL : null);
+        HashMap<String, String> priorAttributes = new HashMap<>(resource.getAttributes());
+        String priorPhysicalId = resource.getPhysicalId();
+        if (update) {
+            when(cognito.describeResourceServer(POOL, IDENTIFIER)).thenReturn(server(POOL, IDENTIFIER, "Original API"));
+        }
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource, properties,
+                ctx(update ? IDENTIFIER : null)));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertEquals(priorPhysicalId, resource.getPhysicalId());
+        assertEquals(priorAttributes, resource.getAttributes());
+        verifyNoInteractions(cognito);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void replacesExternallyDeletedServerBeforeCleaningItsOldAddress(boolean changePool) {
+        String targetPool = changePool ? NEW_POOL : POOL;
+        String targetIdentifier = changePool ? IDENTIFIER : "https://replacement.example.com";
+        StackResource resource = resource(IDENTIFIER, POOL);
+        when(cognito.describeResourceServer(POOL, IDENTIFIER))
+                .thenThrow(new AwsException("ResourceNotFoundException", "old server was deleted", 400));
+        doThrow(new AwsException("ResourceNotFoundException", "old server was deleted", 400))
+                .when(cognito).deleteResourceServer(POOL, IDENTIFIER);
+
+        provisioner.provision(resource, properties(targetPool, targetIdentifier, "Replacement API"), ctx(IDENTIFIER));
+
+        verify(cognito).createResourceServer(targetPool, targetIdentifier, "Replacement API", List.of());
+        verify(cognito, never()).describeResourceServer(POOL, IDENTIFIER);
+        verify(cognito, never()).deleteResourceServer(POOL, IDENTIFIER);
+        assertEquals(targetIdentifier, resource.getPhysicalId());
+        assertEquals(targetPool, resource.getAttributes().get("__FlociResourceServerPoolId"));
+        assertTrue(provisioner.hasReplacementUpdate(resource));
+        assertTrue(provisioner.completeUpdate(resource).complete());
+        verify(cognito).deleteResourceServer(POOL, IDENTIFIER);
+        verify(cognito, never()).deleteResourceServer(targetPool, targetIdentifier);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rejectsConditionallyResolvedNullScopesWithoutChangingResourceMetadata(boolean update) throws Exception {
+        ObjectNode properties = properties(POOL, IDENTIFIER, "Changed API");
+        properties.set("Scopes", mapper.readTree("""
+                {"Fn::If": ["IncludeScopes", {"Ref": "AWS::NoValue"}, null]}
+                """));
+        StackResource resource = resource(update ? IDENTIFIER : null, update ? POOL : null);
+        resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, "previous rollback failure");
+        HashMap<String, String> priorAttributes = new HashMap<>(resource.getAttributes());
+        ProvisionContext initial = intrinsicContext();
+        ProvisionContext context = new ProvisionContext(initial.engine(), initial.region(), initial.accountId(),
+                initial.stackName(), update ? IDENTIFIER : null);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource, properties, context));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertEquals(update ? IDENTIFIER : null, resource.getPhysicalId());
+        assertEquals(priorAttributes, resource.getAttributes());
+        verifyNoInteractions(cognito);
+    }
+
+    @Test
+    void aMissingServerStillFailsAnUpdateAtTheSameAddress() {
+        StackResource resource = resource(IDENTIFIER, POOL);
+        HashMap<String, String> priorAttributes = new HashMap<>(resource.getAttributes());
+        AwsException missing = new AwsException("ResourceNotFoundException", "server was deleted", 400);
+        when(cognito.describeResourceServer(POOL, IDENTIFIER)).thenThrow(missing);
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource,
+                properties(POOL, IDENTIFIER, "Changed API"), ctx(IDENTIFIER)));
+
+        assertEquals(missing, failure);
+        assertEquals(IDENTIFIER, resource.getPhysicalId());
+        assertEquals(priorAttributes, resource.getAttributes());
+        verify(cognito, never()).createResourceServer(any(), any(), any(), any());
+        verify(cognito, never()).updateResourceServer(any(), any(), any(), any());
+        verify(cognito, never()).deleteResourceServer(any(), any());
+    }
+
+    @Test
+    void aFailedReplacementCreateLeavesThePriorAddressAndMetadataUnchanged() {
+        StackResource resource = resource(IDENTIFIER, POOL);
+        HashMap<String, String> priorAttributes = new HashMap<>(resource.getAttributes());
+        AwsException failure = new AwsException("InternalErrorException", "replacement creation failed", 500);
+        when(cognito.createResourceServer(NEW_POOL, IDENTIFIER, "Replacement API", List.of())).thenThrow(failure);
+
+        assertEquals(failure, assertThrows(AwsException.class, () -> provisioner.provision(resource,
+                properties(NEW_POOL, IDENTIFIER, "Replacement API"), ctx(IDENTIFIER))));
+
+        assertEquals(IDENTIFIER, resource.getPhysicalId());
+        assertEquals(priorAttributes, resource.getAttributes());
+        verify(cognito, never()).describeResourceServer(any(), any());
+        verify(cognito, never()).deleteResourceServer(any(), any());
+    }
+
+    @Test
+    void replacementRollbackRestoresTheMissingOldAddressAndDeletesOnlyTheNewServer() {
+        StackResource resource = resource(IDENTIFIER, POOL);
+        resource.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+        HashMap<String, String> priorAttributes = new HashMap<>(resource.getAttributes());
+        when(cognito.describeResourceServer(POOL, IDENTIFIER))
+                .thenThrow(new AwsException("ResourceNotFoundException", "old server was deleted", 400));
+
+        provisioner.provision(resource, properties(NEW_POOL, IDENTIFIER, "Replacement API"), ctx(IDENTIFIER));
+
+        assertTrue(provisioner.rollbackUpdate(resource));
+        assertEquals(IDENTIFIER, resource.getPhysicalId());
+        assertEquals(priorAttributes, resource.getAttributes());
+        verify(cognito).deleteResourceServer(NEW_POOL, IDENTIFIER);
+        verify(cognito, never()).describeResourceServer(POOL, IDENTIFIER);
+        verify(cognito, never()).deleteResourceServer(POOL, IDENTIFIER);
+        verify(cognito, never()).createResourceServer(eq(POOL), any(), any(), any());
+        verify(cognito, never()).updateResourceServer(any(), any(), any(), any());
+    }
+
     @Test
     void conditionallyOmittedScopesCreateAnEmptyScopeList() throws Exception {
         ObjectNode properties = properties(POOL, IDENTIFIER, "Example API");

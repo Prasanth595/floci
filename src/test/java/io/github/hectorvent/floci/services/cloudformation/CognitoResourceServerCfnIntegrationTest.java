@@ -175,6 +175,90 @@ class CognitoResourceServerCfnIntegrationTest {
         assertEquals(0, server(pool, IDENTIFIER).path("Scopes").size());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void nullScopesFailCreationWithoutCreatingABackingServer(boolean conditional) throws Exception {
+        String pool = createPool();
+        cloudFormation("CreateStack", nullScopesTemplate(pool, "Invalid API", conditional));
+        createdStack = true;
+
+        assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack).status());
+        assertScopeValidationFailure();
+        assertServerGone(pool, IDENTIFIER);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void nullScopesFailUpdateAndPreserveTheBackingConfiguration(boolean conditional) throws Exception {
+        String pool = createPool();
+        createStack(template(pool, IDENTIFIER, "Original API", "read"));
+
+        updateStack(nullScopesTemplate(pool, "Changed API", conditional), "UPDATE_ROLLBACK_COMPLETE");
+
+        assertScopeValidationFailure();
+        assertEquals(IDENTIFIER, output("ServerRef"));
+        assertServer(pool, IDENTIFIER, "Original API", "read");
+        updateStack(template(pool, IDENTIFIER, "Recovered API", "write"), "UPDATE_COMPLETE");
+        assertServer(pool, IDENTIFIER, "Recovered API", "write");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void replacingAnExternallyDeletedServerCreatesTheNewAddress(boolean changePool) throws Exception {
+        String originalPool = createPool();
+        String targetPool = changePool ? createPool() : originalPool;
+        String targetIdentifier = changePool ? IDENTIFIER : "https://replacement.example.com";
+        createStack(template(originalPool, IDENTIFIER, "Original API", "read"));
+        deleteServer(originalPool);
+
+        updateStack(template(targetPool, targetIdentifier, "Replacement API", "write"), "UPDATE_COMPLETE");
+
+        assertEquals(targetIdentifier, output("ServerRef"));
+        assertServer(targetPool, targetIdentifier, "Replacement API", "write");
+        assertServerGone(originalPool, IDENTIFIER);
+        cloudFormation("DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        createdStack = false;
+        assertServerGone(targetPool, targetIdentifier);
+    }
+
+    @Test
+    void updatingTheSameAddressStillFailsWhenTheBackingServerWasDeleted() throws Exception {
+        String pool = createPool();
+        createStack(template(pool, IDENTIFIER, "Original API", "read"));
+        deleteServer(pool);
+
+        updateStack(template(pool, IDENTIFIER, "Changed API", "write"), "UPDATE_ROLLBACK_COMPLETE");
+
+        assertEquals(IDENTIFIER, output("ServerRef"));
+        assertServerGone(pool, IDENTIFIER);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void replacementRollbackRestoresMissingOldAddressMetadataAndDeletesTheNewServer(boolean changePool)
+            throws Exception {
+        String originalPool = createPool();
+        String targetPool = changePool ? createPool() : originalPool;
+        String targetIdentifier = changePool ? IDENTIFIER : "https://replacement.example.com";
+        createStack(template(originalPool, IDENTIFIER, "Original API", "read"));
+        deleteServer(originalPool);
+        ObjectNode attempted = template(targetPool, targetIdentifier, "Replacement API", "write");
+        addFailingDependentResource(attempted);
+
+        updateStack(attempted, "UPDATE_ROLLBACK_COMPLETE");
+
+        verify(cognitoService).createResourceServer(eq(targetPool), eq(targetIdentifier), eq("Replacement API"), any());
+        verify(cognitoService).deleteResourceServer(targetPool, targetIdentifier);
+        assertEquals(IDENTIFIER, output("ServerRef"));
+        assertServerGone(originalPool, IDENTIFIER);
+        assertServerGone(targetPool, targetIdentifier);
+        String restoredPool = cloudFormationService.describeStacks(stack, "us-east-1", "000000000000")
+                .getFirst().getResources().get("Server")
+                .getAttributes().get("__FlociResourceServerPoolId");
+        assertEquals(originalPool, restoredPool);
+    }
+
     @Test
     void updatingAnOutOfBandRecreatedServerRestoresTheTemplateConfiguration() throws Exception {
         String pool = createPool();
@@ -722,6 +806,27 @@ class CognitoResourceServerCfnIntegrationTest {
             properties.set("Scopes", conditional);
         }
         return template;
+    }
+
+    private ObjectNode nullScopesTemplate(String pool, String name, boolean conditional) {
+        ObjectNode template = template(pool, IDENTIFIER, name, null);
+        ObjectNode properties = (ObjectNode) template.path("Resources").path("Server").path("Properties");
+        if (conditional) {
+            template.putObject("Conditions").putObject("UseNull")
+                    .putArray("Fn::Equals").add("enabled").add("enabled");
+            properties.putObject("Scopes").putArray("Fn::If")
+                    .add("UseNull").addNull().add(mapper.createArrayNode());
+        } else {
+            properties.putNull("Scopes");
+        }
+        return template;
+    }
+
+    private void assertScopeValidationFailure() {
+        String events = given().contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH).formParam("Action", "DescribeStackEvents")
+                .formParam("StackName", stack).post("/").then().statusCode(200).extract().asString();
+        assertTrue(events.contains("Scopes must be a list"));
     }
 
     private static void addFailingDependentResource(ObjectNode template) {

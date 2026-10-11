@@ -68,13 +68,12 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
         Identity prior = ctx.isUpdate() && !priorIsStub ? identity(resource, priorPhysicalId) : null;
         boolean replacement = prior != null
                 && (!prior.poolId().equals(poolId) || !prior.identifier().equals(identifier));
-        ResourceServer existing = prior == null ? null
-                : cognitoService.describeResourceServer(prior.poolId(), prior.identifier());
         Identity target = prior;
         if (prior == null || replacement) {
             cognitoService.createResourceServer(poolId, identifier, name, scopes);
             target = new Identity(poolId, identifier);
         } else {
+            ResourceServer existing = cognitoService.describeResourceServer(prior.poolId(), prior.identifier());
             resource.getAttributes().put(UPDATE_ATTR, snapshot(prior, existing, false).toString());
             cognitoService.updateResourceServer(poolId, identifier, name, scopes);
         }
@@ -100,14 +99,14 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
     }
 
     private static List<ResourceServerScope> scopes(JsonNode properties, ProvisionContext ctx) {
-        if (properties == null || !properties.hasNonNull("Scopes")) {
+        if (properties == null || !properties.has("Scopes")) {
             return List.of();
         }
         JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(properties.get("Scopes"));
-        if (resolved == null || resolved.isNull() || resolved.isMissingNode()) {
+        if (resolved != null && resolved.isMissingNode()) {
             return List.of();
         }
-        if (!resolved.isArray()) {
+        if (resolved == null || !resolved.isArray()) {
             throw new AwsException("ValidationError", TYPE + " Scopes must be a list", 400);
         }
         if (resolved.size() > 100) {
