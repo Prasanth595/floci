@@ -4086,6 +4086,43 @@ class RdsServiceTest {
         assertEquals("available", copy.getStatus());
     }
 
+    @ParameterizedTest
+    @CsvSource({"cn-north-1,us-east-1,xx-nowhere-9,aws-cn",
+            "cn-north-1,us-east-1,cn-north-1,aws-cn",
+            "us-gov-west-1,us-east-1,xx-nowhere-9,aws-us-gov",
+            "us-east-1,cn-north-1,xx-nowhere-9,aws"})
+    void copyDbSnapshotRejectsRelabeledForeignSourceArn(
+            String deploymentRegion, String sourceRegion, String targetRegion, String targetPartition) {
+        regionResolver = new RegionResolver(deploymentRegion, "123456789012");
+        rdsService = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        rdsService.createDbInstance("foreign-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false,
+                false, null, Map.of(), sourceRegion);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        DbSnapshot foreignSource = rdsService.createDbSnapshot("source", "foreign-db", Map.of(), sourceRegion);
+        String relabeledArn = "arn:" + targetPartition + ":rds:" + sourceRegion
+                + ":123456789012:snapshot:source";
+        assertNotEquals(foreignSource.getDbSnapshotArn(), relabeledArn);
+
+        AwsException foreignPartition = assertThrows(AwsException.class, () ->
+                rdsService.copyDbSnapshot(relabeledArn, "copy", false, Map.of(), null, null, targetRegion));
+        assertEquals("InvalidParameterValue", foreignPartition.getErrorCode());
+
+        rdsService.createDbInstance("local-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false,
+                false, null, Map.of(), targetRegion);
+        DbSnapshot localSource = rdsService.createDbSnapshot("local-source", "local-db", Map.of(), targetRegion);
+        DbSnapshot copy = rdsService.copyDbSnapshot(localSource.getDbSnapshotArn(), "copy", false,
+                Map.of(), null, null, targetRegion);
+        assertEquals("arn:" + targetPartition + ":rds:" + targetRegion + ":123456789012:snapshot:copy",
+                copy.getDbSnapshotArn());
+        assertEquals("available", copy.getStatus());
+    }
+
     @Test
     void copyDbSnapshotRejectsDuplicateTargetsAndUnavailableSources() {
         rdsService.createDbInstance("mydb", "postgres", "13",
