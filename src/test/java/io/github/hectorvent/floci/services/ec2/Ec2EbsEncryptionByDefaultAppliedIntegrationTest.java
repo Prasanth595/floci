@@ -9,6 +9,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.hasItem;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * EBS encryption by default has to be applied, not only stored: a volume created, or an instance
@@ -151,9 +152,5 @@ class Ec2EbsEncryptionByDefaultAppliedIntegrationTest {
         assertEquals("false", createVolume());
         String instanceId = runInstanceInRegion(REGION);
         assertEquals("false", rootVolumeEncrypted(REGION, instanceId));
-    }
-
-    private static void assertEquals(String expected, String actual) {
-        org.junit.jupiter.api.Assertions.assertEquals(expected, actual);
     }
 }

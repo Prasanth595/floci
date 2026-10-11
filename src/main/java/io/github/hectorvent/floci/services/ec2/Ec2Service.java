@@ -289,10 +289,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private jakarta.enterprise.inject.Instance<ClusterNodeInstanceProvider> clusterNodeInstanceProviders;
     private ClusterNodeInstanceProvider testClusterNodeInstanceProvider;
     private final Ec2VolumeBlockDeviceManager volumeBlockDeviceManager;
-    // Field-injected so the many hand-built constructors above stay untouched; null when the service is
-    // constructed without CDI, which reads as "encryption by default is off".
-    @Inject
-    Ec2EbsEncryptionService ebsEncryptionService;
+    // Only the CDI constructor receives it; null on the hand-built constructors, which reads as
+    // "encryption by default is off".
+    private Ec2EbsEncryptionService ebsEncryptionService;
     private jakarta.enterprise.inject.Instance<VpcRouteTableListener> routeTableListenersInstance;
     private final List<VpcRouteTableListener> routeTableListeners = new CopyOnWriteArrayList<>();
     private jakarta.enterprise.inject.Instance<Ec2InstanceLaunchListener> instanceLaunchListenersInstance;
@@ -427,13 +426,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                       jakarta.enterprise.inject.Instance<ClusterNodeInstanceProvider> clusterNodeInstanceProviders,
                       Ec2VolumeBlockDeviceManager volumeBlockDeviceManager,
                       jakarta.enterprise.inject.Instance<VpcRouteTableListener> routeTableListenersInstance,
-                      jakarta.enterprise.inject.Instance<Ec2InstanceLaunchListener> instanceLaunchListenersInstance) {
+                      jakarta.enterprise.inject.Instance<Ec2InstanceLaunchListener> instanceLaunchListenersInstance,
+                      Ec2EbsEncryptionService ebsEncryptionService) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
                 instanceTypeCatalog, storageFactory, requestContextInstance, iamService, volumeBlockDeviceManager);
         this.vpcNetworkManager = vpcNetworkManager;
         this.clusterNodeInstanceProviders = clusterNodeInstanceProviders;
         this.routeTableListenersInstance = routeTableListenersInstance;
         this.instanceLaunchListenersInstance = instanceLaunchListenersInstance;
+        this.ebsEncryptionService = ebsEncryptionService;
     }
 
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
