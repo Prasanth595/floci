@@ -28,6 +28,7 @@ import java.util.function.Consumer;
 final class SesAddressSyntax {
 
     private static final List<String> RAW_CHECKED_HEADERS = List.of("To", "Cc", "Bcc");
+    private static final String MISSING_FINAL_DOMAIN = "Missing final '@domain'";
 
     private SesAddressSyntax() {
     }
@@ -49,8 +50,8 @@ final class SesAddressSyntax {
     }
 
     private static void requireFallbackFrom(String address) {
-        Violation violation = classify(address);
-        if (violation != null && violation != Violation.MISSING_AT) {
+        String violation = violation(address);
+        if (violation != null && !MISSING_FINAL_DOMAIN.equals(violation)) {
             throw new AwsException("InvalidParameterValue", "Invalid From address provided.", 400);
         }
     }
@@ -67,8 +68,8 @@ final class SesAddressSyntax {
     }
 
     private static void requireAt(String address) {
-        if (classify(address) == Violation.MISSING_AT) {
-            throw new AwsException("InvalidParameterValue", Violation.MISSING_AT.message(address), 400);
+        if (MISSING_FINAL_DOMAIN.equals(violation(address))) {
+            throw new AwsException("InvalidParameterValue", MISSING_FINAL_DOMAIN, 400);
         }
     }
 
@@ -112,11 +113,6 @@ final class SesAddressSyntax {
      * is blank (a missing address is reported by the caller's own required-field check).
      */
     static String violation(String address) {
-        Violation violation = classify(address);
-        return violation == null ? null : violation.message(address);
-    }
-
-    private static Violation classify(String address) {
         if (address == null || address.isBlank()) {
             return null;
         }
@@ -131,41 +127,27 @@ final class SesAddressSyntax {
                 quoted = !quoted;
             } else if (quoted) {
                 if (c == '\r' || c == '\n') {
-                    return Violation.QUOTED_NEWLINE;
+                    return "Invalid email address " + address + ".";
                 }
             } else if (c == '@') {
                 break;
             } else if (isControlOrWhitespace(c)) {
-                return Violation.LOCAL_CONTROL;
+                return "Local address contains control or whitespace";
             }
         }
         if (i >= addrSpec.length()) {
-            return Violation.MISSING_AT;
+            return MISSING_FINAL_DOMAIN;
         }
         String domain = addrSpec.substring(i + 1);
         if (domain.isEmpty()) {
-            return Violation.MISSING_DOMAIN;
+            return "Missing domain";
         }
         for (int j = 0; j < domain.length(); j++) {
             if (isControlOrWhitespace(domain.charAt(j))) {
-                return Violation.DOMAIN_CONTROL;
+                return "Domain contains control or whitespace";
             }
         }
         return null;
-    }
-
-    private enum Violation {
-        QUOTED_NEWLINE, LOCAL_CONTROL, MISSING_AT, MISSING_DOMAIN, DOMAIN_CONTROL;
-
-        String message(String address) {
-            return switch (this) {
-                case QUOTED_NEWLINE -> "Invalid email address " + address + ".";
-                case LOCAL_CONTROL -> "Local address contains control or whitespace";
-                case MISSING_AT -> "Missing final '@domain'";
-                case MISSING_DOMAIN -> "Missing domain";
-                case DOMAIN_CONTROL -> "Domain contains control or whitespace";
-            };
-        }
     }
 
     private static boolean isControlOrWhitespace(char c) {
