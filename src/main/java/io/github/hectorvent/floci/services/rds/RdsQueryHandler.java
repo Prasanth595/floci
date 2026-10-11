@@ -2300,7 +2300,7 @@ public class RdsQueryHandler {
         if (missing != null) {
             return missing;
         }
-        boolean copyTags = "true".equalsIgnoreCase(params.getFirst("CopyTags"));
+        boolean copyTags = Boolean.TRUE.equals(parseOptionalBoolean(params, "CopyTags"));
         DbClusterSnapshot copy = service.copyDbClusterSnapshot(sourceId, targetId, copyTags, parseTags(params), region);
         return Response.ok(AwsQueryResponse.envelope("CopyDBClusterSnapshot", AwsNamespaces.RDS,
                 dbClusterSnapshotXml(copy))).build();

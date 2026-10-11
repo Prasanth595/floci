@@ -2284,6 +2284,51 @@ class RdsQueryHandlerTest {
         verify(service, never()).startDbCluster(any(), any());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"yes", "", "not-a-boolean"})
+    void copyClusterSnapshotRejectsMalformedCopyTagsBeforeServiceCall(String value) {
+        DbClusterSnapshot snapshot = new DbClusterSnapshot();
+        snapshot.setDbClusterSnapshotIdentifier("target");
+        when(service.copyDbClusterSnapshot(anyString(), anyString(), anyBoolean(), anyMap(), isNull()))
+                .thenReturn(snapshot);
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("SourceDBClusterSnapshotIdentifier", "source");
+        p.putSingle("TargetDBClusterSnapshotIdentifier", "target");
+        p.putSingle("CopyTags", value);
+
+        Response response = handler.handle("CopyDBClusterSnapshot", p);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+        assertTrue(((String) response.getEntity()).contains("CopyTags must be true or false."));
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void copyClusterSnapshotPreservesCopyTagsValuesAndDefault(String value) {
+        DbClusterSnapshot snapshot = new DbClusterSnapshot();
+        snapshot.setDbClusterSnapshotIdentifier("target");
+        boolean copyTags = Boolean.parseBoolean(value);
+        when(service.copyDbClusterSnapshot(eq("source"), eq("target"), eq(copyTags),
+                eq(Map.of("owner", "team")), isNull())).thenReturn(snapshot);
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("SourceDBClusterSnapshotIdentifier", "source");
+        p.putSingle("TargetDBClusterSnapshotIdentifier", "target");
+        p.putSingle("Tags.Tag.1.Key", "owner");
+        p.putSingle("Tags.Tag.1.Value", "team");
+        if (value != null) {
+            p.putSingle("CopyTags", value);
+        }
+
+        Response response = handler.handle("CopyDBClusterSnapshot", p);
+
+        assertEquals(200, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<DBClusterSnapshotIdentifier>target"));
+        verify(service).copyDbClusterSnapshot("source", "target", copyTags, Map.of("owner", "team"), null);
+    }
+
     @Test
     void clusterSnapshotActions_dispatchAndRenderTheClusterSnapshot() {
         DbClusterSnapshot snapshot = new DbClusterSnapshot();

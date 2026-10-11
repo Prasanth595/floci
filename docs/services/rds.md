@@ -187,6 +187,7 @@ including empty strings, return `InvalidParameterValue` before changing resource
 | `CreateDBProxy` | `RequireTLS`, `DebugLogging` | Defaults to `false` |
 | `ModifyDBProxy` | `RequireTLS`, `DebugLogging` | Preserves the current value |
 | `ResetDBParameterGroup`, `ResetDBClusterParameterGroup` | `ResetAllParameters` | Defaults to `false`; named parameter resets keep their existing behavior |
+| `CopyDBClusterSnapshot` | `CopyTags` | Defaults to `false`; explicit request tags still apply |
 
 Malformed reset flags leave saved parameter overrides unchanged.
 
