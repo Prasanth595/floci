@@ -3991,6 +3991,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
+     * Whether this temporary access key and session token are those of a session that has expired
+     * on the injected clock but is still stored, which {@link #findSecretKey(String, String)} finds
+     * no secret for. AWS answers such a credential as expired, not as a key it does not know. The
+     * token has to match, so a caller that does not hold the credential learns nothing about it.
+     */
+    public boolean isExpiredSessionToken(String accessKeyId, String sessionToken) {
+        return findSessionAnyAccount(accessKeyId)
+                .filter(session -> isExpired(session, clock.instant()))
+                .filter(session -> hasMatchingSessionToken(session, sessionToken))
+                .isPresent();
+    }
+
+    /**
      * The session token issued alongside a temporary credential, for callers that must tell a
      * missing token apart from one that does not match.
      *

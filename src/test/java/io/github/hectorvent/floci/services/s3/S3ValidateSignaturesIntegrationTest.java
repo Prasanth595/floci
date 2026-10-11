@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.RestAssured;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
@@ -318,8 +319,7 @@ class S3ValidateSignaturesIntegrationTest {
     void headerSignedRequestsWithSigninCredentialsAreAcceptedUntilTheyExpire() throws Exception {
         // Sign-In stamps its access token's expiry from the injected clock, so IAM measures it on the same one.
         Response token = signIn();
-        S3RequestSigner signinSigner = S3RequestSigner.signedAs(token.path("accessToken.accessKeyId"),
-                token.path("accessToken.secretAccessKey"), token.path("accessToken.sessionToken"));
+        S3RequestSigner signinSigner = signinSigner(token);
         given()
             .filter(signinSigner)
         .when()
@@ -327,17 +327,99 @@ class S3ValidateSignaturesIntegrationTest {
         .then()
             .statusCode(200);
 
-        clock.advance(Duration.ofSeconds(token.<Integer>path("expiresIn") + 1L));
-        // A known gap from AWS, not the intended answer: S3 lists 400 ExpiredToken for a session past
-        // its expiry, which only IAM enforcement gives today. Signature validation still answers it
-        // as a key it does not know.
+        advancePastExpiry(token);
         given()
             .filter(signinSigner)
         .when()
             .get("/" + BUCKET + "/" + KEY)
         .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("ExpiredToken"))
+            .body("Error.Message", equalTo("The provided token has expired."));
+    }
+
+    @Test
+    @Order(35)
+    void presignedUrlsWithSigninCredentialsAreAcceptedUntilTheyExpire() throws Exception {
+        Response token = signIn();
+        S3RequestSigner signinSigner = signinSigner(token);
+        String path = "/" + BUCKET + "/" + KEY;
+        URI uri = URI.create("http://localhost:" + RestAssured.port + path);
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(path + "?" + signinSigner.presignedQuery("GET", uri, 3600))
+        .then()
+            .statusCode(200)
+            .body(equalTo("signed body"));
+
+        advancePastExpiry(token);
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(path + "?" + signinSigner.presignedQuery("GET", uri, 3600))
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("ExpiredToken"))
+            .body("Error.Message", equalTo("The provided token has expired."));
+    }
+
+    @Test
+    @Order(36)
+    void presignedPostsWithSigninCredentialsAreAcceptedUntilTheyExpire() throws Exception {
+        Response token = signIn();
+        postWithSigninCredentials(token, "post-signin-live.txt").then().statusCode(204);
+
+        advancePastExpiry(token);
+        postWithSigninCredentials(token, "post-signin-expired.txt")
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("ExpiredToken"))
+            .body("Error.Message", equalTo("The provided token has expired."));
+        given().filter(LOCAL_SIGNER).when().get("/" + BUCKET + "/post-signin-expired.txt").then().statusCode(404);
+    }
+
+    @Test
+    @Order(37)
+    void anExpiredSessionSentWithAnotherTokenIsStillAnUnknownKey() throws Exception {
+        // Only the session's own token tells an expired session apart from a key that exists nowhere.
+        Response token = signIn();
+        advancePastExpiry(token);
+        given()
+            .filter(S3RequestSigner.signedAs(token.path("accessToken.accessKeyId"),
+                    token.path("accessToken.secretAccessKey"), "another-token"))
+        .when()
+            .get("/" + BUCKET + "/" + KEY)
+        .then()
             .statusCode(403)
             .body("Error.Code", equalTo("InvalidAccessKeyId"));
+    }
+
+    private static S3RequestSigner signinSigner(Response token) {
+        return S3RequestSigner.signedAs(token.path("accessToken.accessKeyId"),
+                token.path("accessToken.secretAccessKey"), token.path("accessToken.sessionToken"));
+    }
+
+    private void advancePastExpiry(Response token) {
+        clock.advance(Duration.ofSeconds(token.<Integer>path("expiresIn") + 1L));
+    }
+
+    /** A presigned POST of {@code key} signed with the Sign-In session, its token listed in the policy as S3 requires. */
+    private static Response postWithSigninCredentials(Response token, String key) {
+        String sessionToken = token.path("accessToken.sessionToken");
+        String policy = postPolicy(key, sessionToken);
+        return given()
+            .multiPart("key", key)
+            .multiPart("policy", policy)
+            .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .multiPart("x-amz-credential", token.path("accessToken.accessKeyId") + "/" + CREDENTIAL_DATE
+                    + "/us-east-1/s3/aws4_request")
+            .multiPart("x-amz-date", AMZ_DATE)
+            .multiPart("x-amz-security-token", sessionToken)
+            .multiPart("x-amz-signature", signPolicy(policy, token.path("accessToken.secretAccessKey")))
+            .multiPart("file", key, "posted".getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET);
     }
 
     /** Runs the AWS Sign-In authorization-code flow through its consent page and returns the token response. */
@@ -418,11 +500,21 @@ class S3ValidateSignaturesIntegrationTest {
     }
 
     private static String postPolicy(String key) {
+        return encodePolicy("""
+                [{"bucket": "%s"}, {"key": "%s"}]""".formatted(BUCKET, key));
+    }
+
+    private static String postPolicy(String key, String sessionToken) {
+        return encodePolicy("""
+                [{"bucket": "%s"}, {"key": "%s"}, {"x-amz-security-token": "%s"}]""".formatted(BUCKET, key, sessionToken));
+    }
+
+    private static String encodePolicy(String conditions) {
         String expiration = DateTimeFormatter.ISO_INSTANT.format(
                 Instant.now().plusSeconds(3600).atZone(ZoneOffset.UTC));
         String policy = """
-                {"expiration": "%s", "conditions": [{"bucket": "%s"}, {"key": "%s"}]}
-                """.formatted(expiration, BUCKET, key);
+                {"expiration": "%s", "conditions": %s}
+                """.formatted(expiration, conditions);
         return Base64.getEncoder().encodeToString(policy.getBytes(StandardCharsets.UTF_8));
     }
 

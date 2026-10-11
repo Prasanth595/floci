@@ -3665,8 +3665,11 @@ public class S3Controller {
         }
 
         String accessKeyId = credential.split("/", 2)[0];
-        Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(
-                iamService, accessKeyId, fields.get("x-amz-security-token"));
+        String sessionToken = fields.get("x-amz-security-token");
+        Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(iamService, accessKeyId, sessionToken);
+        if (secretKey.isEmpty() && S3PostPolicySigner.isExpiredSession(iamService, accessKeyId, sessionToken)) {
+            throw new AwsException("ExpiredToken", S3PostPolicySigner.EXPIRED_TOKEN_MESSAGE, 400);
+        }
         if (secretKey.isEmpty()
                 || !S3PostPolicySigner.verifySignature(policy, credential, signature, secretKey.get())) {
             throw new AwsException("SignatureDoesNotMatch",
@@ -3677,7 +3680,7 @@ public class S3Controller {
         // Route through the same bucket-policy/ACL check every other S3 write path uses, so this
         // path automatically inherits any future strengthening there too.
         s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject",
-                new S3Service.RequestAuthorization(true, accessKeyId, fields.get("x-amz-security-token")));
+                new S3Service.RequestAuthorization(true, accessKeyId, sessionToken));
 
         validatePolicyExpiration(policy);
         validatePolicyConditions(policy, bucket, fields, contentLength);

@@ -287,6 +287,7 @@ class IamServiceTest {
         expired.put("caller ARNs", (service, key) -> service.resolveCallerArns(key).isEmpty());
         expired.put("user ID", (service, key) -> service.resolveCallerUserId(key, "token").isEmpty());
         expired.put("enforcement", (service, key) -> service.isExpiredSession(key, expiration));
+        expired.put("expired token", (service, key) -> service.isExpiredSessionToken(key, "token"));
         expired.put("sweep", (service, key) -> service.sweepExpiredSessions() == 1);
 
         for (Map.Entry<String, BiPredicate<IamService, String>> check : expired.entrySet()) {
@@ -321,6 +322,27 @@ class IamServiceTest {
 
         clock.advance(Duration.ofSeconds(61));
         assertEquals(1, service.sweepExpiredSessions());
+    }
+
+    @Test
+    void anExpiredSessionIsToldApartOnlyWithItsOwnToken() {
+        // Signature validation asks once the secret-key lookup has found nothing, to answer a session
+        // past its expiry as expired rather than as a key that exists nowhere.
+        MutableClock clock = new MutableClock();
+        IamService service = new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), false, clock);
+        service.registerSession("ASIACLOCKSESSION", "secret", "token", "arn:aws:iam::000000000000:role/ClockRole",
+                clock.instant().plusSeconds(60), null, "000000000000", "s", "AROACLOCKROLE:s");
+
+        assertFalse(service.isExpiredSessionToken("ASIACLOCKSESSION", "token"), "a live session");
+        clock.advance(Duration.ofSeconds(61));
+        assertTrue(service.findSecretKey("ASIACLOCKSESSION", "token").isEmpty());
+        assertTrue(service.isExpiredSessionToken("ASIACLOCKSESSION", "token"), "an expired session");
+        // Without its token the session stays as unknown as a key that exists nowhere.
+        assertFalse(service.isExpiredSessionToken("ASIACLOCKSESSION", "another-token"), "another token");
+        assertFalse(service.isExpiredSessionToken("ASIACLOCKSESSION", null), "no token");
+        assertFalse(service.isExpiredSessionToken("ASIANOSUCHSESSION", "token"), "a key that exists nowhere");
     }
 
     private static final String READ_S3 = """
