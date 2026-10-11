@@ -242,6 +242,12 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
         assertVersionPresent(bucket, "retained.txt", versionId);
 
         userPolicy(user, allow(List.of("s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"), objects));
+        // Without the header the retention itself refuses the delete, and that error names the version too.
+        XmlPath retained = deleteObjects(accessKeyId, "s3", bucket, false, false, versionEntry("retained.txt", versionId));
+        assertEquals(List.of("retained.txt"), retained.getList("DeleteResult.Error.Key"));
+        assertEquals(List.of(versionId), retained.getList("DeleteResult.Error.VersionId"));
+        assertVersionPresent(bucket, "retained.txt", versionId);
+
         XmlPath allowed = deleteObjects(accessKeyId, "s3", bucket, false, true, versionEntry("retained.txt", versionId));
         assertEquals(List.of("retained.txt"), allowed.getList("DeleteResult.Deleted.Key"));
         assertEquals(List.of(versionId), allowed.getList("DeleteResult.Deleted.VersionId"));
