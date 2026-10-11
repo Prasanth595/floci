@@ -10646,6 +10646,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         : Base64.getEncoder().encodeToString(userData.getBytes(StandardCharsets.UTF_8)));
     }
 
+    /**
+     * Launches Spot instances with separately retained execution text and API encoding.
+     *
+     * @param userData decoded execution text, including decompressed text for gzip payloads
+     * @param encodedUserData original validated base64 payload corresponding to {@code userData};
+     *                        it takes precedence in descriptions and IMDS byte retrieval. Null
+     *                        retains the legacy UTF-8 text fallback; empty represents zero bytes.
+     */
     public List<SpotInstanceRequest> requestSpotInstances(String region, String spotPrice, Integer instanceCount,
                                                          String type, String productDescription, String imageId, String instanceType,
                                                          String keyName, String subnetId, List<String> securityGroupIds,
@@ -10663,7 +10671,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
             Reservation reservation = runInstances(region, imageId, instanceType, 1, 1, keyName,
                     securityGroupIds, subnetId, null, instanceTags, userData, iamInstanceProfileArn,
-                    null, null, 0, null, null, null, encodedUserData);
+                    /* associatePublicIp */ null, /* networkInterfaceId */ null,
+                    /* networkInterfaceDeviceIndex */ 0, /* availabilityZone */ null,
+                    /* metadataOptions */ null, /* creditSpecificationCpuCredits */ null, encodedUserData);
 
             Instance launchedInstance = reservation.getInstances().get(0);
 
