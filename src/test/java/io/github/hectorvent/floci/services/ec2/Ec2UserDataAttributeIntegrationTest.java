@@ -89,15 +89,7 @@ class Ec2UserDataAttributeIntegrationTest {
     @NullSource
     @ValueSource(strings = {"YQ==", "YQ", "/w", "H4sIAAAAAAAC/1NW1E/KzNMvzuBKTc7IV8hIzcnJ5wIAedQ/FxUAAAA=", ""})
     void spotLaunchPreservesOriginalUserData(String encoded) {
-        RequestSpecification request = given().header("Authorization", AUTH)
-                .formParam("Action", "RequestSpotInstances")
-                .formParam("LaunchSpecification.ImageId", "ami-0abcdef1234567890")
-                .formParam("LaunchSpecification.InstanceType", "t3.micro");
-        if (encoded != null) {
-            request.formParam("LaunchSpecification.UserData", encoded);
-        }
-        Response response = request.post("/");
-        response.then().statusCode(200);
+        Response response = requestSpotInstance(encoded);
         String id = response.path("RequestSpotInstancesResponse.spotInstanceRequestSet.item.instanceId");
         String requestId = response.path("RequestSpotInstancesResponse.spotInstanceRequestSet.item.spotInstanceRequestId");
         try {
@@ -116,20 +108,14 @@ class Ec2UserDataAttributeIntegrationTest {
                     .post("/").then().statusCode(200)
                     .body("DescribeInstanceAttributeResponse.userData.value.text()", equalTo(encoded == null ? "" : encoded));
         } finally {
-            terminate(id);
-            given().header("Authorization", AUTH).formParam("Action", "CancelSpotInstanceRequests")
-                    .formParam("SpotInstanceRequestId.1", requestId).post("/").then().statusCode(200);
+            terminateAndCancelSpotRequest(id, requestId);
         }
     }
 
     @ParameterizedTest
     @ValueSource(strings = {" ", " \t\r\n"})
     void spotLaunchTreatsWhitespaceUserDataAsAbsent(String encoded) {
-        Response response = given().header("Authorization", AUTH).formParam("Action", "RequestSpotInstances")
-                .formParam("LaunchSpecification.ImageId", "ami-0abcdef1234567890")
-                .formParam("LaunchSpecification.InstanceType", "t3.micro")
-                .formParam("LaunchSpecification.UserData", encoded).post("/");
-        response.then().statusCode(200);
+        Response response = requestSpotInstance(encoded);
         String id = response.path("RequestSpotInstancesResponse.spotInstanceRequestSet.item.instanceId");
         String requestId = response.path("RequestSpotInstancesResponse.spotInstanceRequestSet.item.spotInstanceRequestId");
         try {
@@ -144,9 +130,7 @@ class Ec2UserDataAttributeIntegrationTest {
                     .post("/").then().statusCode(200)
                     .body("DescribeInstanceAttributeResponse.userData.value.size()", equalTo(0));
         } finally {
-            terminate(id);
-            given().header("Authorization", AUTH).formParam("Action", "CancelSpotInstanceRequests")
-                    .formParam("SpotInstanceRequestId.1", requestId).post("/").then().statusCode(200);
+            terminateAndCancelSpotRequest(id, requestId);
         }
     }
 
@@ -180,6 +164,28 @@ class Ec2UserDataAttributeIntegrationTest {
         LaunchSpecification legacy = mapper.readValue("{\"userData\":\"legacy text\"}", LaunchSpecification.class);
         assertNull(legacy.getEncodedUserData());
         assertEquals("legacy text", legacy.getUserData());
+    }
+
+    private Response requestSpotInstance(String encoded) {
+        RequestSpecification request = given().header("Authorization", AUTH)
+                .formParam("Action", "RequestSpotInstances")
+                .formParam("LaunchSpecification.ImageId", "ami-0abcdef1234567890")
+                .formParam("LaunchSpecification.InstanceType", "t3.micro");
+        if (encoded != null) {
+            request.formParam("LaunchSpecification.UserData", encoded);
+        }
+        Response response = request.post("/");
+        response.then().statusCode(200);
+        return response;
+    }
+
+    private void terminateAndCancelSpotRequest(String id, String requestId) {
+        try {
+            terminate(id);
+        } finally {
+            given().header("Authorization", AUTH).formParam("Action", "CancelSpotInstanceRequests")
+                    .formParam("SpotInstanceRequestId.1", requestId).post("/").then().statusCode(200);
+        }
     }
 
     private void terminate(String id) {
