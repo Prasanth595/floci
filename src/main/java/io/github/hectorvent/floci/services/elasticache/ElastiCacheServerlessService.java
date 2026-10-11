@@ -55,7 +55,19 @@ public class ElastiCacheServerlessService implements Resettable {
     public record ModifyServerlessCacheRequest(String serverlessCacheName, String description, String engine,
                                                String majorEngineVersion, List<String> securityGroupIds,
                                                String userGroupId, Boolean removeUserGroup, CacheUsageLimits cacheUsageLimits,
-                                               Integer snapshotRetentionLimit, String dailySnapshotTime) {}
+                                               Integer snapshotRetentionLimit, String dailySnapshotTime,
+                                               boolean resetUnset) {
+
+        /** The API form: an omitted field leaves the stored value unchanged. */
+        public ModifyServerlessCacheRequest(String serverlessCacheName, String description, String engine,
+                                            String majorEngineVersion, List<String> securityGroupIds,
+                                            String userGroupId, Boolean removeUserGroup,
+                                            CacheUsageLimits cacheUsageLimits, Integer snapshotRetentionLimit,
+                                            String dailySnapshotTime) {
+            this(serverlessCacheName, description, engine, majorEngineVersion, securityGroupIds, userGroupId,
+                    removeUserGroup, cacheUsageLimits, snapshotRetentionLimit, dailySnapshotTime, false);
+        }
+    }
 
     public ServerlessCache createServerlessCache(CreateServerlessCacheRequest request) {
         String name = normalizedName(request.serverlessCacheName());
@@ -191,13 +203,15 @@ public class ElastiCacheServerlessService implements Resettable {
                 if (request.securityGroupIds() != null) {
                     updated.setSecurityGroupIds(request.securityGroupIds());
                 }
-                if (request.cacheUsageLimits() != null) {
+                // CloudFormation sends the whole desired state, so an omitted field goes back to its create default.
+                if (request.cacheUsageLimits() != null || request.resetUnset()) {
                     updated.setCacheUsageLimits(request.cacheUsageLimits());
                 }
-                if (request.snapshotRetentionLimit() != null) {
-                    updated.setSnapshotRetentionLimit(request.snapshotRetentionLimit());
+                if (request.snapshotRetentionLimit() != null || request.resetUnset()) {
+                    updated.setSnapshotRetentionLimit(
+                            request.snapshotRetentionLimit() == null ? 0 : request.snapshotRetentionLimit());
                 }
-                if (request.dailySnapshotTime() != null) {
+                if (request.dailySnapshotTime() != null || request.resetUnset()) {
                     updated.setDailySnapshotTime(request.dailySnapshotTime());
                 }
                 caches.put(key(name), updated);
@@ -217,6 +231,20 @@ public class ElastiCacheServerlessService implements Resettable {
             if (changedGroup && previous.getUserGroupId() != null) {
                 groups.detachServerlessCache(previous.getUserGroupId(), key(name));
             }
+            return current(updated);
+        }
+    }
+
+    /** Drives the tags to exactly the given set, the way CloudFormation reconciles a resource on update. */
+    public ServerlessCache replaceTags(String name, Map<String, String> tags) {
+        if (tags != null && tags.size() > 50) {
+            throw new AwsException("TagQuotaPerResourceExceeded", "At most 50 tags are supported.", 400);
+        }
+        String normalized = normalizedName(name);
+        synchronized (lockFor(normalized)) {
+            ServerlessCache updated = copy(requireCache(normalized));
+            updated.setTags(tags);
+            caches.put(key(normalized), updated);
             return current(updated);
         }
     }

@@ -15,6 +15,7 @@ import org.mockito.ArgumentCaptor;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -23,6 +24,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -201,5 +203,88 @@ class ElastiCacheServerlessCfnProvisionerTest {
         assertEquals(4000, request.getValue().cacheUsageLimits().ecpuPerSecond().maximum());
         verify(serverless).replaceTags(eq("sl"), any());
         verify(serverless, never()).createServerlessCache(any());
+    }
+
+    private ServerlessCache existingWithSettings() {
+        ServerlessCache existing = new ServerlessCache();
+        existing.setServerlessCacheName("sl");
+        existing.setArn("arn");
+        existing.setStatus("available");
+        existing.setDescription("old");
+        existing.setSecurityGroupIds(List.of("sg-1"));
+        existing.setUserGroupId("team");
+        existing.setSnapshotRetentionLimit(7);
+        existing.setDailySnapshotTime("05:00");
+        existing.setCacheUsageLimits(new ServerlessCache.CacheUsageLimits(null,
+                new ServerlessCache.EcpuPerSecond(null, 4000)));
+        existing.setTags(new HashMap<>(Map.of("env", "dev")));
+        return existing;
+    }
+
+    @Test
+    void serverlessUpdateResetsLimitsAndSnapshotSettingsRemovedFromTheTemplate() throws Exception {
+        ServerlessCache existing = existingWithSettings();
+        when(serverless.getServerlessCache("sl")).thenReturn(existing);
+        when(serverless.modifyServerlessCache(any())).thenReturn(existing);
+        when(serverless.replaceTags(eq("sl"), any())).thenReturn(existing);
+        StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
+
+        serverlessProvisioner.provision(r, props("{\"ServerlessCacheName\":\"sl\",\"Engine\":\"valkey\"}"), ctx("sl"));
+
+        ArgumentCaptor<ElastiCacheServerlessService.ModifyServerlessCacheRequest> request =
+                ArgumentCaptor.forClass(ElastiCacheServerlessService.ModifyServerlessCacheRequest.class);
+        verify(serverless).modifyServerlessCache(request.capture());
+        assertTrue(request.getValue().resetUnset());
+        assertEquals(null, request.getValue().cacheUsageLimits());
+        assertEquals(null, request.getValue().snapshotRetentionLimit());
+        assertEquals(null, request.getValue().dailySnapshotTime());
+    }
+
+    @Test
+    void failedTagUpdatePutsTheSettingsBack() throws Exception {
+        ServerlessCache existing = existingWithSettings();
+        when(serverless.getServerlessCache("sl")).thenReturn(existing);
+        when(serverless.modifyServerlessCache(any())).thenReturn(existing);
+        when(serverless.replaceTags(eq("sl"), any()))
+                .thenThrow(new AwsException("TagQuotaPerResourceExceeded", "too many", 400))
+                .thenReturn(existing);
+        StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
+
+        assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r, props("""
+                {"ServerlessCacheName":"sl","Engine":"valkey","Description":"new"}
+                """), ctx("sl")));
+
+        ArgumentCaptor<ElastiCacheServerlessService.ModifyServerlessCacheRequest> request =
+                ArgumentCaptor.forClass(ElastiCacheServerlessService.ModifyServerlessCacheRequest.class);
+        verify(serverless, times(2)).modifyServerlessCache(request.capture());
+        ElastiCacheServerlessService.ModifyServerlessCacheRequest restore = request.getAllValues().get(1);
+        assertEquals("old", restore.description());
+        assertEquals(List.of("sg-1"), restore.securityGroupIds());
+        assertEquals("team", restore.userGroupId());
+        assertEquals(7, restore.snapshotRetentionLimit());
+        assertEquals("05:00", restore.dailySnapshotTime());
+        assertEquals(4000, restore.cacheUsageLimits().ecpuPerSecond().maximum());
+        verify(serverless).replaceTags("sl", Map.of("env", "dev"));
+    }
+
+    @Test
+    void rollbackOfAnInPlaceServerlessUpdateRestoresThePriorSettings() throws Exception {
+        ServerlessCache existing = existingWithSettings();
+        when(serverless.getServerlessCache("sl")).thenReturn(existing);
+        when(serverless.modifyServerlessCache(any())).thenReturn(existing);
+        when(serverless.replaceTags(eq("sl"), any())).thenReturn(existing);
+        StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
+        serverlessProvisioner.provision(r, props("""
+                {"ServerlessCacheName":"sl","Engine":"valkey","Description":"new"}
+                """), ctx("sl"));
+
+        assertTrue(serverlessProvisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<ElastiCacheServerlessService.ModifyServerlessCacheRequest> request =
+                ArgumentCaptor.forClass(ElastiCacheServerlessService.ModifyServerlessCacheRequest.class);
+        verify(serverless, times(2)).modifyServerlessCache(request.capture());
+        assertEquals("old", request.getAllValues().get(1).description());
+        serverlessProvisioner.clearUpdate(r);
+        assertTrue(r.getAttributes().keySet().stream().noneMatch(k -> k.contains("ServerlessCacheUpdateSnapshot")));
     }
 }

@@ -28,6 +28,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -430,5 +431,40 @@ class ElastiCacheServerlessServiceTest {
         service.deleteServerlessCache("multi-cache");
 
         assertNotNull(runtime.deleteUserGroup("team"));
+    }
+
+    @Test
+    void modifyWithResetUnsetClearsLimitsAndSnapshotSettingsButOmittedFieldsStayOtherwise() {
+        service.createServerlessCache(new ElastiCacheServerlessService.CreateServerlessCacheRequest("reset-cache",
+                "valkey", null, "description", List.of("subnet-local"), List.of("sg-local"), null, null,
+                new ServerlessCache.CacheUsageLimits(null, new ServerlessCache.EcpuPerSecond(null, 4000)), 7, "05:00",
+                List.of(), Map.of()));
+
+        ServerlessCache kept = service.modifyServerlessCache(new ElastiCacheServerlessService.ModifyServerlessCacheRequest(
+                "reset-cache", "d", null, null, null, null, null, null, null, null));
+        assertEquals(7, kept.getSnapshotRetentionLimit());
+        assertEquals("05:00", kept.getDailySnapshotTime());
+        assertNotNull(kept.getCacheUsageLimits());
+
+        ServerlessCache reset = service.modifyServerlessCache(new ElastiCacheServerlessService.ModifyServerlessCacheRequest(
+                "reset-cache", "d", null, null, null, null, null, null, null, null, true));
+        assertEquals(0, reset.getSnapshotRetentionLimit());
+        assertNull(reset.getDailySnapshotTime());
+        assertNull(reset.getCacheUsageLimits());
+    }
+
+    @Test
+    void replaceTagsDrivesTheTagsToTheGivenSetAndRejectsMoreThanFifty() {
+        service.createServerlessCache(create("tag-cache", "valkey", null));
+
+        assertEquals(Map.of("env", "dev"), service.replaceTags("tag-cache", Map.of("env", "dev")).getTags());
+        assertEquals(Map.of("env", "dev"), service.getServerlessCache("tag-cache").getTags());
+
+        Map<String, String> tooMany = new HashMap<>();
+        for (int i = 0; i < 51; i++) {
+            tooMany.put("k" + i, "v");
+        }
+        error("TagQuotaPerResourceExceeded", () -> service.replaceTags("tag-cache", tooMany));
+        assertEquals(Map.of("env", "dev"), service.getServerlessCache("tag-cache").getTags());
     }
 }
