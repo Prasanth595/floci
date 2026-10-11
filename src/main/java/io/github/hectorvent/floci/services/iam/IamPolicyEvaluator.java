@@ -1239,7 +1239,7 @@ public class IamPolicyEvaluator {
                 if (ifExists) {
                     continue; // key missing + IfExists → pass this key
                 }
-                if (parsed.quantifier() == SetQuantifier.FOR_ALL_VALUES) {
+                if (parsed.quantifier() == SetQuantifier.FOR_ALL_VALUES && isSupportedConditionOperator(operator)) {
                     continue;
                 }
                 // A negated operator asks for the key not to match, and an absent key matches

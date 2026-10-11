@@ -88,9 +88,8 @@ class DynamoDbFgacEnforcementIntegrationTest {
 
         String accessKeyId = assumeRoleWithLeadingKeysSessionPolicy(roleName);
 
-        // The Key omits the partition attribute, so the leading key cannot be resolved. With
-        // access scoped purely through dynamodb:LeadingKeys this is denied rather than passed
-        // to DynamoDB, which is the correct direction for a security boundary.
+        // The Key omits the partition attribute, so the leading key cannot be resolved.
+        // The session policy's Null:false guard denies it before DynamoDB handles the request.
         given()
                 .header("Authorization", auth(accessKeyId, "dynamodb"))
                 .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
@@ -280,7 +279,8 @@ class DynamoDbFgacEnforcementIntegrationTest {
                     {"Version":"2012-10-17","Statement":[
                       {"Effect":"Allow","Action":"dynamodb:*","Resource":"*",
                        "Condition":{"ForAllValues:StringLike":
-                         {"dynamodb:LeadingKeys":["USER_alice*"]}}}
+                         {"dynamodb:LeadingKeys":["USER_alice*"]},
+                         "Null":{"dynamodb:LeadingKeys":"false"}}}
                     ]}""")
                 .header("Authorization", auth(CALLER_ACCOUNT_ID, "sts"))
         .when()

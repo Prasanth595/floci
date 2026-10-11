@@ -427,6 +427,26 @@ class IamPolicyEvaluatorTest {
     }
 
     @Test
+    void unknownForAllValuesOperatorsDoNotMatchMissingKeys() {
+        for (String operator : List.of("ForAllValues:StringTypo", "ForAllValues:ForAnyValue:StringLike")) {
+            String allow = """
+                    {"Version":"2012-10-17","Statement":[
+                      {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+                       "Condition":{"%s":{"dynamodb:LeadingKeys":["USER_alice*"]}}}
+                    ]}""".formatted(operator);
+            String deny = allow.replace("\"Effect\":\"Allow\"", "\"Effect\":\"Deny\"");
+            assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                    List.of(allow), "dynamodb:GetItem", "*", Map.of()));
+            assertEquals(Decision.DENY, evaluator.evaluate(CallerContext.of(List.of(allow)),
+                    List.of(), "dynamodb:GetItem", "*", Map.of()));
+            assertEquals(IamPolicyEvaluator.SimulationDecision.ALLOWED, evaluator.simulatePrincipalPolicy(
+                    CallerContext.of(List.of(ALLOW_ALL, deny)), "dynamodb:GetItem", "*", Map.of()));
+            assertEquals(Decision.ALLOW, evaluator.evaluate(CallerContext.of(List.of(ALLOW_ALL, deny)),
+                    List.of(), "dynamodb:GetItem", "*", Map.of()));
+        }
+    }
+
+    @Test
     void setOperatorComposesWithIfExists() {
         String policy = """
             {"Version":"2012-10-17","Statement":[
