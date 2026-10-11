@@ -25,6 +25,49 @@ class CloudFormationVpcEndpointIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
 
     @Test
+    void addressTypeResolvesParameterOnCreateAndUpdate() {
+        String stack = "cfn-vpce-ip-" + Long.toString(System.nanoTime(), 36);
+        String vpc = XmlParser.extractFirst(given().header("Authorization", EC2_AUTH)
+                .formParam("Action", "CreateVpc").formParam("CidrBlock", "10.63.0.0/16")
+                .post("/").then().statusCode(200).extract().asString(), "vpcId", null);
+        String template = """
+                {"Parameters":{"AddressType":{"Type":"String"}},"Resources":{
+                  "Endpoint":{"Type":"AWS::EC2::VPCEndpoint","Properties":{
+                    "VpcId":"%s","ServiceName":"com.amazonaws.us-east-1.s3",
+                    "IpAddressType":{"Ref":"AddressType"}}}},
+                  "Outputs":{"EndpointId":{"Value":{"Ref":"Endpoint"}}}}
+                """.formatted(vpc);
+        try {
+            String action = "CreateStack";
+            for (String type : new String[]{"ipv6", "dualstack", "not-specified"}) {
+                given().header("Authorization", CFN_AUTH).formParam("Action", action)
+                        .formParam("StackName", stack).formParam("TemplateBody", template)
+                        .formParam("Parameters.member.1.ParameterKey", "AddressType")
+                        .formParam("Parameters.member.1.ParameterValue", type)
+                        .post("/").then().statusCode(200);
+                assertEquals("CreateStack".equals(action) ? "CREATE_COMPLETE" : "UPDATE_COMPLETE",
+                        CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+                String described = given().header("Authorization", CFN_AUTH)
+                        .formParam("Action", "DescribeStacks").formParam("StackName", stack)
+                        .post("/").then().statusCode(200).extract().asString();
+                String id = XmlParser.extractFirst(described, "OutputValue", null);
+                String endpoint = given().header("Authorization", EC2_AUTH)
+                        .formParam("Action", "DescribeVpcEndpoints").formParam("VpcEndpointId.1", id)
+                        .post("/").then().statusCode(200).extract().asString();
+                assertEquals("not-specified".equals(type) ? "ipv4" : type,
+                        XmlParser.extractFirst(endpoint, "ipAddressType", null));
+                action = "UpdateStack";
+            }
+        } finally {
+            given().header("Authorization", CFN_AUTH).formParam("Action", "DeleteStack")
+                    .formParam("StackName", stack).post("/").then().statusCode(200);
+            CfnStackWaits.awaitStackDeleted(stack, CFN_AUTH);
+            given().header("Authorization", EC2_AUTH).formParam("Action", "DeleteVpc")
+                    .formParam("VpcId", vpc).post("/").then().statusCode(200);
+        }
+    }
+
+    @Test
     void createStackProvisionsGatewayEndpointAndDeleteRemovesIt() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-vpce-stack-" + suffix;

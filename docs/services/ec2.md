@@ -112,6 +112,8 @@ Notes and limitations:
 
 EC2 containers receive `AWS_EC2_METADATA_SERVICE_ENDPOINT` for IMDS and `AWS_ENDPOINT_URL` for AWS service API calls back to Floci.
 
+CloudFormation `AWS::EC2::VPCEndpoint` resolves `IpAddressType` on create and update, including parameter references. Omission or `not-specified` uses the default `ipv4`. Updates retain the existing replacement behavior; synthetic interfaces remain IPv4-only.
+
 ## Instance Metadata Service (IMDS)
 
 Floci runs an IMDS-compatible HTTP server on port `9169` of the host. Each launched container receives the environment variable `AWS_EC2_METADATA_SERVICE_ENDPOINT` pointing to this server.
@@ -224,7 +226,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | DescribeVpcEndpointServices | Lists common AWS interface endpoint services and S3 (gateway and interface) in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
 | CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument` and the per-subnet IPv4 and IPv6 addresses named by `SubnetConfiguration.N`. `IpAddressType` defaults to `ipv4`. Interface and gateway address types are stored as metadata. Synthesized endpoint interfaces still carry IPv4 only; IPv6 networking is not emulated. An `Ipv4` value outside the named subnet's CIDR, or among the first four or the last address AWS reserves in it, is rejected with `InvalidParameterValue`. |
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints, including their IP address type. |
-| ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, and sets or resets the endpoint policy. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` and `IpAddressType` are accepted and ignored. |
+| ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, sets or resets the endpoint policy, and updates stored `IpAddressType` metadata. Omitting the type preserves its current value; malformed types are rejected before changes are applied. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` is accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
 | DescribeVpnGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
 | DescribeEgressOnlyInternetGateways | Validates filters and pagination parameters and returns an empty set, including for explicit IDs, as AWS does. |

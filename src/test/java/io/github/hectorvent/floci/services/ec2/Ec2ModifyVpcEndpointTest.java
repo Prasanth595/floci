@@ -77,6 +77,38 @@ class Ec2ModifyVpcEndpointTest {
         return ec2("DescribeVpcEndpoints", "VpcEndpointId.1", endpointId);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"Gateway", "Interface"})
+    void modifyingAddressTypePersistsAndOmissionPreservesIt(String endpointType) {
+        String vpcId = xmlValue(ec2("CreateVpc", "CidrBlock", "10.81.0.0/16"), "vpcId");
+        String id = xmlValue(ec2("CreateVpcEndpoint", "VpcId", vpcId,
+                "ServiceName", "com.amazonaws.us-east-1.s3", "VpcEndpointType", endpointType), "vpcEndpointId");
+        for (String type : List.of("ipv6", "dualstack", "ipv4")) {
+            ec2("ModifyVpcEndpoint", "VpcEndpointId", id, "IpAddressType", type);
+            assertEquals(type, xmlValue(describe(id), "ipAddressType"));
+            ec2("ModifyVpcEndpoint", "VpcEndpointId", id, "PrivateDnsEnabled", "false");
+            assertEquals(type, xmlValue(describe(id), "ipAddressType"));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bogus", "IPv4", "", " ", "not-specified"})
+    void invalidModifiedAddressTypeDoesNotApplyOtherChanges(String ipAddressType) {
+        Fixture f = fixture("10.80.0.0/16");
+        given().header("Authorization", AUTH_HEADER)
+                .formParam("Action", "ModifyVpcEndpoint")
+                .formParam("VpcEndpointId", f.endpointId())
+                .formParam("IpAddressType", ipAddressType)
+                .formParam("AddRouteTableId.1", f.routeTableId())
+                .formParam("PolicyDocument", POLICY)
+                .when().post("/").then().statusCode(400)
+                .body(hasXPath("//*[local-name()='Code']", equalTo("InvalidParameterValue")));
+        VpcEndpoint saved = service.describeVpcEndpoints("us-east-1", List.of(f.endpointId()), Map.of()).getFirst();
+        assertEquals("ipv4", saved.getIpAddressType());
+        assertEquals(List.of(), saved.getRouteTableIds());
+        assertNull(saved.getPolicyDocument());
+    }
+
     @Test
     void endpointStatesUseAwsWireValues() {
         Fixture f = fixture("10.89.0.0/16");
