@@ -109,7 +109,7 @@ class ElastiCacheServerlessServiceTest {
                 config, ec2, resolver, kms, new ElastiCacheProvisioningIds());
         memcached = new ElastiCacheMemcachedService(mock(ElastiCacheMemcachedContainerManager.class), factory,
                 config, new ElastiCacheProvisioningIds(), resolver);
-        service = new ElastiCacheServerlessService(factory, resolver, runtime, memcached, runtime);
+        service = new ElastiCacheServerlessService(factory, resolver, runtime, memcached);
         runtime.createUser("alice", "alice", AuthMode.PASSWORD, List.of("password-a"), "on ~* +@all", "valkey");
         runtime.createUser("bob", "bob", AuthMode.PASSWORD, List.of("password-b"), "on ~* +@all", "valkey");
         runtime.createUserGroup("team", "valkey", List.of("alice"), "us-east-1");
@@ -243,7 +243,7 @@ class ElastiCacheServerlessServiceTest {
     @Test
     void rehydratedServiceRetainsRuntimeIdentityAndAssociation() {
         ServerlessCache original = service.createServerlessCache(create("cache", "valkey", "team"));
-        ElastiCacheServerlessService reloaded = new ElastiCacheServerlessService(factory, resolver, runtime, memcached, runtime);
+        ElastiCacheServerlessService reloaded = new ElastiCacheServerlessService(factory, resolver, runtime, memcached);
         assertEquals(original.getBackingCacheClusterId(), reloaded.getServerlessCache("cache").getBackingCacheClusterId());
         error("InvalidUserGroupState", () -> runtime.deleteUserGroup("team"));
         reloaded.deleteServerlessCache("cache");
@@ -307,14 +307,14 @@ class ElastiCacheServerlessServiceTest {
     void persistentRestartRestoresHiddenRuntimeCredentialsAndPortOwnership() {
         StorageFactory persistent = persistentFactory();
         ElastiCacheService persistedRuntime = newRuntime(persistent);
-        ElastiCacheServerlessService persisted = new ElastiCacheServerlessService(persistent, resolver, persistedRuntime, memcached, persistedRuntime);
+        ElastiCacheServerlessService persisted = new ElastiCacheServerlessService(persistent, resolver, persistedRuntime, memcached);
         persistedRuntime.createUser("member", "member", AuthMode.PASSWORD, List.of("secret"), "on ~* +@all", "valkey");
         persistedRuntime.createUserGroup("persisted-team", "valkey", List.of("member"), "us-east-1");
         ServerlessCache original = persisted.createServerlessCache(create("persistent", "valkey", "persisted-team"));
         persistent.shutdownAll();
         StorageFactory reloadedFactory = persistentFactory();
         ElastiCacheService reloadedRuntime = newRuntime(reloadedFactory);
-        ElastiCacheServerlessService reloaded = new ElastiCacheServerlessService(reloadedFactory, resolver, reloadedRuntime, memcached, reloadedRuntime);
+        ElastiCacheServerlessService reloaded = new ElastiCacheServerlessService(reloadedFactory, resolver, reloadedRuntime, memcached);
         reloadedFactory.loadAll();
         clearInvocations(proxies);
         reloadedRuntime.restorePersistedRuntime().join();
@@ -362,7 +362,7 @@ class ElastiCacheServerlessServiceTest {
         assertTrue(backing.getForAccount("111111111111", original.getBackingCacheClusterId()).isPresent());
         context.setAccountId("111111111111");
         context.setRegion("cn-north-1");
-        ElastiCacheServerlessService reloaded = new ElastiCacheServerlessService(factory, resolver, reloadedRuntime, memcached, reloadedRuntime);
+        ElastiCacheServerlessService reloaded = new ElastiCacheServerlessService(factory, resolver, reloadedRuntime, memcached);
         assertEquals(original.getEndpoint(), reloaded.getServerlessCache("account-cache").getEndpoint());
         reloaded.deleteServerlessCache("account-cache");
         runtime.deleteUserGroup("team");

@@ -32,18 +32,16 @@ public class ElastiCacheServerlessService implements Resettable {
     private final RegionResolver resolver;
     private final ElastiCacheService runtime;
     private final ElastiCacheMemcachedService memcached;
-    private final ElastiCacheService groups;
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
 
     @Inject
     public ElastiCacheServerlessService(StorageFactory factory, RegionResolver resolver, ElastiCacheService runtime,
-                                        ElastiCacheMemcachedService memcached, ElastiCacheService groups) {
+                                        ElastiCacheMemcachedService memcached) {
         this.caches = factory.create("elasticache", "elasticache-serverless-caches.json",
                 new TypeReference<Map<String, ServerlessCache>>() {});
         this.resolver = resolver;
         this.runtime = runtime;
         this.memcached = memcached;
-        this.groups = groups;
     }
 
     public record CreateServerlessCacheRequest(String serverlessCacheName, String engine, String majorEngineVersion,
@@ -97,7 +95,7 @@ public class ElastiCacheServerlessService implements Resettable {
             CacheCluster backing = null;
             try {
                 if (group != null) {
-                    groups.attachServerlessCache(group, key(name), engine);
+                    runtime.attachServerlessCache(group, key(name), engine);
                     attached = true;
                 }
                 String runtimeId = "serverless-" + UUID.randomUUID();
@@ -143,7 +141,7 @@ public class ElastiCacheServerlessService implements Resettable {
                 }
                 if (attached) {
                     try {
-                        groups.detachServerlessCache(group, key(name));
+                        runtime.detachServerlessCache(group, key(name));
                     } catch (RuntimeException cleanupFailure) {
                         exception.addSuppressed(cleanupFailure);
                     }
@@ -190,7 +188,7 @@ public class ElastiCacheServerlessService implements Resettable {
             validateGroup(group, previous.getEngine(), previous.getRegion());
             boolean changedGroup = !Objects.equals(group, previous.getUserGroupId());
             if (changedGroup && group != null) {
-                groups.attachServerlessCache(group, key(name), previous.getEngine());
+                runtime.attachServerlessCache(group, key(name), previous.getEngine());
             }
             try {
                 if (changedGroup && !"memcached".equals(previous.getEngine())) {
@@ -220,7 +218,7 @@ public class ElastiCacheServerlessService implements Resettable {
                     try {
                         runtime.updateServerlessUserGroup(previous.getBackingCacheClusterId(), previous.getAccountId(), previous.getUserGroupId());
                         if (group != null) {
-                            groups.detachServerlessCache(group, key(name));
+                            runtime.detachServerlessCache(group, key(name));
                         }
                     } catch (RuntimeException rollbackFailure) {
                         exception.addSuppressed(rollbackFailure);
@@ -229,7 +227,7 @@ public class ElastiCacheServerlessService implements Resettable {
                 throw exception;
             }
             if (changedGroup && previous.getUserGroupId() != null) {
-                groups.detachServerlessCache(previous.getUserGroupId(), key(name));
+                runtime.detachServerlessCache(previous.getUserGroupId(), key(name));
             }
             return current(updated);
         }
@@ -270,7 +268,7 @@ public class ElastiCacheServerlessService implements Resettable {
                         cache.getBackingCacheClusterId(), normalized);
             }
             if (cache.getUserGroupId() != null) {
-                groups.detachServerlessCache(cache.getUserGroupId(), key(normalized));
+                runtime.detachServerlessCache(cache.getUserGroupId(), key(normalized));
             }
             caches.delete(key(normalized));
             ServerlessCache deleted = copy(cache);
@@ -328,7 +326,7 @@ public class ElastiCacheServerlessService implements Resettable {
         if ("memcached".equals(engine)) {
             throw new AwsException("InvalidParameterCombination", "Memcached does not support user groups.", 400);
         }
-        groups.validateServerlessAssociation(group, engine);
+        runtime.validateServerlessAssociation(group, engine);
     }
 
     private static String normalizedName(String name) {
@@ -403,7 +401,7 @@ public class ElastiCacheServerlessService implements Resettable {
                         cache.getBackingCacheClusterId(), cache.getServerlessCacheName());
             }
             if (cache.getUserGroupId() != null) {
-                groups.detachServerlessCache(cache.getUserGroupId(),
+                runtime.detachServerlessCache(cache.getUserGroupId(),
                         cache.getRegion() + "/" + cache.getServerlessCacheName());
             }
         }
