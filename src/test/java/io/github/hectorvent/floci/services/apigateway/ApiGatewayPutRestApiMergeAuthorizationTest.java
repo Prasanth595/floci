@@ -516,11 +516,25 @@ class ApiGatewayPutRestApiMergeAuthorizationTest {
                 given().delete("/restapis/" + apiId).then().statusCode(202);
             }
         }
+
+        String optionalAuthorizerSecurity = COGNITO_SPEC.replace(
+                "\"security\": [{\"Guard\": []}]",
+                "\"security\": [{\"Guard\": []}, {}]");
+        String apiId = importApi(optionalAuthorizerSecurity);
+        try {
+            JsonNode method = getJson(methodPath(apiId));
+            assertAll(
+                    () -> assertFalse(method.path("apiKeyRequired").asBoolean()),
+                    () -> assertEquals("COGNITO_USER_POOLS", method.path("authorizationType").asText()),
+                    () -> assertTrue(method.hasNonNull("authorizerId")));
+        } finally {
+            given().delete("/restapis/" + apiId).then().statusCode(202);
+        }
     }
 
     @Test
-    void apiKeyAndAuthorizerAlternativesAreRejected() {
-        String incompatibleSpec = """
+    void apiKeyAndAuthorizerAlternativesDoNotRequireAnApiKeyAndKeepAuthorizer() throws Exception {
+        String apiKeyAndAuthorizerSpec = """
                 {
                   "openapi": "3.0.1",
                   "info": {"title": "IncompatibleSecurity", "version": "1"},
@@ -539,9 +553,20 @@ class ApiGatewayPutRestApiMergeAuthorizationTest {
                   }}}
                 }
                 """.formatted(AUTHORIZER_URI);
-        String errorBody = given().contentType(ContentType.JSON).queryParam("mode", "import")
-                .body(incompatibleSpec).post("/restapis").then().statusCode(400).extract().asString();
-        assertTrue(errorBody.contains("security alternatives that switch between API keys and authorizers"));
+        String apiId = importApi(apiKeyAndAuthorizerSpec);
+        try {
+            denyAuthorizerRequests();
+            JsonNode method = getJson(methodPath(apiId));
+            deploy(apiId, "mixed-security");
+            assertAll(
+                    () -> assertFalse(method.path("apiKeyRequired").asBoolean()),
+                    () -> assertEquals("CUSTOM", method.path("authorizationType").asText()),
+                    () -> assertTrue(method.hasNonNull("authorizerId")),
+                    () -> assertEquals(403, invoke(apiId, "mixed-security")),
+                    () -> verifyDenyInvocations(1));
+        } finally {
+            given().delete("/restapis/" + apiId).then().statusCode(202);
+        }
     }
 
     @Test

@@ -3600,23 +3600,14 @@ public class ApiGatewayService implements ResourceProvider {
         // to a method authorizationType (CUSTOM/AWS_IAM/COGNITO_USER_POOLS) + authorizerId.
         List<SecurityRequirement> secReqs = operation.getSecurity() != null
                 ? operation.getSecurity() : openAPI.getSecurity();
-        boolean permitsAnonymousAccess = secReqs != null
-                && secReqs.stream().anyMatch(SecurityRequirement::isEmpty);
-        boolean apiKeyRequired = secReqs != null && !secReqs.isEmpty() && !permitsAnonymousAccess
+        boolean apiKeyRequired = secReqs != null && !secReqs.isEmpty()
                 && secReqs.stream().allMatch(requirement -> requirement.keySet().stream()
                         .anyMatch(apiKeySchemes::contains));
-        if (secReqs != null && !permitsAnonymousAccess
-                && hasIncompatibleApiKeyAuthorizerAlternatives(secReqs, apiKeySchemes, schemeToAuthType)) {
-            throw new AwsException("BadRequestException",
-                    "API Gateway cannot import security alternatives that switch between API keys and authorizers",
-                    400);
-        }
         String authType = "NONE";
         String authorizerId = null;
         List<String> authorizationScopes = List.of();
-        if (secReqs != null && !permitsAnonymousAccess) {
-            // AWS resolves the OR-list of security requirements to the first declared
-            // authorizer scheme (a method has exactly one authorizer), so stop at the first match.
+        if (secReqs != null) {
+            // An API Gateway method can reference only one authorizer, so preserve the first match.
             resolveAuth:
             for (SecurityRequirement secReq : secReqs) {
                 for (String schemeName : secReq.keySet()) {
@@ -3719,26 +3710,6 @@ public class ApiGatewayService implements ResourceProvider {
         if (integrationExt != null) {
             applyIntegration(region, apiId, resourceId, httpMethod, integrationExt);
         }
-    }
-
-    private static boolean hasIncompatibleApiKeyAuthorizerAlternatives(List<SecurityRequirement> securityRequirements,
-            Set<String> apiKeySchemes, Map<String, String> schemeToAuthType) {
-        boolean hasApiKeyAlternative = securityRequirements.stream().anyMatch(requirement ->
-                requirement.keySet().stream().anyMatch(apiKeySchemes::contains));
-        boolean hasAuthorizerAlternative = securityRequirements.stream().anyMatch(requirement ->
-                requirement.keySet().stream().anyMatch(schemeName -> {
-                    String authType = schemeToAuthType.get(schemeName);
-                    return authType != null && !"NONE".equals(authType);
-                }));
-        if (!hasApiKeyAlternative || !hasAuthorizerAlternative) {
-            return false;
-        }
-        return securityRequirements.stream().anyMatch(requirement ->
-                requirement.keySet().stream().anyMatch(apiKeySchemes::contains)
-                        != requirement.keySet().stream().anyMatch(schemeName -> {
-                            String authType = schemeToAuthType.get(schemeName);
-                            return authType != null && !"NONE".equals(authType);
-                        }));
     }
 
     private static final String PARAMETER_REF_PREFIX = "#/components/parameters/";
