@@ -1729,6 +1729,24 @@ public class CognitoService implements ResourceProvider {
                 .findFirst();
     }
 
+    public UserPoolDomainNames findDomainNamesForPool(String poolId) {
+        String domain = null;
+        String customDomain = null;
+        for (UserPoolDomain userPoolDomain : allDomains()) {
+            if (!poolId.equals(userPoolDomain.getUserPoolId())) {
+                continue;
+            }
+            if (userPoolDomain.isCustomDomain() && customDomain == null) {
+                customDomain = userPoolDomain.getDomain();
+            } else if (!userPoolDomain.isCustomDomain() && domain == null) {
+                domain = userPoolDomain.getDomain();
+            }
+        }
+        return new UserPoolDomainNames(domain, customDomain);
+    }
+
+    public record UserPoolDomainNames(String domain, String customDomain) { }
+
     private List<UserPoolDomain> allDomains() {
         return domainStore instanceof AccountAwareStorageBackend<UserPoolDomain> aware
                 ? aware.scanAllAccounts()

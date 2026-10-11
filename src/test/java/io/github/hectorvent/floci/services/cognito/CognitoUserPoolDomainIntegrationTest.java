@@ -49,6 +49,8 @@ class CognitoUserPoolDomainIntegrationTest {
                 }
                 """);
         poolId = poolResponse.path("UserPool").path("Id").asText();
+        assertNull(poolResponse.path("UserPool").get("Domain"));
+        assertNull(poolResponse.path("UserPool").get("CustomDomain"));
         prefixDomain = "floci-test-" + UUID.randomUUID().toString().substring(0, 8);
         customDomain = "auth-" + UUID.randomUUID().toString().substring(0, 8) + ".example.com";
         CERTIFICATE_ARN = requestCertificate(customDomain);
@@ -101,6 +103,14 @@ class CognitoUserPoolDomainIntegrationTest {
         assertEquals(poolId, description.path("UserPoolId").asText());
         assertEquals("ACTIVE", description.path("Status").asText());
         assertNull(description.get("CustomDomainConfig"));
+
+        JsonNode userPool = cognitoJson("DescribeUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(poolId)).path("UserPool");
+        assertEquals(prefixDomain, userPool.path("Domain").asText());
+        assertNull(userPool.get("CustomDomain"));
     }
 
     @Test
@@ -161,6 +171,32 @@ class CognitoUserPoolDomainIntegrationTest {
         assertEquals(CERTIFICATE_ARN, description.path("CustomDomainConfig").path("CertificateArn").asText());
         assertEquals("ACTIVE", description.path("Status").asText());
         org.junit.jupiter.api.Assertions.assertNotNull(description.path("CloudFrontDistribution").asText(null));
+
+        String secondPrefixDomain = prefixDomain + "-again";
+        cognitoJson("CreateUserPoolDomain", """
+                {
+                  "Domain": "%s",
+                  "UserPoolId": "%s"
+                }
+                """.formatted(secondPrefixDomain, poolId));
+        try {
+            JsonNode userPool = cognitoJson("DescribeUserPool", """
+                    {
+                      "UserPoolId": "%s"
+                    }
+                    """.formatted(poolId)).path("UserPool");
+            assertEquals(secondPrefixDomain, userPool.path("Domain").asText());
+            assertEquals(customDomain, userPool.path("CustomDomain").asText());
+        } finally {
+            cognitoAction("DeleteUserPoolDomain", """
+                    {
+                      "Domain": "%s",
+                      "UserPoolId": "%s"
+                    }
+                    """.formatted(secondPrefixDomain, poolId))
+                    .then()
+                    .statusCode(200);
+        }
     }
 
     @Test

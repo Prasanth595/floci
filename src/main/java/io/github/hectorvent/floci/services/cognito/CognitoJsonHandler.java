@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.cognito.CognitoService.UserPoolDomainNames;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
@@ -1131,6 +1132,14 @@ public class CognitoJsonHandler {
         node.put("Status", p.getStatus());
         node.put("CreationDate", (double) p.getCreationDate());
         node.put("LastModifiedDate", (double) p.getLastModifiedDate());
+
+        UserPoolDomainNames domains = service.findDomainNamesForPool(p.getId());
+        if (domains.domain() != null) {
+            node.put("Domain", domains.domain());
+        }
+        if (domains.customDomain() != null) {
+            node.put("CustomDomain", domains.customDomain());
+        }
 
         node.set("Policies", objectMapper.valueToTree(p.getPolicies() != null ? p.getPolicies() : new HashMap<>()));
         node.put("DeletionProtection", p.getDeletionProtection() != null ? p.getDeletionProtection() : "INACTIVE");
