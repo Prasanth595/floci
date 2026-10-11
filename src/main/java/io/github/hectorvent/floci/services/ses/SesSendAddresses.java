@@ -133,7 +133,7 @@ final class SesSendAddresses {
         }
     }
 
-    private static void forEachHeaderAddress(Message message, String name, Consumer<String> check) {
+    static void forEachHeaderAddress(Message message, String name, Consumer<String> check) {
         Header header = message == null ? null : message.getHeader();
         if (header == null) {
             return;

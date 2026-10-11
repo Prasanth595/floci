@@ -167,6 +167,40 @@ class SesServiceAddressSyntaxTest {
     }
 
     @Test
+    void v2RawSend_fromHeaderWithoutAtIsReportedAfterMissingDestination() {
+        assertRejects("Missing required header 'To'.", () -> service.sendEmail(request(null).toAddresses(List.of())
+                .content(v2RawWithoutTo(NO_AT)).build()));
+    }
+
+    @Test
+    void v2RawSend_otherFromHeaderViolationsAreReportedBeforeMissingDestination() {
+        assertRejects(INVALID_FROM, () -> service.sendEmail(request(null).toAddresses(List.of())
+                .content(v2RawWithoutTo(EMPTY_DOMAIN)).build()));
+    }
+
+    @Test
+    void v2RawSend_fromHeaderWithoutAtIsReportedAfterRecipientSyntax() {
+        assertRejects(LOCAL_CONTROL, () -> service.sendEmail(request(null).toAddresses(List.of(NON_ASCII_LOCAL))
+                .content(fromHeaderRaw(NO_AT, true)).build()));
+        assertRejects(LOCAL_CONTROL, () -> service.sendEmail(request(null).toAddresses(List.of())
+                .content(fromHeaderRaw(NO_AT, true, NON_ASCII_LOCAL)).build()));
+    }
+
+    @Test
+    void v2RawSend_fromHeaderWithoutAtIsReportedAfterUnknownConfigurationSet() {
+        AwsException e = assertThrows(AwsException.class, () -> service.sendEmail(request(null)
+                .configurationSetName("missing").content(fromHeaderRaw(NO_AT, true)).build()));
+
+        assertEquals("ConfigurationSetDoesNotExist", e.getErrorCode());
+    }
+
+    @Test
+    void v2RawSend_fromHeaderWithoutAtIsReportedBeforeLength() {
+        assertRejects(MISSING_FINAL_DOMAIN, () -> service.sendEmail(request(null).toAddresses(List.of(address(321)))
+                .content(fromHeaderRaw(NO_AT, true)).build()));
+    }
+
+    @Test
     void rawSend_destinationsAreChecked() {
         assertRejects(LOCAL_CONTROL, () -> service.sendEmail(request(SENDER)
                 .toAddresses(List.of(NON_ASCII_LOCAL)).content(raw(SENDER, TO)).build()));
@@ -265,8 +299,17 @@ class SesServiceAddressSyntaxTest {
     }
 
     private static EmailContent.Raw fromHeaderRaw(String from, boolean fromHeaderAsFallback) {
-        return new EmailContent.Raw(Base64.getEncoder().encodeToString(("From: " + from + "\r\nTo: " + TO
+        return fromHeaderRaw(from, fromHeaderAsFallback, TO);
+    }
+
+    private static EmailContent.Raw fromHeaderRaw(String from, boolean fromHeaderAsFallback, String to) {
+        return new EmailContent.Raw(Base64.getEncoder().encodeToString(("From: " + from + "\r\nTo: " + to
                 + "\r\nSubject: s\r\n\r\nbody").getBytes(StandardCharsets.UTF_8)), fromHeaderAsFallback);
+    }
+
+    private static EmailContent.Raw v2RawWithoutTo(String from) {
+        return new EmailContent.Raw(Base64.getEncoder().encodeToString(("From: " + from
+                + "\r\nSubject: s\r\n\r\nbody").getBytes(StandardCharsets.UTF_8)), true);
     }
 
     private static EmailContent.Raw raw(String from, String to, String extraHeaders) {

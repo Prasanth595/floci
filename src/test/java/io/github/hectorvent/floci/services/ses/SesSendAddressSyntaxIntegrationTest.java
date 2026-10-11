@@ -342,6 +342,29 @@ class SesSendAddressSyntaxIntegrationTest {
 
     @ParameterizedTest
     @CsvSource({
+        "sender.example.com, Missing required header 'To'.",
+        "sender@, Invalid From address provided."
+    })
+    void v2SendEmailRaw_malformedFromHeaderWithoutAnyDestination(String from, String message) {
+        String raw = Base64.getEncoder().encodeToString(("From: " + from + "\r\nSubject: s\r\n\r\nb")
+                .getBytes(StandardCharsets.UTF_8));
+
+        given()
+            .contentType("application/json; charset=UTF-8")
+            .header("Authorization", AUTH)
+            .body("""
+                {"Content": {"Raw": {"Data": "%s"}}}
+                """.formatted(raw))
+        .when()
+            .post("/v2/email/outbound-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo(message));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
         "sender.example.com, Missing final '@domain'",
         "sender@, Missing domain",
         "やまだ@example.com, Local address contains control or whitespace",

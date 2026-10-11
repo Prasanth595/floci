@@ -22,7 +22,8 @@ import java.util.function.Consumer;
  * the Reply-To and Return-Path headers were not probed and are left unchecked. The v2 controller
  * remaps the code to BadRequestException. A v2 raw send checks its From header only without a
  * sender parameter, and then answers an invalid From address for every violation but a missing
- * {@code @} (probe-confirmed for the four JavaMail messages; a quoted CR or LF is assumed to follow).
+ * {@code @}, which it reports later (probe-confirmed for the four JavaMail messages; a quoted CR
+ * or LF is assumed to follow).
  */
 final class SesAddressSyntax {
 
@@ -49,10 +50,25 @@ final class SesAddressSyntax {
 
     private static void requireFallbackFrom(String address) {
         Violation violation = classify(address);
-        if (violation != null) {
-            throw new AwsException("InvalidParameterValue", violation == Violation.MISSING_AT
-                    ? violation.message(address)
-                    : "Invalid From address provided.", 400);
+        if (violation != null && violation != Violation.MISSING_AT) {
+            throw new AwsException("InvalidParameterValue", "Invalid From address provided.", 400);
+        }
+    }
+
+    /**
+     * The missing {@code @} of a v2 raw From header read in place of the sender, which AWS reports
+     * only after the configuration set and the missing-destination checks, and before the length
+     * check (probe-confirmed).
+     */
+    static void requireFallbackFromAt(SendEmailRequest request, EmailContent.Raw raw, Message message) {
+        if (raw.fromHeaderAsFallback() && !request.hasSource()) {
+            SesSendAddresses.forEachHeaderAddress(message, "From", SesAddressSyntax::requireAt);
+        }
+    }
+
+    private static void requireAt(String address) {
+        if (classify(address) == Violation.MISSING_AT) {
+            throw new AwsException("InvalidParameterValue", Violation.MISSING_AT.message(address), 400);
         }
     }
 
