@@ -1604,10 +1604,13 @@ public class S3Controller {
         S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                 s3Service.isAuthEnforced(), httpHeaders, uriInfo);
         s3Service.authorizeSignedRequest(authorization);
+        String iamCredential = IamEnforcementFilter.requestAuthorization(
+                httpHeaders.getHeaderString("Authorization"), uriInfo.getQueryParameters());
         List<XmlParser.KeyVersion> authorizedEntries = new ArrayList<>();
         List<S3Service.DeleteError> authorizationErrors = new ArrayList<>();
         for (XmlParser.KeyVersion entry : entries) {
             try {
+                authorizeDeleteEntryIdentity(iamCredential, bucket, entry);
                 s3Service.authorizeDeleteObject(bucket, entry.key(), entry.versionId(), authorization);
                 authorizeDeleteETagRead(bucket, entry.key(), entry.eTag(), authorization);
                 if (bypass && s3Service.isGovernanceRetentionActive(
@@ -1663,14 +1666,46 @@ public class S3Controller {
     // s3:GetObject as well as s3:DeleteObject. The existence check (If-Match: *) needs only the delete.
     private void authorizeDeleteETagRead(String bucket, String key, String ifMatch,
                                          S3Service.RequestAuthorization authorization) {
-        if (ifMatch == null) {
-            return;
-        }
-        String value = ifMatch.trim();
-        if (value.equals("*") || value.equals("\"*\"")) {
+        if (!isETagCondition(ifMatch)) {
             return;
         }
         s3Service.authorizeGetObject(bucket, key, null, authorization);
+    }
+
+    private static boolean isETagCondition(String ifMatch) {
+        if (ifMatch == null) {
+            return false;
+        }
+        String value = ifMatch.trim();
+        return !value.equals("*") && !value.equals("\"*\"");
+    }
+
+    /**
+     * Evaluates the caller's identity policies for one DeleteObjects entry, which IamEnforcementFilter
+     * cannot do: S3 has no s3:DeleteObjects action, the keys arrive only in the request body, and a
+     * denial answers that one key with an {@code <Error>} rather than refusing the whole request.
+     * Each entry needs s3:DeleteObject, or s3:DeleteObjectVersion when it names a version, plus
+     * s3:GetObject when it carries an ETag condition.
+     *
+     * <p>No resource-policy decision is passed, so the filter resolves the bucket policy itself, with
+     * its own global condition keys, as it does for a single-key delete. S3's error for a denied entry
+     * reads "Access Denied", not the filter's message for a whole-request denial.
+     */
+    private void authorizeDeleteEntryIdentity(String iamCredential, String bucket, XmlParser.KeyVersion entry) {
+        String resource = S3PublicAccessEvaluator.objectArn(
+                s3Service.bucketPartition(bucket), bucket, entry.key());
+        String action = entry.versionId() == null ? "s3:DeleteObject" : "s3:DeleteObjectVersion";
+        try {
+            iamEnforcementFilter.authorizeAdditionalResource(iamCredential, action, resource);
+            if (isETagCondition(entry.eTag())) {
+                iamEnforcementFilter.authorizeAdditionalResource(iamCredential, "s3:GetObject", resource);
+            }
+        } catch (AwsException e) {
+            if ("AccessDenied".equals(e.getErrorCode())) {
+                throw new AwsException("AccessDenied", "Access Denied", 403);
+            }
+            throw e;
+        }
     }
 
     private Response handleListParts(String bucket, String key, String uploadId,

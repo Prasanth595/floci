@@ -845,10 +845,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (akid == null || "test".equals(akid)) {
             return;
         }
-        String credentialScope = extractCredentialScope(authorizationHeader);
-        if (credentialScope == null) {
+        String rawScope = extractCredentialScope(authorizationHeader);
+        if (rawScope == null) {
             return;
         }
+        // Canonicalised as filter() does, so a signing alias (s3express) finds the resource
+        // policies its canonical service (s3) supplies.
+        String credentialScope = catalog.canonicalCredentialScope(rawScope);
 
         String accountId = resolveCredentialAccountId(akid, authorizationHeader);
         String previousAccountId = requestContext.getAccountId();

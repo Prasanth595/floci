@@ -1,0 +1,150 @@
+package io.github.hectorvent.floci.services.s3;
+
+import io.github.hectorvent.floci.testing.S3IamEnforcementProfile;
+import io.github.hectorvent.floci.testutil.S3RequestSigner;
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
+import io.restassured.path.xml.XmlPath;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.UUID;
+
+import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+/**
+ * The per-key DeleteObjects authorization of {@link S3DeleteObjectsIamEnforcementIntegrationTest}
+ * with S3 auth enforcement and the global bucket namespace on as well, so S3's own signed
+ * bucket-policy check runs beside IAM's. That check evaluates a narrower condition context than
+ * the IAM layer, so a batch delete must reach the IAM evaluation to be refused exactly where the
+ * single-key DeleteObject is.
+ */
+@QuarkusTest
+@TestProfile(S3IamEnforcementProfile.class)
+class S3DeleteObjectsSignedIamEnforcementIntegrationTest {
+
+    // S3HeaderSignatureFilter verifies every header signature under this profile, so each S3 call
+    // signs for real with the caller's secret.
+    private static final S3RequestSigner ROOT_SIGNER = S3RequestSigner.signedAs("test", "test");
+    private static final String REGION = "us-east-1";
+    private static final String ACCOUNT_A = "111122223333";
+    private static final String ACCOUNT_B = "222233334444";
+
+    private record UserCredentials(String accessKeyId, String secretAccessKey) {
+        S3RequestSigner signer() {
+            return S3RequestSigner.signedAs(accessKeyId, secretAccessKey);
+        }
+    }
+
+    @Test
+    void aBucketPolicyDenyOnRequestedRegionAppliesAsItDoesToASingleDelete() {
+        String bucket = uniqueName("delobj-region");
+        createBucket(bucket, ROOT_SIGNER);
+        put(bucket, "single.txt", ROOT_SIGNER);
+        put(bucket, "batch.txt", ROOT_SIGNER);
+        String user = uniqueName("delobj-region");
+        UserCredentials caller = createUser(user, "test");
+        userPolicy(user, "test",
+                "{\"Effect\":\"Allow\",\"Action\":\"s3:DeleteObject\",\"Resource\":\"arn:aws:s3:::" + bucket + "/*\"}");
+        bucketPolicy(bucket, ROOT_SIGNER, """
+                {"Effect":"Deny","Principal":"*","Action":"s3:DeleteObject","Resource":"arn:aws:s3:::%s/*",
+                 "Condition":{"StringEquals":{"aws:RequestedRegion":"%s"}}}""".formatted(bucket, REGION));
+
+        given().filter(caller.signer()).when().delete("/" + bucket + "/single.txt").then().statusCode(403);
+        XmlPath result = deleteObjects(caller.signer(), bucket, "batch.txt");
+
+        assertEquals(List.of(), result.getList("DeleteResult.Deleted.Key"));
+        assertDenied(result, "batch.txt");
+        assertPresent(bucket, "single.txt", ROOT_SIGNER);
+        assertPresent(bucket, "batch.txt", ROOT_SIGNER);
+    }
+
+    // Only the denial is asserted: S3Service.deleteObject looks the bucket up in the caller's own
+    // account, so a cross-account object delete answers NoSuchBucket here, single-key or batch.
+    @Test
+    void aCrossAccountBucketPolicyGrantWithoutAnIdentityGrantIsDenied() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "delobj-cross-" + suffix;
+        String owner = "delobj-owner-" + suffix;
+        UserCredentials ownerCredentials = createUser(owner, ACCOUNT_A);
+        userPolicy(owner, ACCOUNT_A, "{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"}");
+        createBucket(bucket, ownerCredentials.signer());
+        put(bucket, "shared.txt", ownerCredentials.signer());
+        String user = "delobj-cross-user-" + suffix;
+        UserCredentials caller = createUser(user, ACCOUNT_B);
+        bucketPolicy(bucket, ownerCredentials.signer(), """
+                {"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::%s:user/%s"},
+                 "Action":"s3:DeleteObject","Resource":"arn:aws:s3:::%s/*"}""".formatted(ACCOUNT_B, user, bucket));
+
+        XmlPath result = deleteObjects(caller.signer(), bucket, "shared.txt");
+
+        assertEquals(List.of(), result.getList("DeleteResult.Deleted.Key"));
+        assertDenied(result, "shared.txt");
+        assertPresent(bucket, "shared.txt", ownerCredentials.signer());
+    }
+
+    private static void assertDenied(XmlPath result, String key) {
+        assertEquals(List.of(key), result.getList("DeleteResult.Error.Key"));
+        assertEquals(List.of("AccessDenied"), result.getList("DeleteResult.Error.Code"));
+        assertEquals(List.of("Access Denied"), result.getList("DeleteResult.Error.Message"));
+    }
+
+    private static XmlPath deleteObjects(S3RequestSigner signer, String bucket, String key) {
+        String response = given()
+                .filter(signer)
+                .contentType("application/xml")
+                .body("<Delete><Object><Key>" + key + "</Key></Object></Delete>")
+        .when()
+                .post("/" + bucket + "?delete")
+        .then()
+                .statusCode(200)
+                .extract().asString();
+        return XmlPath.from(response);
+    }
+
+    private static String uniqueName(String prefix) {
+        return prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    private static void createBucket(String bucket, S3RequestSigner signer) {
+        given().filter(signer).when().put("/" + bucket).then().statusCode(200);
+    }
+
+    private static void put(String bucket, String key, S3RequestSigner signer) {
+        given().filter(signer).contentType("text/plain").body("seed")
+                .when().put("/" + bucket + "/" + key).then().statusCode(200);
+    }
+
+    private static void assertPresent(String bucket, String key, S3RequestSigner signer) {
+        given().filter(signer).when().head("/" + bucket + "/" + key).then().statusCode(200);
+    }
+
+    private static void bucketPolicy(String bucket, S3RequestSigner signer, String statement) {
+        given().filter(signer).contentType("application/json")
+                .body("{\"Version\":\"2012-10-17\",\"Statement\":[" + statement + "]}")
+                .when().put("/" + bucket + "?policy").then().statusCode(200);
+    }
+
+    private static UserCredentials createUser(String user, String accountKey) {
+        given().formParam("Action", "CreateUser").formParam("UserName", user)
+                .header("Authorization", auth(accountKey, "iam")).when().post("/").then().statusCode(200);
+        XmlPath key = given().formParam("Action", "CreateAccessKey").formParam("UserName", user)
+                .header("Authorization", auth(accountKey, "iam")).when().post("/").then().statusCode(200)
+                .extract().xmlPath();
+        return new UserCredentials(
+                key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId"),
+                key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.SecretAccessKey"));
+    }
+
+    private static void userPolicy(String user, String accountKey, String statement) {
+        given().formParam("Action", "PutUserPolicy").formParam("UserName", user).formParam("PolicyName", "p")
+                .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[" + statement + "]}")
+                .header("Authorization", auth(accountKey, "iam")).when().post("/").then().statusCode(200);
+    }
+
+    private static String auth(String accessKeyId, String service) {
+        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260629/" + REGION + "/" + service
+                + "/aws4_request, SignedHeaders=host, Signature=abc";
+    }
+}
