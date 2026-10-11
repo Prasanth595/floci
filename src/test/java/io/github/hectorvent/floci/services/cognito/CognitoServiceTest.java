@@ -245,7 +245,8 @@ class CognitoServiceTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"alice smith@example.com", "alice", "alice@", "@example.com",
-            "alice@@example.com", "alice@example.com\n", "alice@example.com\u0000", "alice@exa mple.com"})
+            "alice@@example.com", "alice@example.com\n", "alice@example.com\u0000", "alice@exa mple.com",
+            "alice\\@example.com", "\"alice@example.com\""})
     @SuppressWarnings("unchecked")
     void malformedEmailsAreRejectedBeforeAnyUserOrAttributeIsStored(String email) {
         UserPool pool = createPoolAndUser();
@@ -286,6 +287,15 @@ class CognitoServiceTest {
                 Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")).get("AuthenticationResult");
         service.updateUserAttributes((String) auth.get("AccessToken"), Map.of("email", ""));
         assertNull(service.adminGetUser(pool.getId(), "alice").getAttributes().get("email"));
+    }
+
+    @Test
+    void emailSeparatorAfterAQuotedLocalPartOrEscapedBackslashRemainsValid() {
+        UserPool pool = createPoolAndUser();
+        for (String email : List.of("\"alice\\\\name\"@example.com", "alice\\\\@example.com")) {
+            service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("email", email));
+            assertEquals(email, service.adminGetUser(pool.getId(), "alice").getAttributes().get("email"));
+        }
     }
 
     private UserPool createPoolWithStrictPasswordPolicy() {

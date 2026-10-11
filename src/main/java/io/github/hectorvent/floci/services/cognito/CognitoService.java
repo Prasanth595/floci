@@ -4133,9 +4133,24 @@ public class CognitoService implements ResourceProvider {
         }
         // Use Cognito's 2048-character attribute limit, not SES's envelope-address limit.
         if (email == null || email.length() > EMAIL_ATTRIBUTE_MAX_LENGTH
-                || !EMAIL_ATTRIBUTE_PATTERN.matcher(email).matches()) {
+                || !EMAIL_ATTRIBUTE_PATTERN.matcher(email).matches() || !hasEmailSeparator(email)) {
             throw new AwsException("InvalidParameterException", "Invalid email address format.", 400);
         }
+    }
+
+    private static boolean hasEmailSeparator(String email) {
+        boolean quoted = false;
+        for (int i = 0; i < email.length(); i++) {
+            char character = email.charAt(i);
+            if (character == '\\') {
+                i++;
+            } else if (character == '"') {
+                quoted = !quoted;
+            } else if (character == '@' && !quoted) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void deleteUserAttributes(String accessToken, List<String> attributeNames) {

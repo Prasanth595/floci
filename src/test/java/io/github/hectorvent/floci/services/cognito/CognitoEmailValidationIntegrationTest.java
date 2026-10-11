@@ -4,7 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -23,8 +24,9 @@ class CognitoEmailValidationIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
-    @Test
-    void allFourApisReturnCognitoValidationErrorsAndPreserveExistingAttributes() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"alice smith@example.com", "alice\\@example.com", "\"alice@example.com\""})
+    void allFourApisReturnCognitoValidationErrorsAndPreserveExistingAttributes(String email) throws Exception {
         String poolId = cognitoJson("CreateUserPool", JSON.writeValueAsString(Map.of(
                 "PoolName", "email-validation-" + UUID.randomUUID()))).path("UserPool").path("Id").asText();
         try {
@@ -42,7 +44,7 @@ class CognitoEmailValidationIntegrationTest {
                     "AuthFlow", "USER_PASSWORD_AUTH", "AuthParameters", Map.of("USERNAME", "alice", "PASSWORD", "Passw0rd!x"))))
                     .path("AuthenticationResult").path("AccessToken").asText();
             List<Map<String, String>> attributes = List.of(Map.of("Name", "name", "Value", "must-not-be-saved"),
-                    Map.of("Name", "email", "Value", "alice smith@example.com"));
+                    Map.of("Name", "email", "Value", email));
             Map<String, Map<String, Object>> requests = Map.of(
                     "AdminCreateUser", Map.of("UserPoolId", poolId, "Username", "bad-admin", "MessageAction", "SUPPRESS", "UserAttributes", attributes),
                     "SignUp", Map.of("ClientId", clientId, "Username", "bad-signup", "Password", "Passw0rd!x", "UserAttributes", attributes),
