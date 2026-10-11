@@ -329,7 +329,7 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
         for (int index = 0; index < 3; index++) {
             String token = index < tokens.size() ? tokens.get(index) : null;
             names[index] = token == null ? "" : token + "._domainkey." + identity.getIdentity();
-            values[index] = token == null ? "" : token + "." + identity.getDkimSigningHostedZone();
+            values[index] = token == null ? "" : token + "." + SesIdentityService.DKIM_SIGNING_HOSTED_ZONE;
         }
         resource.getAttributes().put("DkimDNSTokenName1", names[0]);
         resource.getAttributes().put("DkimDNSTokenName2", names[1]);

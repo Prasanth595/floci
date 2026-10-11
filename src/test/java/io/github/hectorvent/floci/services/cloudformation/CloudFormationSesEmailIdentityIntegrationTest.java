@@ -37,7 +37,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
@@ -197,10 +196,10 @@ class CloudFormationSesEmailIdentityIntegrationTest {
     @Test
     void domainSigningHostedZoneDrivesGetAttInheritanceRotationAndDnsDetection() throws Exception {
         String domain = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
-        String signingZone = "dkim.identity-specific.floci.test";
+        String signingZone = SesIdentityService.DKIM_SIGNING_HOSTED_ZONE;
         String email = "user@" + domain;
         stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
-        createStackWithSigningHostedZone(domain, signingZone);
+        createIdentityStack(domain);
         List<String> originalTokens = sesIdentity(domain).jsonPath().getList("DkimAttributes.Tokens", String.class);
         cfn("UpdateStack", template(domain, true)).then().statusCode(200);
         String updated = awaitStatus("UPDATE_COMPLETE");
@@ -530,8 +529,8 @@ class CloudFormationSesEmailIdentityIntegrationTest {
     void failedLaterResourceRestoresIdentitySettingsAndTags() throws Exception {
         String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
         stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
-        String signingZone = "dkim.rollback.floci.test";
-        createStackWithSigningHostedZone(identityName, signingZone);
+        String signingZone = SesIdentityService.DKIM_SIGNING_HOSTED_ZONE;
+        createIdentityStack(identityName);
         List<String> originalTokens = sesIdentity(identityName).jsonPath()
                 .getList("DkimAttributes.Tokens", String.class);
 
@@ -1037,19 +1036,9 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         }
     }
 
-    private void createStackWithSigningHostedZone(String identityName, String signingZone) throws Exception {
-        doAnswer(call -> {
-            Identity created = (Identity) call.callRealMethod();
-            created.setDkimSigningHostedZone(signingZone);
-            identityService.save(created, "us-east-1");
-            return created;
-        }).when(sesService).createEmailIdentity(eq(identityName), any(), any(), eq("us-east-1"));
-        try {
-            cfn("CreateStack", template(identityName, false)).then().statusCode(200);
-            awaitStatus("CREATE_COMPLETE");
-        } finally {
-            doCallRealMethod().when(sesService).createEmailIdentity(eq(identityName), any(), any(), eq("us-east-1"));
-        }
+    private void createIdentityStack(String identityName) throws Exception {
+        cfn("CreateStack", template(identityName, false)).then().statusCode(200);
+        awaitStatus("CREATE_COMPLETE");
     }
 
     private String dnsChanges(String changes) {

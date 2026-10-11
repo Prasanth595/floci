@@ -42,7 +42,6 @@ class SesCfnProvisionerTest {
     @Test
     void domainCreationSetsRefAndAllDkimDnsAttributes() throws Exception {
         Identity identity = domain("example.com");
-        identity.setDkimSigningHostedZone("dkim.identity-specific.floci.test");
         when(ses.createEmailIdentity(eq("example.com"), isNull(), eq(List.of()), eq("us-east-1")))
                 .thenReturn(identity);
         when(identities.getIdentityVerificationAttributes("example.com", "us-east-1")).thenReturn(identity);
@@ -56,7 +55,7 @@ class SesCfnProvisionerTest {
             String token = "token" + index;
             assertEquals(token + "._domainkey.example.com",
                     resource.getAttributes().get("DkimDNSTokenName" + index));
-            assertEquals(token + ".dkim.identity-specific.floci.test",
+            assertEquals(token + ".dkim.amazonses.com",
                     resource.getAttributes().get("DkimDNSTokenValue" + index));
         }
     }
@@ -104,7 +103,6 @@ class SesCfnProvisionerTest {
     @Test
     void failedRollbackKeepsTheOriginalSnapshotForAnotherFailedUpdate() throws Exception {
         Identity identity = domain("example.com");
-        identity.setDkimSigningHostedZone("dkim.original.floci.test");
         identity.setTags(List.of(new Tag("purpose", "original")));
         when(identities.getIdentityVerificationAttributes("example.com", "us-east-1")).thenReturn(identity);
         when(ses.listResourceTags(anyString(), eq("us-east-1"))).thenReturn(identity.getTags());
@@ -126,7 +124,6 @@ class SesCfnProvisionerTest {
                     identity.setFeedbackForwardingEnabled(restoredIdentity.isFeedbackForwardingEnabled());
                     identity.setTags(restoredIdentity.getTags());
                     identity.setDkimTokens(restoredIdentity.getDkimTokens());
-                    identity.setDkimSigningHostedZone(restoredIdentity.getDkimSigningHostedZone());
                     return null;
                 }).when(identities).save(any(Identity.class), eq("us-east-1"));
 
@@ -145,7 +142,7 @@ class SesCfnProvisionerTest {
         assertTrue(recovered.isFeedbackForwardingEnabled());
         assertEquals(List.of(new Tag("purpose", "original")), recovered.getTags());
         assertEquals(List.of("token1", "token2", "token3"), recovered.getDkimTokens());
-        assertEquals("dkim.original.floci.test", recovered.getDkimSigningHostedZone());
+        assertEquals("token1.dkim.amazonses.com", resource.getAttributes().get("DkimDNSTokenValue1"));
         assertEquals(managedTags, resource.getAttributes().get("__FlociSesManagedTags"));
         assertFalse(provisioner.retainsFailedUpdateState(resource));
     }
