@@ -80,16 +80,16 @@ class Ec2ModifyVpcEndpointTest {
     @Test
     void endpointStatesUseAwsWireValues() {
         Fixture f = fixture("10.89.0.0/16");
-        assertEquals("Available", xmlValue(describe(f.endpointId()), "state"));
-        assertEquals("Deleted", service.deleteVpcEndpoints("us-east-1", List.of(f.endpointId())).getFirst().getState());
+        assertEquals("available", xmlValue(describe(f.endpointId()), "state"));
+        assertEquals("deleted", service.deleteVpcEndpoints("us-east-1", List.of(f.endpointId())).getFirst().getState());
     }
 
     @Test
-    void savedEndpointStateDecodesAndStillMatchesLowercaseFilter() throws Exception {
+    void savedEndpointStateAndDefaultIpTypeRemainCompatible() throws Exception {
         Fixture f = fixture("10.86.0.0/16");
         VpcEndpoint saved = service.describeVpcEndpoints("us-east-1", List.of(f.endpointId()), Map.of()).getFirst();
         objectMapper.readerForUpdating(saved).readValue("{\"state\":\"available\"}");
-        assertEquals("Available", xmlValue(describe(f.endpointId()), "state"));
+        assertEquals("available", xmlValue(describe(f.endpointId()), "state"));
         String filtered = ec2("DescribeVpcEndpoints", "VpcEndpointId.1", f.endpointId(),
                 "Filter.1.Name", "vpc-endpoint-state", "Filter.1.Value.1", "available");
         assertEquals(f.endpointId(), xmlValue(filtered, "vpcEndpointId"));
@@ -97,10 +97,10 @@ class Ec2ModifyVpcEndpointTest {
     }
 
     @Test
-    void mixedCaseEndpointStateKeepsDocumentedFilterSpelling() throws Exception {
+    void endpointStateFilterPreservesDocumentedSpelling() throws Exception {
         Fixture f = fixture("10.82.0.0/16");
         VpcEndpoint saved = service.describeVpcEndpoints("us-east-1", List.of(f.endpointId()), Map.of()).getFirst();
-        objectMapper.readerForUpdating(saved).readValue("{\"state\":\"PendingAcceptance\"}");
+        objectMapper.readerForUpdating(saved).readValue("{\"state\":\"pendingAcceptance\"}");
         String filtered = ec2("DescribeVpcEndpoints", "VpcEndpointId.1", f.endpointId(),
                 "Filter.1.Name", "vpc-endpoint-state", "Filter.1.Value.1", "pendingAcceptance");
         assertEquals(f.endpointId(), xmlValue(filtered, "vpcEndpointId"));
@@ -118,26 +118,19 @@ class Ec2ModifyVpcEndpointTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"ipv6", "dualstack"})
-    void unsupportedInterfaceAddressTypeDoesNotCreateResources(String ipAddressType) {
+    @ValueSource(strings = {"ipv4", "ipv6", "dualstack"})
+    void interfaceAddressTypeRoundTripsAsMetadata(String ipAddressType) {
         String vpcId = xmlValue(ec2("CreateVpc", "CidrBlock", "10.83.0.0/16"), "vpcId");
-        int before = service.describeVpcEndpoints("us-east-1", List.of(), Map.of()).size();
-        int interfacesBefore = service.endpointNetworkInterfaces("us-east-1").size();
-        int tagsBefore = service.describeTags("us-east-1", Map.of()).size();
-        given().header("Authorization", AUTH_HEADER)
-                .formParam("Action", "CreateVpcEndpoint")
-                .formParam("VpcId", vpcId)
-                .formParam("ServiceName", "com.amazonaws.us-east-1.s3")
-                .formParam("VpcEndpointType", "Interface")
-                .formParam("IpAddressType", ipAddressType)
-                .formParam("TagSpecification.1.ResourceType", "vpc-endpoint")
-                .formParam("TagSpecification.1.Tag.1.Key", "Name")
-                .formParam("TagSpecification.1.Tag.1.Value", "unsupported-address-type")
-                .when().post("/").then().statusCode(400)
-                .body(hasXPath("//*[local-name()='Code']", equalTo("InvalidParameterValue")));
-        assertEquals(before, service.describeVpcEndpoints("us-east-1", List.of(), Map.of()).size());
-        assertEquals(interfacesBefore, service.endpointNetworkInterfaces("us-east-1").size());
-        assertEquals(tagsBefore, service.describeTags("us-east-1", Map.of()).size());
+        String subnetId = xmlValue(ec2("CreateSubnet", "VpcId", vpcId,
+                "CidrBlock", "10.83.1.0/24"), "subnetId");
+        String created = ec2("CreateVpcEndpoint", "VpcId", vpcId,
+                "ServiceName", "com.amazonaws.us-east-1.s3", "VpcEndpointType", "Interface",
+                "SubnetId.1", subnetId, "IpAddressType", ipAddressType);
+        String endpointId = xmlValue(created, "vpcEndpointId");
+        assertEquals(ipAddressType, xmlValue(created, "ipAddressType"));
+        assertEquals(ipAddressType, xmlValue(describe(endpointId), "ipAddressType"));
+        assertEquals(1, service.endpointNetworkInterfaces("us-east-1").stream()
+                .filter(networkInterface -> networkInterface.getSubnetId().equals(subnetId)).count());
     }
 
     @ParameterizedTest

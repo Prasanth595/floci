@@ -15,7 +15,7 @@ public class VpcEndpoint {
     private String vpcId;
     private String serviceName;
     private String vpcEndpointType = "Gateway";
-    private String state = "Available";
+    private String state = "available";
     private String ipAddressType = "ipv4";
     private Instant creationTimestamp;
     private String region;
@@ -48,15 +48,7 @@ public class VpcEndpoint {
     public void setVpcEndpointType(String vpcEndpointType) { this.vpcEndpointType = vpcEndpointType; }
 
     public String getState() { return state; }
-    public void setState(String state) {
-        // Records saved before the SDK state correction used lowercase values.
-        this.state = switch (state) {
-            case "available" -> "Available";
-            case "deleted" -> "Deleted";
-            case null -> null;
-            default -> state;
-        };
-    }
+    public void setState(String state) { this.state = state; }
 
     public String getIpAddressType() { return ipAddressType; }
     public void setIpAddressType(String ipAddressType) { this.ipAddressType = ipAddressType; }
