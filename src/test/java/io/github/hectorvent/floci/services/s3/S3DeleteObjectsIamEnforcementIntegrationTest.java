@@ -266,6 +266,26 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
         assertGone(bucket, "retained.txt");
     }
 
+    // With no pre-versioning object there is no null version, so the retained current version at the
+    // plain key does not make a "null" entry need the bypass permission.
+    @Test
+    void aNullVersionEntryDoesNotInheritTheRetentionOfAVersionedObject() {
+        String bucket = bucket("delobj-governance-no-null");
+        enableVersioning(bucket);
+        String versionId = putGovernanceRetained(bucket, "retained.txt");
+        String user = uniqueName("delobj-governance-no-null");
+        String accessKeyId = createUser(user);
+        String objects = "arn:aws:s3:::" + bucket + "/*";
+
+        userPolicy(user, allow("s3:DeleteObjectVersion", objects) + "," + deny("s3:BypassGovernanceRetention", objects));
+        XmlPath result = deleteObjects(accessKeyId, "s3", bucket, false, true, versionEntry("retained.txt", "null"));
+        // S3 answers a delete of a version that does not exist as deleted.
+        assertEquals(List.of("retained.txt"), result.getList("DeleteResult.Deleted.Key"));
+        assertEquals(List.of("null"), result.getList("DeleteResult.Deleted.VersionId"));
+        assertEquals(List.of(), result.getList("DeleteResult.Error.Key"));
+        assertVersionPresent(bucket, "retained.txt", versionId);
+    }
+
     @Test
     void aPresignedRequestIsAuthorizedPerKey() {
         String bucket = bucket("delobj-presigned");
