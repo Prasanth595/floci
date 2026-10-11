@@ -719,6 +719,40 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void createSubnetRejectsIpv4PrefixOutsideSlash16ToSlash28() {
+        // VPC User Guide: "The allowed block size is between a /28 netmask and /16 netmask."
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.0.0.0/8", false).getVpcId();
+
+        for (String cidr : List.of("10.0.0.0/15", "10.2.0.0/29", "10.2.0.16/30", "10.2.0.32/32")) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.createSubnet("us-east-1", vpcId, cidr, "us-east-1a"));
+            assertEquals("InvalidSubnet.Range", error.getErrorCode());
+            assertEquals("The CIDR '" + cidr + "' is invalid.", error.getMessage());
+            assertEquals(400, error.getHttpStatus());
+        }
+        assertEquals(0, service.describeSubnets("us-east-1", List.of(), Map.of()).stream()
+                .filter(s -> vpcId.equals(s.getVpcId())).count());
+    }
+
+    @Test
+    void createSubnetAcceptsTheSlash16AndSlash28PrefixBounds() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.0.0.0/8", false).getVpcId();
+
+        assertEquals("10.1.0.0/16", service.createSubnet("us-east-1", vpcId, "10.1.0.0/16", "us-east-1a")
+                .getCidrBlock());
+        assertEquals("10.2.0.0/28", service.createSubnet("us-east-1", vpcId, "10.2.0.0/28", "us-east-1a")
+                .getCidrBlock());
+    }
+
+    @Test
     void createVpcAndCreateSubnetStoreTheCidrBlockInCanonicalForm() {
         // AWS CreateVpc/CreateSubnet: "We modify the specified CIDR block to its canonical form; for
         // example, if you specify 100.68.0.18/18, we modify it to 100.68.0.0/18."
