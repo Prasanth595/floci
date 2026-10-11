@@ -1043,6 +1043,12 @@ class Ec2Tests {
             VpcEndpoint ep = described.vpcEndpoints().get(0);
             assertThat(ep.ipAddressType()).isEqualTo(IpAddressType.IPV4);
             assertThat(ep.stateAsString()).isEqualTo("available");
+            ec2.modifyVpcEndpoint(ModifyVpcEndpointRequest.builder().vpcEndpointId(endpointId)
+                    .ipAddressType(IpAddressType.DUALSTACK).build());
+            assertThat(ec2.describeVpcEndpoints(DescribeVpcEndpointsRequest.builder()
+                    .vpcEndpointIds(endpointId).build()).vpcEndpoints().get(0).ipAddressType())
+                    .isEqualTo(IpAddressType.DUALSTACK);
+
 
             assertThat(ep.networkInterfaceIds())
                     .as("DescribeVpcEndpoints response")

@@ -2212,7 +2212,7 @@ public class Ec2QueryHandler {
                 p.getFirst("PolicyDocument"),
                 p.getFirst("ResetPolicy") != null ? Boolean.valueOf(p.getFirst("ResetPolicy")) : null,
                 p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
-                parseSubnetConfigurations(p));
+                parseSubnetConfigurations(p), p.getFirst("IpAddressType"));
         // ModifyVpcEndpoint returns only a boolean; the caller re-reads the endpoint
         // through DescribeVpcEndpoints to see the result.
         XmlBuilder xml = new XmlBuilder()
