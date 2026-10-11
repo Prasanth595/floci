@@ -482,7 +482,7 @@ class CognitoResourceServerCfnIntegrationTest {
     }
 
     @Test
-    void aFailedProvisionRetryDoesNotRestoreConsumedHistoricalCleanup() throws Exception {
+    void aFailedProvisionRetryPreservesHistoricalCleanupUntilStackDeletion() throws Exception {
         String originalPool = createPool();
         String historicalPool = createPool();
         createStack(template(originalPool, IDENTIFIER, "Original API", "read"));
@@ -501,23 +501,23 @@ class CognitoResourceServerCfnIntegrationTest {
 
         updateStack(template(originalPool, IDENTIFIER, "Retry API", "read"), "UPDATE_ROLLBACK_COMPLETE");
 
-        verify(cognitoService, times(1)).deleteResourceServer(historicalPool, IDENTIFIER);
+        verify(cognitoService, times(0)).deleteResourceServer(historicalPool, IDENTIFIER);
         verify(cognitoService, times(1)).describeResourceServer(originalPool, IDENTIFIER);
-        assertServerGone(historicalPool, IDENTIFIER);
+        assertServer(historicalPool, IDENTIFIER, "Failed replacement", "write");
         Stack owner = cloudFormationService.describeStacks(stack, "us-east-1", "000000000000").getFirst();
-        boolean cleanupRestored = owner.resourcesSnapshot().get("Server").getAttributes()
-                .containsKey(CfnRollback.REPLACEMENT_CLEANUP_ATTR);
-        createServer(historicalPool, "Directly reused API", "admin");
+        assertTrue(owner.resourcesSnapshot().get("Server").getAttributes()
+                .containsKey(CfnRollback.REPLACEMENT_CLEANUP_ATTR));
         clearInvocations(cognitoService);
 
         updateStack(template(originalPool, IDENTIFIER, "Second retry API", "write"), "UPDATE_ROLLBACK_COMPLETE");
+        verify(cognitoService, times(0)).deleteResourceServer(historicalPool, IDENTIFIER);
         cloudFormation("DeleteStack", null);
         CfnStackWaits.awaitStackDeleted(stack);
         createdStack = false;
 
-        assertServer(historicalPool, IDENTIFIER, "Directly reused API", "admin");
-        verify(cognitoService, times(0)).deleteResourceServer(historicalPool, IDENTIFIER);
-        assertFalse(cleanupRestored, "A failed retry must not restore historical cleanup that already succeeded");
+        assertServerGone(historicalPool, IDENTIFIER);
+        verify(cognitoService, times(1)).deleteResourceServer(historicalPool, IDENTIFIER);
+
     }
 
     @Test

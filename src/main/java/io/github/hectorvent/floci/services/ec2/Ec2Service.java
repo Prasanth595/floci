@@ -4867,6 +4867,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                          List<String> securityGroupIds, Boolean privateDnsEnabled,
                                          String policyDocument, List<Tag> endpointTags,
                                          List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
+        return createVpcEndpoint(region, vpcId, serviceName, endpointType, routeTableIds, subnetIds,
+                securityGroupIds, privateDnsEnabled, policyDocument, endpointTags, subnetConfigurations, null);
+    }
+
+    public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
+                                         List<String> routeTableIds, List<String> subnetIds,
+                                         List<String> securityGroupIds, Boolean privateDnsEnabled,
+                                         String policyDocument, List<Tag> endpointTags,
+                                         List<VpcEndpointSubnetConfiguration> subnetConfigurations, String ipAddressType) {
+        if (ipAddressType != null && !Set.of("ipv4", "ipv6", "dualstack").contains(ipAddressType)) {
+            throw new AwsException("InvalidParameterValue",
+                    "IpAddressType must be ipv4, ipv6, or dualstack.", 400);
+        }
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         for (String routeTableId : routeTableIds) {
@@ -4895,6 +4908,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         endpoint.setVpcId(vpcId);
         endpoint.setServiceName(serviceName);
         endpoint.setVpcEndpointType(endpointType != null && !endpointType.isBlank() ? endpointType : "Gateway");
+        endpoint.setIpAddressType(ipAddressType != null ? ipAddressType : "ipv4");
         boolean isInterface = "Interface".equalsIgnoreCase(endpoint.getVpcEndpointType());
         endpoint.setPrivateDnsEnabled(privateDnsEnabled != null ? privateDnsEnabled : isInterface);
         endpoint.setCreationTimestamp(Instant.now());

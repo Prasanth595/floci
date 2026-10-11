@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -26,7 +25,6 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
     private static final String TYPE = "AWS::Cognito::UserPoolResourceServer";
     private static final String POOL_ATTR = "__FlociResourceServerPoolId";
     private static final String UPDATE_ATTR = "__FlociResourceServerUpdate";
-    private static final String LEGACY_CLEANUP_ATTR = "__FlociResourceServerCleanup";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final CognitoService cognitoService;
@@ -62,7 +60,6 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
             }
         }
         String priorPhysicalId = ctx.isUpdate() ? resource.getPhysicalId() : null;
-        cleanupBeforeProvision(resource);
         boolean priorIsStub = ctx.isUpdate()
                 && CfnResourceDispatcher.isStub(priorPhysicalId, resource.getAttributes());
         Identity prior = ctx.isUpdate() && !priorIsStub ? identity(resource, priorPhysicalId) : null;
@@ -74,7 +71,7 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
             target = new Identity(poolId, identifier);
         } else {
             ResourceServer existing = cognitoService.describeResourceServer(prior.poolId(), prior.identifier());
-            resource.getAttributes().put(UPDATE_ATTR, snapshot(prior, existing, false).toString());
+            resource.getAttributes().put(UPDATE_ATTR, snapshot(prior, existing).toString());
             cognitoService.updateResourceServer(poolId, identifier, name, scopes);
         }
         Map<String, String> attributesBefore = new HashMap<>(resource.getAttributes());
@@ -166,11 +163,10 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
         return MAPPER.createObjectNode().put("poolId", identity.poolId()).put("identifier", identity.identifier());
     }
 
-    private static ObjectNode snapshot(Identity identity, ResourceServer server, boolean replacement) {
+    private static ObjectNode snapshot(Identity identity, ResourceServer server) {
         ObjectNode snapshot = address(identity);
         snapshot.put("name", server.getName());
         snapshot.set("scopes", MAPPER.valueToTree(server.getScopes()));
-        snapshot.put("replacement", replacement);
         return snapshot;
     }
 
@@ -209,7 +205,6 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
             projected.setPhysicalId(CfnResourceDispatcher.isStub(resource.getPhysicalId(), resource.getAttributes())
                     ? resource.getPhysicalId() : encode(identity(resource, resource.getPhysicalId())));
         }
-        importLegacy(projected);
         validateCleanup(projected);
         return projected;
     }
@@ -232,50 +227,6 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
                 setIdentity(resource, restored);
             }
         }
-    }
-
-    private static void importLegacy(StackResource projected) {
-        ObjectNode legacy = read(projected, LEGACY_CLEANUP_ATTR);
-        ObjectNode snapshot = read(projected, UPDATE_ATTR);
-        boolean legacyReplacement = snapshot != null && snapshot.path("replacement").asBoolean();
-        if (legacy == null && !legacyReplacement) {
-            return;
-        }
-        ObjectNode cleanup = read(projected, CfnRollback.REPLACEMENT_CLEANUP_ATTR);
-        if (cleanup == null) {
-            cleanup = MAPPER.createObjectNode();
-            cleanup.putArray("displaced");
-        }
-        if (legacy != null) {
-            Identity owed = identity(legacy);
-            requireIdentity(owed);
-            String encoded = encode(owed);
-            JsonNode existing = null;
-            for (JsonNode entry : cleanup.path("displaced")) {
-                if (encoded.equals(entry.path("physicalId").asText(null))) {
-                    existing = entry;
-                    break;
-                }
-            }
-            if (existing == null) {
-                ObjectNode entry = cleanup.withArray("displaced").addObject();
-                entry.put("physicalId", encoded);
-                entry.put("resourceType", TYPE);
-                entry.put("retainable", legacy.path("retainable").asBoolean());
-                entry.put("cleanupAttempts", legacy.path("attempts").asInt(0));
-            }
-            projected.getAttributes().remove(LEGACY_CLEANUP_ATTR);
-        }
-        if (legacyReplacement) {
-            Identity prior = identity(snapshot);
-            requireIdentity(prior);
-            if (!cleanup.hasNonNull("priorPhysicalId")) {
-                cleanup.put("priorPhysicalId", encode(prior));
-                cleanup.putObject("priorAttributes");
-            }
-            projected.getAttributes().remove(UPDATE_ATTR);
-        }
-        projected.getAttributes().put(CfnRollback.REPLACEMENT_CLEANUP_ATTR, cleanup.toString());
     }
 
     private static void requireIdentity(Identity identity) {
@@ -321,25 +272,6 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
         CfnDeletes.safeDelete("Cognito resource server", identity.identifier(),
                 () -> cognitoService.deleteResourceServer(identity.poolId(), identity.identifier()),
                 "ResourceNotFoundException");
-    }
-
-    private void cleanupBeforeProvision(StackResource resource) {
-        RuntimeException[] failure = new RuntimeException[1];
-        withProjection(resource, projected -> {
-            UpdateCleanupResult result = ReplacementCleanup.complete(projected, (type, physicalId, region) -> {
-                try {
-                    deleteAddress(type, physicalId, region);
-                } catch (RuntimeException deleteFailure) {
-                    failure[0] = deleteFailure;
-                    throw deleteFailure;
-                }
-            });
-            ReplacementCleanup.clear(projected);
-            if (failure[0] != null) {
-                throw failure[0];
-            }
-            return result;
-        });
     }
 
     @Override
@@ -473,35 +405,6 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
             ReplacementCleanup.clear(projected);
             return null;
         });
-    }
-
-    @Override
-    public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
-        // The attempted resource is authoritative about debts it already consumed before failing.
-        // The dispatcher's additive merge cannot remove those entries from the restored metadata.
-        StackResource projectedAttempt = project(attempted);
-        ObjectNode cleanup = read(projectedAttempt, CfnRollback.REPLACEMENT_CLEANUP_ATTR);
-        ObjectNode carried = cleanup == null ? null : cleanup.deepCopy();
-        if (carried != null) {
-            ArrayNode debts = MAPPER.createArrayNode();
-            String current = previous.getPhysicalId() == null
-                    || CfnResourceDispatcher.isStub(previous.getPhysicalId(), previous.getAttributes())
-                    ? null : encode(identity(previous, previous.getPhysicalId()));
-            for (JsonNode entry : carried.path("displaced")) {
-                if (!entry.path("physicalId").asText().equals(current)) {
-                    debts.add(entry);
-                }
-            }
-            carried.set("displaced", debts);
-            carried.remove("priorPhysicalId");
-            carried.remove("priorAttributes");
-        }
-        previous.getAttributes().remove(LEGACY_CLEANUP_ATTR);
-        if (carried == null || carried.path("displaced").isEmpty()) {
-            previous.getAttributes().remove(CfnRollback.REPLACEMENT_CLEANUP_ATTR);
-        } else {
-            previous.getAttributes().put(CfnRollback.REPLACEMENT_CLEANUP_ATTR, carried.toString());
-        }
     }
 
     private static ObjectNode read(StackResource resource, String attribute) {

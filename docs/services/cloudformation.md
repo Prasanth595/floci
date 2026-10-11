@@ -120,6 +120,9 @@ The provisioner keeps the pool and identifier together in private replacement bo
 so changing only the pool still cleans up the displaced server without changing the `Ref` value.
 
 Replacement rollback and historical cleanup use the shared bounded replacement lifecycle.
+Provisioning leaves historical cleanup for a committed update or stack deletion. A failed provision
+keeps that debt and its remaining retry budget. A new replacement at an old cleanup address consumes
+the old debt; if its rollback delete fails, the new orphan starts its own non-retainable retry budget.
 Committed replacements honor `UpdateReplacePolicy: Retain`; failed rollback replacements remain
 owed cleanup while their retry budget remains. Exhausted historical records are abandoned across
 later updates and stack-delete retries. Historical cleanup is address-based and does not provide
@@ -182,7 +185,7 @@ cross-resource references.
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
 | IoT Core | `Authorizer`, `DomainConfiguration` (`ServerCertificates` resolves to a JSON string), `Policy` (deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached), `Thing`, `TopicRule` |
-| CloudFront | `CachePolicy`, `Distribution`, `OriginAccessControl`, `OriginRequestPolicy`, `ResponseHeadersPolicy` |
+| CloudFront | `CachePolicy`, `Distribution`, `Function` (`KeyValueStoreAssociations` is ignored), `KeyGroup`, `OriginAccessControl`, `OriginRequestPolicy`, `PublicKey`, `ResponseHeadersPolicy` |
 | CloudWatch | `Alarm`, `Dashboard` |
 | CloudWatch Logs | `LogGroup`, `LogStream`, `MetricFilter` |
 | WAFv2 | `WebACL`, `WebACLAssociation` |
