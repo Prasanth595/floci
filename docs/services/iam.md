@@ -1202,8 +1202,10 @@ account key carries no identity policies of its own.
 - Supports `...IfExists` variants for all operators.
 - Set operators `ForAllValues:` and `ForAnyValue:` over multi-valued condition keys, in AWS's
   own spelling (the prefix match is case-sensitive). They compose with `IfExists`
-  (`ForAnyValue:StringEqualsIfExists`). `ForAllValues:` over an empty set matches vacuously
-  and `ForAnyValue:` over an empty set does not match, so pair `ForAllValues:` with
+  (`ForAnyValue:StringEqualsIfExists`). `ForAllValues:` matches when the context key is absent
+  or its value set is empty; `ForAnyValue:` does not match either case. This follows the
+  [AWS set-operator rules](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-single-vs-multi-valued-context-keys.html).
+  Pair `ForAllValues:` with
   `"Null":{"<key>":"false"}` as you would on AWS: `Null` treats a present-but-empty set as
   absent, so the guard fires either way.
 - When a condition lists several values, a positive operator matches if the request value

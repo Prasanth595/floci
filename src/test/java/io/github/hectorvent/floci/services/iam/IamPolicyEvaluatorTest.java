@@ -396,11 +396,34 @@ class IamPolicyEvaluatorTest {
     }
 
     @Test
-    void setOperatorWithoutIfExistsFailsClosedWhenTheKeyIsAbsent() {
-        // The key is absent from the context entirely — not an empty set. A request that
-        // cannot be proven in scope is treated as out of scope.
-        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+    void forAllValuesMatchesWhenTheKeyIsAbsent() {
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
                 List.of(LEADING_KEYS_FOR_ALL), "dynamodb:GetItem", "*", Map.of()));
+        assertEquals(Decision.ALLOW, evaluator.evaluate(CallerContext.of(List.of(LEADING_KEYS_FOR_ALL)),
+                List.of(), "dynamodb:GetItem", "*", Map.of()));
+    }
+
+    @Test
+    void forAllValuesExplicitDenyMatchesWhenTheKeyIsAbsent() {
+        String deny = LEADING_KEYS_FOR_ALL.replace("\"Effect\":\"Allow\"", "\"Effect\":\"Deny\"");
+        assertEquals(Decision.DENY, evaluator.evaluate(CallerContext.of(List.of(ALLOW_ALL, deny)),
+                List.of(), "dynamodb:GetItem", "*", Map.of()));
+        assertEquals(IamPolicyEvaluator.SimulationDecision.EXPLICIT_DENY, evaluator.simulatePrincipalPolicy(
+                CallerContext.of(List.of(ALLOW_ALL, deny)), "dynamodb:GetItem", "*", Map.of()));
+    }
+
+    @Test
+    void forAllValuesMissingKeyStillRequiresOtherConditionKeysToMatch() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+                   "Condition":{"ForAllValues:StringLike":{
+                     "dynamodb:LeadingKeys":["USER_alice*"],"aws:TagKeys":["environment"]}}}
+                ]}""";
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), "dynamodb:GetItem", "*",
+                Map.of("aws:TagKeys", List.of("unapproved"))));
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(policy), "dynamodb:GetItem", "*",
+                Map.of("aws:TagKeys", List.of("environment"))));
     }
 
     @Test
@@ -426,7 +449,7 @@ class IamPolicyEvaluatorTest {
             {"Version":"2012-10-17","Statement":[
               {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
                "Condition":{
-                 "ForAllValues:StringLikeIfExists":{"dynamodb:LeadingKeys":["USER_alice*"]},
+                 "ForAllValues:StringLike":{"dynamodb:LeadingKeys":["USER_alice*"]},
                  "Null":{"dynamodb:LeadingKeys":"false"}}}
             ]}""";
 

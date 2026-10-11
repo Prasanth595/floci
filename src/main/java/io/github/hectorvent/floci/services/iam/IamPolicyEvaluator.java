@@ -1239,6 +1239,9 @@ public class IamPolicyEvaluator {
                 if (ifExists) {
                     continue; // key missing + IfExists → pass this key
                 }
+                if (parsed.quantifier() == SetQuantifier.FOR_ALL_VALUES) {
+                    continue;
+                }
                 // A negated operator asks for the key not to match, and an absent key matches
                 // nothing, so the condition holds (IAM User Guide, condition operators). The set
                 // operators keep their own rule for an absent key.

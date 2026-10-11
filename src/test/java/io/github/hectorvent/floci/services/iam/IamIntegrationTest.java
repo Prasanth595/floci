@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.LinkedHashMap;
@@ -419,6 +420,30 @@ class IamIntegrationTest {
                     equalTo("explicitDeny"))
             .body("SimulateCustomPolicyResponse.SimulateCustomPolicyResult.EvaluationResults.member.find { it.EvalActionName == 'ssm:GetParameter' }.EvalDecision",
                     equalTo("implicitDeny"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "ForAllValues:StringLike, allowed",
+            "ForAllValues:StringNotLike, allowed",
+            "ForAnyValue:StringLike, implicitDeny",
+            "ForAnyValue:StringNotLike, implicitDeny"
+    })
+    void simulateCustomPolicyUsesSetOperatorSemanticsForMissingKeys(String operator, String decision) {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+                   "Condition":{"%s":{"dynamodb:LeadingKeys":["USER_alice*"]}}}
+                ]}""".formatted(operator);
+        given()
+            .formParam("Action", "SimulateCustomPolicy")
+            .formParam("PolicyInputList.member.1", policy)
+            .formParam("ActionNames.member.1", "dynamodb:GetItem")
+            .formParam("ResourceArns.member.1", "*")
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then().statusCode(200)
+            .body("SimulateCustomPolicyResponse.SimulateCustomPolicyResult.EvaluationResults.member.EvalDecision",
+                    equalTo(decision));
     }
 
     @Test
