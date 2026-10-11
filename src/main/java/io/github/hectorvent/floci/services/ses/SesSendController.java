@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.EmailContent;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
+import io.github.hectorvent.floci.services.ses.model.MessageAttachment;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.SendBulkEmailRequest;
@@ -33,13 +34,17 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.stringArrayOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
@@ -98,9 +103,9 @@ public class SesSendController {
             String fromEmailAddress = request.path("FromEmailAddress").asText(null);
 
             JsonNode destination = requireObjectOrAbsent(request, "Destination");
-            List<String> toAddresses = jsonArrayToList(destination.path("ToAddresses"));
-            List<String> ccAddresses = jsonArrayToList(destination.path("CcAddresses"));
-            List<String> bccAddresses = jsonArrayToList(destination.path("BccAddresses"));
+            List<String> toAddresses = destinationAddresses(destination, "ToAddresses");
+            List<String> ccAddresses = destinationAddresses(destination, "CcAddresses");
+            List<String> bccAddresses = destinationAddresses(destination, "BccAddresses");
             List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
             String feedbackForwardingAddress =
                     request.path("FeedbackForwardingEmailAddress").asText(null);
@@ -131,13 +136,10 @@ public class SesSendController {
                     throw new AwsException("BadRequestException",
                             "Content.Raw.Data is required.", 400);
                 }
-                if (toAddresses.isEmpty() && ccAddresses.isEmpty() && bccAddresses.isEmpty()) {
-                    throw new AwsException("BadRequestException",
-                            "At least one destination address is required.", 400);
-                }
+                SendEmailRequest rawRequest = sendRequest.content(new EmailContent.Raw(rawData)).build();
                 sesService.checkTenantRawSendAccess(tenantName, fromEmailAddress, rawData,
-                        configurationSetName, regionResolver.getAccountId(), region);
-                messageId = sesService.sendEmail(sendRequest.content(new EmailContent.Raw(rawData)).build());
+                        rawRequest.hasRecipients(), configurationSetName, regionResolver.getAccountId(), region);
+                messageId = sesService.sendEmail(rawRequest);
             } else if (content.has("Simple")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     // AWS returns BadRequestException with a null message body here.
@@ -149,10 +151,13 @@ public class SesSendController {
                 String bodyHtml = simple.path("Body").path("Html").path("Data").asText(null);
                 List<MessageHeader> additionalHeaders =
                         parseHeadersArray(simple.path("Headers"), "content.simple.headers");
+                List<MessageAttachment> attachments =
+                        parseAttachmentsArray(simple.path("Attachments"), "content.simple.attachments");
                 sesService.checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName,
                         null, regionResolver.getAccountId(), region);
                 messageId = sesService.sendEmail(sendRequest
-                        .content(new EmailContent.Simple(subject, bodyText, bodyHtml, additionalHeaders))
+                        .content(new EmailContent.Simple(subject, bodyText, bodyHtml, additionalHeaders,
+                                attachments))
                         .build());
             } else if (content.has("Template")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
@@ -237,9 +242,11 @@ public class SesSendController {
                 throw new AwsException("BadRequestException",
                         "FromEmailAddress is required.", 400);
             }
+            SesAddressSyntax.requireBulkAddress(fromEmailAddress);
             List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
             String feedbackForwardingAddress =
                     request.path("FeedbackForwardingEmailAddress").asText(null);
+            SesAddressSyntax.requireBulkAddress(feedbackForwardingAddress);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
             String tenantName = stringMemberOrAbsent(request, "TenantName");
 
@@ -398,6 +405,12 @@ public class SesSendController {
 
     // ──────────────────────────── Helpers ────────────────────────────
 
+    // A Raw send falls back to the MIME recipients when no destination is given, so a present member
+    // of the wrong JSON type must be rejected rather than read as an omitted one.
+    private static List<String> destinationAddresses(JsonNode destination, String field) {
+        return Objects.requireNonNullElse(stringArrayOrAbsent(destination, field), List.of());
+    }
+
     private List<String> jsonArrayToList(JsonNode arrayNode) {
         if (arrayNode == null || arrayNode.isMissingNode() || !arrayNode.isArray()) {
             return Collections.emptyList();
@@ -485,10 +498,118 @@ public class SesSendController {
         return out;
     }
 
-    private AwsException missingHeaderMember(String location, int index, String member) {
+    /**
+     * Parse a V2 SES {@code Content.Simple.Attachments} array. {@code FileName} and
+     * {@code RawContent} are required, the string members carry the documented length limits and
+     * the two enum members their value sets; a violation is reported with a Smithy constraint
+     * message anchored at {@code location} and the offending 1-based index, as for headers.
+     */
+    private List<MessageAttachment> parseAttachmentsArray(JsonNode attachmentsNode, String location) {
+        if (attachmentsNode.isMissingNode() || attachmentsNode.isNull()) {
+            return List.of();
+        }
+        if (!attachmentsNode.isArray()) {
+            throw new AwsException("BadRequestException", "Attachments must be an array.", 400);
+        }
+        List<MessageAttachment> out = new ArrayList<>();
+        int index = 1;
+        for (JsonNode node : attachmentsNode) {
+            if (!node.isObject()) {
+                throw new AwsException("BadRequestException",
+                        "Attachments entries must be JSON objects.", 400);
+            }
+            String memberPrefix = location + "." + index + ".member.";
+            String fileName = attachmentString(node, "FileName", memberPrefix + "fileName", 0, 255);
+            if (fileName == null) {
+                throw constraintViolation(null, memberPrefix + "fileName", "Member must not be null");
+            }
+            JsonNode rawNode = node.get("RawContent");
+            if (rawNode == null || rawNode.isNull()) {
+                throw constraintViolation(null, memberPrefix + "rawContent", "Member must not be null");
+            }
+            if (!rawNode.isTextual()) {
+                throw new AwsException("BadRequestException",
+                        "RawContent must be a base64-encoded string.", 400);
+            }
+            byte[] rawContent;
+            try {
+                rawContent = Base64.getDecoder().decode(rawNode.textValue());
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("BadRequestException",
+                        "RawContent is not valid base64: " + e.getMessage(), 400);
+            }
+            String contentType = attachmentHeaderValue(node, "ContentType", memberPrefix + "contentType", 1, 78);
+            String description = attachmentHeaderValue(node, "ContentDescription",
+                    memberPrefix + "contentDescription", 0, 1000);
+            String contentId = attachmentHeaderValue(node, "ContentId", memberPrefix + "contentId", 1, 78);
+            MessageAttachment.Disposition disposition = attachmentEnum(node, "ContentDisposition",
+                    memberPrefix + "contentDisposition", MessageAttachment.Disposition.class);
+            MessageAttachment.TransferEncoding transferEncoding = attachmentEnum(node,
+                    "ContentTransferEncoding", memberPrefix + "contentTransferEncoding",
+                    MessageAttachment.TransferEncoding.class);
+            out.add(new MessageAttachment(fileName, rawContent, contentType, disposition, description,
+                    contentId, transferEncoding));
+            index++;
+        }
+        return List.copyOf(out);
+    }
+
+    private static String attachmentString(JsonNode node, String member, String path, int min, int max) {
+        JsonNode value = node.get(member);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw new AwsException("BadRequestException", member + " must be a string.", 400);
+        }
+        String text = value.textValue();
+        if (text.length() < min) {
+            throw constraintViolation(text, path, "Member must have length greater than or equal to " + min);
+        }
+        if (text.length() > max) {
+            throw constraintViolation(text, path, "Member must have length less than or equal to " + max);
+        }
+        return text;
+    }
+
+    /**
+     * An attachment member written verbatim into the part's MIME headers. The mail encoder only
+     * encodes the file name, so a CR or LF here would add header lines to the part; it is refused
+     * by the same rule {@link MessageHeader#isSafe()} applies to custom headers.
+     */
+    private static String attachmentHeaderValue(JsonNode node, String member, String path, int min, int max) {
+        String text = attachmentString(node, member, path, min, max);
+        if (text != null && !MessageHeader.noCrlf(text)) {
+            throw new AwsException("BadRequestException",
+                    member + " must not contain line breaks.", 400);
+        }
+        return text;
+    }
+
+    private static <E extends Enum<E>> E attachmentEnum(JsonNode node, String member, String path,
+                                                        Class<E> type) {
+        String text = attachmentString(node, member, path, 0, Integer.MAX_VALUE);
+        if (text == null) {
+            return null;
+        }
+        for (E constant : type.getEnumConstants()) {
+            if (constant.name().equals(text)) {
+                return constant;
+            }
+        }
+        throw constraintViolation(text, path,
+                "Member must satisfy enum value set: " + Arrays.toString(type.getEnumConstants()));
+    }
+
+    private static AwsException constraintViolation(String value, String path, String constraint) {
+        String subject = value == null ? "Value" : "Value '" + value + "'";
         return new AwsException("BadRequestException",
-                "1 validation error detected: Value at '" + location + "." + index + ".member." + member
-                        + "' failed to satisfy constraint: Member must not be null", 400);
+                "1 validation error detected: " + subject + " at '" + path
+                        + "' failed to satisfy constraint: " + constraint, 400);
+    }
+
+    private static AwsException missingHeaderMember(String location, int index, String member) {
+        return constraintViolation(null, location + "." + index + ".member." + member, "Member must not be null");
     }
 
     private static ListManagementOptions parseListManagementOptions(JsonNode node) {

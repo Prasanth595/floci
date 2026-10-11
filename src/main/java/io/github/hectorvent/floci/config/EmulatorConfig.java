@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.config;
 
 import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithDefault;
+
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
@@ -77,7 +78,7 @@ public interface EmulatorConfig {
 
         /**
          * Refuse requests signed for a service AWS does not publish in the request's partition
-         * (CloudFront in GovCloud, IAM in {@code aws-eusc}). On AWS such a request never reaches
+         * (CloudFront in GovCloud, Lightsail in China). On AWS such a request never reaches
          * an API because its endpoint does not resolve; Floci serves every enabled service in
          * every partition unless this is set.
          */
@@ -1120,6 +1121,20 @@ public interface EmulatorConfig {
     interface CloudControlServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Worker threads that run CreateResource provisioning.
+         * Env: FLOCI_SERVICES_CLOUDCONTROL_CREATE_WORKER_THREADS
+         */
+        @WithDefault("4")
+        int createWorkerThreads();
+
+        /**
+         * CreateResource requests that may wait for a worker; past that a new create is refused with
+         * ThrottlingException. Env: FLOCI_SERVICES_CLOUDCONTROL_CREATE_QUEUE_CAPACITY
+         */
+        @WithDefault("64")
+        int createQueueCapacity();
     }
     interface S3VectorsServiceConfig {
         @WithDefault("true")
@@ -3515,6 +3530,25 @@ public interface EmulatorConfig {
          */
         @WithDefault("512")
         int streamingMaxConnections();
+
+        /**
+         * How long a Docker call waits for a free pooled connection before it fails with
+         * {@code ConnectionRequestTimeoutException}, in seconds, for both pools. A full pool means
+         * the emulator is saturated, so failing sooner beats httpclient5's default three-minute wait;
+         * the transport retry never replays a lease timeout.
+         */
+        @WithDefault("30")
+        int connectionRequestTimeoutSeconds();
+
+        /**
+         * How long a Docker call waits for the daemon's response before it fails, in seconds, for
+         * both pools. The limit is per attempt: a control-plane request that is safe to repeat is
+         * tried up to six times. Requests that hold a stream open for as long as a container runs (container
+         * waits, exec and attach output, followed logs, streamed stats, events, image pulls and
+         * builds) are exempt, since they can stay silent while healthy.
+         */
+        @WithDefault("300")
+        int apiTimeoutSeconds();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

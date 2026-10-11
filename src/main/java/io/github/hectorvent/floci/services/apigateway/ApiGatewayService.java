@@ -10,7 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
-import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
@@ -46,6 +46,7 @@ import io.swagger.v3.core.util.Json;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
+import io.swagger.v3.oas.models.parameters.Parameter;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.security.SecurityScheme;
 import io.swagger.v3.parser.core.models.SwaggerParseResult;
@@ -299,6 +300,7 @@ public class ApiGatewayService implements ResourceProvider {
             throw new AwsException("BadRequestException",
                     "Endpoint configuration types must contain exactly one value.", 400);
         }
+        requireEndpointTypeAvailable(endpointConfiguration.getTypes().getFirst().name(), region);
 
         api.setEndpointConfiguration(endpointConfigurationOf(endpointConfiguration.getTypes().getFirst(),
                 endpointConfiguration.getVpcEndpointIds()));
@@ -2082,11 +2084,9 @@ public class ApiGatewayService implements ResourceProvider {
             domain.setDistributionDomainName(null);
             domain.setDistributionHostedZoneId(null);
         } else if (domain.getDistributionDomainName() == null) {
-            domain.setDistributionDomainName(
-                    "d" + UUID.randomUUID().toString().replace("-", "").substring(0, 13) + "."
-                            + config.services().cloudfront().domainSuffix());
-            domain.setDistributionHostedZoneId(AwsRegionFacts.cloudFrontHostedZoneId(
-                    AwsPartitions.forRegionOrCommercial(region).id()).orElse(null));
+            CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(region, config.services().cloudfront().domainSuffix());
+            domain.setDistributionDomainName(edge.domainName());
+            domain.setDistributionHostedZoneId(edge.hostedZoneId());
         }
     }
 
@@ -2464,7 +2464,7 @@ public class ApiGatewayService implements ResourceProvider {
         if (patchOperations != null) {
             // Worked out before anything is set: the store hands back the live API, and a rejected
             // endpoint change must leave it as it was.
-            EndpointConfiguration endpointConfiguration = patchEndpointConfiguration(api, patchOperations);
+            EndpointConfiguration endpointConfiguration = patchEndpointConfiguration(api, patchOperations, region);
             for (Map<String, String> op : patchOperations) {
                 if (!"replace" .equals(op.get("op"))) continue;
                 String path = op.getOrDefault("path", "");
@@ -2491,11 +2491,13 @@ public class ApiGatewayService implements ResourceProvider {
      * and disassociate a VPC endpoint.
      */
     private static EndpointConfiguration patchEndpointConfiguration(RestApi api,
-                                                                    List<Map<String, String>> patchOperations) {
+                                                                    List<Map<String, String>> patchOperations,
+                                                                    String region) {
         EndpointConfiguration current = api.getEndpointConfiguration();
         // An API stored without one is REGIONAL, which is also what GetRestApi reports for it.
-        EndpointType type = current == null || current.getTypes().isEmpty()
+        EndpointType currentType = current == null || current.getTypes().isEmpty()
                 ? EndpointType.REGIONAL : current.getTypes().getFirst();
+        EndpointType type = currentType;
         List<String> vpcEndpointIds = new ArrayList<>(current == null ? List.of() : current.getVpcEndpointIds());
         boolean patched = false;
         for (Map<String, String> op : patchOperations) {
@@ -2523,6 +2525,9 @@ public class ApiGatewayService implements ResourceProvider {
                     patched = true;
                 }
             }
+        }
+        if (type != currentType) {
+            requireEndpointTypeAvailable(type.name(), region);
         }
         return patched ? endpointConfigurationOf(type, vpcEndpointIds) : null;
     }
@@ -3638,7 +3643,11 @@ public class ApiGatewayService implements ResourceProvider {
         // Map OpenAPI parameters to requestParameters
         if (operation.getParameters() != null && !operation.getParameters().isEmpty()) {
             Map<String, Boolean> requestParameters = new HashMap<>();
-            for (var param : operation.getParameters()) {
+            for (Parameter declared : operation.getParameters()) {
+                Parameter param = resolveParameter(declared, openAPI);
+                if (param == null) {
+                    continue;
+                }
                 String location = switch (param.getIn()) {
                     case "query" -> "method.request.querystring." + param.getName();
                     case "header" -> "method.request.header." + param.getName();
@@ -3689,6 +3698,56 @@ public class ApiGatewayService implements ResourceProvider {
         if (integrationExt != null) {
             applyIntegration(region, apiId, resourceId, httpMethod, integrationExt);
         }
+    }
+
+    private static final String PARAMETER_REF_PREFIX = "#/components/parameters/";
+    private static final String SWAGGER2_PARAMETER_REF_PREFIX = "#/parameters/";
+
+    /**
+     * Returns the parameter a local {@code #/components/parameters/} reference names, following a
+     * component that is itself a reference. The document is parsed without reference resolution, so
+     * a referenced parameter arrives carrying only its {@code $ref}. A Swagger 2 document is converted
+     * to OpenAPI 3, but an ANY method is read from its raw vendor extension, so its references keep
+     * the Swagger 2 form {@code #/parameters/}; they name the same converted components. A Swagger 2
+     * body or form data reference returns null, because the converter files it as a request body or a
+     * {@code formData_} schema, and is skipped like the in-place form.
+     *
+     * @throws AwsException if the reference names no component, or the references form a cycle
+     */
+    private static Parameter resolveParameter(Parameter param, OpenAPI openAPI) {
+        Map<String, Parameter> components = openAPI.getComponents() == null
+                ? null : openAPI.getComponents().getParameters();
+        Set<String> seen = new HashSet<>();
+        Parameter current = param;
+        while (current.get$ref() != null) {
+            String ref = current.get$ref();
+            String prefix = ref.startsWith(SWAGGER2_PARAMETER_REF_PREFIX)
+                    ? SWAGGER2_PARAMETER_REF_PREFIX : PARAMETER_REF_PREFIX;
+            Parameter target = components != null && ref.startsWith(prefix) && seen.add(ref)
+                    ? components.get(unescapeJsonPointer(ref.substring(prefix.length()))) : null;
+            if (target == null) {
+                if (ref.startsWith(SWAGGER2_PARAMETER_REF_PREFIX) && isSwagger2BodyOrFormDataParameter(openAPI,
+                        unescapeJsonPointer(ref.substring(SWAGGER2_PARAMETER_REF_PREFIX.length())))) {
+                    return null;
+                }
+                throw new AwsException("BadRequestException",
+                        "Unable to resolve parameter reference: " + ref, 400);
+            }
+            current = target;
+        }
+        return current;
+    }
+
+    private static boolean isSwagger2BodyOrFormDataParameter(OpenAPI openAPI, String name) {
+        if (openAPI.getComponents() == null) {
+            return false;
+        }
+        boolean body = openAPI.getComponents().getRequestBodies() != null
+                && openAPI.getComponents().getRequestBodies().containsKey(name);
+        // The converter keys a form data parameter's schema as formData_<name> so it cannot overwrite a model.
+        boolean formData = openAPI.getComponents().getSchemas() != null
+                && openAPI.getComponents().getSchemas().containsKey("formData_" + name);
+        return body || formData;
     }
 
     private String ensureResourcePath(String region, String apiId, String path,

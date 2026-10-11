@@ -2,12 +2,12 @@ package io.github.hectorvent.floci.services.rds;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
-import io.github.hectorvent.floci.services.rds.model.DbCluster;
-import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
-import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
+import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
+import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceScalingChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
@@ -26,6 +26,10 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
@@ -57,6 +61,174 @@ class RdsQueryHandlerTest {
         docDbHandler = mock(DocDbQueryHandler.class);
         neptuneHandler = mock(NeptuneQueryHandler.class);
         handler = new RdsQueryHandler(service, config, docDbHandler, neptuneHandler);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "ResetDBParameterGroup, DBParameterGroupName",
+            "ResetDBClusterParameterGroup, DBClusterParameterGroupName"
+    })
+    void parameterResetRejectsMalformedBooleanBeforeServiceCalls(String action, String nameParameter) {
+        DbParameterGroup instanceGroup = new DbParameterGroup();
+        instanceGroup.setDbParameterGroupName("custom-group");
+        DbClusterParameterGroup clusterGroup = new DbClusterParameterGroup();
+        clusterGroup.setDbClusterParameterGroupName("custom-group");
+        when(service.resetDbParameterGroup(any(), anyBoolean(), anyList(), any())).thenReturn(instanceGroup);
+        when(service.resetDbClusterParameterGroup(any(), anyBoolean(), anyList(), any())).thenReturn(clusterGroup);
+        for (String invalid : List.of("yes", "", "1", "0", " true", "false ", "not-a-boolean")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle(nameParameter, "custom-group");
+            p.putSingle("ResetAllParameters", invalid);
+            p.putSingle("Parameters.Parameter.1.ParameterName", "max_connections");
+
+            Response response = handler.handle(action, p, "us-west-2");
+
+            assertEquals(400, response.getStatus(), action + ": " + invalid);
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(body.contains("ResetAllParameters must be true or false."));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void parameterResetPreservesBooleanValuesAndOmission(String value) {
+        boolean resetAll = Boolean.parseBoolean(value);
+        DbParameterGroup instanceGroup = new DbParameterGroup();
+        instanceGroup.setDbParameterGroupName("custom-group");
+        DbClusterParameterGroup clusterGroup = new DbClusterParameterGroup();
+        clusterGroup.setDbClusterParameterGroupName("custom-group");
+        List<String> names = resetAll ? List.of() : List.of("max_connections");
+        when(service.resetDbParameterGroup("custom-group", resetAll, names, "us-west-2"))
+                .thenReturn(instanceGroup);
+        when(service.resetDbClusterParameterGroup("custom-group", resetAll, names, "us-west-2"))
+                .thenReturn(clusterGroup);
+        for (String nameParameter : List.of("DBParameterGroupName", "DBClusterParameterGroupName")) {
+            String action = nameParameter.equals("DBParameterGroupName")
+                    ? "ResetDBParameterGroup" : "ResetDBClusterParameterGroup";
+            MultivaluedMap<String, String> p = params();
+            p.putSingle(nameParameter, "custom-group");
+            if (value != null) {
+                p.putSingle("ResetAllParameters", value);
+            }
+            if (!resetAll) {
+                p.putSingle("Parameters.Parameter.1.ParameterName", "max_connections");
+            }
+
+            Response response = handler.handle(action, p, "us-west-2");
+
+            assertEquals(200, response.getStatus());
+            assertTrue(((String) response.getEntity()).contains("<" + nameParameter
+                    + ">custom-group</" + nameParameter + ">"));
+        }
+        verify(service).resetDbParameterGroup("custom-group", resetAll, names, "us-west-2");
+        verify(service).resetDbClusterParameterGroup("custom-group", resetAll, names, "us-west-2");
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "CreateDBInstance, MultiAZ",
+            "CreateDBInstance, EnableIAMDatabaseAuthentication",
+            "CreateDBInstance, ManageMasterUserPassword",
+            "CreateDBInstance, StorageEncrypted",
+            "CreateDBInstance, CopyTagsToSnapshot",
+            "CreateDBInstance, EnablePerformanceInsights",
+            "ModifyDBInstance, MultiAZ",
+            "ModifyDBInstance, ManageMasterUserPassword",
+            "ModifyDBInstance, EnableIAMDatabaseAuthentication",
+            "ModifyDBInstance, CopyTagsToSnapshot",
+            "ModifyDBInstance, EnablePerformanceInsights"
+    })
+    void instanceBooleanFlagsRejectMalformedValuesBeforeServiceCalls(String action, String parameter) {
+        for (String invalid : List.of("yes", "", "not-a-boolean")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle("DBInstanceIdentifier", "mydb");
+            p.putSingle("Engine", "postgres");
+            p.putSingle(parameter, invalid);
+
+            Response response = handler.handle(action, p);
+
+            assertEquals(400, response.getStatus());
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(body.contains(parameter + " must be true or false."));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void createInstanceBooleanFlagsPreserveValuesAndDefaults(String value) {
+        boolean enabled = Boolean.parseBoolean(value);
+        Boolean setting = value == null ? null : enabled;
+        ArgumentCaptor<DbInstanceSettings> settings = ArgumentCaptor.forClass(DbInstanceSettings.class);
+        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+                isNull(), isNull(), isNull(), eq("db.t3.micro"), eq(20), eq(enabled),
+                isNull(), isNull(), isNull(), isNull(), eq(enabled), eq(enabled), isNull(),
+                eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), settings.capture(),
+                isNull(), isNull(), isNull())).thenReturn(makeInstance("mydb"));
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBInstanceIdentifier", "mydb");
+        p.putSingle("Engine", "postgres");
+        if (value != null) {
+            for (String name : List.of("MultiAZ", "EnableIAMDatabaseAuthentication", "ManageMasterUserPassword",
+                    "StorageEncrypted", "CopyTagsToSnapshot", "EnablePerformanceInsights")) {
+                p.putSingle(name, value);
+            }
+        }
+
+        assertEquals(200, handler.handle("CreateDBInstance", p).getStatus());
+        assertEquals(setting, settings.getValue().storageEncrypted());
+        assertEquals(setting, settings.getValue().copyTagsToSnapshot());
+        assertEquals(setting, settings.getValue().performanceInsightsEnabled());
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void modifyInstanceBooleanFlagsPreserveValuesAndOmission(String value) {
+        Boolean enabled = value == null ? null : Boolean.parseBoolean(value);
+        ArgumentCaptor<DbInstanceSettings> settings = ArgumentCaptor.forClass(DbInstanceSettings.class);
+        when(service.modifyDbInstance(eq("mydb"), isNull(), eq(enabled), isNull(), any(), isNull(), any(),
+                isNull(), settings.capture(), isNull(), any(DbInstanceScalingChanges.class), isNull()))
+                .thenReturn(makeInstance("mydb"));
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBInstanceIdentifier", "mydb");
+        // Encryption is not a ModifyDBInstance request member and remains ignored.
+        p.putSingle("StorageEncrypted", "yes");
+        if (value != null) {
+            for (String name : List.of("MultiAZ", "ManageMasterUserPassword", "EnableIAMDatabaseAuthentication",
+                    "CopyTagsToSnapshot", "EnablePerformanceInsights")) {
+                p.putSingle(name, value);
+            }
+        }
+
+        assertEquals(200, handler.handle("ModifyDBInstance", p).getStatus());
+        assertNull(settings.getValue().storageEncrypted());
+        assertEquals(enabled, settings.getValue().copyTagsToSnapshot());
+        assertEquals(enabled, settings.getValue().performanceInsightsEnabled());
+    }
+
+    @Test
+    void invalidAutoMinorVersionUpgradeIsRejectedBeforeCreateOrModify() {
+        for (String action : List.of("CreateDBInstance", "ModifyDBInstance")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle("DBInstanceIdentifier", "invalid-boolean");
+            p.putSingle("Engine", "postgres");
+            p.putSingle("MasterUsername", "admin");
+            p.putSingle("MasterUserPassword", "password");
+            p.putSingle("AutoMinorVersionUpgrade", "invalid");
+
+            Response response = handler.handle(action, p);
+
+            assertEquals(400, response.getStatus());
+            assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(((String) response.getEntity()).contains("AutoMinorVersionUpgrade must be true or false."));
+            verifyNoInteractions(service);
+        }
     }
 
     @Test
@@ -1482,6 +1654,58 @@ class RdsQueryHandlerTest {
                         && "ENABLED".equals(auth.getFirst().getIamAuth())
                         && "database-user".equals(auth.getFirst().getUserName())),
                 eq(1800), eq(false), eq(Map.of()), eq("us-west-2"), isNull(), isNull());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"RequireTLS", "DebugLogging"})
+    void createDbProxyRejectsMalformedBooleanFlagsBeforeCallingService(String parameter) {
+        when(service.createDbProxy(any(), any(), anyBoolean(), anyBoolean(), any(), any(),
+                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(), any(), any()))
+                .thenReturn(new DbProxy());
+        for (String invalid : List.of("yes", "", "1", "0", " true", "false ", "not-a-boolean")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle("DBProxyName", "app-proxy");
+            p.putSingle("EngineFamily", "POSTGRESQL");
+            p.putSingle(parameter, invalid);
+
+            Response response = handler.handle("CreateDBProxy", p, "us-west-2");
+
+            assertEquals(400, response.getStatus(), parameter + "=" + invalid);
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(body.contains(parameter + " must be true or false."));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void createDbProxyBooleanFlagsPreserveValuesAndDefaults(String value) {
+        boolean enabled = Boolean.parseBoolean(value);
+        DbProxy proxy = new DbProxy();
+        proxy.setRequireTls(enabled);
+        proxy.setDebugLogging(enabled);
+        when(service.createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(enabled), eq(false),
+                isNull(), isNull(), eq(List.of()), eq(List.of()), eq(List.of()), eq(1800),
+                eq(enabled), eq(Map.of()), eq("us-west-2"), isNull(), isNull())).thenReturn(proxy);
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBProxyName", "app-proxy");
+        p.putSingle("EngineFamily", "POSTGRESQL");
+        if (value != null) {
+            p.putSingle("RequireTLS", value);
+            p.putSingle("DebugLogging", value);
+        }
+
+        Response response = handler.handle("CreateDBProxy", p, "us-west-2");
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<RequireTLS>" + enabled + "</RequireTLS>"));
+        assertTrue(body.contains("<DebugLogging>" + enabled + "</DebugLogging>"));
+        verify(service).createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(enabled), eq(false),
+                isNull(), isNull(), eq(List.of()), eq(List.of()), eq(List.of()), eq(1800),
+                eq(enabled), eq(Map.of()), eq("us-west-2"), isNull(), isNull());
     }
 
     @Test

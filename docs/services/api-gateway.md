@@ -232,8 +232,8 @@ Rejections are `403`, and never reach the integration:
 | Signature mismatch | `The request signature we calculated does not match…` / `InvalidSignatureException` | `Forbidden` |
 
 A verified caller reaches the integration as `requestContext.identity.{accessKey, accountId, caller,
-user, userArn}` on a REST proxy event, and as `requestContext.authorizer.iam` on an HTTP API 2.0
-event.
+user, userArn}` on a REST proxy or HTTP API 1.0 event, and as `requestContext.authorizer.iam` on an
+HTTP API 2.0 event.
 
 As on AWS, a REST (v1) `AWS_PROXY` or `HTTP_PROXY` integration never receives the caller's
 `Authorization` header when the method is `AWS_IAM`, and on any method the header is dropped if it
@@ -521,6 +521,16 @@ setups, and `floci:override-id` wins when both are present. Every other tag is p
 `CreateUsagePlan` and `GetUsagePlans` responses.
 
 ---
+
+## Partitions
+
+Edge-optimized APIs and custom domains (`EDGE`) exist only in the commercial partition: China
+has CloudFront but no edge-optimized API Gateway, and GovCloud, EUSC and the ISO partitions have
+no CloudFront. Floci enforces this for REST APIs and custom domains: creating either with `EDGE`,
+or switching one to it with `UpdateRestApi` or `UpdateDomainName`, outside the commercial partition
+is a `BadRequestException`. `REGIONAL` APIs and domains work in every partition (private custom
+domains are not emulated). Invoke URLs use the partition's DNS suffix
+(`<api-id>.execute-api.cn-north-1.amazonaws.com.cn`). See [AWS Partitions](../configuration/partitions.md).
 
 ## Configuration
 

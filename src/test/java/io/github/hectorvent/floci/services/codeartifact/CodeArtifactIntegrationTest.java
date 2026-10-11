@@ -183,6 +183,117 @@ class CodeArtifactIntegrationTest {
     }
 
     @Test
+    void describePackageReturnsTheDirectPublishOriginControlsAndReportsUnknownPackages() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=describe-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=describe-domain&repository=repo").then().statusCode(200);
+        byte[] content = "describe".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", sha256Hex(content))
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=describe-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=my-pkg&version=1.0.0&asset=a.txt")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=describe-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=my-pkg")
+                .then().statusCode(200)
+                .body("package.format", equalTo("generic"))
+                .body("package.namespace", equalTo("ns"))
+                .body("package.name", equalTo("my-pkg"))
+                .body("package.originConfiguration.restrictions.publish", equalTo("ALLOW"))
+                .body("package.originConfiguration.restrictions.upstream", equalTo("BLOCK"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=describe-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=no-such-package")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void deletePackageUsesThePackageFieldNameAndRemovesEveryVersion() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=delete-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=delete-domain&repository=repo").then().statusCode(200);
+        byte[] content = "delete-me".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", sha256Hex(content))
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=delete-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=my-pkg&version=1.0.0&asset=a.txt")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=delete-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=my-pkg")
+                .then().statusCode(200)
+                .body("deletedPackage.format", equalTo("generic"))
+                .body("deletedPackage.namespace", equalTo("ns"))
+                .body("deletedPackage.package", equalTo("my-pkg"))
+                .body("deletedPackage.originConfiguration.restrictions.publish", equalTo("ALLOW"))
+                .body("deletedPackage.originConfiguration.restrictions.upstream", equalTo("BLOCK"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=delete-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=my-pkg")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=delete-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=my-pkg&version=1.0.0&asset=a.txt")
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=delete-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=my-pkg")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void putPackageOriginConfigurationCreatesAPackageAndItsRestrictionsSurviveDescribeAndDelete() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=origin-config-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=origin-config-domain&repository=repo")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"restrictions\":{\"publish\":\"BLOCK\",\"upstream\":\"ALLOW\"}}")
+                .post("/v1/package?domain=origin-config-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=never-published")
+                .then().statusCode(200)
+                .body("originConfiguration.restrictions.publish", equalTo("BLOCK"))
+                .body("originConfiguration.restrictions.upstream", equalTo("ALLOW"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=origin-config-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=never-published")
+                .then().statusCode(200)
+                .body("package.originConfiguration.restrictions.publish", equalTo("BLOCK"))
+                .body("package.originConfiguration.restrictions.upstream", equalTo("ALLOW"));
+
+        byte[] content = "blocked".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", sha256Hex(content))
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=origin-config-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=never-published&version=1.0.0&asset=a.txt")
+                .then().statusCode(409).body("__type", equalTo("ConflictException"));
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=origin-config-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=never-published")
+                .then().statusCode(200)
+                .body("deletedPackage.originConfiguration.restrictions.publish", equalTo("BLOCK"))
+                .body("deletedPackage.originConfiguration.restrictions.upstream", equalTo("ALLOW"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=origin-config-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=never-published")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
     void unfinishedPublishKeepsVersionOpenForMoreAssets() {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{}").post("/v1/domain?domain=unfinished-domain").then().statusCode(200);

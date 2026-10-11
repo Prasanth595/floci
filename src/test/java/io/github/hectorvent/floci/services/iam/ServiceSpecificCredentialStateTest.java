@@ -9,12 +9,14 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.iam.model.ServiceSpecificCredential;
+import io.github.hectorvent.floci.testing.MutableClock;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
-import java.time.Instant;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -62,6 +64,11 @@ class ServiceSpecificCredentialStateTest {
 
     private static IamService newService(
             StorageBackend<String, ServiceSpecificCredential> credentials, String defaultAccount) {
+        return newService(credentials, defaultAccount, Clock.systemUTC());
+    }
+
+    private static IamService newService(
+            StorageBackend<String, ServiceSpecificCredential> credentials, String defaultAccount, Clock clock) {
         return new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -70,7 +77,8 @@ class ServiceSpecificCredentialStateTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 credentials,
-                new RegionResolver("us-east-1", defaultAccount), false, null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", defaultAccount), false, null, clock);
     }
 
     /**
@@ -291,7 +299,11 @@ class ServiceSpecificCredentialStateTest {
         }
     }
 
-    /** AWS lists the service-specific credential among the items to remove before a user. */
+    /**
+     * AWS lists the service-specific credential among the items to remove before a user. Unlike the
+     * access-key and policy cases it gets no message of its own: the recorded answer is the generic
+     * referenced-objects wording, so the message deliberately does not name the credential.
+     */
     @Test
     void aUserWithACredentialCannotBeDeleted() {
         IamService service = newService(new InMemoryStorage<>(), ACCOUNT_A);
@@ -302,8 +314,8 @@ class ServiceSpecificCredentialStateTest {
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.deleteUser("blocked-user"));
         assertEquals("DeleteConflict", refused.getErrorCode());
-        assertTrue(refused.getMessage().contains("service-specific credential"),
-                "the message should name what is in the way: " + refused.getMessage());
+        assertEquals("Cannot delete entity, must remove referenced objects first.",
+                refused.getMessage());
 
         service.deleteServiceSpecificCredential("blocked-user", id);
         service.deleteUser("blocked-user");
@@ -576,22 +588,18 @@ class ServiceSpecificCredentialStateTest {
      * A key past its {@code ExpirationDate} reports {@code Expired}, and an update to
      * {@code Active} cannot undo that: the status is derived on read, so the stored value is left
      * as the caller set it while the reported one tells the truth.
-     *
-     * <p>The expiry has to be planted directly in the store, because the smallest
-     * {@code CredentialAgeDays} AWS allows is one day, so no sequence of calls reaches a past
-     * expiry.
      */
     @Test
     void aKeyPastItsExpiryReportsExpiredAndCannotBeReactivated() {
-        InMemoryStorage<String, ServiceSpecificCredential> store = new InMemoryStorage<>();
-        IamService service = newService(store, ACCOUNT_A);
+        MutableClock clock = new MutableClock();
+        IamService service = newService(new InMemoryStorage<>(), ACCOUNT_A, clock);
         service.createUser("expiry-user", "/");
+        // One day, the shortest CredentialAgeDays AWS allows.
         ServiceSpecificCredential credential =
                 service.createServiceSpecificCredential("expiry-user", BEDROCK, 1);
         assertEquals("Active", service.reportedStatus(credential));
 
-        credential.setExpirationDate(Instant.now().minusSeconds(60));
-        store.put(credential.getServiceSpecificCredentialId(), credential);
+        clock.advance(Duration.ofDays(1));
 
         assertEquals("Expired", service.reportedStatus(credential));
         assertEquals("Expired", service.reportedStatus(service
@@ -610,16 +618,15 @@ class ServiceSpecificCredentialStateTest {
     /** Expiry is terminal, so it outranks a status the caller set to Inactive. */
     @Test
     void anExpiredKeyReportsExpiredRatherThanInactive() {
-        InMemoryStorage<String, ServiceSpecificCredential> store = new InMemoryStorage<>();
-        IamService service = newService(store, ACCOUNT_A);
+        MutableClock clock = new MutableClock();
+        IamService service = newService(new InMemoryStorage<>(), ACCOUNT_A, clock);
         service.createUser("inactive-user", "/");
         ServiceSpecificCredential credential =
                 service.createServiceSpecificCredential("inactive-user", BEDROCK, 1);
         service.updateServiceSpecificCredential(
                 "inactive-user", credential.getServiceSpecificCredentialId(), "Inactive");
 
-        credential.setExpirationDate(Instant.now().minusSeconds(60));
-        store.put(credential.getServiceSpecificCredentialId(), credential);
+        clock.advance(Duration.ofDays(1));
 
         assertEquals("Expired", service.reportedStatus(credential));
     }

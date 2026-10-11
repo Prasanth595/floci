@@ -10,13 +10,13 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
+import io.github.hectorvent.floci.services.cognito.model.ManagedLoginBranding;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClientSecret;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
-import io.github.hectorvent.floci.services.cognito.model.ManagedLoginBranding;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -648,6 +648,9 @@ public class CognitoJsonHandler {
             attr.put("Name", k);
             attr.put("Value", v);
         });
+        Map<String, Object> mfaSettings = new LinkedHashMap<>();
+        CognitoService.putMfaSettings(mfaSettings, service.describeUserPool(request.path("UserPoolId").asText()), user);
+        response.setAll(objectMapper.<ObjectNode>valueToTree(mfaSettings));
         return Response.ok(response).build();
     }
 
@@ -980,10 +983,13 @@ public class CognitoJsonHandler {
     }
 
     private Response handleConfirmSignUp(JsonNode request) {
+        Map<String, String> clientMetadata = new HashMap<>();
+        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
         service.confirmSignUp(
                 request.path("ClientId").asText(),
                 request.path("Username").asText(),
-                request.path("ConfirmationCode").asText()
+                request.path("ConfirmationCode").asText(),
+                clientMetadata
         );
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -1002,9 +1008,12 @@ public class CognitoJsonHandler {
     }
 
     private Response handleAdminConfirmSignUp(JsonNode request) {
+        Map<String, String> clientMetadata = new HashMap<>();
+        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
         service.adminConfirmSignUp(
                 request.path("UserPoolId").asText(),
-                request.path("Username").asText()
+                request.path("Username").asText(),
+                clientMetadata
         );
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -1032,11 +1041,14 @@ public class CognitoJsonHandler {
     }
 
     private Response handleConfirmForgotPassword(JsonNode request) {
+        Map<String, String> clientMetadata = new HashMap<>();
+        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
         service.confirmForgotPassword(
                 request.path("ClientId").asText(),
                 request.path("Username").asText(),
                 request.path("ConfirmationCode").asText(),
-                request.path("Password").asText()
+                request.path("Password").asText(),
+                clientMetadata
         );
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -1509,47 +1521,26 @@ public class CognitoJsonHandler {
         return node;
     }
     private Response handleAdminSetUserMFAPreference(JsonNode request) {
-        String userPoolId = request.path("UserPoolId").asText();
-        String username = request.path("Username").asText();
-
-        JsonNode emailSettings = request.path("EmailMfaSettings");
-
-        Boolean enabled = emailSettings.has("Enabled")
-                ? emailSettings.path("Enabled").asBoolean()
-                : null;
-
-        Boolean preferredMfa = emailSettings.has("PreferredMfa")
-                ? emailSettings.path("PreferredMfa").asBoolean()
-                : null;
-
         service.adminSetUserMFAPreference(
-                userPoolId,
-                username,
-                enabled,
-                preferredMfa
-        );
-
+                request.path("UserPoolId").asText(),
+                request.path("Username").asText(),
+                mfaSettingsUpdate(request.path("EmailMfaSettings")),
+                mfaSettingsUpdate(request.path("SoftwareTokenMfaSettings")));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleSetUserMFAPreference(JsonNode request) {
-        JsonNode emailSettings = request.path("EmailMfaSettings");
-
-        Boolean enabled = emailSettings.has("Enabled")
-                ? emailSettings.path("Enabled").asBoolean()
-                : null;
-
-        Boolean preferredMfa = emailSettings.has("PreferredMfa")
-                ? emailSettings.path("PreferredMfa").asBoolean()
-                : null;
-
         service.setUserMFAPreference(
                 request.path("AccessToken").asText(),
-                enabled,
-                preferredMfa
-        );
-
+                mfaSettingsUpdate(request.path("EmailMfaSettings")),
+                mfaSettingsUpdate(request.path("SoftwareTokenMfaSettings")));
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private static CognitoService.MfaSettingsUpdate mfaSettingsUpdate(JsonNode settings) {
+        return new CognitoService.MfaSettingsUpdate(
+                settings.has("Enabled") ? settings.path("Enabled").asBoolean() : null,
+                settings.has("PreferredMfa") ? settings.path("PreferredMfa").asBoolean() : null);
     }
 
 }

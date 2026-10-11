@@ -6,19 +6,17 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
+import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
-import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
-import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
-import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
-import io.github.hectorvent.floci.services.rds.model.EventSubscription;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceScalingChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
-import io.github.hectorvent.floci.services.rds.model.LogExportChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
@@ -27,8 +25,10 @@ import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.rds.model.EventSubscription;
 import io.github.hectorvent.floci.services.rds.model.GlobalCluster;
 import io.github.hectorvent.floci.services.rds.model.GlobalClusterMember;
+import io.github.hectorvent.floci.services.rds.model.LogExportChanges;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import io.github.hectorvent.floci.services.rds.model.PointInTimeRestoreRequest;
@@ -205,22 +205,27 @@ public class RdsQueryHandler {
         String dbInstanceClass = params.getFirst("DBInstanceClass");
         String allocatedStorageStr = params.getFirst("AllocatedStorage");
         int allocatedStorage = allocatedStorageStr != null ? parseIntSafe(allocatedStorageStr, 20) : 20;
-        boolean iamEnabled = "true".equalsIgnoreCase(params.getFirst("EnableIAMDatabaseAuthentication"));
+        boolean iamEnabled;
         String paramGroupName = params.getFirst("DBParameterGroupName");
         String optionGroupName = params.getFirst("OptionGroupName");
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         String dbClusterIdentifier = params.getFirst("DBClusterIdentifier");
-        boolean manageMasterUserPassword = "true".equalsIgnoreCase(params.getFirst("ManageMasterUserPassword"));
+        boolean manageMasterUserPassword;
         String masterUserSecretKmsKeyId = params.getFirst("MasterUserSecretKmsKeyId");
         Map<String, String> tags = parseTags(params);
         String availabilityZone = params.getFirst("AvailabilityZone");
-        boolean multiAz = "true".equalsIgnoreCase(params.getFirst("MultiAZ"));
+        boolean multiAz;
         // AWS defaults this to true when the request omits it - unlike most boolean flags here,
         // which default to false.
-        boolean autoMinorVersionUpgrade = !"false".equalsIgnoreCase(params.getFirst("AutoMinorVersionUpgrade"));
+        boolean autoMinorVersionUpgrade;
         Boolean publiclyAccessible;
         Boolean deletionProtection;
         try {
+            iamEnabled = Boolean.TRUE.equals(parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"));
+            manageMasterUserPassword = Boolean.TRUE.equals(parseOptionalBoolean(params, "ManageMasterUserPassword"));
+            multiAz = Boolean.TRUE.equals(parseOptionalBoolean(params, "MultiAZ"));
+            Boolean requestedAutoMinorVersionUpgrade = parseOptionalBoolean(params, "AutoMinorVersionUpgrade");
+            autoMinorVersionUpgrade = requestedAutoMinorVersionUpgrade == null || requestedAutoMinorVersionUpgrade;
             publiclyAccessible = parseOptionalBoolean(params, "PubliclyAccessible");
             deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
         } catch (AwsException e) {
@@ -601,16 +606,18 @@ public class RdsQueryHandler {
             return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
         }
         String newPassword = params.getFirst("MasterUserPassword");
-        String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
-        Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
+        Boolean iamEnabled;
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         String optionGroupName = params.getFirst("OptionGroupName");
-        String autoMinorVersionUpgradeStr = params.getFirst("AutoMinorVersionUpgrade");
-        Boolean autoMinorVersionUpgrade = autoMinorVersionUpgradeStr != null
-                ? Boolean.parseBoolean(autoMinorVersionUpgradeStr) : null;
+        Boolean autoMinorVersionUpgrade;
         Boolean publiclyAccessible;
         Boolean deletionProtection;
         try {
+            // These request members are accepted, but their modify behavior is not yet emulated.
+            parseOptionalBoolean(params, "MultiAZ");
+            parseOptionalBoolean(params, "ManageMasterUserPassword");
+            iamEnabled = parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication");
+            autoMinorVersionUpgrade = parseOptionalBoolean(params, "AutoMinorVersionUpgrade");
             publiclyAccessible = parseOptionalBoolean(params, "PubliclyAccessible");
             deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
         } catch (AwsException e) {
@@ -654,15 +661,15 @@ public class RdsQueryHandler {
     private static DbInstanceSettings instanceSettings(MultivaluedMap<String, String> params,
                                                        boolean includeEncryption) {
         return new DbInstanceSettings(
-                includeEncryption ? optionalBoolean(params.getFirst("StorageEncrypted")) : null,
+                includeEncryption ? parseOptionalBoolean(params, "StorageEncrypted") : null,
                 includeEncryption ? params.getFirst("KmsKeyId") : null,
                 optionalInt(params.getFirst("BackupRetentionPeriod")),
                 params.getFirst("PreferredBackupWindow"),
                 params.getFirst("PreferredMaintenanceWindow"),
-                optionalBoolean(params.getFirst("CopyTagsToSnapshot")),
+                parseOptionalBoolean(params, "CopyTagsToSnapshot"),
                 optionalInt(params.getFirst("MonitoringInterval")),
                 params.getFirst("MonitoringRoleArn"),
-                optionalBoolean(params.getFirst("EnablePerformanceInsights")),
+                parseOptionalBoolean(params, "EnablePerformanceInsights"),
                 optionalInt(params.getFirst("PerformanceInsightsRetentionPeriod")),
                 params.getFirst("EngineLifecycleSupport"),
                 includeEncryption ? cloudwatchLogsExports(params) : null,
@@ -1379,7 +1386,7 @@ public class RdsQueryHandler {
         }
         try {
             DbParameterGroup group = service.resetDbParameterGroup(name,
-                    Boolean.parseBoolean(params.getFirst("ResetAllParameters")), parameterNames(params), region);
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "ResetAllParameters")), parameterNames(params), region);
             String result = new XmlBuilder()
                     .elem("DBParameterGroupName", group.getDbParameterGroupName())
                     .build();
@@ -1534,7 +1541,7 @@ public class RdsQueryHandler {
         }
         try {
             DbClusterParameterGroup group = service.resetDbClusterParameterGroup(name,
-                    Boolean.parseBoolean(params.getFirst("ResetAllParameters")), parameterNames(params), region);
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "ResetAllParameters")), parameterNames(params), region);
             String result = new XmlBuilder()
                     .elem("DBClusterParameterGroupName", group.getDbClusterParameterGroupName())
                     .build();
@@ -1877,8 +1884,8 @@ public class RdsQueryHandler {
         validateDbProxyNetworkType(targetConnectionNetworkType, "TargetConnectionNetworkType", false, "IPV4 or IPV6");
         String name = params.getFirst("DBProxyName");
         String engineFamily = params.getFirst("EngineFamily");
-        boolean requireTls = "true".equalsIgnoreCase(params.getFirst("RequireTLS"));
-        boolean debugLogging = "true".equalsIgnoreCase(params.getFirst("DebugLogging"));
+        boolean requireTls = Boolean.TRUE.equals(parseOptionalBoolean(params, "RequireTLS"));
+        boolean debugLogging = Boolean.TRUE.equals(parseOptionalBoolean(params, "DebugLogging"));
         int idleClientTimeout = 1800;
         String idleClientTimeoutValue = params.getFirst("IdleClientTimeout");
         if (idleClientTimeoutValue != null) {

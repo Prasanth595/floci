@@ -429,6 +429,9 @@ final class CognitoAuthFlowHandler {
                 throw new AwsException("NotAuthorizedException", "Session not found", 400);
             }
         }
+        if (phase == TotpPhase.VERIFIED) {
+            service.activateSoftwareTokenMfaAfterSetup(pool.getId(), user.getUsername());
+        }
         Map<String, String> metadata = clientMetadata != null && !clientMetadata.isEmpty()
                 ? clientMetadata : state.clientMetadata();
         return authenticationResult(pool, client, user, state.triggerSource(), metadata);
@@ -629,13 +632,7 @@ final class CognitoAuthFlowHandler {
 
         firePreAuthentication(pool, client, user, null, clientMetadata, false);
 
-        if (!user.isEnabled()) throw new AwsException("UserNotConfirmedException", "User is disabled", 400);
-        if ("RESET_REQUIRED".equals(user.getUserStatus())) {
-            throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
-        }
-        if ("UNCONFIRMED".equals(user.getUserStatus())) {
-            throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
-        }
+        requireSignInEligible(user);
         if (user.getPasswordHash() == null || !user.getPasswordHash().equals(service.hashPassword(password))) {
             throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
         }
@@ -776,13 +773,7 @@ final class CognitoAuthFlowHandler {
         CognitoUser user = service.adminGetUser(pool.getId(), username);
         firePreAuthentication(pool, client, user, null, clientMetadata, false);
 
-        if (!user.isEnabled()) throw new AwsException("UserNotConfirmedException", "User is disabled", 400);
-        if ("RESET_REQUIRED".equals(user.getUserStatus())) {
-            throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
-        }
-        if ("UNCONFIRMED".equals(user.getUserStatus())) {
-            throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
-        }
+        requireSignInEligible(user);
         if (user.getSrpVerifier() == null) {
             throw new AwsException("NotAuthorizedException", "User does not support SRP auth", 400);
         }
@@ -853,13 +844,7 @@ final class CognitoAuthFlowHandler {
         validateSecretHash(client, responses, username);
 
         CognitoUser user = service.adminGetUser(pool.getId(), username);
-        if (!user.isEnabled()) throw new AwsException("UserNotConfirmedException", "User is disabled", 400);
-        if ("RESET_REQUIRED".equals(user.getUserStatus())) {
-            throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
-        }
-        if ("UNCONFIRMED".equals(user.getUserStatus())) {
-            throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
-        }
+        requireSignInEligible(user);
         if (user.getSrpVerifier() == null) {
             throw new AwsException("NotAuthorizedException", "User does not support SRP auth", 400);
         }
@@ -1179,6 +1164,12 @@ final class CognitoAuthFlowHandler {
         List<String> available = availableUserAuthChallenges(user);
         List<String> allowed = allowedFirstAuthFactors(pool);
         available.removeIf(challenge -> !allowed.contains("PASSWORD_SRP".equals(challenge) ? "PASSWORD" : challenge));
+        // Where MFA is optional, AWS lets a user who has turned on an MFA factor sign in with a password
+        // only, so that the second factor still follows. Floci asks for software-token codes, not for
+        // email or SMS ones, so only that factor restricts the choice here.
+        if ("OPTIONAL".equals(pool.getMfaConfiguration()) && CognitoService.softwareTokenMfaEnabled(user)) {
+            available.removeIf(challenge -> !"PASSWORD".equals(challenge) && !"PASSWORD_SRP".equals(challenge));
+        }
         return available;
     }
 
@@ -1237,14 +1228,19 @@ final class CognitoAuthFlowHandler {
     }
 
     private void requireSignInEligible(CognitoUser user) {
-        if (!user.isEnabled()) {
-            throw new AwsException("UserNotConfirmedException", "User is disabled", 400);
-        }
+        requireEnabled(user);
         if ("RESET_REQUIRED".equals(user.getUserStatus())) {
             throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
         }
         if ("UNCONFIRMED".equals(user.getUserStatus())) {
             throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
+        }
+    }
+
+    /** AWS rejects a disabled user with NotAuthorizedException, not UserNotConfirmedException. */
+    private static void requireEnabled(CognitoUser user) {
+        if (!user.isEnabled()) {
+            throw new AwsException("NotAuthorizedException", "User is disabled.", 400);
         }
     }
 
@@ -1258,7 +1254,7 @@ final class CognitoAuthFlowHandler {
 
         CognitoUser user = service.adminGetUser(pool.getId(), username);
         firePreAuthentication(pool, client, user, null, clientMetadata, false);
-        if (!user.isEnabled()) throw new AwsException("UserNotConfirmedException", "User is disabled", 400);
+        requireEnabled(user);
         if ("RESET_REQUIRED".equals(user.getUserStatus())) {
             throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
         }
@@ -1655,8 +1651,7 @@ final class CognitoAuthFlowHandler {
         TriggerResult result = invokeTrigger(pool, client, user,
                 "PreAuthentication", "PreAuthentication_Authentication", req);
         if (result.errored()) {
-            throw new AwsException("NotAuthorizedException",
-                    "PreAuthentication failed with error " + result.errorMessage() + ".", 400);
+            throw blockingTriggerFailure(result, "PreAuthentication");
         }
     }
 
@@ -1694,8 +1689,7 @@ final class CognitoAuthFlowHandler {
         req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
         TriggerResult result = invokeTrigger(pool, client, user, "PreSignUp", triggerSource, req);
         if (result.errored()) {
-            throw new AwsException("NotAuthorizedException",
-                    "PreSignUp trigger denied signup: " + result.errorMessage(), 400);
+            throw blockingTriggerFailure(result, "PreSignUp");
         }
         if (!result.configured() || result.response() == null) return PreSignUpResponse.empty();
         Map<String, Object> resp = result.response();
@@ -1717,14 +1711,23 @@ final class CognitoAuthFlowHandler {
         req.put("validationData", validationData == null ? Map.of() : validationData);
         req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
         TriggerResult result = invokeTrigger(pool, null, user, "PreSignUp", "PreSignUp_AdminCreateUser", req);
-        if (!result.errored()) {
-            return;
+        if (result.errored()) {
+            throw blockingTriggerFailure(result, "PreSignUp");
         }
+    }
+
+    /**
+     * Maps a failed PreSignUp/PreAuthentication invocation the way Cognito does: a function
+     * that returned an error payload surfaces as {@code UserLambdaValidationException}
+     * ("&lt;Trigger&gt; failed with error &lt;errorMessage&gt;."), while an uninvokable
+     * function or a malformed response keeps the generic Lambda error mapping.
+     */
+    private AwsException blockingTriggerFailure(TriggerResult result, String triggerName) {
         if (result.errorKind() == TriggerErrorKind.USER_VALIDATION) {
-            throw new AwsException("UserLambdaValidationException",
-                    "PreSignUp failed with error " + result.errorMessage() + ".", 400);
+            return new AwsException("UserLambdaValidationException",
+                    triggerName + " failed with error " + result.errorMessage() + ".", 400);
         }
-        throw triggerFailure(result, "PreSignUp");
+        return triggerFailure(result, triggerName);
     }
 
     /**
@@ -1918,14 +1921,23 @@ final class CognitoAuthFlowHandler {
         }
     }
 
+    /**
+     * Ends a successful first factor with tokens, or with the MFA challenge the pool and user call for.
+     * A pool that requires MFA asks for the user's authenticator, or sets one up when the user has none.
+     * Where MFA is optional, only a user who has turned on software-token MFA with SetUserMFAPreference
+     * is asked for a code. AWS keeps accepting a registered authenticator after the pool stops offering
+     * software-token MFA, so the optional case does not look at the pool's software-token setting.
+     */
     private Map<String, Object> completePrimaryAuth(UserPool pool, UserPoolClient client, CognitoUser user,
                                                      String triggerSource, Map<String, String> clientMetadata) {
-        if (!"ON".equals(pool.getMfaConfiguration())
-                || !Boolean.TRUE.equals(pool.getSoftwareTokenMfaEnabled())) {
+        TotpPhase phase;
+        if ("OPTIONAL".equals(pool.getMfaConfiguration()) && CognitoService.softwareTokenMfaEnabled(user)) {
+            phase = TotpPhase.CODE_REQUIRED;
+        } else if ("ON".equals(pool.getMfaConfiguration()) && Boolean.TRUE.equals(pool.getSoftwareTokenMfaEnabled())) {
+            phase = user.getSoftwareTokenMfaSecret() == null ? TotpPhase.SETUP : TotpPhase.CODE_REQUIRED;
+        } else {
             return authenticationResult(pool, client, user, triggerSource, clientMetadata);
         }
-        TotpPhase phase = user.getSoftwareTokenMfaSecret() == null
-                ? TotpPhase.SETUP : TotpPhase.CODE_REQUIRED;
         String challengeName = phase == TotpPhase.SETUP ? "MFA_SETUP" : "SOFTWARE_TOKEN_MFA";
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", challengeName);

@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.rds;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.docker.ContainerLiveness;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
@@ -27,6 +29,8 @@ import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.rds.container.AutoPauseListener;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
@@ -37,9 +41,6 @@ import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
-import io.github.hectorvent.floci.services.rds.model.EventSubscription;
-import io.github.hectorvent.floci.services.kms.KmsService;
-import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceScalingChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
@@ -48,21 +49,21 @@ import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
-import io.github.hectorvent.floci.services.rds.model.PointInTimeRestoreRequest;
-import io.github.hectorvent.floci.services.rds.model.RdsEvent;
-import io.github.hectorvent.floci.services.rds.model.ReadReplicaRequest;
 import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.rds.model.EventSubscription;
 import io.github.hectorvent.floci.services.rds.model.GlobalCluster;
 import io.github.hectorvent.floci.services.rds.model.GlobalClusterMember;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
+import io.github.hectorvent.floci.services.rds.model.PointInTimeRestoreRequest;
+import io.github.hectorvent.floci.services.rds.model.RdsEvent;
+import io.github.hectorvent.floci.services.rds.model.ReadReplicaRequest;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyBinding;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
-import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -724,6 +725,8 @@ public class RdsService implements Resettable, ResourceProvider {
         if (manageMasterUserPassword && (masterPassword == null || masterPassword.isBlank())) {
             masterPassword = generatedMasterPassword();
         }
+        String effectiveSecretKmsKeyId = manageMasterUserPassword
+                ? resolveManagedSecretKmsKeyId(masterUserSecretKmsKeyId, effectiveRegion) : null;
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
         int proxyPort = reserveProxyPort(requestedPort);
@@ -826,7 +829,7 @@ public class RdsService implements Resettable, ResourceProvider {
         instance.setDbiResourceId(dbiResourceId);
         instance.setDbInstanceArn(dbInstanceArn);
         if (manageMasterUserPassword) {
-            attachManagedMasterUserSecret(instance, effectiveRegion, masterUserSecretKmsKeyId);
+            attachManagedMasterUserSecret(instance, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
         }
 
         String accountId = accountIdFromArn(instance.getDbInstanceArn());
@@ -841,7 +844,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         masterUsername, masterPassword, dbName,
                         (user, pw) -> validateDbPasswordForScope(
                                 accountId, instanceRegion, id, user, pw),
-                        proxyBinding(engine, instance.getEndpoint().address(), proxyPort,
+                        proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
                                 instanceRegion, accountId, instance.getDbiResourceId()));
             } catch (RuntimeException | Error e) {
                 try {
@@ -1077,9 +1080,10 @@ public class RdsService implements Resettable, ResourceProvider {
         if (sourceIdentifier != null && sourceIdentifier.startsWith("arn:")) {
             try {
                 AwsArnUtils.Arn parsed = AwsArnUtils.parse(sourceIdentifier);
-                // A snapshot copies within its partition only, so a source ARN naming another
-                // partition than the target region's is not a snapshot this copy can read.
-                if (!AwsRegions.partitionFor(targetRegion).equals(parsed.partition())
+                // Both regions must belong to the ARN's partition; changing its prefix must
+                // not make a snapshot from another partition eligible for copying.
+                if (!regionResolver.partitionForRegion(targetRegion).equals(parsed.partition())
+                        || !regionResolver.partitionForRegion(parsed.region()).equals(parsed.partition())
                         || !"rds".equals(parsed.service())
                         || !parsed.resource().startsWith("snapshot:")) {
                     throw new IllegalArgumentException("not an RDS snapshot ARN");
@@ -2283,6 +2287,9 @@ public class RdsService implements Resettable, ResourceProvider {
             if (!"rds".equals(arn.service())) {
                 throw new AwsException("InvalidParameterValue", "Invalid resource name: " + resourceName, 400);
             }
+            if (!regionResolver.partitionForRegion(effectiveRegion).equals(arn.partition())) {
+                throw new AwsException("InvalidParameterValue", "Invalid resource name: " + resourceName, 400);
+            }
             if (!effectiveRegion.equals(arn.region())) {
                 throw new AwsException("InvalidParameterValue",
                         "ResourceName is not in region " + effectiveRegion + ": " + resourceName, 400);
@@ -2467,6 +2474,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     // The secret's ARN names its own account and region, neither of which a
                     // startup backfill has a request context to infer.
                     secretsManagerService.markOwnedByService(secretArn, MANAGED_SECRET_OWNING_SERVICE);
+                    backfillManagedSecretKey(instance, regionFromArn(instance.getDbInstanceArn()));
                 } catch (RuntimeException e) {
                     LOG.debugv(e, "Could not mark master user secret {0} as service-managed", secretArn);
                 }
@@ -2478,6 +2486,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 }
                 try {
                     secretsManagerService.markOwnedByService(secretArn, MANAGED_SECRET_OWNING_SERVICE);
+                    backfillManagedSecretKey(cluster, regionFromArn(cluster.getDbClusterArn()));
                 } catch (RuntimeException e) {
                     LOG.debugv(e, "Could not mark master user secret {0} as service-managed", secretArn);
                 }
@@ -2528,7 +2537,55 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
-    private void attachManagedMasterUserSecret(DbInstance instance, String region, String kmsKeyId) {
+    private void backfillManagedSecretKey(DbInstance instance, String region) {
+        if (instance.getMasterUserSecretArn() != null && instance.getMasterUserSecretKmsKeyId() == null) {
+            String keyId = recoverManagedSecretKey(instance.getMasterUserSecretArn(), region);
+            if (keyId != null) {
+                instance.setMasterUserSecretKmsKeyId(keyId);
+                putInstanceForScope(accountIdFromArn(instance.getDbInstanceArn()), region,
+                        instance.getDbInstanceIdentifier(), instance);
+            }
+        }
+    }
+
+    private void backfillManagedSecretKey(DbCluster cluster, String region) {
+        if (cluster.getMasterUserSecretArn() != null && cluster.getMasterUserSecretKmsKeyId() == null) {
+            String keyId = recoverManagedSecretKey(cluster.getMasterUserSecretArn(), region);
+            if (keyId != null) {
+                cluster.setMasterUserSecretKmsKeyId(keyId);
+                putClusterForScope(accountIdFromArn(cluster.getDbClusterArn()), region,
+                        cluster.getDbClusterIdentifier(), cluster);
+            }
+        }
+    }
+
+    private String recoverManagedSecretKey(String secretArn, String region) {
+        if (secretsManagerService == null || kmsService == null) {
+            return null;
+        }
+        try {
+            Secret secret = secretsManagerService.describeSecret(secretArn, region);
+            String keyId = secret.getKmsKeyId();
+            return keyId != null ? keyId : RequestScopes.callAs(accountIdFromArn(secretArn), region,
+                    () -> kmsService.describeKey("alias/aws/secretsmanager", region).getArn());
+        } catch (RuntimeException e) {
+            // Old metadata remains readable if its secret or key is temporarily unavailable.
+            LOG.debugv(e, "Could not recover the managed key for secret {0}", secretArn);
+            return null;
+        }
+    }
+
+    private String resolveManagedSecretKmsKeyId(String kmsKeyId, String region) {
+        if (secretsManagerService == null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "ManageMasterUserPassword requires Secrets Manager support.", 400);
+        }
+        return kmsKeyId != null ? kmsKeyId
+                : kmsService.describeKey("alias/aws/secretsmanager", region).getArn();
+    }
+
+    private void attachManagedMasterUserSecret(DbInstance instance, String region, String kmsKeyId,
+                                               String effectiveKmsKeyId) {
         if (secretsManagerService == null) {
             throw new AwsException("InvalidParameterCombination",
                     "ManageMasterUserPassword requires Secrets Manager support.", 400);
@@ -2550,7 +2607,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 region);
         instance.setMasterUserSecretArn(secret.getArn());
         instance.setMasterUserSecretStatus("active");
-        instance.setMasterUserSecretKmsKeyId(kmsKeyId);
+        instance.setMasterUserSecretKmsKeyId(effectiveKmsKeyId);
     }
 
     private static String managedMasterSecretString(DbInstance instance) {
@@ -2570,7 +2627,8 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
-    private void attachManagedMasterUserSecret(DbCluster cluster, String region, String kmsKeyId) {
+    private void attachManagedMasterUserSecret(DbCluster cluster, String region, String kmsKeyId,
+                                               String effectiveKmsKeyId) {
         if (secretsManagerService == null) {
             throw new AwsException("InvalidParameterCombination",
                     "ManageMasterUserPassword requires Secrets Manager support.", 400);
@@ -2592,7 +2650,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 region);
         cluster.setMasterUserSecretArn(secret.getArn());
         cluster.setMasterUserSecretStatus("active");
-        cluster.setMasterUserSecretKmsKeyId(kmsKeyId);
+        cluster.setMasterUserSecretKmsKeyId(effectiveKmsKeyId);
     }
 
     /**
@@ -2605,14 +2663,21 @@ public class RdsService implements Resettable, ResourceProvider {
         if (secretArn == null || secretsManagerService == null) {
             return;
         }
+        detachManagedMasterUserSecret(secretArn, region);
+        cluster.setMasterUserSecretArn(null);
+        cluster.setMasterUserSecretStatus(null);
+        cluster.setMasterUserSecretKmsKeyId(null);
+    }
+
+    private void detachManagedMasterUserSecret(String secretArn, String region) {
+        if (secretArn == null || secretsManagerService == null) {
+            return;
+        }
         try {
             secretsManagerService.deleteSecret(secretArn, null, true, region);
         } catch (RuntimeException e) {
             LOG.debugv(e, "Managed master user secret {0} could not be deleted", secretArn);
         }
-        cluster.setMasterUserSecretArn(null);
-        cluster.setMasterUserSecretStatus(null);
-        cluster.setMasterUserSecretKmsKeyId(null);
     }
 
     /**
@@ -2656,7 +2721,8 @@ public class RdsService implements Resettable, ResourceProvider {
     public DbInstance getDbInstance(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         return Optional.ofNullable(findInstanceForScope(
-                currentAccountId(), effectiveRegion, id)).orElseThrow(() ->
+                currentAccountId(), effectiveRegion, id))
+                .orElseThrow(() ->
                 new AwsException("DBInstanceNotFound",
                         "DB instance " + id + " not found.", 404));
     }
@@ -3311,7 +3377,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.getEndpoint().address(),
                     effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
                     (user, pw) -> validateDbPasswordForScope(accountId, instanceRegion, id, user, pw),
-                    proxyBinding(instance.getEngine(), instance.getEndpoint().address(), instance.getProxyPort(),
+                    proxyBinding(instance.getEngine(), instance.getEndpoint().address(), instance.getEndpoint().port(),
                             instanceRegion, accountId, instance.getDbiResourceId()));
         }
     }
@@ -3478,7 +3544,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     cluster.getMasterUsername() != null ? cluster.getMasterUsername() : "root",
                     cluster.getMasterPassword(), cluster.getDatabaseName(),
                     (user, pw) -> validateDbClusterPasswordForScope(accountId, clusterRegion, id, user, pw),
-                    proxyBinding(cluster.getEngine(), cluster.getEndpoint().address(), cluster.getProxyPort(),
+                    proxyBinding(cluster.getEngine(), cluster.getEndpoint().address(), cluster.getEndpoint().port(),
                             clusterRegion, accountId, cluster.getDbClusterResourceId()));
             applyAutoPause(cluster);
         }
@@ -3546,7 +3612,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         (user, pw) -> validateDbPasswordForScope(
                                 accountId, instanceRegion, id, user, pw),
                         proxyBinding(instance.getEngine(), instance.getEndpoint().address(),
-                                instance.getProxyPort(), instanceRegion, accountId, instance.getDbiResourceId()));
+                                instance.getEndpoint().port(), instanceRegion, accountId, instance.getDbiResourceId()));
             } else {
                 // No backing container: created or last rebooted while no daemon was reachable.
                 instance = ensureInstanceBackend(id, effectiveRegion);
@@ -3654,7 +3720,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     (user, pw) -> validateDbPasswordForScope(
                             accountId, instanceRegion, id, user, pw),
                     proxyBinding(instance.getEngine(), relayEndpoint.address(),
-                            relayPort, instanceRegion, accountId, instance.getDbiResourceId()));
+                            relayEndpoint.port(), instanceRegion, accountId, instance.getDbiResourceId()));
         } catch (RuntimeException e) {
             if (allocatedRelayPort) {
                 releaseProxyPort(relayPort);
@@ -3748,7 +3814,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     (user, pw) -> validateDbClusterPasswordForScope(
                             accountId, clusterRegion, id, user, pw),
                     proxyBinding(cluster.getEngine(), relayEndpoint.address(),
-                            relayPort, clusterRegion, accountId, cluster.getDbClusterResourceId()));
+                            relayEndpoint.port(), clusterRegion, accountId, cluster.getDbClusterResourceId()));
         } catch (RuntimeException e) {
             if (allocatedRelayPort) {
                 releaseProxyPort(relayPort);
@@ -3876,6 +3942,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     "DB instance " + id + " is registered with a DB proxy target group.", 400);
         }
 
+        String clusterId = instance.getDbClusterIdentifier();
         instance.setStatus(DbInstanceStatus.DELETING);
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
         detachReadReplicaLinksBeforeDelete(instance);
@@ -3885,7 +3952,6 @@ public class RdsService implements Resettable, ResourceProvider {
             proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
         }
 
-        String clusterId = instance.getDbClusterIdentifier();
         if (clusterId == null || clusterId.isBlank()) {
             // Standalone, so stop its container and clean up its Docker volume. Neither exists in
             // mock mode, and an instance with no container and no reachable daemon has nothing
@@ -3902,6 +3968,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         resolvedInstanceStorageResourceId(instance),
                         resolvedInstanceDockerVolumeName(instance));
             }
+            detachManagedMasterUserSecret(instance.getMasterUserSecretArn(), effectiveRegion);
         } else {
             // Cluster member — remove from cluster's member list
             DbCluster cluster = findClusterForScope(
@@ -4077,6 +4144,8 @@ public class RdsService implements Resettable, ResourceProvider {
         PlacementResolution placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz, effectiveRegion);
 
         boolean mock = config.services().rds().mock();
+        String effectiveSecretKmsKeyId = manageMasterUserPassword
+                ? resolveManagedSecretKmsKeyId(masterUserSecretKmsKeyId, effectiveRegion) : null;
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
         int proxyPort = reserveProxyPort(requestedPort);
@@ -4122,7 +4191,7 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setDbClusterArn(clusterArn);
 
         if (manageMasterUserPassword) {
-            attachManagedMasterUserSecret(cluster, effectiveRegion, masterUserSecretKmsKeyId);
+            attachManagedMasterUserSecret(cluster, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
         }
 
         try {
@@ -4137,7 +4206,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         effectiveMasterUser, masterPassword, databaseName,
                         (user, pw) -> validateDbClusterPasswordForScope(
                                 accountId, clusterRegion, id, user, pw),
-                        proxyBinding(engine, cluster.getEndpoint().address(), proxyPort,
+                        proxyBinding(engine, cluster.getEndpoint().address(), cluster.getEndpoint().port(),
                                 clusterRegion, accountId, cluster.getDbClusterResourceId()));
             }
 
@@ -4429,7 +4498,8 @@ public class RdsService implements Resettable, ResourceProvider {
     public DbCluster getDbCluster(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         return Optional.ofNullable(findClusterForScope(
-                currentAccountId(), effectiveRegion, id)).orElseThrow(() ->
+                currentAccountId(), effectiveRegion, id))
+                .orElseThrow(() ->
                 new AwsException("DBClusterNotFoundFault",
                         "DB cluster " + id + " not found.", 404));
     }
@@ -4517,6 +4587,9 @@ public class RdsService implements Resettable, ResourceProvider {
             effectiveAutoPauseSeconds = validateServerlessV2ScalingConfiguration(
                     effectiveMinCapacity, effectiveMaxCapacity, requestedOrExistingAutoPause);
         }
+        String effectiveSecretKmsKeyId = Boolean.TRUE.equals(manageMasterUserPassword)
+                && cluster.getMasterUserSecretArn() == null
+                ? resolveManagedSecretKmsKeyId(masterUserSecretKmsKeyId, effectiveRegion) : null;
         boolean passwordRotated = false;
         if (newPassword != null && !newPassword.isBlank()) {
             String oldPassword = cluster.getMasterPassword();
@@ -4540,7 +4613,7 @@ public class RdsService implements Resettable, ResourceProvider {
             if (cluster.getMasterPassword() == null || cluster.getMasterPassword().isBlank()) {
                 cluster.setMasterPassword(generatedMasterPassword());
             }
-            attachManagedMasterUserSecret(cluster, effectiveRegion, masterUserSecretKmsKeyId);
+            attachManagedMasterUserSecret(cluster, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
         } else if (Boolean.FALSE.equals(manageMasterUserPassword) && cluster.getMasterUserSecretArn() != null) {
             detachManagedMasterUserSecret(cluster, effectiveRegion);
         } else if (cluster.getMasterUserSecretArn() != null
@@ -5193,9 +5266,9 @@ public class RdsService implements Resettable, ResourceProvider {
     // ── DB Proxies (AWS::RDS::DBProxy) ──────────────────────────────────────────
 
     /**
-     * Creates a DB Proxy. No relay is started here — the backend target is unknown until a target
+     * Creates a DB Proxy. No relay is started here: the backend target is unknown until a target
      * group registers a cluster/instance (see {@link #registerDbProxyTargets}). The relay listens on
-     * the engine family's default port so the endpoint is a bare host clients reach at 5432/3306.
+     * the engine family's default port when available, otherwise an allocated pool port.
      */
     public DbProxy createDbProxy(String dbProxyName, String engineFamily, boolean requireTls,
                                  boolean iamAuth, String roleArn, List<String> vpcSubnetIds,
@@ -5251,9 +5324,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
 
         boolean mock = config.services().rds().mock();
-        // RDS Proxy exposes a bare hostname on the engine's default port. Floci currently models
-        // that contract directly; a separate endpoint-routing design is required before multiple
-        // same-engine proxies can be made externally reachable through one Docker host.
+        // Proxies share a hostname, so each needs its own listener port.
         int proxyPort = reserveOrAllocateProxyPort(defaultPortForEngineFamily(engineFamily));
         DbProxy proxy = new DbProxy();
         proxy.setDbProxyName(dbProxyName);
@@ -7213,7 +7284,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         try {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(targetGroup.getTargetGroupArn());
-            return AwsRegions.partitionFor(region).equals(arn.partition())
+            return regionResolver.partitionForRegion(region).equals(arn.partition())
                     && "rds".equals(arn.service())
                     && Objects.equals(accountId, arn.accountId())
                     && Objects.equals(region, arn.region())
@@ -7649,7 +7720,7 @@ public class RdsService implements Resettable, ResourceProvider {
         return java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 17);
     }
 
-    /** The engine's default listener port — an RDS Proxy endpoint is a bare host reached on this port. */
+    /** The preferred listener port, used when no other proxy has reserved it. */
     private int defaultPortForEngineFamily(String engineFamily) {
         if (engineFamily == null) {
             return 5432;
@@ -7730,7 +7801,7 @@ public class RdsService implements Resettable, ResourceProvider {
                             (user, pw) -> validateDbClusterPasswordForScope(
                                     accountId, clusterRegion,
                                     cluster.getDbClusterIdentifier(), user, pw),
-                            proxyBinding(cluster.getEngine(), cluster.getEndpoint().address(), proxyPort,
+                            proxyBinding(cluster.getEngine(), cluster.getEndpoint().address(), cluster.getEndpoint().port(),
                                     clusterRegion, accountId, cluster.getDbClusterResourceId()));
                 }
                 cluster.setStatus(DbInstanceStatus.AVAILABLE);
@@ -7873,7 +7944,7 @@ public class RdsService implements Resettable, ResourceProvider {
                             (user, pw) -> validateDbPasswordForScope(
                                     accountId, instanceRegion,
                                     instance.getDbInstanceIdentifier(), user, pw),
-                            proxyBinding(instance.getEngine(), instance.getEndpoint().address(), proxyPort,
+                            proxyBinding(instance.getEngine(), instance.getEndpoint().address(), instance.getEndpoint().port(),
                                     instanceRegion, accountId, instance.getDbiResourceId()));
                 }
                 instance.setStatus(DbInstanceStatus.AVAILABLE);
@@ -8127,9 +8198,8 @@ public class RdsService implements Resettable, ResourceProvider {
         targetGroup = new DbProxyTargetGroup();
         targetGroup.setDbProxyName(proxy.getDbProxyName());
         targetGroup.setTargetGroupName("default");
-        targetGroup.setTargetGroupArn(AwsArnUtils.Arn.of("rds",
-                region,
-                accountId, "target-group:prx-tg-" + randomResourceSuffix()).toString());
+        targetGroup.setTargetGroupArn(regionResolver.buildArn("rds", region,
+                accountId, "target-group:prx-tg-" + randomResourceSuffix()));
         targetGroup.setDefaultTargetGroup(true);
         targetGroup.setCreatedAt(now);
         targetGroup.setUpdatedAt(now);
@@ -8697,7 +8767,7 @@ public class RdsService implements Resettable, ResourceProvider {
             String resourceType, String resourceId) {
         try {
             AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-            return AwsRegions.partitionFor(region).equals(parsed.partition())
+            return regionResolver.partitionForRegion(region).equals(parsed.partition())
                     && "rds".equals(parsed.service())
                     && Objects.equals(accountId, parsed.accountId())
                     && Objects.equals(region, parsed.region())
@@ -9294,8 +9364,8 @@ public class RdsService implements Resettable, ResourceProvider {
         // The model documents the subscription as created but inactive when Enabled is false, and
         // says nothing about a default, so an omitted Enabled activates it as the console does.
         subscription.setEnabled(enabled == null || enabled);
-        subscription.setEventSubscriptionArn(AwsArnUtils.Arn.of("rds", region, accountId,
-                "es:" + subscriptionName).toString());
+        subscription.setEventSubscriptionArn(regionResolver.buildArn("rds", region,
+                "es:" + subscriptionName));
         subscription.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
         eventSubscriptions.put(key, subscription);
         return subscription;
@@ -9407,6 +9477,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         String prefix = eventSubscriptionKey(region, "");
         List<EventSubscription> all = eventSubscriptions.scan(k -> k.startsWith(prefix)).stream()
+                .map(subscription -> normalizeEventSubscriptionArn(region, subscription))
                 .sorted(Comparator.comparing(EventSubscription::getCustSubscriptionId))
                 .toList();
         // The marker is the last name of the previous page and the next page starts after it.
@@ -9429,8 +9500,27 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private EventSubscription requireEventSubscription(String region, String subscriptionName) {
         return eventSubscriptions.get(eventSubscriptionKey(region, subscriptionName))
+                .map(subscription -> normalizeEventSubscriptionArn(region, subscription))
                 .orElseThrow(() -> new AwsException("SubscriptionNotFound",
                         "Subscription " + subscriptionName + " not found.", 404));
+    }
+
+    private EventSubscription normalizeEventSubscriptionArn(String region, EventSubscription subscription) {
+        String accountId = subscription.getCustomerAwsId();
+        String name = subscription.getCustSubscriptionId();
+        if (accountId == null || name == null) {
+            return subscription;
+        }
+        String resource = "es:" + name;
+        String legacyArn = AwsArnUtils.Arn.of("rds", region, accountId, resource).toString();
+        String expectedArn = regionResolver.buildArn("rds", region, accountId, resource);
+        // Earlier versions minted custom-region subscriptions with the catalog's fallback
+        // partition. Repair only that exact legacy identity, preserving its stored owner.
+        if (legacyArn.equals(subscription.getEventSubscriptionArn()) && !legacyArn.equals(expectedArn)) {
+            subscription.setEventSubscriptionArn(expectedArn);
+            eventSubscriptions.put(eventSubscriptionKey(region, name), subscription);
+        }
+        return subscription;
     }
 
     // ── Cluster endpoints ─────────────────────────────────────────────────────
@@ -9455,6 +9545,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         String id = requireClusterEndpointIdentifier(endpointId);
         DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        requireAuroraCluster(cluster);
         if (cluster.getStatus() != null && cluster.getStatus() != DbInstanceStatus.AVAILABLE) {
             throw new AwsException("InvalidDBClusterStateFault",
                     "DB cluster " + cluster.getDbClusterIdentifier() + " is not in available state.", 400);
@@ -9501,6 +9592,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         DbClusterEndpoint endpoint = requireClusterEndpoint(effectiveRegion, endpointId);
         DbCluster cluster = getDbCluster(endpoint.getDbClusterIdentifier(), effectiveRegion);
+        requireAuroraCluster(cluster);
         String customType = isBlank(endpointType) ? endpoint.getCustomEndpointType() : requireCustomEndpointType(endpointType);
         boolean listsGiven = staticMembers != null || excludedMembers != null;
         List<String> newStatic = listsGiven ? clusterMembersNamed(cluster, staticMembers) : endpoint.getStaticMembers();
@@ -9581,6 +9673,13 @@ public class RdsService implements Resettable, ResourceProvider {
         int to = Math.min(matching.size(), start + limit);
         return new ClusterEndpointPage(matching.subList(start, to),
                 to < matching.size() ? Integer.toString(to) : null);
+    }
+
+    private static void requireAuroraCluster(DbCluster cluster) {
+        if (!isAuroraEngine(cluster.getEngineIdentifier())) {
+            throw new AwsException("InvalidParameterValue",
+                    "Custom endpoints are supported only for Aurora DB clusters.", 400);
+        }
     }
 
     private static boolean matchesFilter(Map<String, List<String>> filters, String name, String value) {

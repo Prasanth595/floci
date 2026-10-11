@@ -44,8 +44,11 @@ PREFIX ?= $(HOME)/.local
 .DEFAULT_GOAL := help
 .PHONY: help dev build test native native-host run-native native-install native-image native-up native-down native-logs clean-sidecars clean-volumes compat docker-tests \
         docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test \
+        slr-check slr-table slr-audit slr-test \
         aws-data-sync aws-data-check aws-data-test \
-        iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test
+        iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test \
+        iam-action-resources-sync iam-action-resources-check iam-action-resources-verify \
+        iam-action-resources-test iam-data-verify
 
 help: ## List the targets below
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -174,10 +177,33 @@ partition-audit: ## Print the per-package table of remaining partition literals
 partition-test: ## Run the partition tooling's unit tests
 	$(PYTHON) -m pytest tools/partition -q
 
-aws-data-sync: ## Regenerate src/main/resources/aws/*.json from botocore, the CDK and Terraform (commit the result)
+slr-check: ## CI gate: the service-linked role table must match the vendored AWS data
+	@$(PYTHON) tools/slr/service_linked_roles.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/iam/service-linked-roles.tsv drifted (see above)."; \
+		echo "       Run 'make slr-table SNAPSHOT=<localstack iam snapshot>' and commit the result."; \
+		exit 1; \
+	}
+
+slr-table: ## Regenerate the service-linked role table from an AWS-validated snapshot
+	@test -n "$(SNAPSHOT)" || { \
+		echo "error: set SNAPSHOT to a LocalStack tests/aws/services/iam/test_iam.snapshot.json"; \
+		echo "       the suffix column can only come from a recorded create"; \
+		exit 1; \
+	}
+	$(PYTHON) tools/slr/service_linked_roles.py --refresh "$(SNAPSHOT)"
+
+slr-audit: ## Print the service-linked role table, marking names that are not derivable
+	@$(PYTHON) tools/slr/service_linked_roles.py --audit
+
+slr-test: ## Run the service-linked role tooling's unit tests
+	$(PYTHON) -m pytest tools/slr -q
+
+aws-data-sync: ## Regenerate src/main/resources/aws/*.json and the IAM managed-policy catalog from local/aws (commit the result)
 	$(PYTHON) tools/aws/regen_partitions.py
 	$(PYTHON) tools/aws/regen_region_facts.py
 	$(PYTHON) tools/aws/regen_dynamodb_shapes.py
+	$(PYTHON) tools/aws/regen_managed_policies.py
 
 aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 	@$(PYTHON) tools/aws/regen_partitions.py --check || { \
@@ -196,6 +222,12 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 		echo ""; \
 		echo "error: src/main/resources/aws/dynamodb-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_managed_policies.py --check || { \
+		echo ""; \
+		echo "error: the IAM managed-policy catalog (src/main/resources/iam/managed-polic*) is out of date or malformed."; \
+		echo "       Run 'make aws-data-sync' with local/aws checked out and commit the result."; \
 		exit 1; \
 	}
 
@@ -228,3 +260,50 @@ iam-namespaces-verify: ## CI gate (online): every vendored IAM namespace must st
 
 iam-namespaces-test: ## Run the IAM namespace generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_service_namespaces.py -q
+
+iam-action-resources-sync: ## Regenerate src/main/resources/aws/iam-action-resources.json from AWS (commit the result)
+	$(PYTHON) tools/aws/regen_iam_action_resources.py
+
+iam-action-resources-check: ## CI gate (offline): the vendored IAM action resource map must be well-formed
+	@$(PYTHON) tools/aws/regen_iam_action_resources.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/iam-action-resources.json is malformed."; \
+		echo "       Run 'make iam-action-resources-sync' and commit the result."; \
+		exit 1; \
+	}
+
+iam-action-resources-verify: ## CI gate (online): every vendored IAM action resource must match AWS
+	@$(PYTHON) tools/aws/regen_iam_action_resources.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not reach AWS's IAM service reference, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: the vendored IAM action resource map claims a resource AWS does not use,"; \
+		echo "       so enforcement would authorize against the wrong thing."; \
+		echo "       Run 'make iam-action-resources-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS
+	@# Both halves run even when the first fails, so one file's drift cannot hide the other's
+	@# state. Sequential steps in CI stop at the first failure, which once left the action
+	@# resource gate unexercised while the namespace list was stale.
+	@namespaces=0; actions=0; \
+	$(MAKE) --no-print-directory iam-namespaces-verify || namespaces=$$?; \
+	$(MAKE) --no-print-directory iam-action-resources-verify || actions=$$?; \
+	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ]; then \
+		echo ""; \
+		echo "error: vendored IAM data does not match upstream:"; \
+		if [ $$namespaces -ne 0 ]; then \
+			echo "       the service namespace list, see its message above"; \
+		fi; \
+		if [ $$actions -ne 0 ]; then \
+			echo "       the action resource map, see its message above"; \
+		fi; \
+		exit 1; \
+	fi
+
+iam-action-resources-test: ## Run the IAM action resource generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_iam_action_resources.py -q

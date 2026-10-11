@@ -23,8 +23,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.HashSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1971,7 +1971,7 @@ class LambdaServiceTest {
                 "FunctionResponseTypes", List.of("Bogus"))));
 
         EventSourceMapping stored = service.getEventSourceMapping(esm.getUuid());
-        assertEquals(10, stored.getBatchSize());
+        assertEquals(100, stored.getBatchSize());
         assertTrue(stored.isEnabled());
     }
 
@@ -2322,5 +2322,391 @@ class LambdaServiceTest {
                 () -> service.updateFunctionConfiguration(REGION, "validation-order-function", updateRequest));
         assertEquals("ValidationException", thrown.getErrorCode());
         assertEquals(400, thrown.getHttpStatus());
+    }
+
+    @Test
+    void updateFunctionCode_withMismatchedRevisionId_throwsPreconditionFailedException() throws Exception {
+        // Catches: UpdateFunctionCode silently accepts a stale RevisionId and overwrites the function's code
+        // (the CodeSha256 assertion fails if the check ever runs after code extraction)
+        Map<String, Object> createReq = baseRequest("revision-lock-func");
+        service.createFunction(REGION, createReq);
+
+        LambdaFunction fn = service.getFunction(REGION, "revision-lock-func");
+        String initialRevisionId = fn.getRevisionId();
+        String initialCodeSha256 = fn.getCodeSha256();
+        String mismatchingRevision = "stale-revision-id-abc123";
+        String zipBase64 = createZipBase64("index.js");
+
+        Map<String, Object> updateReq = new HashMap<>();
+        updateReq.put("ZipFile", zipBase64);
+        updateReq.put("RevisionId", mismatchingRevision);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateFunctionCode(REGION, "revision-lock-func", updateReq));
+        assertEquals("PreconditionFailedException", ex.getErrorCode());
+        assertEquals(412, ex.getHttpStatus());
+        assertEquals("The Revision Id provided does not match the latest Revision Id. Call the GetFunction/GetAlias API to retrieve the latest Revision Id", ex.getMessage());
+
+        LambdaFunction unchangedFn = service.getFunction(REGION, "revision-lock-func");
+        assertEquals(initialRevisionId, unchangedFn.getRevisionId());
+        assertEquals(initialCodeSha256, unchangedFn.getCodeSha256());
+
+        updateReq.put("RevisionId", initialRevisionId);
+        service.updateFunctionCode(REGION, "revision-lock-func", updateReq);
+
+        LambdaFunction updatedFn = service.getFunction(REGION, "revision-lock-func");
+        assertNotEquals(initialRevisionId, updatedFn.getRevisionId());
+    }
+
+    @Test
+    void createEventSourceMapping_moreThanOneTopic_isRejected() {
+        // Catches: a Topics list longer than the model's maximum of 1 is stored instead of rejected
+        service.createFunction(REGION, baseRequest("kafka-topics-max-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-topics-max-fn", List.of("topic-a", "topic-b"), List.of())));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'topics' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 1", error.getMessage());
+    }
+
+    @Test
+    void createEventSourceMapping_topicStartingWithADot_isRejected() {
+        // Catches: a Topic that doesn't match the model pattern [^.]([a-zA-Z0-9\-_.]+) is stored
+        service.createFunction(REGION, baseRequest("kafka-topic-pattern-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-topic-pattern-fn", List.of(".hidden"), List.of())));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value '.hidden' at 'topics.member' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [^.]([a-zA-Z0-9\\-_.]+)", error.getMessage());
+    }
+
+    @Test
+    void createEventSourceMapping_moreThan23SourceAccessConfigurations_isRejected() {
+        // Catches: a SourceAccessConfigurations list longer than the model's maximum of 23 is stored
+        service.createFunction(REGION, baseRequest("kafka-access-max-fn"));
+        List<Map<String, Object>> access = new ArrayList<>();
+        for (int i = 0; i < 24; i++) {
+            access.add(Map.of("Type", "BASIC_AUTH", "URI", "arn:aws:secretsmanager:us-east-1:000000000000:secret:s" + i));
+        }
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-access-max-fn", List.of("my-topic"), access)));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'sourceAccessConfigurations' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 23", error.getMessage());
+    }
+
+    @Test
+    void updateEventSourceMapping_moreThanOneTopic_isRejectedAndLeavesTheMappingUnchanged() {
+        // Catches: UpdateEventSourceMapping accepting (or half-applying) a Topics list longer than 1
+        service.createFunction(REGION, baseRequest("kafka-update-topics-fn"));
+        EventSourceMapping esm = service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-update-topics-fn", List.of("my-topic"), List.of()));
+        // Floci's default BatchSize differs per source type, so compare against the value before the update
+        int batchSizeBefore = esm.getBatchSize();
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(),
+                Map.of("BatchSize", 5, "Topics", List.of("topic-a", "topic-b"))));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        EventSourceMapping stored = service.getEventSourceMapping(esm.getUuid());
+        assertEquals(List.of("my-topic"), stored.getTopics());
+        assertEquals(batchSizeBefore, stored.getBatchSize());
+    }
+
+    @Test
+    void createEventSourceMapping_emptyTopic_isRejectedWithAValidationException() {
+        // Catches: an empty Topic reaching the blank check and answering InvalidParameterValueException instead of the Topic shape's min-length ValidationException
+        service.createFunction(REGION, baseRequest("kafka-topic-empty-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-topic-empty-fn", List.of(""), List.of())));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value '' at 'topics.member' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1", error.getMessage());
+    }
+
+    @Test
+    void createEventSourceMapping_sqsSourceWithMoreThan23SourceAccessConfigurations_isRejected() {
+        // Catches: the 23-entry SourceAccessConfigurations cap being enforced only for self-managed Kafka sources
+        service.createFunction(REGION, baseRequest("sqs-access-max-fn"));
+        List<Map<String, Object>> access = new ArrayList<>();
+        for (int i = 0; i < 24; i++) {
+            access.add(Map.of("Type", "BASIC_AUTH", "URI", "arn:aws:secretsmanager:us-east-1:000000000000:secret:s" + i));
+        }
+        Map<String, Object> request = new HashMap<>();
+        request.put("FunctionName", "sqs-access-max-fn");
+        request.put("EventSourceArn", "arn:aws:sqs:us-east-1:000000000000:access-max-queue");
+        request.put("SourceAccessConfigurations", access);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION, request));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'sourceAccessConfigurations' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 23", error.getMessage());
+    }
+
+    @Test
+    void updateEventSourceMapping_moreThan23SourceAccessConfigurations_isRejectedAndLeavesTheMappingUnchanged() {
+        // Catches: UpdateEventSourceMapping accepting (or half-applying) more than 23 SourceAccessConfigurations
+        service.createFunction(REGION, baseRequest("kafka-update-access-fn"));
+        EventSourceMapping esm = service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-update-access-fn", List.of("my-topic"), List.of()));
+        int batchSizeBefore = esm.getBatchSize();
+        List<Map<String, Object>> accessBefore = esm.getSourceAccessConfigurations();
+        List<Map<String, Object>> access = new ArrayList<>();
+        for (int i = 0; i < 24; i++) {
+            access.add(Map.of("Type", "BASIC_AUTH", "URI", "arn:aws:secretsmanager:us-east-1:000000000000:secret:s" + i));
+        }
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(),
+                Map.of("BatchSize", 5, "SourceAccessConfigurations", access)));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        EventSourceMapping stored = service.getEventSourceMapping(esm.getUuid());
+        assertEquals(batchSizeBefore, stored.getBatchSize());
+        assertEquals(accessBefore, stored.getSourceAccessConfigurations());
+    }
+
+    private static Map<String, Object> kafkaMappingRequest(String functionName, List<String> topics,
+                                                            List<Map<String, Object>> sourceAccessConfigurations) {
+        Map<String, Object> request = new HashMap<>();
+        request.put("FunctionName", functionName);
+        request.put("Topics", topics);
+        request.put("SelfManagedEventSource", Map.of("Endpoints", Map.of("KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092"))));
+        if (!sourceAccessConfigurations.isEmpty()) {
+            request.put("SourceAccessConfigurations", sourceAccessConfigurations);
+        }
+        return request;
+    }
+
+    @Test
+    void updateFunctionCode_s3BucketEndingInADot_isRejected() {
+        // Catches: UpdateFunctionCode accepting an S3Bucket that breaks the model pattern [0-9A-Za-z\.\-_]*(?<!\.)
+        service.createFunction(REGION, baseRequest("code-bucket-pattern-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateFunctionCode(REGION,
+                "code-bucket-pattern-fn", Map.of("S3Bucket", "my-bucket.", "S3Key", "code.zip")));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value 'my-bucket.' at 's3Bucket' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [0-9A-Za-z\\.\\-_]*(?<!\\.)", error.getMessage());
+    }
+
+    @Test
+    void updateFunctionCode_s3KeyLongerThan1024_isRejected() {
+        // Catches: UpdateFunctionCode accepting an S3Key longer than the model's 1024-character maximum
+        service.createFunction(REGION, baseRequest("code-key-length-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateFunctionCode(REGION,
+                "code-key-length-fn", Map.of("S3Bucket", "my-bucket", "S3Key", "k".repeat(1025))));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value at 's3Key' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 1024", error.getMessage());
+    }
+
+    @Test
+    void createAlias_functionVersionOutsideTheModelPattern_isRejected() {
+        // Catches: CreateAlias storing a FunctionVersion that isn't $LATEST, $LATEST.PUBLISHED or a number
+        service.createFunction(REGION, baseRequest("alias-version-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createAlias(REGION, "alias-version-fn", "live", "v1", null, null));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value 'v1' at 'functionVersion' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: (\\$LATEST(\\.PUBLISHED)?|[0-9]+)", error.getMessage());
+    }
+
+    @Test
+    void updateAlias_descriptionLongerThan256_isRejectedAndLeavesTheAliasUnchanged() {
+        // Catches: UpdateAlias accepting (or half-applying) a Description over the model's 256-character maximum
+        service.createFunction(REGION, baseRequest("alias-description-fn"));
+        service.createAlias(REGION, "alias-description-fn", "live", "$LATEST", "original", null);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.updateAlias(REGION, "alias-description-fn", "live", "$LATEST", "d".repeat(257), null));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("original", service.getAlias(REGION, "alias-description-fn", "live").getDescription());
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafkaWithoutBatchSize_defaultsTo100() {
+        // Catches: every event source defaulting to BatchSize 10, where AWS uses 10 only for SQS
+        service.createFunction(REGION, baseRequest("kafka-default-batch-fn"));
+
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "kafka-default-batch-fn",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of("Endpoints", Map.of("KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")))));
+
+        assertEquals(100, esm.getBatchSize());
+    }
+
+    @Test
+    void addPermission_keepsSourceAccountAlongsideSourceArn() {
+        // Catches: SourceAccount is silently dropped from the statement when SourceArn is also given
+        service.createFunction(REGION, baseRequest("perm-conditions-fn"));
+
+        Map<String, Object> statement = service.addPermission(REGION, "perm-conditions-fn", null, Map.of(
+                "StatementId", "s3-invoke",
+                "Action", "lambda:InvokeFunction",
+                "Principal", "s3.amazonaws.com",
+                "SourceArn", "arn:aws:s3:::test-bucket",
+                "SourceAccount", "111111111111"));
+
+        assertEquals(Map.of(
+                "ArnLike", Map.of("AWS:SourceArn", "arn:aws:s3:::test-bucket"),
+                "StringEquals", Map.of("AWS:SourceAccount", "111111111111")), statement.get("Condition"));
+    }
+
+    @Test
+    void addPermission_storesAnAccountIdPrincipalAsItsRootArn() {
+        // Catches: a bare 12-digit account ID principal is stored raw instead of as an AWS root ARN
+        service.createFunction(REGION, baseRequest("perm-principal-fn"));
+
+        Map<String, Object> statement = service.addPermission(REGION, "perm-principal-fn", null, Map.of(
+                "StatementId", "cross-account",
+                "Action", "lambda:InvokeFunction",
+                "Principal", "111122223333"));
+
+        assertEquals(Map.of("AWS", "arn:aws:iam::111122223333:root"), statement.get("Principal"));
+    }
+
+    @Test
+    void addPermission_keepsEveryStringConditionInOneStatement() {
+        // Catches: PrincipalOrgID or FunctionUrlAuthType dropped, or split from SourceArn/SourceAccount
+        service.createFunction(REGION, baseRequest("perm-all-fields-fn"));
+
+        Map<String, Object> statement = service.addPermission(REGION, "perm-all-fields-fn", null, Map.of(
+                "StatementId", "urlPermission",
+                "Action", "lambda:InvokeFunctionUrl",
+                "Principal", "*",
+                "SourceArn", "arn:aws:s3:::test-bucket",
+                "SourceAccount", "111111111111",
+                "PrincipalOrgID", "o-1234567890",
+                "FunctionUrlAuthType", "NONE"));
+
+        assertEquals("*", statement.get("Principal"));
+        assertEquals(Map.of(
+                "StringEquals", Map.of(
+                        "AWS:SourceAccount", "111111111111",
+                        "lambda:FunctionUrlAuthType", "NONE",
+                        "aws:PrincipalOrgID", "o-1234567890"),
+                "ArnLike", Map.of("AWS:SourceArn", "arn:aws:s3:::test-bucket")), statement.get("Condition"));
+    }
+
+    @Test
+    void addPermission_storesAnEventSourceTokenAsAStringEqualsCondition() {
+        // Catches: EventSourceToken dropped, which leaves an Alexa skill grant open to every caller
+        service.createFunction(REGION, baseRequest("perm-alexa-fn"));
+
+        Map<String, Object> statement = service.addPermission(REGION, "perm-alexa-fn", null, Map.of(
+                "StatementId", "alexaSkill",
+                "Action", "lambda:InvokeFunction",
+                "Principal", "*",
+                "EventSourceToken", "amzn1.ask.skill.12345678-1234-1234-1234-123456789012"));
+
+        assertEquals(Map.of("StringEquals", Map.of(
+                "lambda:EventSourceToken", "amzn1.ask.skill.12345678-1234-1234-1234-123456789012")),
+                statement.get("Condition"));
+    }
+
+    @Test
+    void addPermission_invokedViaFunctionUrl_isABoolConditionWithAStringValue() {
+        // Catches: InvokedViaFunctionUrl dropped, which turns the public function URL grant into an
+        // unconditioned "*" grant on InvokeFunction; and a JSON boolean, which clients parsing the
+        // condition values as strings cannot read
+        service.createFunction(REGION, baseRequest("perm-url-invoke-fn"));
+
+        Map<String, Object> statement = service.addPermission(REGION, "perm-url-invoke-fn", null, Map.of(
+                "StatementId", "FunctionURLInvokeAllowPublicAccess",
+                "Action", "lambda:InvokeFunction",
+                "Principal", "*",
+                "InvokedViaFunctionUrl", true));
+
+        assertEquals(Map.of("Bool", Map.of("lambda:InvokedViaFunctionUrl", "true")), statement.get("Condition"));
+    }
+
+    @Test
+    void addPermission_roleArnWithADotInItsName_staysAnAwsPrincipal() {
+        // Catches: the dot check running before the ARN check, which stores an IAM ARN as a Service
+        service.createFunction(REGION, baseRequest("perm-dotted-role-fn"));
+
+        Map<String, Object> statement = service.addPermission(REGION, "perm-dotted-role-fn", null, Map.of(
+                "StatementId", "dotted-role",
+                "Action", "lambda:InvokeFunction",
+                "Principal", "arn:aws:iam::111122223333:role/my.role"));
+
+        assertEquals(Map.of("AWS", "arn:aws:iam::111122223333:role/my.role"), statement.get("Principal"));
+    }
+
+    @Test
+    void addPermission_accountIdInAChinaRegion_isTheRootArnInTheAwsCnPartition() {
+        // Catches: an account principal minted in the commercial partition for a function outside it
+        Map<String, Object> request = baseRequest("perm-cn-principal-fn");
+        request.put("Role", "arn:aws-cn:iam::000000000000:role/test-role");
+        service.createFunction("cn-north-1", request);
+
+        Map<String, Object> statement = service.addPermission("cn-north-1", "perm-cn-principal-fn", null, Map.of(
+                "StatementId", "cross-account",
+                "Action", "lambda:InvokeFunction",
+                "Principal", "111122223333"));
+
+        assertEquals(Map.of("AWS", "arn:aws-cn:iam::111122223333:root"), statement.get("Principal"));
+    }
+
+    @Test
+    void addPermission_functionUrlAuthTypeOutsideTheEnum_isRejectedAndLeavesNoStatement() {
+        // Catches: an unknown FunctionUrlAuthType stored as a condition no function URL can ever match
+        service.createFunction(REGION, baseRequest("perm-auth-type-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.addPermission(REGION, "perm-auth-type-fn", null, Map.of(
+                        "StatementId", "url",
+                        "Action", "lambda:InvokeFunctionUrl",
+                        "Principal", "*",
+                        "FunctionUrlAuthType", "PUBLIC")));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value 'PUBLIC' at 'functionUrlAuthType' failed to satisfy "
+                + "constraint: Member must satisfy enum value set: [NONE, AWS_IAM]", error.getMessage());
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.getPolicy(REGION, "perm-auth-type-fn", null));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+    }
+
+    @Test
+    void addPermission_conditionValuesOutsideTheModelPatterns_areRejected() {
+        // Catches: a SourceAccount, PrincipalOrgID or EventSourceToken the model's pattern refuses being stored
+        service.createFunction(REGION, baseRequest("perm-patterns-fn"));
+
+        AwsException sourceAccount = assertThrows(AwsException.class, () ->
+                service.addPermission(REGION, "perm-patterns-fn", null, Map.of(
+                        "StatementId", "s3", "Action", "lambda:InvokeFunction", "Principal", "s3.amazonaws.com",
+                        "SourceAccount", "arn:aws:iam::111111111111:root")));
+        AwsException principalOrgId = assertThrows(AwsException.class, () ->
+                service.addPermission(REGION, "perm-patterns-fn", null, Map.of(
+                        "StatementId", "org", "Action", "lambda:InvokeFunction", "Principal", "*",
+                        "PrincipalOrgID", "my-org")));
+        AwsException eventSourceToken = assertThrows(AwsException.class, () ->
+                service.addPermission(REGION, "perm-patterns-fn", null, Map.of(
+                        "StatementId", "alexa", "Action", "lambda:InvokeFunction", "Principal", "*",
+                        "EventSourceToken", "not a token")));
+
+        assertEquals("1 validation error detected: Value 'arn:aws:iam::111111111111:root' at 'sourceAccount' "
+                + "failed to satisfy constraint: Member must satisfy regular expression pattern: \\d{12}",
+                sourceAccount.getMessage());
+        assertEquals("1 validation error detected: Value 'my-org' at 'principalOrgID' failed to satisfy "
+                + "constraint: Member must satisfy regular expression pattern: o-[a-z0-9]{10,32}",
+                principalOrgId.getMessage());
+        assertEquals("ValidationException", eventSourceToken.getErrorCode());
     }
 }

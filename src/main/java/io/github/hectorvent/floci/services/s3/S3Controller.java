@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
-import static io.github.hectorvent.floci.services.s3.S3RequestParser.hasQueryParam;
-
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -10,34 +10,34 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.MultipartFormParser;
-import io.github.hectorvent.floci.core.common.XmlBuilder;
-import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.IamService;
-import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.ChecksumAlgorithm;
 import io.github.hectorvent.floci.services.s3.model.ChecksumType;
-import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesParts;
-import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
-import io.github.hectorvent.floci.services.s3.model.ObjectAnnotation;
-import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
-import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
-import io.github.hectorvent.floci.services.s3.model.FilterRule;
-import io.github.hectorvent.floci.services.s3.model.NotificationConfiguration;
-import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.CopyObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.CopySourceConditions;
-import io.github.hectorvent.floci.services.s3.model.QueueNotification;
+import io.github.hectorvent.floci.services.s3.model.FilterRule;
+import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesParts;
+import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
+import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
+import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
+import io.github.hectorvent.floci.services.s3.model.NotificationConfiguration;
+import io.github.hectorvent.floci.services.s3.model.ObjectAnnotation;
+import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.ObjectLockRetention;
 import io.github.hectorvent.floci.services.s3.model.Part;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
+import io.github.hectorvent.floci.services.s3.model.QueueNotification;
 import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.s3.model.TopicNotification;
 import io.github.hectorvent.floci.services.s3.model.WebsiteConfiguration;
+import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
@@ -47,13 +47,17 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
+import org.jboss.logging.Logger;
+import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
+
+import javax.xml.stream.XMLStreamConstants;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamReader;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
-import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -78,14 +82,8 @@ import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
-import javax.xml.stream.XMLStreamConstants;
-import javax.xml.stream.XMLStreamException;
-import javax.xml.stream.XMLStreamReader;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.jboss.logging.Logger;
-import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
+import static io.github.hectorvent.floci.services.s3.S3RequestParser.hasQueryParam;
 
 /**
  * S3 controller handling REST-style S3 API requests.
@@ -850,7 +848,8 @@ public class S3Controller {
                             copySource, bucket, key, uploadId, partNumber, httpHeaders, authorization);
                 }
                 Part part = s3Service.storePart(bucket, key, uploadId, partNumber,
-                        decodedBody(body, contentEncoding, contentSha256), uploadChecksums(httpHeaders, uriInfo),
+                        decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
+                        uploadChecksums(httpHeaders, uriInfo),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
@@ -891,7 +890,8 @@ public class S3Controller {
             String sseCustomerKeyMd5 = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5");
             String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
             s3Service.authorizePutObject(bucket, key, authorization);
-            S3Object obj = s3Service.putObject(bucket, key, decodedBody(body, contentEncoding, contentSha256),
+            S3Object obj = s3Service.putObject(bucket, key,
+                    decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
                     uploadChecksums(httpHeaders, uriInfo), contentType, extractUserMetadata(httpHeaders, uriInfo),
                     new PutObjectOptions()
                             .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
@@ -1048,8 +1048,10 @@ public class S3Controller {
                 }
 
                 boolean includeChecksum = "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, uriInfo, "x-amz-checksum-mode"));
-                if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-                    Response rangeResponse = handleRangeRequest(obj, read.body(), rangeHeader, overrides, includeChecksum);
+                if (ByteRange.inBytes(rangeHeader) && ByteRange.rangeApplies(
+                        httpHeaders.getHeaderString("If-Range"), obj.getETag(), obj.getLastModified())) {
+                    Response rangeResponse = handleRangeRequest(
+                            bucket, key, obj, read.body(), rangeHeader, overrides, includeChecksum);
                     bodyHandedOff = rangeResponse.getEntity() instanceof StreamingOutput;
                     return rangeResponse;
                 }
@@ -1115,83 +1117,59 @@ public class S3Controller {
         return resp;
     }
 
-    private Response handleRangeRequest(S3Object obj, InputStream body, String rangeHeader,
-                                        ResponseHeaderOverrides overrides,
+    private Response handleRangeRequest(String bucket, String key, S3Object obj, InputStream body,
+                                        String rangeHeader, ResponseHeaderOverrides overrides,
                                         boolean includeChecksum) {
         long totalSize = obj.getSize();
-        String rangeSpec = rangeHeader.substring("bytes=".length()).trim();
-
-        long start, end;
-        try {
-            int dash = rangeSpec.indexOf('-');
-            if (dash < 0) {
-                return invalidRangeResponse(totalSize);
-            }
-            String before = rangeSpec.substring(0, dash);
-            String after = rangeSpec.substring(dash + 1);
-            if (before.isEmpty() && after.isEmpty()) {
-                return invalidRangeResponse(totalSize);
-            }
-            if (before.isEmpty()) {
-                long suffix = Long.parseLong(after);
-                if (suffix <= 0) {
-                    return invalidRangeResponse(totalSize);
-                }
-                start = Math.max(0, totalSize - suffix);
-                end = totalSize - 1;
-            } else {
-                start = Long.parseLong(before);
-                end = after.isEmpty() ? totalSize - 1 : Math.min(Long.parseLong(after), totalSize - 1);
-            }
-        } catch (NumberFormatException e) {
-            return invalidRangeResponse(totalSize);
+        ByteRange.Resolution resolution = ByteRange.resolve(rangeHeader, totalSize);
+        if (resolution.outcome() == ByteRange.Outcome.WHOLE) {
+            emitCloudTrailEvent("GetObject", bucket, key, 0L, totalSize, null, null);
+            return fullObjectResponse(obj, body, overrides, includeChecksum);
+        }
+        if (resolution.outcome() == ByteRange.Outcome.NOT_SATISFIABLE) {
+            emitCloudTrailEvent("GetObject", bucket, key, 0L, 0L,
+                    "InvalidRange", ByteRange.NOT_SATISFIABLE_MESSAGE);
+            return invalidRangeResponse(rangeHeader, totalSize);
         }
 
-        if (start < 0 || start >= totalSize || start > end) {
-            if (totalSize == 0 && rangeSpec.startsWith("-")) {
-                return fullObjectResponse(obj, body, overrides, includeChecksum);
-            }
-            return invalidRangeResponse(totalSize);
-        }
-
-        long length = end - start + 1;
+        ByteRange range = resolution.range();
+        emitCloudTrailEvent("GetObject", bucket, key, 0L, range.length(), null, null);
         StreamingOutput stream = output -> {
-            try (InputStream in = body) {
-                in.skipNBytes(start);
-                copyExactly(in, output, length);
+            try (InputStream in = range.slice(body)) {
+                in.transferTo(output);
             }
         };
         var resp = Response.status(206)
                 .entity(stream)
                 .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
-                .header("Content-Length", length)
-                .header("Content-Range", "bytes " + start + "-" + end + "/" + totalSize)
+                .header("Content-Length", range.length())
+                .header("Content-Range", range.contentRange(totalSize))
                 .header("ETag", obj.getETag())
                 .header("Last-Modified", RFC_822.format(obj.getLastModified()))
                 .header("Accept-Ranges", "bytes");
         if (obj.getVersionId() != null) {
             resp.header("x-amz-version-id", obj.getVersionId());
         }
-        // includeChecksum=false: the stored checksum covers the whole object, not this range.
-        appendObjectHeaders(resp, obj, overrides, false);
+        appendObjectHeaders(resp, obj, overrides, includeChecksum && rangeCarriesObjectChecksum(range, obj));
         return resp.build();
+    }
+
+    /**
+     * Whether the stored checksum is the checksum of {@code range}: S3 returns a part's checksum for a
+     * range aligned with a single part, and the whole of an object stored in one request, or completed
+     * from one part, is that part, whose checksum a full-object checksum of the object is. A composite
+     * checksum is not that of any one part, nor is a checksum of an object of several parts, so their
+     * ranges get none.
+     */
+    private static boolean rangeCarriesObjectChecksum(ByteRange range, S3Object obj) {
+        S3Checksum checksum = obj.getChecksum();
+        return range.first() == 0 && range.last() == obj.getSize() - 1
+                && (obj.getParts() == null || obj.getParts().size() <= 1)
+                && checksum != null && checksum.getChecksumType() != ChecksumType.COMPOSITE;
     }
 
     private Response websiteObjectResponse(S3Service.ObjectRead read, ResponseHeaderOverrides overrides) {
         return fullObjectResponse(read.object(), read.body(), overrides, false);
-    }
-
-    private static void copyExactly(InputStream in, OutputStream out, long length) throws IOException {
-        byte[] buffer = new byte[64 * 1024];
-        long remaining = length;
-        while (remaining > 0) {
-            int n = in.read(buffer, 0, (int) Math.min(buffer.length, remaining));
-            if (n < 0) {
-                throw new EOFException("S3 object ended " + remaining + " bytes before the requested range");
-            }
-            out.write(buffer, 0, n);
-            remaining -= n;
-        }
     }
 
     private static void closeQuietly(Closeable closeable) {
@@ -1202,19 +1180,21 @@ public class S3Controller {
         }
     }
 
-    private Response invalidRangeResponse(long totalSize) {
+    private Response invalidRangeResponse(String rangeHeader, long totalSize) {
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("Error")
                 .elem("Code", "InvalidRange")
-                .elem("Message", "The requested range is not satisfiable.")
+                .elem("Message", ByteRange.NOT_SATISFIABLE_MESSAGE)
+                .elem("RangeRequested", rangeHeader)
+                .elem("ActualObjectSize", totalSize)
                 .elem("RequestId", java.util.UUID.randomUUID().toString())
                 .end("Error")
                 .build();
         return Response.status(416)
                 .entity(xml)
                 .type(MediaType.APPLICATION_XML)
-                .header("Content-Range", "bytes */" + totalSize)
+                .header("Content-Range", ByteRange.unsatisfiedContentRange(totalSize))
                 .build();
     }
 
@@ -1279,16 +1259,35 @@ public class S3Controller {
                 return xmlErrorResponse(new AwsException("InvalidRequest",
                         "Request specific response headers cannot be used for anonymous GET requests.", 400));
             }
+            // "If the Range is satisfiable, only the ContentLength is affected in the response. If the
+            // Range is not satisfiable, S3 returns a 416." A Range that is not one valid range is ignored.
+            long contentLength = obj.getSize();
+            boolean checksumDescribesRange = true;
+            String rangeHeader = httpHeaders.getHeaderString("Range");
+            if (ByteRange.inBytes(rangeHeader) && ByteRange.rangeApplies(
+                    httpHeaders.getHeaderString("If-Range"), obj.getETag(), obj.getLastModified())) {
+                ByteRange.Resolution resolution = ByteRange.resolve(rangeHeader, obj.getSize());
+                if (resolution.outcome() == ByteRange.Outcome.PART) {
+                    contentLength = resolution.range().length();
+                    checksumDescribesRange = rangeCarriesObjectChecksum(resolution.range(), obj);
+                } else if (resolution.outcome() == ByteRange.Outcome.NOT_SATISFIABLE) {
+                    emitCloudTrailEvent("HeadObject", bucket, key, 0L, 0L,
+                            "InvalidRange", ByteRange.NOT_SATISFIABLE_MESSAGE);
+                    return headOnlyResponse(invalidRangeResponse(rangeHeader, obj.getSize()));
+                }
+            }
             var resp = Response.ok()
                     .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
-                    .header("Content-Length", obj.getSize())
+                    .header("Content-Length", contentLength)
                     .header("ETag", obj.getETag())
                     .header("Last-Modified", RFC_822.format(obj.getLastModified()))
                     .header("Accept-Ranges", "bytes");
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
-            boolean includeChecksum = "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, uriInfo, "x-amz-checksum-mode"));
+            // As on a ranged GetObject, the stored checksum is sent only for a range it describes.
+            boolean includeChecksum = checksumDescribesRange
+                    && "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, uriInfo, "x-amz-checksum-mode"));
             appendObjectHeaders(resp, obj, overrides, includeChecksum);
             emitCloudTrailEvent("HeadObject", bucket, key, 0L, obj.getSize(), null, null);
             return resp.build();
@@ -1530,9 +1529,12 @@ public class S3Controller {
 
             if (hasQueryParam(uriInfo, "select")) {
                 s3Service.authorizeGetObject(bucket, key, versionId, authorization);
-                S3Object obj = s3Service.getObject(bucket, key, versionId);
-                byte[] result = s3SelectService.select(obj, new String(body, StandardCharsets.UTF_8));
-                return Response.ok(result)
+                // The object and its metadata are opened as one snapshot, as for GetObject, and the
+                // query reads it as the response is written, so the object is never held in memory.
+                S3SelectService.EventStream events = s3SelectService.select(
+                        s3Service.openObject(bucket, key, versionId), new String(body, StandardCharsets.UTF_8));
+                StreamingOutput entity = events::writeTo;
+                return Response.ok(entity)
                         .type("application/octet-stream")
                         .build();
             }
@@ -2102,20 +2104,27 @@ public class S3Controller {
     // --- AWS Chunked Decoding ---
 
     /**
-     * The object data of an upload body, read as it arrives. A streaming payload is decoded from its
-     * aws-chunked framing on the way through. A Content-Encoding naming aws-chunked without that
-     * declaration does not guarantee framing, so that body is read whole and kept as sent when it
-     * does not decode.
+     * The object data of an upload body, read as it arrives. A streaming payload, and any aws-chunked
+     * body that declares {@code x-amz-trailer}, is decoded from its framing on the way through so the
+     * trailing checksum can be checked. A Content-Encoding naming aws-chunked without either of those
+     * does not guarantee framing, so that body is read whole and kept as sent when it does not decode.
      */
-    private InputStream decodedBody(InputStream body, String contentEncoding, String contentSha256) {
+    private InputStream decodedBody(InputStream body, String contentEncoding, String contentSha256,
+                                    String trailer) {
         InputStream raw = body != null ? body : InputStream.nullInputStream();
-        if (declaresStreamingPayload(contentSha256)) {
-            return new AwsChunkedInputStream(raw);
+        boolean awsChunked = contentEncoding != null
+                && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked");
+        if (declaresStreamingPayload(contentSha256) || (awsChunked && trailer != null && !trailer.isBlank())) {
+            return new AwsChunkedInputStream(raw, trailerChecksumAlgorithm(trailer));
         }
-        if (contentEncoding != null && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked")) {
+        if (awsChunked) {
             return new ByteArrayInputStream(decodeAwsChunked(readWholeBody(raw), contentEncoding, contentSha256));
         }
         return raw;
+    }
+
+    private static String trailerHeader(HttpHeaders httpHeaders, UriInfo uriInfo) {
+        return resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-trailer");
     }
 
     /** The whole of a body that is small by nature, such as a subresource's XML, or must be read whole to be decoded. */
@@ -2724,9 +2733,9 @@ public class S3Controller {
         appendLockHeaders(resp, obj);
     }
 
-    // includeChecksum must be false for partial (206) responses: obj.getChecksum() is the
-    // whole-object checksum, which does not match the range bytes returned. SDKs that
-    // validate it against the received body fail. Real S3 omits it on ranged responses.
+    // includeChecksum must be false for a range the stored checksum does not describe:
+    // obj.getChecksum() is the whole-object checksum, which does not match the range bytes
+    // returned. SDKs that validate it against the received body fail. Real S3 omits it there.
     private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj, ResponseHeaderOverrides overrides,
                                      boolean includeChecksum) {
         if (obj.getStorageClass() != null) {
@@ -3158,7 +3167,22 @@ public class S3Controller {
                 claimed.put(algorithm, value);
             }
         }
-        return new UploadChecksums(httpHeaders.getHeaderString("Content-MD5"), claimed);
+        return new UploadChecksums(httpHeaders.getHeaderString("Content-MD5"), claimed,
+                trailerChecksumAlgorithm(resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-trailer")));
+    }
+
+    /** The checksum algorithm an {@code x-amz-trailer} value names, as {@code x-amz-checksum-crc32}. */
+    private static ChecksumAlgorithm trailerChecksumAlgorithm(String trailer) {
+        if (trailer == null || trailer.isBlank()) {
+            return null;
+        }
+        for (String name : trailer.split(",")) {
+            ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromChecksumHeader(name.trim());
+            if (algorithm != null) {
+                return algorithm;
+            }
+        }
+        return null;
     }
 
     static boolean isWebsiteRequest(HttpHeaders httpHeaders, UriInfo uriInfo) {
@@ -3541,7 +3565,7 @@ public class S3Controller {
         rejectUnknownPostRegion(credential);
         if (credential != null && !credential.isEmpty()) {
             iamEnforcementFilter.authorizeAdditionalResource(
-                    "Credential=" + credential, "s3:PutObject",
+                    AccountResolver.SIGV4_SCHEME + " Credential=" + credential, "s3:PutObject",
                     S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key));
         }
 
@@ -3654,8 +3678,11 @@ public class S3Controller {
         }
 
         String accessKeyId = credential.split("/", 2)[0];
-        Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(
-                iamService, accessKeyId, fields.get("x-amz-security-token"));
+        String sessionToken = fields.get("x-amz-security-token");
+        Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(iamService, accessKeyId, sessionToken);
+        if (secretKey.isEmpty() && S3PostPolicySigner.isExpiredSession(iamService, accessKeyId, sessionToken)) {
+            throw new AwsException("ExpiredToken", S3PostPolicySigner.EXPIRED_TOKEN_MESSAGE, 400);
+        }
         if (secretKey.isEmpty()
                 || !S3PostPolicySigner.verifySignature(policy, credential, signature, secretKey.get())) {
             throw new AwsException("SignatureDoesNotMatch",
@@ -3666,7 +3693,7 @@ public class S3Controller {
         // Route through the same bucket-policy/ACL check every other S3 write path uses, so this
         // path automatically inherits any future strengthening there too.
         s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject",
-                new S3Service.RequestAuthorization(true, accessKeyId, fields.get("x-amz-security-token")));
+                new S3Service.RequestAuthorization(true, accessKeyId, sessionToken));
 
         validatePolicyExpiration(policy);
         validatePolicyConditions(policy, bucket, fields, contentLength);

@@ -8,7 +8,6 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.CachePolicy;
-import io.github.hectorvent.floci.services.cloudfront.model.OriginRequestPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontFunction;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontOriginAccessIdentity;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
@@ -17,6 +16,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
+import io.github.hectorvent.floci.services.cloudfront.model.OriginRequestPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.StreamingDistribution;
@@ -167,6 +167,86 @@ class CloudFrontServiceTest {
         assertEquals(development.getFunctionCode(), describedLive.getFunctionCode());
         assertEquals(development.getEtag(), describedDevelopment.getEtag());
         assertNotEquals(development.getEtag(), live.getEtag());
+    }
+
+    @Test
+    void createFunction_existingName_isRejectedAndKeepsTheFunction() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontFunction first = new CloudFrontFunction();
+        first.setName("routing");
+        first.setFunctionCode("first");
+        service.createFunction(first);
+        CloudFrontFunction second = new CloudFrontFunction();
+        second.setName("routing");
+        second.setFunctionCode("second");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createFunction(second));
+
+        assertEquals("FunctionAlreadyExists", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
+        assertEquals("first", service.describeFunction("routing", null).getFunctionCode());
+    }
+
+    @Test
+    void createFunction_nameOfADeletedFunction_isAccepted() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontFunction function = new CloudFrontFunction();
+        function.setName("routing");
+        CloudFrontFunction created = service.createFunction(function);
+        service.publishFunction("routing", created.getEtag());
+        service.deleteFunction("routing", created.getEtag());
+        CloudFrontFunction again = new CloudFrontFunction();
+        again.setName("routing");
+
+        assertEquals("DEVELOPMENT", service.createFunction(again).getStage());
+    }
+
+    @Test
+    void createFunction_unknownRuntime_isRejected() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontFunction function = new CloudFrontFunction();
+        function.setName("routing");
+        function.setRuntime("python3");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createFunction(function));
+
+        assertEquals("InvalidArgument", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertThrows(AwsException.class, () -> service.describeFunction("routing", null));
+    }
+
+    @Test
+    void createFunction_supportedRuntimes_areAccepted() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        for (String runtime : List.of("cloudfront-js-1.0", "cloudfront-js-2.0")) {
+            CloudFrontFunction function = new CloudFrontFunction();
+            function.setName("routing-" + runtime);
+            function.setRuntime(runtime);
+
+            assertEquals(runtime, service.createFunction(function).getRuntime());
+        }
+    }
+
+    @Test
+    void updateFunction_unknownRuntime_isRejectedAndKeepsTheFunction() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontFunction function = new CloudFrontFunction();
+        function.setName("routing");
+        function.setFunctionCode("first");
+        function.setRuntime("cloudfront-js-2.0");
+        String etag = service.createFunction(function).getEtag();
+        CloudFrontFunction update = new CloudFrontFunction();
+        update.setFunctionCode("second");
+        update.setRuntime("python3");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunction("routing", etag, update));
+
+        assertEquals("InvalidArgument", error.getErrorCode());
+        CloudFrontFunction kept = service.describeFunction("routing", null);
+        assertEquals("first", kept.getFunctionCode());
+        assertEquals("cloudfront-js-2.0", kept.getRuntime());
+        assertEquals(etag, kept.getEtag());
     }
 
     @Test
