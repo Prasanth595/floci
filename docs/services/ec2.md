@@ -130,6 +130,8 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
 
 As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A token is valid only on the instance that requested it: presenting it from another instance returns `401`. A request without a token header still uses IMDSv1; Floci does not enforce `HttpTokens=required`.
 
+User data is returned as the original base64-decoded bytes, without decompressing gzip content or converting binary data to text. Older records without the original encoding use their saved UTF-8 text. Missing or empty data returns `404`; whitespace is preserved. Script execution retains its separate bounded gzip decoding.
+
 ### Supported IMDS endpoints
 
 | Endpoint | Returns |
@@ -151,7 +153,7 @@ As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT
 | `GET /latest/meta-data/iam/security-credentials/{role}` | Temporary credentials |
 | `GET /latest/meta-data/identity-credentials/ec2/info` | Instance identity role info (`Code`, `LastUpdated`, `AccountId`) |
 | `GET /latest/meta-data/identity-credentials/ec2/security-credentials/ec2-instance` | Instance identity role credentials |
-| `GET /latest/user-data` | UserData script |
+| `GET /latest/user-data` | Original user-data bytes, including compressed content |
 | `GET /latest/dynamic/instance-identity/document` | Identity document JSON |
 
 IAM credentials are served when the instance has an `IamInstanceProfile.Arn` that resolves to an existing instance profile with one role in the profile's account. The role list uses the role name, which can differ from the profile name. Missing profiles, missing roles, and requests for another role return `404`.
