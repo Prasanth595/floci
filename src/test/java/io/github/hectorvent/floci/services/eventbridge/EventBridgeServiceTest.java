@@ -1455,4 +1455,60 @@ class EventBridgeServiceTest {
         assertEquals("MalformedDetail", entry.get("ErrorCode"));
         assertNull(entry.get("EventId"));
     }
+
+    @Test
+    void putEventsRejectsMalformedDetailWithTrailingGarbage() {
+        var result = service.putEvents(
+                List.of(Map.of("Source", "s", "DetailType", "d",
+                        "Detail", "{} garbage")),
+                REGION);
+        assertMalformedDetail(result);
+    }
+
+    @Test
+    void putEventsRejectsTwoConcatenatedValidJsonObjects() {
+        var result = service.putEvents(
+                List.of(Map.of("Source", "s", "DetailType", "d",
+                        "Detail", "{\"a\":1}{\"b\":2}")),
+                REGION);
+        assertMalformedDetail(result);
+    }
+
+    @Test
+    void putEventsRejectsTwoConcatenatedEmptyObjects() {
+        var result = service.putEvents(
+                List.of(Map.of("Source", "s", "DetailType", "d",
+                        "Detail", "{} {}")),
+                REGION);
+        assertMalformedDetail(result);
+    }
+
+    @Test
+    void putEventsAcceptsSingleObjectWithTrailingWhitespace() {
+        var result = service.putEvents(
+                List.of(Map.of("Source", "s", "DetailType", "d",
+                        "Detail", "{\"a\":1}   \n\t")),
+                REGION);
+        assertEquals(0, result.failedCount());
+        assertNotNull(result.entries().getFirst().get("EventId"));
+    }
+
+    @Test
+    void putEventsRejectsNonObjectDetail() {
+        assertMalformedDetail(service.putEvents(
+                List.of(Map.of("Source", "s", "DetailType", "d",
+                        "Detail", "[1,2,3]")),
+                REGION));
+        assertMalformedDetail(service.putEvents(
+                List.of(Map.of("Source", "s", "DetailType", "d",
+                        "Detail", "123")),
+                REGION));
+    }
+
+    private static void assertMalformedDetail(EventBridgeService.PutEventsResult r) {
+        assertEquals(1, r.failedCount());
+        var entry = r.entries().getFirst();
+        assertEquals("MalformedDetail", entry.get("ErrorCode"));
+        assertNull(entry.get("EventId"));
+    }
 }

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -37,6 +38,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Instant;
@@ -853,16 +855,19 @@ public class EventBridgeService implements ResourceProvider {
     }
 
     private boolean isValidDetailJson(Map<String, Object> detail) {
-        String jsonString = (String) detail.get("Detail");
-
-        if (jsonString == null || jsonString.trim().isEmpty()) {
+        Object raw = detail.get("Detail");
+        if (!(raw instanceof String jsonString) || jsonString.trim().isEmpty()) {
             return false;
         }
 
-        try {
-            objectMapper.readTree(jsonString);
-            return true;
-        } catch (JsonProcessingException e) {
+        try (JsonParser parser = objectMapper.getFactory().createParser(jsonString)) {
+            JsonNode node = objectMapper.readTree(parser);
+            if (node == null || !node.isObject()) {
+                return false; // empty input or "123" or "[1,2]"
+            }
+            // check if there is more
+            return parser.nextToken() == null;
+        } catch (IOException e) {
             return false;
         }
     }
