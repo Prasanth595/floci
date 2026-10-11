@@ -54,6 +54,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
 /**
@@ -1789,37 +1790,31 @@ public class ElastiCacheService implements ResourceProvider {
 
     public ElastiCacheUserGroup modifyUserGroup(String userGroupId, List<String> userIdsToAdd,
                                                 List<String> userIdsToRemove, String engine) {
-        String id = normalizeUserGroupId(userGroupId);
-        synchronized (userGroupLock) {
-            ElastiCacheUserGroup userGroup = getUserGroup(id);
-            // Validate the resulting group before changing the stored object.
-            String newEngine = (engine == null || engine.isBlank()) ? userGroup.getEngine() : normalizeEngine(engine);
-            Set<String> members = new LinkedHashSet<>(userGroup.getUserIds());
+        return updateUserGroup(userGroupId, engine, current -> {
+            Set<String> members = new LinkedHashSet<>(current);
             if (userIdsToAdd != null) {
                 members.addAll(userIdsToAdd);
             }
             if (userIdsToRemove != null) {
                 members.removeAll(userIdsToRemove);
             }
-            validateUserGroupMembers(newEngine, members);
-            if (!newEngine.equals(userGroup.getEngine())) {
-                for (ReplicationGroup group : replicationGroupsUsing(id)) {
-                    requireEngineCompatible(newEngine, id, group.getEngine());
-                }
-            }
-            userGroup.setEngine(newEngine);
-            userGroup.setUserIds(members);
-            userGroups.put(id, userGroup);
-            return userGroup;
-        }
+            return members;
+        });
     }
 
     public ElastiCacheUserGroup setUserGroupMembers(String userGroupId, List<String> userIds, String engine) {
+        return updateUserGroup(userGroupId, engine,
+                current -> userIds == null ? new LinkedHashSet<>() : new LinkedHashSet<>(userIds));
+    }
+
+    private ElastiCacheUserGroup updateUserGroup(String userGroupId, String engine,
+                                                 UnaryOperator<Set<String>> membership) {
         String id = normalizeUserGroupId(userGroupId);
         synchronized (userGroupLock) {
             ElastiCacheUserGroup userGroup = getUserGroup(id);
+            // Validate the resulting group before changing the stored object.
             String newEngine = (engine == null || engine.isBlank()) ? userGroup.getEngine() : normalizeEngine(engine);
-            Set<String> members = userIds == null ? new LinkedHashSet<>() : new LinkedHashSet<>(userIds);
+            Set<String> members = membership.apply(userGroup.getUserIds());
             validateUserGroupMembers(newEngine, members);
             if (!newEngine.equals(userGroup.getEngine())) {
                 for (ReplicationGroup group : replicationGroupsUsing(id)) {

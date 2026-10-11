@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheMemcachedService;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
+import io.github.hectorvent.floci.services.elasticache.UserAuthentication;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
 import io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup;
@@ -423,12 +424,6 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Status", group.getStatus());
     }
 
-    private record UserAuthentication(AuthMode mode, List<String> passwords) {}
-
-    /**
-     * AuthenticationMode and the top-level Passwords and NoPasswordRequired members select the same
-     * thing in AWS; passwords given either way mean password authentication.
-     */
     private UserAuthentication resolveAuthentication(JsonNode props, ProvisionContext ctx) {
         JsonNode mode = props.has("AuthenticationMode")
                 ? ctx.engine().resolveNode(props.get("AuthenticationMode")) : null;
@@ -439,41 +434,7 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
             passwords = ctx.resolveStringList(props, "Passwords");
         }
         boolean noPasswordRequired = Boolean.parseBoolean(ctx.resolveOptional(props, "NoPasswordRequired"));
-
-        if (type == null || type.isBlank()) {
-            if (noPasswordRequired && !passwords.isEmpty()) {
-                throw new AwsException("InvalidParameterCombination",
-                        "NoPasswordRequired cannot be true when Passwords are provided.", 400);
-            }
-            if (!passwords.isEmpty()) {
-                return new UserAuthentication(AuthMode.PASSWORD, passwords);
-            }
-            return noPasswordRequired ? new UserAuthentication(AuthMode.NO_AUTH, List.of()) : null;
-        }
-
-        String normalizedType = type.toLowerCase(Locale.ROOT);
-        if (noPasswordRequired && !"no-password-required".equals(normalizedType)) {
-            throw new AwsException("InvalidParameterCombination",
-                    "NoPasswordRequired cannot be true when AuthenticationMode.Type is " + type + ".", 400);
-        }
-        return switch (normalizedType) {
-            case "password" -> {
-                if (passwords.isEmpty()) {
-                    throw new AwsException("InvalidParameterValue",
-                            "Passwords are required when AuthenticationMode.Type is password.", 400);
-                }
-                yield new UserAuthentication(AuthMode.PASSWORD, passwords);
-            }
-            case "iam", "no-password-required" -> {
-                if (!passwords.isEmpty()) {
-                    throw new AwsException("InvalidParameterCombination",
-                            "Passwords cannot be provided when AuthenticationMode.Type is " + type + ".", 400);
-                }
-                yield new UserAuthentication("iam".equals(normalizedType) ? AuthMode.IAM : AuthMode.NO_AUTH, List.of());
-            }
-            default -> throw new AwsException("InvalidParameterValue",
-                    "Invalid AuthenticationMode.Type " + type + ". Valid values are password, no-password-required and iam.", 400);
-        };
+        return UserAuthentication.resolve(type, passwords, noPasswordRequired);
     }
 
     @Override
