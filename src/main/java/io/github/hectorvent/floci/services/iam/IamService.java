@@ -908,6 +908,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         "The group with name " + groupName + " cannot be found.", 404));
     }
 
+    /**
+     * Looks up a group by name in a specific account's namespace, without throwing when absent.
+     * Mirrors {@link #findUser(String, String)} and {@link #findRole(String, String)}.
+     */
+    public Optional<IamGroup> findGroup(String accountId, String groupName) {
+        if (groups instanceof AccountAwareStorageBackend<IamGroup> aware) {
+            return aware.getForAccount(accountId, groupName);
+        }
+        return groups.get(groupName);
+    }
+
     public void updateGroup(String groupName, String newGroupName, String newPath) {
         validateIamResourceName(groupName, "GroupName");
         if (newGroupName != null) {

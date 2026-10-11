@@ -712,9 +712,8 @@ because listing goes through the user.
 marks it optional and it resolves from the access key that signed the request. That is the opposite
 of the signing-certificate operations, where it is optional throughout.
 
-Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
-owning user's ARN, along with every other IAM action except the server-certificate operations, which
-is the general gap tracked in [#4979](https://github.com/floci-io/floci/issues/4979).
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against the owning user's
+ARN, the caller's own when `UserName` is left out.
 
 ### Signing Certificates
 
@@ -757,10 +756,8 @@ date, and `N/A` when the certificate is not `Active`, which is how the User Guid
 `GetAccountSummary`'s `AccountSigningCertificatesPresent` is unaffected: it reports the account root
 user's certificates, and Floci does not model root credentials.
 
-Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
-owning user's ARN, along with every other IAM action except the server-certificate operations. That
-is the general gap tracked in [#4979](https://github.com/floci-io/floci/issues/4979), not something
-specific to signing certificates.
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against the owning user's
+ARN, the caller's own when `UserName` is left out.
 
 ### Service-Specific Credentials
 
@@ -879,9 +876,8 @@ was minted rather than re-derived from the new name, because it is what the call
 with and rewriting it would break a working credential; AWS does not document which way it goes, so
 this is a choice rather than a sourced behaviour.
 
-Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
-owning user's ARN, as the general gap in
-[#4979](https://github.com/floci-io/floci/issues/4979) describes.
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against the owning user's
+ARN, the caller's own when `UserName` is left out.
 
 ## AWS Managed Policies
 
@@ -1035,20 +1031,47 @@ These identities always bypass enforcement (backward-compatible defaults):
 | No `Authorization` header | **Rejected** for a JSON, CBOR or Query management call, unless AWS serves the operation without credentials. Allowed for a REST request such as a health check (see [Unsigned requests](#unsigned-requests)) |
 | Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
 
-**IAM's own resources are mostly not named.** When enforcement evaluates a request, the target
-resource comes from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB,
-Kinesis, Secrets Manager, SSM, KMS, and, within IAM, only the server-certificate operations. Every
-other IAM action is evaluated against `*`, so a statement naming a specific user, role, policy,
-instance profile, MFA device or identity provider does not constrain it: a `Deny` on
-`arn:aws:iam::123456789012:user/bob` does not stop `DeleteUser` from running, and an `Allow`
-scoped to one role does not limit `DeleteRole` to it. Action-level matching works normally, so
-denying `iam:DeleteUser` outright does take effect; it is only the resource half that is missing.
+**IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
+from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets
+Manager, SSM, KMS and IAM. Each IAM action is evaluated against the resource the Service
+Authorization Reference lists for it, so a `Deny` on `arn:aws:iam::123456789012:user/bob` stops
+`DeleteUser` on `bob`, and an `Allow` scoped to one role grants `GetRole` on that role and no other:
 
-This is the behaviour IAM has always had here rather than a recent change, and it errs toward
-permissive, which is the direction worth knowing about. Closing it means mapping the resource of
-every dispatched IAM action, which is tracked in
-[#4979](https://github.com/floci-io/floci/issues/4979) rather than bundled into the
-server-certificate work that mapped the first few.
+| Resource | Named by | Actions |
+|----------|----------|---------|
+| User | `UserName` | The user's own operations, its login profile, access keys, SSH public keys, signing certificates, service-specific credentials, inline and attached policies, permissions boundary and tags, `ListGroupsForUser`, and `EnableMFADevice` / `DeactivateMFADevice` / `ResyncMFADevice` / `ListMFADevices`. `GetAccessKeyLastUsed` names the user owning `AccessKeyId` |
+| Group | `GroupName` | The group's own operations and policies, and `AddUserToGroup` / `RemoveUserFromGroup` |
+| Role | `RoleName` | The role's own operations, policies, permissions boundary and tags, `UpdateAssumeRolePolicy`, `ListInstanceProfilesForRole` and `DeleteServiceLinkedRole`. `CreateServiceLinkedRole` names the role it would create under `/aws-service-role/<service>/` |
+| Instance profile | `InstanceProfileName` | The profile's own operations and tags, and `AddRoleToInstanceProfile` / `RemoveRoleFromInstanceProfile` |
+| Managed policy | `PolicyArn` | The policy's own operations, its versions and tags, and `ListEntitiesForPolicy`. `CreatePolicy` names the policy it would create |
+| Virtual MFA device | `SerialNumber` | `DeleteVirtualMFADevice` and the device's tags. `CreateVirtualMFADevice` names the device it would create |
+| SAML / OIDC provider | `SAMLProviderArn`, `OpenIDConnectProviderArn` | Each provider's own operations and tags. A create names the provider it would create |
+| Server certificate | `ServerCertificateName` | Every server-certificate operation except `ListServerCertificates` |
+| Principal | `PolicySourceArn`, `Arn` | `SimulatePrincipalPolicy`, `GetContextKeysForPrincipalPolicy`, `GenerateServiceLastAccessedDetails`, `ListPoliciesGrantingServiceAccess` |
+
+An entity that already exists is checked against its own stored ARN, because a policy names the
+full ARN, path included, and only the store knows the path. A create has nothing stored yet, so it
+is checked against the ARN minted from the request's `Path`: creating a role under `/restricted/`
+is refused by a `Deny` on `role/restricted/*`, while the same name at the root path is not. An
+operation that names an entity that does not exist is evaluated against `*`; it fails as
+`NoSuchEntity` regardless.
+
+Where the model marks `UserName` optional and the request leaves it out, it defaults to the user
+that signed the request, and so does the resource: `ListAccessKeys` with no `UserName` is checked
+against the caller's own user ARN, which is what lets a self-service statement naming that ARN
+grant it. A caller that is not an IAM user, such as an assumed-role session, has no user to name
+and is evaluated against `*`. `ListServiceSpecificCredentials` with `AllUsers` names no one user.
+
+Operations that the reference lists without a resource type (the account-wide lists,
+`GetAccountSummary`, `GetAccountAuthorizationDetails`, account aliases, the password policy, the
+credential report and the like) are evaluated against `*`, as on AWS.
+
+Policy variables such as `${aws:username}` in a `Resource` element are not substituted during
+enforcement, so a statement relying on one does not match; name the ARN literally.
+
+**A rename names two resources.** `UpdateUser` and `UpdateGroup` are evaluated against both the
+entity's current ARN and the ARN its new name or `NewPath` would produce, for the same reason as
+certificates below.
 
 **A certificate rename names two resources.** `UpdateServerCertificate` is evaluated against both
 the certificate's current ARN and the ARN that `NewServerCertificateName` or `NewPath` would

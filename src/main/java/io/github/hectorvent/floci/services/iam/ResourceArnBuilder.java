@@ -2,9 +2,11 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
@@ -17,11 +19,14 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 
 /**
@@ -34,14 +39,108 @@ import java.util.regex.Matcher;
 @ApplicationScoped
 public class ResourceArnBuilder {
 
-    /**
-     * The IAM actions whose resource this builder can name. Deliberately only the
-     * server-certificate operations; see {@link #buildIamArn}.
-     */
+    /** The server-certificate operations, which name their certificate by ServerCertificateName. */
     private static final Set<String> SERVER_CERTIFICATE_ACTIONS = Set.of(
             "UploadServerCertificate", "GetServerCertificate", "UpdateServerCertificate",
             "DeleteServerCertificate", "TagServerCertificate", "UntagServerCertificate",
             "ListServerCertificateTags");
+
+    /**
+     * Operations whose Service Authorization Reference resource is the user named by UserName.
+     * The MFA enable, deactivate and resync operations are among them: their resource is the user
+     * the device is bound to, not the device.
+     */
+    private static final Set<String> USER_ACTIONS = Set.of(
+            "CreateUser", "GetUser", "DeleteUser", "UpdateUser",
+            "TagUser", "UntagUser", "ListUserTags",
+            "CreateLoginProfile", "GetLoginProfile", "UpdateLoginProfile", "DeleteLoginProfile",
+            "CreateAccessKey", "DeleteAccessKey", "ListAccessKeys", "UpdateAccessKey",
+            "AttachUserPolicy", "DetachUserPolicy", "ListAttachedUserPolicies",
+            "PutUserPolicy", "GetUserPolicy", "DeleteUserPolicy", "ListUserPolicies",
+            "PutUserPermissionsBoundary", "DeleteUserPermissionsBoundary",
+            "ListGroupsForUser",
+            "UploadSSHPublicKey", "GetSSHPublicKey", "ListSSHPublicKeys",
+            "UpdateSSHPublicKey", "DeleteSSHPublicKey",
+            "UploadSigningCertificate", "ListSigningCertificates",
+            "UpdateSigningCertificate", "DeleteSigningCertificate",
+            "CreateServiceSpecificCredential", "ListServiceSpecificCredentials",
+            "UpdateServiceSpecificCredential", "ResetServiceSpecificCredential",
+            "DeleteServiceSpecificCredential",
+            "EnableMFADevice", "DeactivateMFADevice", "ResyncMFADevice", "ListMFADevices");
+
+    /**
+     * The user operations whose UserName the model marks optional, defaulting to the user that
+     * signed the request. Without it, the resource is that caller rather than {@code *}, which is
+     * what lets a self-service statement naming the caller's own user ARN grant them.
+     */
+    private static final Set<String> CALLER_DEFAULT_USER_ACTIONS = Set.of(
+            "GetUser",
+            "CreateLoginProfile", "GetLoginProfile", "UpdateLoginProfile", "DeleteLoginProfile",
+            "CreateAccessKey", "DeleteAccessKey", "ListAccessKeys", "UpdateAccessKey",
+            "ListSSHPublicKeys",
+            "UploadSigningCertificate", "ListSigningCertificates",
+            "UpdateSigningCertificate", "DeleteSigningCertificate",
+            "ListServiceSpecificCredentials", "UpdateServiceSpecificCredential",
+            "ResetServiceSpecificCredential", "DeleteServiceSpecificCredential",
+            "DeactivateMFADevice", "ListMFADevices");
+
+    /** Operations whose resource is the group named by GroupName, membership changes included. */
+    private static final Set<String> GROUP_ACTIONS = Set.of(
+            "CreateGroup", "GetGroup", "UpdateGroup", "DeleteGroup",
+            "AddUserToGroup", "RemoveUserFromGroup",
+            "AttachGroupPolicy", "DetachGroupPolicy", "ListAttachedGroupPolicies",
+            "PutGroupPolicy", "GetGroupPolicy", "DeleteGroupPolicy", "ListGroupPolicies");
+
+    /** Operations whose resource is the role named by RoleName. */
+    private static final Set<String> ROLE_ACTIONS = Set.of(
+            "CreateRole", "GetRole", "DeleteRole", "UpdateRole", "UpdateAssumeRolePolicy",
+            "TagRole", "UntagRole", "ListRoleTags",
+            "AttachRolePolicy", "DetachRolePolicy", "ListAttachedRolePolicies",
+            "PutRolePolicy", "GetRolePolicy", "DeleteRolePolicy", "ListRolePolicies",
+            "PutRolePermissionsBoundary", "DeleteRolePermissionsBoundary",
+            "ListInstanceProfilesForRole", "DeleteServiceLinkedRole");
+
+    /** Operations whose resource is the instance profile named by InstanceProfileName. */
+    private static final Set<String> INSTANCE_PROFILE_ACTIONS = Set.of(
+            "CreateInstanceProfile", "GetInstanceProfile", "DeleteInstanceProfile",
+            "TagInstanceProfile", "UntagInstanceProfile", "ListInstanceProfileTags",
+            "AddRoleToInstanceProfile", "RemoveRoleFromInstanceProfile");
+
+    /**
+     * Operations that already carry their resource as an ARN, keyed to the parameter holding it.
+     * The ARN is passed through rather than rebuilt: it is what the operation acts on.
+     */
+    private static final Map<String, String> ARN_PARAMETER_ACTIONS = arnParameterActions();
+
+    private static Map<String, String> arnParameterActions() {
+        Map<String, String> actions = new HashMap<>();
+        for (String action : List.of("GetPolicy", "DeletePolicy", "ListEntitiesForPolicy",
+                "CreatePolicyVersion", "GetPolicyVersion", "DeletePolicyVersion",
+                "ListPolicyVersions", "SetDefaultPolicyVersion",
+                "TagPolicy", "UntagPolicy", "ListPolicyTags")) {
+            actions.put(action, "PolicyArn");
+        }
+        for (String action : List.of("DeleteVirtualMFADevice",
+                "TagMFADevice", "UntagMFADevice", "ListMFADeviceTags")) {
+            actions.put(action, "SerialNumber");
+        }
+        for (String action : List.of("GetSAMLProvider", "UpdateSAMLProvider", "DeleteSAMLProvider",
+                "TagSAMLProvider", "UntagSAMLProvider", "ListSAMLProviderTags")) {
+            actions.put(action, "SAMLProviderArn");
+        }
+        for (String action : List.of("GetOpenIDConnectProvider", "DeleteOpenIDConnectProvider",
+                "AddClientIDToOpenIDConnectProvider", "RemoveClientIDFromOpenIDConnectProvider",
+                "UpdateOpenIDConnectProviderThumbprint", "TagOpenIDConnectProvider",
+                "UntagOpenIDConnectProvider", "ListOpenIDConnectProviderTags")) {
+            actions.put(action, "OpenIDConnectProviderArn");
+        }
+        // The principal whose policies are simulated or whose access is reported.
+        actions.put("SimulatePrincipalPolicy", "PolicySourceArn");
+        actions.put("GetContextKeysForPrincipalPolicy", "PolicySourceArn");
+        actions.put("GenerateServiceLastAccessedDetails", "Arn");
+        actions.put("ListPoliciesGrantingServiceAccess", "Arn");
+        return Map.copyOf(actions);
+    }
 
     private final ObjectMapper objectMapper;
     /**
@@ -49,19 +148,27 @@ public class ResourceArnBuilder {
      * which IamService itself does not depend on, and a direct injection would close that loop.
      */
     private final Instance<IamService> iamService;
+    /** Reads the signing access key, to name the caller where UserName defaults to it. */
+    private final AccountResolver accountResolver;
 
     @Inject
-    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService) {
+    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
+                              AccountResolver accountResolver) {
         this.objectMapper = objectMapper;
         this.iamService = iamService;
+        this.accountResolver = accountResolver;
+    }
+
+    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService) {
+        this(objectMapper, iamService, null);
     }
 
     public ResourceArnBuilder() {
-        this(new ObjectMapper(), null);
+        this(new ObjectMapper(), null, null);
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper) {
-        this(objectMapper, null);
+        this(objectMapper, null, null);
     }
 
     public String build(String credentialScope, ContainerRequestContext ctx,
@@ -94,20 +201,21 @@ public class ResourceArnBuilder {
     // ── IAM ─────────────────────────────────────────────────────────────────────
 
     /**
-     * IAM resource ARNs are only built for the server-certificate operations. Every other IAM
-     * action still resolves to {@code *}, so a policy naming a specific user, role, policy or MFA
-     * device does not constrain it. That is how IAM behaved before server certificates existed,
-     * and closing it for the rest means mapping the resource of every dispatched IAM action, which
-     * is its own change rather than a side effect of this one: tracked in issue 4979, and
-     * described in docs/services/iam.md.
+     * The resource of each IAM action, as the Service Authorization Reference lists it: the user,
+     * group, role, instance profile, managed policy, MFA device, identity provider or server
+     * certificate the request acts on. Actions the reference lists without a resource type (the
+     * account-wide reads, aliases, password policy, credential report and the like) resolve to
+     * {@code *}, as on AWS.
      *
      * <p>The operation is resolved through {@link AwsQueryServiceResolver#action(String, String)},
      * so the legacy {@code Operation} parameter names the resource exactly as {@code Action} does.
      * Reading {@code Action} alone would let a caller spell the operation the other way and have
-     * the request evaluated against {@code *}, skipping a deny that names the certificate.
+     * the request evaluated against {@code *}, skipping a deny that names the resource.
      *
-     * <p>The path is taken from the stored certificate when one exists: a policy names the full
-     * ARN, path included, and only the store knows the path.
+     * <p>An entity that already exists is checked against its own stored ARN, because a policy
+     * names the full ARN, path included, and only the store knows the path and the partition the
+     * entity was created in. A create mints the ARN from the request instead. An entity that does
+     * not exist resolves to {@code *}: the operation fails as NoSuchEntity either way.
      *
      * <p>A rename names two resources rather than one; see {@link #renameTargetArn}.
      */
@@ -116,9 +224,221 @@ public class ResourceArnBuilder {
         String action = AwsQueryServiceResolver.action(
                 RequestBodyReader.formField(ctx, "Action"),
                 RequestBodyReader.formField(ctx, "Operation"));
-        if (action == null || !SERVER_CERTIFICATE_ACTIONS.contains(action)) {
+        if (action == null) {
             return List.of("*");
         }
+        if (SERVER_CERTIFICATE_ACTIONS.contains(action)) {
+            return buildServerCertificateArns(ctx, action, region, accountId);
+        }
+        if (USER_ACTIONS.contains(action)) {
+            return buildUserArns(ctx, action, region, accountId);
+        }
+        if (GROUP_ACTIONS.contains(action)) {
+            return buildNamedEntityArns(ctx, action, "CreateGroup", "UpdateGroup", "group",
+                    "GroupName", "NewGroupName", region, accountId,
+                    name -> lookup(service -> service.findGroup(accountId, name)
+                            .map(g -> new StoredEntity(g.getArn(), g.getPath()))));
+        }
+        if (ROLE_ACTIONS.contains(action)) {
+            return buildNamedEntityArns(ctx, action, "CreateRole", null, "role",
+                    "RoleName", null, region, accountId,
+                    name -> lookup(service -> service.findRole(accountId, name)
+                            .map(r -> new StoredEntity(r.getArn(), r.getPath()))));
+        }
+        if (INSTANCE_PROFILE_ACTIONS.contains(action)) {
+            return buildNamedEntityArns(ctx, action, "CreateInstanceProfile", null, "instance-profile",
+                    "InstanceProfileName", null, region, accountId,
+                    name -> lookup(service -> service.findInstanceProfile(accountId, name)
+                            .map(p -> new StoredEntity(p.getArn(), p.getPath()))));
+        }
+        String arnParameter = ARN_PARAMETER_ACTIONS.get(action);
+        if (arnParameter != null) {
+            return List.of(iamArnParameter(ctx, arnParameter));
+        }
+        return switch (action) {
+            case "CreatePolicy" -> List.of(mintFromRequest(ctx, "policy", "PolicyName", region, accountId));
+            case "CreateVirtualMFADevice" ->
+                    List.of(mintFromRequest(ctx, "mfa", "VirtualMFADeviceName", region, accountId));
+            case "CreateSAMLProvider" -> List.of(mintRootPath(
+                    "saml-provider", RequestBodyReader.formField(ctx, "Name"), region, accountId));
+            case "CreateOpenIDConnectProvider" -> List.of(oidcProviderArn(ctx, region, accountId));
+            case "CreateServiceLinkedRole" -> List.of(serviceLinkedRoleArn(ctx, region, accountId));
+            case "GetAccessKeyLastUsed" -> List.of(accessKeyOwnerArn(
+                    RequestBodyReader.formField(ctx, "AccessKeyId"), accountId));
+            default -> List.of("*");
+        };
+    }
+
+    /** The parts of a stored IAM entity the permission check reads. */
+    private record StoredEntity(String arn, String path) {}
+
+    private Optional<StoredEntity> lookup(
+            Function<IamService, Optional<StoredEntity>> finder) {
+        if (iamService == null) {
+            return Optional.empty();
+        }
+        return finder.apply(iamService.get())
+                .filter(entity -> entity.arn() != null && !entity.arn().isBlank());
+    }
+
+    /**
+     * The user operations. Mostly a named entity like the others, except that several operations
+     * default UserName to the caller; see {@link #CALLER_DEFAULT_USER_ACTIONS}.
+     */
+    private List<String> buildUserArns(ContainerRequestContext ctx, String action,
+                                       String region, String accountId) {
+        String userName = RequestBodyReader.formField(ctx, "UserName");
+        if ((userName == null || userName.isBlank()) && CALLER_DEFAULT_USER_ACTIONS.contains(action)) {
+            // AllUsers lists every user's credentials rather than the caller's, so there is no one
+            // user it acts on.
+            if ("ListServiceSpecificCredentials".equals(action)
+                    && "true".equalsIgnoreCase(RequestBodyReader.formField(ctx, "AllUsers"))) {
+                return List.of("*");
+            }
+            return List.of(callerUserArn(ctx, accountId));
+        }
+        return buildNamedEntityArns(ctx, action, "CreateUser", "UpdateUser", "user",
+                "UserName", "NewUserName", region, accountId,
+                name -> lookup(service -> service.findUser(accountId, name)
+                        .map(u -> new StoredEntity(u.getArn(), u.getPath()))));
+    }
+
+    /**
+     * A user, group, role or instance profile named by its bare name. The create operation mints
+     * the ARN from the request's own Path, every other operation reads the stored entity's ARN,
+     * and the rename operation names both the current and the destination ARN.
+     */
+    private List<String> buildNamedEntityArns(ContainerRequestContext ctx, String action,
+                                              String createAction, String renameAction,
+                                              String resourceType, String nameParameter,
+                                              String newNameParameter, String region,
+                                              String accountId,
+                                              Function<String, Optional<StoredEntity>> finder) {
+        String name = RequestBodyReader.formField(ctx, nameParameter);
+        if (name == null || name.isBlank()) {
+            return List.of("*");
+        }
+        if (action.equals(createAction)) {
+            // A create names an entity that does not exist yet, so its ARN comes from the request:
+            // the path it asks for, in the partition it is being created in. Reading a stored path
+            // here would authorize a create under /team/ against the root path.
+            return List.of(mintWithPath(resourceType, RequestBodyReader.formField(ctx, "Path"),
+                    name, region, accountId));
+        }
+        Optional<StoredEntity> stored = finder.apply(name);
+        if (stored.isEmpty()) {
+            return List.of("*");
+        }
+        String storedArn = stored.get().arn();
+        if (!action.equals(renameAction)) {
+            return List.of(storedArn);
+        }
+        String target = renameTargetArn(storedArn, stored.get().path(), resourceType, name,
+                RequestBodyReader.formField(ctx, newNameParameter),
+                RequestBodyReader.formField(ctx, "NewPath"), region, accountId);
+        return storedArn.equals(target) ? List.of(storedArn) : List.of(storedArn, target);
+    }
+
+    /**
+     * The caller's own user ARN, for an operation whose UserName defaults to it. A caller that is
+     * not an IAM user (an assumed-role session, the account root) has no user to name, and the
+     * operation fails for it either way.
+     */
+    private String callerUserArn(ContainerRequestContext ctx, String accountId) {
+        if (accountResolver == null) {
+            return "*";
+        }
+        String accessKeyId = accountResolver.extractAccessKeyId(ctx.getHeaderString("Authorization"));
+        return accessKeyOwnerArn(accessKeyId, accountId);
+    }
+
+    /** The ARN of the user owning an access key, or {@code *} when no stored user owns it. */
+    private String accessKeyOwnerArn(String accessKeyId, String accountId) {
+        if (accessKeyId == null || accessKeyId.isBlank() || iamService == null) {
+            return "*";
+        }
+        return iamService.get().findUserNameByAccessKeyId(accessKeyId)
+                .flatMap(userName -> lookup(service -> service.findUser(accountId, userName)
+                        .map(u -> new StoredEntity(u.getArn(), u.getPath()))))
+                .map(StoredEntity::arn)
+                .orElse("*");
+    }
+
+    /**
+     * An ARN the request carries. Passed through as written when it is an IAM ARN; anything else
+     * names no IAM resource, and the operation fails on it regardless.
+     */
+    private static String iamArnParameter(ContainerRequestContext ctx, String parameter) {
+        String value = RequestBodyReader.formField(ctx, parameter);
+        if (value == null || value.isBlank() || !AwsArnUtils.isArnFor(value.trim(), "iam")) {
+            return "*";
+        }
+        return value.trim();
+    }
+
+    /** A created resource's ARN, from its name parameter and the request's Path. */
+    private static String mintFromRequest(ContainerRequestContext ctx, String resourceType,
+                                          String nameParameter, String region, String accountId) {
+        String name = RequestBodyReader.formField(ctx, nameParameter);
+        if (name == null || name.isBlank()) {
+            return "*";
+        }
+        return mintWithPath(resourceType, RequestBodyReader.formField(ctx, "Path"), name,
+                region, accountId);
+    }
+
+    /**
+     * IAM is global, so the ARN carries no region. Minted in the request's partition rather than
+     * through a blank-region Arn.of, which would silently mean the commercial one.
+     */
+    private static String mintWithPath(String resourceType, String path, String name,
+                                       String region, String accountId) {
+        return AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
+                resourceType + normalizeArnPath(path) + name).toString();
+    }
+
+    /** A resource type that takes no path, such as a SAML provider. */
+    private static String mintRootPath(String resourceType, String name, String region,
+                                       String accountId) {
+        if (name == null || name.isBlank()) {
+            return "*";
+        }
+        return AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
+                resourceType + "/" + name).toString();
+    }
+
+    /** An OIDC provider is named by its URL without the scheme, as the service mints it. */
+    private static String oidcProviderArn(ContainerRequestContext ctx, String region, String accountId) {
+        String url = RequestBodyReader.formField(ctx, "Url");
+        if (url == null || !url.startsWith("https://")) {
+            return "*";
+        }
+        return mintRootPath("oidc-provider", url.substring("https://".length()), region, accountId);
+    }
+
+    /**
+     * A service-linked role sits under {@code /aws-service-role/<principal>/}, named from the
+     * principal plus any CustomSuffix, which is how a policy scoping
+     * {@code iam:CreateServiceLinkedRole} to one service's roles names it.
+     */
+    private static String serviceLinkedRoleArn(ContainerRequestContext ctx, String region,
+                                               String accountId) {
+        String awsServiceName = RequestBodyReader.formField(ctx, "AWSServiceName");
+        if (awsServiceName == null || awsServiceName.isBlank()) {
+            return "*";
+        }
+        Optional<String> baseName = ServiceLinkedRoles.roleName(awsServiceName);
+        if (baseName.isEmpty()) {
+            return "*";
+        }
+        String suffix = RequestBodyReader.formField(ctx, "CustomSuffix");
+        String roleName = baseName.get() + (suffix == null || suffix.isEmpty() ? "" : "_" + suffix);
+        return mintWithPath("role", "/aws-service-role/"
+                + ServicePrincipals.canonical(awsServiceName) + "/", roleName, region, accountId);
+    }
+
+    private List<String> buildServerCertificateArns(ContainerRequestContext ctx, String action,
+                                                    String region, String accountId) {
         String name = RequestBodyReader.formField(ctx, "ServerCertificateName");
         if (name == null || name.isBlank()) {
             return List.of("*");
@@ -147,7 +467,9 @@ public class ResourceArnBuilder {
         if (!"UpdateServerCertificate".equals(action)) {
             return List.of(storedArn);
         }
-        String target = renameTargetArn(ctx, stored.get(), name, region, accountId);
+        String target = renameTargetArn(storedArn, stored.get().getPath(), "server-certificate",
+                name, RequestBodyReader.formField(ctx, "NewServerCertificateName"),
+                RequestBodyReader.formField(ctx, "NewPath"), region, accountId);
         return storedArn.equals(target) ? List.of(storedArn) : List.of(storedArn, target);
     }
 
@@ -156,24 +478,22 @@ public class ResourceArnBuilder {
      * the old and the new name, so that a rename into a name they cannot write fails: naming both
      * resources is what enforces it, because the filter authorizes a request once per resource.
      *
-     * <p>Built beside the stored ARN so it keeps the certificate's partition and account. Only
-     * the path and the name change, and taking the partition from the caller's signing region
-     * instead would name a resource in a partition the certificate does not live in. Returns the
-     * stored ARN unchanged when the request renames and moves nothing.
+     * <p>Built beside the stored ARN so it keeps the entity's partition and account. Only the
+     * path and the name change, and taking the partition from the caller's signing region instead
+     * would name a resource in a partition the entity does not live in. Returns the stored ARN
+     * unchanged when the request renames and moves nothing.
      */
-    private String renameTargetArn(ContainerRequestContext ctx, ServerCertificate stored,
-                                   String name, String region, String accountId) {
-        String newName = RequestBodyReader.formField(ctx, "NewServerCertificateName");
-        String newPath = RequestBodyReader.formField(ctx, "NewPath");
+    private static String renameTargetArn(String storedArn, String storedPath, String resourceType,
+                                          String name, String newName, String newPath,
+                                          String region, String accountId) {
         String targetName = newName == null || newName.isBlank() ? name : newName;
         String targetPath = newPath == null || newPath.isBlank()
-                ? normalizeArnPath(stored.getPath())
+                ? normalizeArnPath(storedPath)
                 : normalizeArnPath(newPath);
-        String partition = AwsArnUtils.partitionOrDefault(stored.getArn(),
-                AwsRegions.partitionFor(region));
-        String account = AwsArnUtils.accountOrDefault(stored.getArn(), accountId);
+        String partition = AwsArnUtils.partitionOrDefault(storedArn, AwsRegions.partitionFor(region));
+        String account = AwsArnUtils.accountOrDefault(storedArn, accountId);
         return AwsArnUtils.Arn.global(partition, "iam", account,
-                "server-certificate" + targetPath + targetName).toString();
+                resourceType + targetPath + targetName).toString();
     }
 
     /** A request's Path as it appears in an ARN: slash-delimited, defaulting to a bare slash. */
