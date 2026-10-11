@@ -904,6 +904,94 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void lambdaFunctionArnKeepsTheAccountItNames() {
+        when(uriInfo.getPath()).thenReturn(
+                "/2015-03-31/functions/arn:aws:lambda:us-east-1:111122223333:function:my-function/invocations");
+        assertEquals("arn:aws:lambda:us-east-1:111122223333:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+
+        when(uriInfo.getPath()).thenReturn("/2015-03-31/functions/111122223333:function:my-function/invocations");
+        assertEquals("arn:aws:lambda:us-east-1:111122223333:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void lambdaInvokeKeepsTheQualifierItRuns() {
+        when(uriInfo.getPath()).thenReturn(
+                "/2015-03-31/functions/arn:aws:lambda:us-east-1:111122223333:function:my-function:live/invocations");
+        assertEquals("arn:aws:lambda:us-east-1:111122223333:function:my-function:live",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+
+        when(uriInfo.getPath()).thenReturn("/2015-03-31/functions/my-function/invocations");
+        queryParams.putSingle("Qualifier", "1");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function:1",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void lambdaRoutesOtherThanInvokeAreCheckedAgainstTheCallersUnqualifiedFunction() {
+        when(uriInfo.getPath()).thenReturn(
+                "/2015-03-31/functions/arn:aws:lambda:us-east-1:111122223333:function:my-function:1/code");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+
+        when(uriInfo.getPath()).thenReturn("/2015-03-31/functions/111122223333:function:my-function/policy");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+
+        when(uriInfo.getPath()).thenReturn("/2015-03-31/functions/my-function");
+        queryParams.putSingle("Qualifier", "1");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void lambdaQualifiedReadsByArnAreCheckedInTheAccountTheyRead() {
+        when(ctx.getMethod()).thenReturn("GET");
+        when(uriInfo.getPath()).thenReturn(
+                "/2015-03-31/functions/arn:aws:lambda:us-east-1:111122223333:function:my-function:1");
+        assertEquals("arn:aws:lambda:us-east-1:111122223333:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+
+        when(uriInfo.getPath()).thenReturn(
+                "/2015-03-31/functions/arn:aws:lambda:us-east-1:111122223333:function:my-function/configuration");
+        queryParams.putSingle("Qualifier", "live");
+        assertEquals("arn:aws:lambda:us-east-1:111122223333:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void lambdaReadsThatDoNotFollowTheArnAreCheckedOnTheCallersFunction() {
+        when(ctx.getMethod()).thenReturn("GET");
+        when(uriInfo.getPath()).thenReturn(
+                "/2015-03-31/functions/arn:aws:lambda:us-east-1:111122223333:function:my-function");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+
+        when(uriInfo.getPath()).thenReturn("/2015-03-31/functions/111122223333:function:my-function:1");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+
+        when(uriInfo.getPath()).thenReturn(
+                "/2015-03-31/functions/arn:aws:lambda:us-east-1:111122223333:function:my-function:1/policy");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+
+        when(ctx.getMethod()).thenReturn("DELETE");
+        when(uriInfo.getPath()).thenReturn(
+                "/2015-03-31/functions/arn:aws:lambda:us-east-1:111122223333:function:my-function:1");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void lambdaReferenceLambdaRefusesIsNamedAsGiven() {
+        when(uriInfo.getPath()).thenReturn("/2015-03-31/functions/not:a:function:ref/invocations");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:not:a:function:ref",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
     void lambdaDurableExecutionRoutesNameTheExecution() {
         when(uriInfo.getPath()).thenReturn("/2025-12-01/durable-executions/arn:aws:lambda:us-east-1:000000000000:"
                 + "function:my-function:$LATEST/durable-execution/run-1/0b1c/stop");
