@@ -2083,10 +2083,19 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     public boolean isGovernanceRetentionActive(String bucketName, String key, String versionId) {
         ensureBucketExists(bucketName);
-        S3Object object = (versionId != null
-                ? objectStore.get(versionedKey(bucketName, key, versionId))
-                : objectStore.get(objectKey(bucketName, key)))
-                .orElse(null);
+        S3Object object;
+        if ("null".equals(versionId)) {
+            // Resolved as deleteObjectLocked resolves it: the null version is the unversioned object
+            // at the plain key, so a versioned key named "null" would miss a retained one.
+            object = objectStore.get(objectKey(bucketName, key))
+                    .filter(existing -> existing.getVersionId() == null)
+                    .orElse(null);
+        } else {
+            object = (versionId != null
+                    ? objectStore.get(versionedKey(bucketName, key, versionId))
+                    : objectStore.get(objectKey(bucketName, key)))
+                    .orElse(null);
+        }
         return object != null
                 && !object.isDeleteMarker()
                 && "GOVERNANCE".equals(object.getObjectLockMode())

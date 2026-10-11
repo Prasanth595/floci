@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.net.URLEncoder;
@@ -13,6 +15,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -37,6 +40,9 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
     private static final String ACCOUNT = "000000000000";
     private static final DateTimeFormatter AMZ_DATE =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
+
+    @Inject
+    IamService iamService;
 
     @Test
     void anIdentityPolicyOnOnePrefixDeletesOnlyThatPrefix() {
@@ -161,11 +167,53 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
         assertBucketPolicyDenyApplies("s3express", "delobj-express");
     }
 
-    // A REST JSON service's scope never reaches an S3 route (AwsRestRouteScopeFilter answers it 404),
-    // so ssm stands in for the other services a caller can still sign an S3 request for.
+    // A lambda-scoped request to this route is answered 404 by AwsRestRouteScopeFilter before the
+    // handler runs, so ssm, whose scope does reach it, stands in for a credential scoped to another service.
     @Test
     void aBucketPolicyDenyAppliesToACredentialScopedToAnotherService() {
         assertBucketPolicyDenyApplies("ssm", "delobj-other-scope");
+    }
+
+    // filter() returns before its key checks on DeleteObjects, a route no IAM action maps, so the per-key
+    // check is where an unusable key is refused. An s3express alias is answered in S3's vocabulary, not
+    // with the codes other services use.
+    @Test
+    void aDeactivatedKeySignedForS3ExpressIsRefusedAsS3RefusesIt() {
+        String bucket = bucket("delobj-inactive");
+        put(bucket, "a.txt");
+        String user = uniqueName("delobj-inactive");
+        String accessKeyId = createUser(user);
+        userPolicy(user, allow("s3:DeleteObject", "arn:aws:s3:::" + bucket + "/*"));
+        given().formParam("Action", "UpdateAccessKey").formParam("UserName", user)
+                .formParam("AccessKeyId", accessKeyId).formParam("Status", "Inactive")
+                .header("Authorization", auth(ADMIN, "iam")).when().post("/").then().statusCode(200);
+
+        XmlPath result = deleteObjects(accessKeyId, "s3express", bucket, false, entry("a.txt"));
+
+        assertEquals(List.of(), result.getList("DeleteResult.Deleted.Key"));
+        assertEquals(List.of("a.txt"), result.getList("DeleteResult.Error.Key"));
+        assertEquals(List.of("InvalidAccessKeyId"), result.getList("DeleteResult.Error.Code"));
+        assertPresent(bucket, "a.txt");
+    }
+
+    @Test
+    void anExpiredSessionSignedForS3ExpressIsRefusedAsS3RefusesIt() {
+        String bucket = bucket("delobj-expired");
+        put(bucket, "a.txt");
+        String accessKeyId = "ASIADELOBJ" + UUID.randomUUID().toString().replace("-", "")
+                .substring(0, 10).toUpperCase(Locale.ROOT);
+        iamService.registerSessionForAccount(ACCOUNT, accessKeyId, "secret",
+                "arn:aws:iam::" + ACCOUNT + ":role/delobj-expired", Instant.parse("2020-01-01T00:00:00Z"), null);
+        try {
+            XmlPath result = deleteObjects(accessKeyId, "s3express", bucket, false, entry("a.txt"));
+
+            assertEquals(List.of(), result.getList("DeleteResult.Deleted.Key"));
+            assertEquals(List.of("a.txt"), result.getList("DeleteResult.Error.Key"));
+            assertEquals(List.of("ExpiredToken"), result.getList("DeleteResult.Error.Code"));
+            assertPresent(bucket, "a.txt");
+        } finally {
+            iamService.unregisterSession(ACCOUNT, accessKeyId);
+        }
     }
 
     @Test
@@ -173,13 +221,16 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
         String bucket = bucket("delobj-governance");
         enableVersioning(bucket);
         String versionId = putGovernanceRetained(bucket, "retained.txt");
+        String plainVersionId = put(bucket, "plain.txt");
         String user = uniqueName("delobj-governance");
         String accessKeyId = createUser(user);
         String objects = "arn:aws:s3:::" + bucket + "/*";
 
+        // The header asks for the bypass on both entries, but only the retained one needs the permission.
         userPolicy(user, allow("s3:DeleteObjectVersion", objects) + "," + deny("s3:BypassGovernanceRetention", objects));
-        XmlPath denied = deleteObjects(accessKeyId, "s3", bucket, false, true, versionEntry("retained.txt", versionId));
-        assertEquals(List.of(), denied.getList("DeleteResult.Deleted.Key"));
+        XmlPath denied = deleteObjects(accessKeyId, "s3", bucket, false, true,
+                versionEntry("retained.txt", versionId), versionEntry("plain.txt", plainVersionId));
+        assertEquals(List.of("plain.txt"), denied.getList("DeleteResult.Deleted.Key"));
         assertDenied(denied, "retained.txt");
         assertVersionPresent(bucket, "retained.txt", versionId);
 
@@ -188,6 +239,31 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
         assertEquals(List.of("retained.txt"), allowed.getList("DeleteResult.Deleted.Key"));
         assertEquals(List.of(versionId), allowed.getList("DeleteResult.Deleted.VersionId"));
         assertEquals(List.of(), allowed.getList("DeleteResult.Error.Key"));
+    }
+
+    // An object written before versioning was enabled is the null version, which an entry names as
+    // VersionId "null". Its retention protects it as any version's does, so the bypass needs the permission.
+    @Test
+    void bypassingGovernanceRetentionOnTheNullVersionNeedsTheBypassPermission() {
+        String bucket = bucket("delobj-governance-null");
+        putGovernanceRetained(bucket, "retained.txt");
+        enableVersioning(bucket);
+        String user = uniqueName("delobj-governance-null");
+        String accessKeyId = createUser(user);
+        String objects = "arn:aws:s3:::" + bucket + "/*";
+
+        userPolicy(user, allow("s3:DeleteObjectVersion", objects) + "," + deny("s3:BypassGovernanceRetention", objects));
+        XmlPath denied = deleteObjects(accessKeyId, "s3", bucket, false, true, versionEntry("retained.txt", "null"));
+        assertEquals(List.of(), denied.getList("DeleteResult.Deleted.Key"));
+        assertDenied(denied, "retained.txt");
+        assertPresent(bucket, "retained.txt");
+
+        userPolicy(user, allow(List.of("s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"), objects));
+        XmlPath allowed = deleteObjects(accessKeyId, "s3", bucket, false, true, versionEntry("retained.txt", "null"));
+        assertEquals(List.of("retained.txt"), allowed.getList("DeleteResult.Deleted.Key"));
+        assertEquals(List.of("null"), allowed.getList("DeleteResult.Deleted.VersionId"));
+        assertEquals(List.of(), allowed.getList("DeleteResult.Error.Key"));
+        assertGone(bucket, "retained.txt");
     }
 
     @Test

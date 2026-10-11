@@ -857,12 +857,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         String previousAccountId = requestContext.getAccountId();
         requestContext.setAccountId(accountId);
         try {
-            // A presigned POST carries its credential only in the form body, which filter() never
-            // sees, so a key IAM holds but that can no longer be used is refused here as filter()
-            // refuses it. Otherwise an inactive key would act with its user's policies, and
-            // resolveCallerContext would delete an expired session, which would then read as a key
-            // that exists nowhere. For a second resource of a request filter() has seen, the key
-            // has already passed these checks.
+            // A key IAM holds but that can no longer be used is refused here as filter() refuses it,
+            // for the requests whose key filter() has not checked: a presigned POST, whose credential
+            // is only in the form body, and DeleteObjects, a route no action maps, where filter()
+            // returns before its key checks. Otherwise an inactive key would act with its user's
+            // policies, and resolveCallerContext would delete an expired session, which would then
+            // read as a key that exists nowhere. For a second resource of a request filter() has
+            // authorized, the key has already passed these checks.
             boolean accountRootKey = akid.equals(accountId);
             if (!accountRootKey && iamService.isInactiveAccessKey(akid)) {
                 throw unrecognizedClientException(credentialScope);
@@ -880,13 +881,15 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             boolean accountRootPrincipal = false;
             CallerContext caller = iamService.resolveCallerContext(akid, now);
             if (caller == null) {
-                // No unknown-key rejection here, unlike filter(), and none is needed. For a second
-                // resource of a request filter() has seen (CopyObject's source, RotateSecret's
-                // rotation function, the secrets behind SSM GetParameter) the credential is the one
-                // filter() evaluated, and filter() refuses an unknown key before the handler runs. A
-                // presigned POST carries its credential only in the form body, which filter() never
-                // sees: an unknown key there is refused by S3's presigned-POST signature check when
-                // S3 auth enforcement is on, and otherwise uploads as an unsigned request would.
+                // No unknown-key rejection here, unlike filter(). For a second resource of a request
+                // filter() has authorized (CopyObject's source, RotateSecret's rotation function, the
+                // secrets behind SSM GetParameter) the credential is the one filter() evaluated, and
+                // filter() refuses an unknown key before the handler runs. Two callers reach here with
+                // a key filter() has not checked: a presigned POST, whose credential is only in the
+                // form body, and DeleteObjects, where filter() returns before its key checks because
+                // no action maps the route. For both, S3's own request authentication refuses an
+                // unknown key when S3 auth enforcement is on; with it off, the request proceeds as an
+                // unsigned one would.
                 if (scpLevels == null || !accountRootKey) {
                     return;
                 }
