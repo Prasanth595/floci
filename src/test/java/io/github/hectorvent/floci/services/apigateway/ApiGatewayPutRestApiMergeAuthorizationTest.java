@@ -130,6 +130,35 @@ class ApiGatewayPutRestApiMergeAuthorizationTest {
               }}}
             }
             """;
+    private static final String API_KEY_SPEC = """
+            {
+              "openapi": "3.0.1",
+              "info": {"title": "ApiKeyProtected", "version": "1"},
+              "components": {"securitySchemes": {
+                "client_key": {"type": "apiKey", "name": "x-api-key", "in": "header"}
+              }},
+              "paths": {"/protected": {"get": {
+                "security": [{"client_key": []}],
+                "x-amazon-apigateway-integration": {"type": "MOCK"}
+              }}}
+            }
+            """;
+    private static final String ROOT_API_KEY_SPEC = """
+            {
+              "openapi": "3.0.1",
+              "info": {"title": "RootApiKeyProtected", "version": "1"},
+              "security": [{"client_key": []}],
+              "components": {"securitySchemes": {
+                "client_key": {
+                  "type": "apiKey", "name": "x-api-key", "in": "header",
+                  "x-amazon-apigateway-authtype": "apiKey"
+                }
+              }},
+              "paths": {"/protected": {"get": {
+                "x-amazon-apigateway-integration": {"type": "MOCK"}
+              }}}
+            }
+            """;
     private static final String EMPTY_SECURITY_SPEC = """
             {
               "openapi": "3.0.1",
@@ -399,6 +428,21 @@ class ApiGatewayPutRestApiMergeAuthorizationTest {
                     () -> verifyDenyInvocations(0));
         } finally {
             given().delete("/restapis/" + apiId).then().statusCode(202);
+        }
+    }
+
+    @Test
+    void importedPlainApiKeySecurityRequiresApiKeyForOperationAndRootSecurity() throws Exception {
+        for (String spec : List.of(API_KEY_SPEC, ROOT_API_KEY_SPEC)) {
+            String apiId = importApi(spec);
+            try {
+                JsonNode method = getJson(methodPath(apiId));
+                assertAll(
+                        () -> assertEquals("NONE", method.path("authorizationType").asText()),
+                        () -> assertTrue(method.path("apiKeyRequired").asBoolean()));
+            } finally {
+                given().delete("/restapis/" + apiId).then().statusCode(202);
+            }
         }
     }
 
