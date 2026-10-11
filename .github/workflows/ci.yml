@@ -23,9 +23,9 @@ permissions:
   contents: read
 
 # A new push to a pull request cancels its older run: only the latest head matters there.
-# On main a running run is left to finish. Merges land a median 13 minutes apart and a run
-# takes about 18, so cancelling killed 30 of 47 main runs in one day, each partway through
-# and with 546 runner-minutes already spent, and left most main commits with no result.
+# On main a running run is left to finish. A run takes about 18 minutes and merges often
+# land closer together than that, so cancelling stopped 77 of 138 main runs partway through
+# between 2026-10-05 and 2026-10-09 and left most main commits with no result.
 # Without cancelling, the concurrency group still holds at most one pending run: a newer
 # merge replaces the waiting one before it starts, so a burst of merges is tested once, at
 # its newest commit, and no run is stopped halfway.
