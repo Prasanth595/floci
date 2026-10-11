@@ -117,11 +117,8 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
                 .build());
         connectionManager.setMaxTotal(maxConnections);
         connectionManager.setDefaultMaxPerRoute(maxConnections);
-        TimeValue validateAfterInactivity = "npipe".equalsIgnoreCase(dockerHost.getScheme())
-                ? TimeValue.NEG_ONE_MILLISECOND
-                : VALIDATE_AFTER_INACTIVITY;
         connectionManager.setDefaultConnectionConfig(ConnectionConfig.custom()
-                .setValidateAfterInactivity(validateAfterInactivity)
+                .setValidateAfterInactivity(VALIDATE_AFTER_INACTIVITY)
                 .setConnectTimeout(connectionTimeout != null
                         ? Timeout.of(connectionTimeout.toNanos(), TimeUnit.NANOSECONDS) : null)
                 .build());
