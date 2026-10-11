@@ -20,6 +20,7 @@ import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -497,7 +498,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
         PartitionMatrix.assertArnIn(partitionCase, created.jsonPath().getString("cluster.arn"));
         String issuer = signed(region, "eks").when().get("/clusters/" + name).then().statusCode(200)
             .extract().jsonPath().getString("cluster.identity.oidc.issuer");
-        PartitionMatrix.assertHostIn(partitionCase, URI.create(issuer).getHost());
+        assertRegionalHostIn(partitionCase, URI.create(issuer).getHost());
     }
 
     @ParameterizedTest
@@ -540,7 +541,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
         PartitionMatrix.assertArnIn(partitionCase, created.jsonPath().getString("DomainStatus.ARN"));
         String endpoint = signed(region, "es").when().get("/2021-01-01/opensearch/domain/" + name)
             .then().statusCode(200).extract().jsonPath().getString("DomainStatus.Endpoint");
-        PartitionMatrix.assertHostIn(partitionCase, endpoint);
+        assertRegionalHostIn(partitionCase, endpoint);
     }
 
     @ParameterizedTest
@@ -640,7 +641,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
         String gatewayId = created.jsonPath().getString("gatewayId");
         cleanup.register(() -> signed(region, "bedrock-agentcore").when().delete("/gateways/" + gatewayId + "/"));
         PartitionMatrix.assertArnIn(partitionCase, created.jsonPath().getString("gatewayArn"));
-        PartitionMatrix.assertHostIn(partitionCase, URI.create(created.jsonPath().getString("gatewayUrl")).getHost());
+        assertRegionalHostIn(partitionCase, URI.create(created.jsonPath().getString("gatewayUrl")).getHost());
     }
 
     @ParameterizedTest
@@ -940,12 +941,14 @@ class PartitionCrossServiceSmokeIntegrationTest {
                 "{\"Name\":\"" + unique("smoke-ns", partitionCase) + "\"}")
         .when().post("/").then().statusCode(200)
             .extract().jsonPath().getString("OperationId");
-        String namespaceId = json11(region, "servicediscovery", target + "GetOperation",
-                "{\"OperationId\":\"" + operationId + "\"}")
+        String getOperation = "{\"OperationId\":\"" + operationId + "\"}";
+        cleanup.register(() -> json11(region, "servicediscovery", target + "DeleteNamespace",
+                "{\"Id\":\"" + json11(region, "servicediscovery", target + "GetOperation", getOperation)
+                        .when().post("/").jsonPath().getString("Operation.Targets.NAMESPACE") + "\"}")
+                .when().post("/"));
+        String namespaceId = json11(region, "servicediscovery", target + "GetOperation", getOperation)
         .when().post("/").then().statusCode(200)
             .extract().jsonPath().getString("Operation.Targets.NAMESPACE");
-        cleanup.register(() -> json11(region, "servicediscovery", target + "DeleteNamespace",
-                "{\"Id\":\"" + namespaceId + "\"}").when().post("/"));
         String arn = json11(region, "servicediscovery", target + "GetNamespace", "{\"Id\":\"" + namespaceId + "\"}")
         .when().post("/").then().statusCode(200)
             .extract().jsonPath().getString("Namespace.Arn");
@@ -979,7 +982,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
         PartitionMatrix.assertArnIn(partitionCase, created.jsonPath().getString("arn"));
         String endpoint = signed(region, "aps").when().get("/workspaces/" + workspaceId)
             .then().statusCode(200).extract().jsonPath().getString("workspace.prometheusEndpoint");
-        PartitionMatrix.assertHostIn(partitionCase, URI.create(endpoint).getHost());
+        assertRegionalHostIn(partitionCase, URI.create(endpoint).getHost());
     }
 
     @ParameterizedTest
@@ -1089,6 +1092,13 @@ class PartitionCrossServiceSmokeIntegrationTest {
                         || AwsPartitions.byId(partitionCase.partition()).offersSigningName(signingName),
                 partitionCase.partition() + " does not offer " + signingName);
         return partitionCase.region();
+    }
+
+    /** The host is in the case's partition and names the case's region, not another one of that partition. */
+    private static void assertRegionalHostIn(PartitionCase partitionCase, String host) {
+        PartitionMatrix.assertHostIn(partitionCase, host);
+        assertTrue(host.contains("." + partitionCase.region() + "."),
+                host + " should name the region " + partitionCase.region());
     }
 
     private static String unique(String prefix, PartitionCase partitionCase) {
