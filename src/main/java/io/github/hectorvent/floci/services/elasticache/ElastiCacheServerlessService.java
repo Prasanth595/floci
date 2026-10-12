@@ -79,9 +79,7 @@ public class ElastiCacheServerlessService implements Resettable {
         if (request.snapshotArnsToRestore() != null && !request.snapshotArnsToRestore().isEmpty()) {
             throw invalid("Snapshot restore is not supported locally.");
         }
-        if (request.tags() != null && request.tags().size() > 50) {
-            throw new AwsException("TagQuotaPerResourceExceeded", "At most 50 tags are supported.", 400);
-        }
+        validateTagCount(request.tags());
         String rawGroup = request.userGroupId();
         String group = normalizedUserGroupId(rawGroup);
         String region = resolver.getRegion();
@@ -235,15 +233,19 @@ public class ElastiCacheServerlessService implements Resettable {
 
     /** Drives the tags to exactly the given set, the way CloudFormation reconciles a resource on update. */
     public ServerlessCache replaceTags(String name, Map<String, String> tags) {
-        if (tags != null && tags.size() > 50) {
-            throw new AwsException("TagQuotaPerResourceExceeded", "At most 50 tags are supported.", 400);
-        }
+        validateTagCount(tags);
         String normalized = normalizedName(name);
         synchronized (lockFor(normalized)) {
             ServerlessCache updated = copy(requireCache(normalized));
             updated.setTags(tags);
             caches.put(key(normalized), updated);
             return current(updated);
+        }
+    }
+
+    private static void validateTagCount(Map<String, String> tags) {
+        if (tags != null && tags.size() > 50) {
+            throw new AwsException("TagQuotaPerResourceExceeded", "At most 50 tags are supported.", 400);
         }
     }
 

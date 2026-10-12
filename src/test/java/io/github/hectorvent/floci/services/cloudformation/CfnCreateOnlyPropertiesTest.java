@@ -38,6 +38,18 @@ class CfnCreateOnlyPropertiesTest {
     }
 
     @Test
+    void isCreateOnly_serverlessCacheReplacesOnItsSchemaProperties() {
+        String type = "AWS::ElastiCache::ServerlessCache";
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "ServerlessCacheName"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "SubnetIds"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "KmsKeyId"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "SnapshotArnsToRestore"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "SecurityGroupIds"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Description"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Tags"));
+    }
+
+    @Test
     void isCreateOnly_treatsEmptySchemaListAsAuthoritative() {
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::ApiGateway::RestApi", "Name"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::Cognito::UserPool", "UserPoolName"));
