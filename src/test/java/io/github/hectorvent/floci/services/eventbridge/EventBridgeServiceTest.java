@@ -1513,24 +1513,47 @@ class EventBridgeServiceTest {
     }
 
     @Test
-    void putEventsReportsMissingDetailDistinctlyFromMalformedDetail() {
+    void putEventsReportsMissingRequiredFieldsDistinctlyFromMalformedDetail() {
         EventBridgeService.PutEventsResult result = service.putEvents(
                 List.of(
-                        Map.of("Source", "s", "DetailType", "d"),                       // no Detail
-                        Map.of("Source", "s", "DetailType", "d", "Detail", "not json")  // malformed
+                        Map.of("Source", "s", "DetailType", "d"),                        // missing Detail
+                        Map.of("Source", "s", "DetailType", "d", "Detail", "not json"),   // malformed Detail
+                        Map.of("Source", "s", "Detail", "{}"),                           // missing DetailType
+                        Map.of("DetailType", "d", "Detail", "{}")                        // missing Source
                 ),
                 REGION);
 
-        assertEquals(2, result.failedCount());
+        assertEquals(4, result.failedCount());
 
-        Map<String, String> missing = result.entries().getFirst();
-        assertEquals("InvalidArgument", missing.get("ErrorCode"));
-        assertTrue(missing.get("ErrorMessage").contains("Detail"),
-                "missing-Detail message should name the parameter; was: " + missing.get("ErrorMessage"));
-        assertNull(missing.get("EventId"));
+        Map<String, String> missingDetail = result.entries().getFirst();
+        assertEquals("InvalidArgument", missingDetail.get("ErrorCode"));
+        assertEquals("Parameter Detail is not valid. Reason: Detail is a required argument.",
+                missingDetail.get("ErrorMessage"));
+        assertNull(missingDetail.get("EventId"));
 
-        Map<String, String> malformed = result.entries().get(1);
-        assertEquals("MalformedDetail", malformed.get("ErrorCode"));
-        assertNull(malformed.get("EventId"));
+        Map<String, String> malformedDetail = result.entries().get(1);
+        assertEquals("MalformedDetail", malformedDetail.get("ErrorCode"));
+        assertEquals("The JSON provided is not valid.", malformedDetail.get("ErrorMessage"));
+        assertNull(malformedDetail.get("EventId"));
+
+        Map<String, String> missingDetailType = result.entries().get(2);
+        assertEquals("InvalidArgument", missingDetailType.get("ErrorCode"));
+        assertEquals("Parameter DetailType is not valid. Reason: DetailType is a required argument.",
+                missingDetailType.get("ErrorMessage"));
+        assertNull(missingDetailType.get("EventId"));
+
+        Map<String, String> missingSource = result.entries().get(3);
+        assertEquals("InvalidArgument", missingSource.get("ErrorCode"));
+        assertEquals("Parameter Source is not valid. Reason: Source is a required argument.",
+                missingSource.get("ErrorMessage"));
+        assertNull(missingSource.get("EventId"));
+    }
+
+    @Test
+    void putEventsReportsSourceFirstWhenMultipleRequiredFieldsAreMissing() {
+        var result = service.putEvents(List.of(Map.of("Detail", "{}")), REGION);
+        assertEquals(1, result.failedCount());
+        assertEquals("Parameter Source is not valid. Reason: Source is a required argument.",
+                result.entries().get(0).get("ErrorMessage"));
     }
 }

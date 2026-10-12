@@ -56,6 +56,7 @@ import java.util.regex.Pattern;
 public class EventBridgeService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(EventBridgeService.class);
+    private static final List<String> REQUIRED_ENTRY_FIELDS = List.of("Source", "DetailType", "Detail");
 
     private final StorageBackend<String, EventBus> busStore;
     private final StorageBackend<String, Rule> ruleStore;
@@ -790,10 +791,19 @@ public class EventBridgeService implements ResourceProvider {
             // inconsistent observable.
             Map<String, Object> entry = new HashMap<>(originalEntry);
 
-            if (!entry.containsKey("Detail") || entry.get("Detail") == null) {
+            String missingRequiredField = null;
+            for(String field : REQUIRED_ENTRY_FIELDS) {
+                if(entry.get(field) == null) {
+                    missingRequiredField = field;
+                    break;
+                }
+            }
+
+            if(missingRequiredField != null) {
                 Map<String, String> errorEntry = new HashMap<>();
                 errorEntry.put("ErrorCode", "InvalidArgument");
-                errorEntry.put("ErrorMessage", "Parameter Detail is not valid. Reason: Detail is a required argument.");
+                errorEntry.put("ErrorMessage",
+                        "Parameter " + missingRequiredField +  " is not valid. Reason: " + missingRequiredField + " is a required argument.");
                 resultEntries.add(errorEntry);
                 failed++;
                 continue;
