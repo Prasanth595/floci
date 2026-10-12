@@ -1959,7 +1959,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 engineVersion != null && !engineVersion.isBlank() ? engineVersion : snapshot.getEngineVersion(),
                 snapshot.getMasterUsername(), snapshot.getMasterPassword(),
                 databaseName != null && !databaseName.isBlank() ? databaseName : snapshot.getDatabaseName(),
-                iamEnabled != null ? iamEnabled : snapshot.isIamDatabaseAuthenticationEnabled(),
+                Boolean.TRUE.equals(iamEnabled),
                 parameterGroupName, dbSubnetGroupName, availabilityZone, false, effectiveRegion,
                 null, null, null, false, null,
                 engineMode != null && !engineMode.isBlank() ? engineMode : snapshot.getEngineMode(),
@@ -2038,7 +2038,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 ? source.getEngineIdentifier() : source.getEngine().name().toLowerCase(Locale.ROOT);
         DbCluster cluster = createDbClusterWithPort(clusterId, engineParam, source.getEngineVersion(),
                 source.getMasterUsername(), source.getMasterPassword(), source.getDatabaseName(),
-                iamEnabled != null ? iamEnabled : source.isIamDatabaseAuthenticationEnabled(),
+                Boolean.TRUE.equals(iamEnabled),
                 parameterGroupName, dbSubnetGroupName, null, false, effectiveRegion,
                 null, null, null, false, null,
                 !isBlank(engineMode) ? engineMode : source.getEngineMode(),

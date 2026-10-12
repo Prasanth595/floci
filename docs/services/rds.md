@@ -191,7 +191,7 @@ including empty strings, return `InvalidParameterValue` before changing resource
 | `CreateEventSubscription` | `Enabled` | Defaults to `true` |
 | `ModifyEventSubscription` | `Enabled` | Preserves the current value |
 | `RestoreDBInstanceFromDBSnapshot` | `MultiAZ` | Defaults to `false` |
-| `RestoreDBClusterFromSnapshot`, `RestoreDBClusterToPointInTime` | `EnableIAMDatabaseAuthentication` | Retains the source setting |
+| `RestoreDBClusterFromSnapshot`, `RestoreDBClusterToPointInTime` | `EnableIAMDatabaseAuthentication` | Defaults to `false`, regardless of the source setting |
 
 Malformed reset flags leave saved parameter overrides unchanged. Malformed event-subscription
 flags leave the subscription and its topic, source type and event categories unchanged.
