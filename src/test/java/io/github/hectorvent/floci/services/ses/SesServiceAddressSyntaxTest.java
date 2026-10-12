@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.EmailContent;
+import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.SendBulkEmailRequest;
 import io.github.hectorvent.floci.services.ses.model.SendEmailRequest;
 import org.junit.jupiter.api.BeforeEach;
@@ -37,12 +39,14 @@ class SesServiceAddressSyntaxTest {
 
     private SesService service;
     private SesSentEmailService sentEmails;
+    private InMemoryStorage<String, Identity> identityStore;
 
     @BeforeEach
     void setUp() {
         SesServiceTestBuilder builder = SesServiceTestBuilder.create();
         service = builder.build();
         sentEmails = builder.sentEmailService();
+        identityStore = builder.identityStore();
     }
 
     @Test
@@ -170,6 +174,18 @@ class SesServiceAddressSyntaxTest {
     void v2RawSend_fromHeaderWithoutAtIsReportedAfterMissingDestination() {
         assertRejects("Missing required header 'To'.", () -> service.sendEmail(request(null).toAddresses(List.of())
                 .content(v2RawWithoutTo(NO_AT)).build()));
+    }
+
+    @Test
+    void v2RawSend_staleDefaultConfigurationSetOfFromHeaderIsReportedBeforeMissingDestination() {
+        Identity identity = new Identity(DOMAIN, "Domain");
+        identity.setConfigurationSetName("deleted");
+        identityStore.put("identity::" + REGION + "::" + DOMAIN, identity);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.sendEmail(request(null)
+                .toAddresses(List.of()).content(v2RawWithoutTo(SENDER)).build()));
+
+        assertEquals("Configuration set <deleted> does not exist.", e.getMessage());
     }
 
     @Test

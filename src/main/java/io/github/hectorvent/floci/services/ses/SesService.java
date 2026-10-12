@@ -453,14 +453,6 @@ public class SesService {
             // both with this message.
             throw new AwsException("InvalidParameterValue", "Missing required header 'From'.", 400);
         }
-        List<String> effectiveDestinations = request.hasRecipients()
-                ? request.recipients()
-                : SendEmailRequest.recipients(headers.to(), headers.cc(), headers.bcc());
-        if (effectiveDestinations.isEmpty()) {
-            throw new AwsException("InvalidParameterValue", "Missing required header 'To'.", 400);
-        }
-        SesAddressSyntax.requireFallbackFromAt(request, raw, parsed.message());
-        SesAddressLength.requireRaw(request, raw, parsed.message());
         // FromEmailAddress was omitted, so the configuration set couldn't be resolved from the
         // sender until the MIME "From" was parsed. Re-resolve from the effective sender now so an
         // email identity's default configuration set still applies to a Raw send without an
@@ -469,6 +461,14 @@ public class SesService {
             effectiveConfigSet = resolveDefaultConfigurationSet(requestedConfigSet, effectiveSource, region);
             configSetService.validateForSending(effectiveConfigSet, region);
         }
+        List<String> effectiveDestinations = request.hasRecipients()
+                ? request.recipients()
+                : SendEmailRequest.recipients(headers.to(), headers.cc(), headers.bcc());
+        if (effectiveDestinations.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "Missing required header 'To'.", 400);
+        }
+        SesAddressSyntax.requireFallbackFromAt(request, raw, parsed.message());
+        SesAddressLength.requireRaw(request, raw, parsed.message());
         // Resolve suppression before recording the message so a bad ListManagementOptions (e.g. an
         // unknown contact list) fails the whole send without leaving an orphaned SentEmail record.
         Map<String, String> suppressedReasons = new LinkedHashMap<>(
