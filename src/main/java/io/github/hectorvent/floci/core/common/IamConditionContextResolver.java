@@ -56,6 +56,7 @@ public class IamConditionContextResolver {
     private static final String RESOURCE_TAG_PREFIX = "aws:ResourceTag/";
     public static final String EXISTING_OBJECT_TAG_PREFIX = "s3:ExistingObjectTag/";
     public static final String REQUEST_OBJECT_TAG_PREFIX = "s3:RequestObjectTag/";
+    private static final String REQUEST_OBJECT_TAG_KEYS = "s3:RequestObjectTagKeys";
 
     private final Instance<DynamoDbFacade> dynamoDbFacade;
     private final Instance<Ec2Service> ec2Service;
@@ -195,6 +196,7 @@ public class IamConditionContextResolver {
             return null;
         }
         Map<String, List<String>> conditions = new LinkedHashMap<>();
+        Set<String> requestedKeys = new LinkedHashSet<>();
         for (String pair : header.split("&")) {
             int eq = pair.indexOf('=');
             if (eq <= 0) {
@@ -206,6 +208,10 @@ public class IamConditionContextResolver {
                 continue;
             }
             conditions.put(REQUEST_OBJECT_TAG_PREFIX + name, List.of(value));
+            requestedKeys.add(name);
+        }
+        if (!requestedKeys.isEmpty()) {
+            conditions.put(REQUEST_OBJECT_TAG_KEYS, new ArrayList<>(requestedKeys));
         }
         return conditions.isEmpty() ? null : conditions;
     }
@@ -223,6 +229,7 @@ public class IamConditionContextResolver {
         }
         Map<String, List<String>> conditions = new LinkedHashMap<>();
         tags.forEach((k, v) -> conditions.put(REQUEST_OBJECT_TAG_PREFIX + k, List.of(v)));
+        conditions.put(REQUEST_OBJECT_TAG_KEYS, new ArrayList<>(tags.keySet()));
         return conditions;
     }
 

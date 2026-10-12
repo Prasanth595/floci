@@ -152,6 +152,41 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void objectTagKeysDecodeHeadersAndRetainCaseWithoutDuplicates() {
+        ContainerRequestContext request = s3Request("/bucket/object", "");
+        when(request.getHeaderString("x-amz-tagging"))
+                .thenReturn("%54eam=one&Team=two&team=three&Cost%20Center=four&bad=%zz");
+        Map<String, List<String>> conditions = resolver.resolve("s3", "s3:PutObject", request);
+        assertEquals(List.of("Team", "team", "Cost Center"), conditions.get("s3:RequestObjectTagKeys"));
+        assertEquals(List.of("two"), conditions.get("s3:RequestObjectTag/Team"));
+        assertFalse(conditions.containsKey("s3:RequestObjectTag/bad"));
+    }
+
+    @Test
+    void objectTagKeysComeOnlyFromTheRequestedXmlTags() {
+        ContainerRequestContext request = s3Request("/bucket/object",
+                "<Tagging><TagSet><Tag><Key>Team</Key><Value>payments</Value></Tag>"
+                        + "<Tag><Key>Cost&amp;Center</Key><Value>42</Value></Tag></TagSet></Tagging>");
+        when(request.getUriInfo().getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+        when(s3Service.getObjectTagging("bucket", "object", null)).thenReturn(Map.of("Previous", "old"));
+        Map<String, List<String>> conditions = resolver.resolve("s3", "s3:PutObjectTagging", request);
+        assertEquals(Set.of("Team", "Cost&Center"), new HashSet<>(conditions.get("s3:RequestObjectTagKeys")));
+        assertEquals(List.of("old"), conditions.get("s3:ExistingObjectTag/Previous"));
+        assertEquals(List.of("42"), conditions.get("s3:RequestObjectTag/Cost&Center"));
+    }
+
+    @Test
+    void emptyObjectTagRequestsDoNotExposeRequestedKeys() {
+        assertNull(resolver.resolve("s3", "s3:PutObject", s3Request("/bucket/object", "")));
+        ContainerRequestContext empty = s3Request("/bucket/object", "<Tagging><TagSet/></Tagging>");
+        when(empty.getUriInfo().getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+        when(s3Service.getObjectTagging("bucket", "object", null)).thenReturn(Map.of("Previous", "old"));
+        Map<String, List<String>> conditions = resolver.resolve("s3", "s3:PutObjectTagging", empty);
+        assertEquals(List.of("old"), conditions.get("s3:ExistingObjectTag/Previous"));
+        assertFalse(conditions.containsKey("s3:RequestObjectTagKeys"));
+    }
+
+    @Test
     void resolvesDynamoDbLeadingKeysForGetItem() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         when(containerRequest.getProperty("floci.bufferedJsonBody")).thenReturn(json("""

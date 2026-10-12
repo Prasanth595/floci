@@ -1237,8 +1237,12 @@ floci populates:
   from the `x-amz-tagging` header and `s3:PutObjectTagging` from the `<Tagging>` body. Any pair
   that does not decode is dropped, so a policy conditioned on the key denies such a request. Where
   enforcement lets it through, the handler still answers a malformed header with
-  `400 InvalidTag`. `s3:RequestObjectTagKeys` is **not** populated; the absent-key rules
-  above apply.
+  `400 InvalidTag`.
+- `s3:RequestObjectTagKeys`: the case-sensitive requested object tag keys from the same
+  `PutObject` header or `PutObjectTagging` body. Header keys are URL-decoded before matching.
+  `ForAllValues:StringEquals` can limit all requested keys without a `Null` guard; an
+  omitted or empty tag set still follows the absent-key rules above. Existing object tags
+  do not contribute to this requested set. See the [AWS object-tag policy guidance](https://docs.aws.amazon.com/AmazonS3/latest/userguide/tagging-and-policies.html).
 - A `PutObject` carrying `If-Match` is authorized as `s3:GetObject` as well, and that second
   check is made without the object's tags in the context, as measured on AWS. `If-None-Match`
   needs no such permission.

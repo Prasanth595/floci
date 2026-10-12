@@ -1,25 +1,45 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.net.URI;
 import java.util.UUID;
 
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.createUser;
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.removeBucket;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
 class IamTagKeysEnforcementIntegrationTest {
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
+    @TestHTTPResource
+    URI endpoint;
 
     @Test
     void ec2CreateTagsRejectsAnUnlistedKeyWithoutNullGuard() {
         String id = given().header("Authorization", auth("test", "ec2"))
                 .formParam("Action", "CreateVpc").formParam("CidrBlock", "10.89.0.0/16")
                 .post("/").then().statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
-        String key = scopedUser("ec2:CreateTags");
+        int port = endpoint.getPort();
+        cleanup.register(() -> given().port(port).header("Authorization", auth("test", "ec2"))
+                .formParam("Action", "DeleteVpc").formParam("VpcId", id).post("/"));
+        String key = scopedUser("ec2:CreateTags", "aws:TagKeys");
         given().header("Authorization", auth(key, "ec2"))
                 .formParam("Action", "CreateTags").formParam("ResourceId.1", id)
                 .formParam("Tag.1.Key", "Team").formParam("Tag.1.Value", "payments")
@@ -33,9 +53,8 @@ class IamTagKeysEnforcementIntegrationTest {
 
     @Test
     void s3BucketTaggingRejectsAnUnlistedKeyWithoutNullGuard() {
-        String bucket = "tagkeys-" + UUID.randomUUID();
-        given().header("Authorization", auth("test", "s3")).put("/" + bucket).then().statusCode(200);
-        String key = scopedUser("s3:PutBucketTagging");
+        String bucket = bucket();
+        String key = scopedUser("s3:PutBucketTagging", "aws:TagKeys");
         String allowed = "<Tag><Key>Team</Key><Value>payments</Value></Tag>";
         given().header("Authorization", auth(key, "s3")).queryParam("tagging", "")
                 .body("<Tagging><TagSet>" + allowed + "</TagSet></Tagging>")
@@ -46,26 +65,72 @@ class IamTagKeysEnforcementIntegrationTest {
                 .put("/" + bucket).then().statusCode(403).body(containsString("AccessDenied"));
     }
 
-    private static String scopedUser(String action) {
+    @ParameterizedTest
+    @ValueSource(strings = {"Admin", "team"})
+    void s3ObjectUploadRestrictsAllRequestedKeysWithoutNullGuard(String forbiddenKey) {
+        String bucket = bucket();
+        String key = scopedUser("s3:PutObject", "s3:RequestObjectTagKeys");
+        String path = "/" + bucket + "/object";
+        given().header("Authorization", auth(key, "s3")).header("x-amz-tagging", "%54eam=payments")
+                .body("original").put(path).then().statusCode(200);
+        given().header("Authorization", auth(key, "s3"))
+                .header("x-amz-tagging", "Team=payments&" + forbiddenKey + "=true")
+                .body("forbidden replacement").put(path).then().statusCode(403)
+                .body(containsString("AccessDenied"));
+        given().header("Authorization", auth("test", "s3")).get(path)
+                .then().statusCode(200).body(equalTo("original"));
+        given().header("Authorization", auth("test", "s3")).queryParam("tagging", "").get(path)
+                .then().statusCode(200).body(containsString("<Key>Team</Key>"))
+                .body(not(containsString("<Key>" + forbiddenKey + "</Key>")));
+        // No tags retain the vacuous ForAllValues match; there is no Null guard.
+        given().header("Authorization", auth(key, "s3")).body("untagged").put(path)
+                .then().statusCode(200);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Admin", "team"})
+    void s3ObjectTaggingRestrictsAllRequestedKeysWithoutNullGuard(String forbiddenKey) {
+        String bucket = bucket();
+        String path = "/" + bucket + "/object";
+        given().header("Authorization", auth("test", "s3")).body("original").put(path)
+                .then().statusCode(200);
+        String key = scopedUser("s3:PutObjectTagging", "s3:RequestObjectTagKeys");
+        String allowed = "<Tag><Key>Team</Key><Value>payments</Value></Tag>";
+        given().header("Authorization", auth(key, "s3")).queryParam("tagging", "")
+                .body("<Tagging><TagSet>" + allowed + "</TagSet></Tagging>")
+                .put(path).then().statusCode(200);
+        given().header("Authorization", auth(key, "s3")).queryParam("tagging", "")
+                .body("<Tagging><TagSet>" + allowed + "<Tag><Key>" + forbiddenKey
+                        + "</Key><Value>true</Value></Tag></TagSet></Tagging>")
+                .put(path).then().statusCode(403).body(containsString("AccessDenied"));
+        given().header("Authorization", auth("test", "s3")).queryParam("tagging", "").get(path)
+                .then().statusCode(200).body(containsString("<Key>Team</Key>"))
+                .body(not(containsString("<Key>" + forbiddenKey + "</Key>")));
+        // An empty tag set removes the tags and still matches ForAllValues.
+        given().header("Authorization", auth(key, "s3")).queryParam("tagging", "")
+                .body("<Tagging><TagSet/></Tagging>").put(path).then().statusCode(200);
+        given().header("Authorization", auth("test", "s3")).queryParam("tagging", "").get(path)
+                .then().statusCode(200).body(not(containsString("<Key>Team</Key>")));
+    }
+
+    private String bucket() {
+        String bucket = "tagkeys-" + UUID.randomUUID();
+        int port = endpoint.getPort();
+        cleanup.register(() -> removeBucket(port, auth("test", "s3"), bucket));
+        given().header("Authorization", auth("test", "s3")).put("/" + bucket).then().statusCode(200);
+        return bucket;
+    }
+
+    private String scopedUser(String action, String conditionKey) {
         String user = "tagkeys-" + UUID.randomUUID();
-        given().header("Authorization", auth("test", "iam"))
-                .formParam("Action", "CreateUser").formParam("UserName", user)
-                .post("/").then().statusCode(200);
+        String accessKey = createUser(cleanup, endpoint.getPort(), auth("test", "iam"), user).accessKeyId();
         given().header("Authorization", auth("test", "iam"))
                 .formParam("Action", "PutUserPolicy").formParam("UserName", user).formParam("PolicyName", "tags")
                 .formParam("PolicyDocument", """
                         {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"%s",
-                         "Resource":"*","Condition":{"ForAllValues:StringEquals":{"aws:TagKeys":["Team"]}}}]}
-                        """.formatted(action))
+                         "Resource":"*","Condition":{"ForAllValues:StringEquals":{"%s":["Team"]}}}]}
+                        """.formatted(action, conditionKey))
                 .post("/").then().statusCode(200);
-        return given().header("Authorization", auth("test", "iam"))
-                .formParam("Action", "CreateAccessKey").formParam("UserName", user)
-                .post("/").then().statusCode(200).extract()
-                .path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
-    }
-
-    private static String auth(String key, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + key + "/20261012/us-east-1/" + service
-                + "/aws4_request, SignedHeaders=host, Signature=abc";
+        return accessKey;
     }
 }
