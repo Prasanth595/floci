@@ -658,6 +658,35 @@ public class SecretsManagerService implements ResourceProvider {
 
     public record Filter(String key, List<String> values) {}
 
+    /**
+     * Releases a managed secret after its owner successfully changes credentials. The caller
+     * supplies the full stored ARN. Replication eligibility, the owner's action and deletion
+     * share the secret monitor so a concurrent replication cannot strand old credentials.
+     * Returns false without running the action when replicas prevent deletion.
+     */
+    public boolean deleteManagedSecretAfter(String secretArn, String region, Runnable changeCredentials) {
+        synchronized (lockFor(secretArn)) {
+            Secret secret;
+            try {
+                secret = resolveSecret(secretArn, region);
+            } catch (AwsException e) {
+                if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                    throw e;
+                }
+                // An already removed secret does not prevent its owner from releasing management.
+                changeCredentials.run();
+                return true;
+            }
+            throwIfReplica(secret);
+            if (secret.getReplicationStatus() != null && !secret.getReplicationStatus().isEmpty()) {
+                return false;
+            }
+            changeCredentials.run();
+            deleteSecret(secretArn, null, true, region);
+            return true;
+        }
+    }
+
     public Secret deleteSecret(String secretId, Integer recoveryWindowInDays, boolean forceDelete, String region) {
         // Parameters are checked before the secret is resolved, the way AWS orders it: an invalid
         // window is reported as such even when the secret does not exist.
@@ -868,11 +897,11 @@ public class SecretsManagerService implements ResourceProvider {
                     "AddReplicaRegions must contain at least one Region.", 400);
         }
 
-        Secret primary = resolveSecret(secretId, region);
-        throwIfPendingDeletion(primary);
-        throwIfReplica(primary);
-
-        synchronized (lockFor(primary.getArn())) {
+        Secret resolved = resolveSecret(secretId, region);
+        synchronized (lockFor(resolved.getArn())) {
+            Secret primary = resolveSecret(resolved.getArn(), region);
+            throwIfPendingDeletion(primary);
+            throwIfReplica(primary);
             List<Secret.ReplicaStatus> statuses = primary.getReplicationStatus() != null
                     ? new ArrayList<>(primary.getReplicationStatus()) : new ArrayList<>();
 

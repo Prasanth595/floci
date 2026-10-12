@@ -581,6 +581,17 @@ Custom endpoints are modelled, not routed: a custom endpoint reports the cluster
 reachable, but connections through it go where the cluster endpoint sends them rather than being
 spread across the chosen members.
 
+## Aurora managed password opt-out
+
+When `ModifyDBCluster` disables `ManageMasterUserPassword` while the managed secret has
+cross-Region replicas, the request succeeds but retains the cluster password and its
+`MasterUserSecret` metadata, as Aurora does. Remove the secret's replicas and retry to
+release password management. Other requested cluster settings still apply.
+
+Floci coordinates the replication check and credential change with Secrets Manager deletion.
+A failed backend password rotation retains the managed secret and stored credentials.
+This does not provide a transaction across database backends and persistent storage.
+
 ## Point in time restore
 
 `RestoreDBInstanceToPointInTime` and `RestoreDBClusterToPointInTime` check the request as AWS does:
