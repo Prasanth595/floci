@@ -446,6 +446,27 @@ class IamIntegrationTest {
                     equalTo(decision));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"ForAllValues:StringTypoIfExists", "ForAnyValue:StringTypoIfExists",
+            "StringTypoIfExists", "ForAllValues:Null", "ForAnyValue:Null", "NullIfExists",
+            "ForAllValues:NullIfExists", "ForAnyValue:NullIfExists"})
+    void simulateCustomPolicyRejectsUnsupportedMissingKeyShortcuts(String operator) {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+                   "Condition":{"%s":{"dynamodb:LeadingKeys":["true"]}}}
+                ]}""".formatted(operator);
+        given()
+            .formParam("Action", "SimulateCustomPolicy")
+            .formParam("PolicyInputList.member.1", policy)
+            .formParam("ActionNames.member.1", "dynamodb:GetItem")
+            .formParam("ResourceArns.member.1", "*")
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then().statusCode(200)
+            .body("SimulateCustomPolicyResponse.SimulateCustomPolicyResult.EvaluationResults.member.EvalDecision",
+                    equalTo("implicitDeny"));
+    }
+
     @Test
     @Order(37)
     void simulateCustomPolicyAppliesPermissionsBoundary() {

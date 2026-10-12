@@ -17,7 +17,8 @@ import java.util.List;
  * <p>Exists so IAM condition-key extraction can reuse the expression parser without making
  * the whole {@link DynamoDbAccessPathValidator} public. Everything here is best effort: a
  * malformed or unsupported expression yields {@code null}, and the caller treats that as
- * "the leading key could not be determined", which fails closed at the policy layer.
+ * "the leading key could not be determined". A {@code ForAllValues} policy needs a
+ * {@code Null:false} guard to require that key.
  */
 final class DynamoDbKeyConditionParser {
 
@@ -43,7 +44,7 @@ final class DynamoDbKeyConditionParser {
         try {
             root = ExpressionEvaluator.parse(keyConditionExpression);
         } catch (RuntimeException e) {
-            return null; // unparseable expression → leading key unknown → fail closed upstream
+            return null; // Unparseable expression: omit the unknown leading key from the context.
         }
         if (root == null) {
             return null;

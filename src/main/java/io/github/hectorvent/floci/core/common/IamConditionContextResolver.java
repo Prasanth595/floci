@@ -499,9 +499,9 @@ public class IamConditionContextResolver {
      * {@code dynamodb:Select} from the buffered request body.
      *
      * <p>A key that cannot be resolved (unknown table, a Key that omits the partition
-     * attribute, an unparseable KeyConditionExpression) is omitted rather than guessed. A
-     * policy scoping access through the missing key then does not match, so the request is
-     * denied: a request that cannot be proven in scope is treated as out of scope.
+     * attribute, an unparseable KeyConditionExpression) is omitted rather than guessed.
+     * A {@code ForAllValues} condition matches an absent key; policies must pair it with
+     * {@code Null:false} to require a resolved key.
      */
     Map<String, List<String>> dynamoDbConditionContext(String action, ContainerRequestContext ctx) {
         JsonNode body = bufferedJsonBody(ctx);
@@ -549,7 +549,8 @@ public class IamConditionContextResolver {
     /**
      * The single table this request targets: the TableName field, or the sole RequestItems
      * entry for the batch operations. A multi-table batch has no single key schema, so it
-     * gets no leading keys and fails closed.
+     * gets no leading keys. A {@code ForAllValues} policy needs a {@code Null:false}
+     * guard to require resolved leading keys.
      */
     private String targetTableName(JsonNode body) {
         if (body.hasNonNull("TableName")) {

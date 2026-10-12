@@ -24,9 +24,9 @@ import java.util.regex.Pattern;
  *
  * <p>Everything is best effort. Whatever cannot be determined is simply absent from the
  * result: an unresolvable leading key produces an empty list, the condition key is then
- * omitted from the request context, and a policy that scopes access through it fails closed.
- * Note that this "fail closed" behavior applies to {@code dynamodb:LeadingKeys}; for
- * {@code dynamodb:Attributes} evaluated under {@code ForAllValues}, under-reporting is the
+ * omitted from the request context. A {@code ForAllValues} policy must include a
+ * {@code Null:false} guard to require a resolved leading key.
+ * For {@code dynamodb:Attributes} evaluated under {@code ForAllValues}, under-reporting is the
  * unsafe direction because omitting a referenced attribute could allow an unauthorized
  * operation to pass.
  */

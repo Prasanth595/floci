@@ -1218,6 +1218,9 @@ public class IamPolicyEvaluator {
     private boolean evaluateConditionBlock(String operator,
                                             Map<String, List<String>> keyValueMap,
                                             Map<String, List<String>> ctx) {
+        if (!isSupportedConditionOperator(operator)) {
+            return false;
+        }
         ParsedOperator parsed = parseOperator(operator);
         String baseOp = parsed.baseOp();
         boolean ifExists = parsed.ifExists();
@@ -1239,7 +1242,7 @@ public class IamPolicyEvaluator {
                 if (ifExists) {
                     continue; // key missing + IfExists → pass this key
                 }
-                if (parsed.quantifier() == SetQuantifier.FOR_ALL_VALUES && isSupportedConditionOperator(operator)) {
+                if (parsed.quantifier() == SetQuantifier.FOR_ALL_VALUES) {
                     continue;
                 }
                 // A negated operator asks for the key not to match, and an absent key matches

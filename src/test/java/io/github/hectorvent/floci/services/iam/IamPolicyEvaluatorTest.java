@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccoun
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.util.List;
@@ -443,6 +445,33 @@ class IamPolicyEvaluatorTest {
                     CallerContext.of(List.of(ALLOW_ALL, deny)), "dynamodb:GetItem", "*", Map.of()));
             assertEquals(Decision.ALLOW, evaluator.evaluate(CallerContext.of(List.of(ALLOW_ALL, deny)),
                     List.of(), "dynamodb:GetItem", "*", Map.of()));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ForAllValues:StringTypoIfExists", "ForAnyValue:StringTypoIfExists",
+            "StringTypoIfExists", "ForAllValues:Null", "ForAnyValue:Null", "NullIfExists",
+            "ForAllValues:NullIfExists", "ForAnyValue:NullIfExists"})
+    void unsupportedOperatorsCannotBypassConditionChecks(String operator) {
+        String allow = """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+                   "Condition":{"%s":{"dynamodb:LeadingKeys":["true"]}}}
+                ]}""".formatted(operator);
+        String deny = allow.replace("\"Effect\":\"Allow\"", "\"Effect\":\"Deny\"");
+        List<Map<String, List<String>>> contexts = List.of(Map.of(),
+                Map.of("dynamodb:LeadingKeys", List.of()),
+                Map.of("dynamodb:LeadingKeys", List.of("USER_alice")));
+        for (Map<String, List<String>> context : contexts) {
+            assertFalse(IamPolicyEvaluator.isSupportedConditionOperator(operator));
+            assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                    List.of(allow), "dynamodb:GetItem", "*", context));
+            assertEquals(Decision.DENY, evaluator.evaluate(CallerContext.of(List.of(allow)),
+                    List.of(), "dynamodb:GetItem", "*", context));
+            assertEquals(IamPolicyEvaluator.SimulationDecision.ALLOWED, evaluator.simulatePrincipalPolicy(
+                    CallerContext.of(List.of(ALLOW_ALL, deny)), "dynamodb:GetItem", "*", context));
+            assertEquals(Decision.ALLOW, evaluator.evaluate(CallerContext.of(List.of(ALLOW_ALL, deny)),
+                    List.of(), "dynamodb:GetItem", "*", context));
         }
     }
 
