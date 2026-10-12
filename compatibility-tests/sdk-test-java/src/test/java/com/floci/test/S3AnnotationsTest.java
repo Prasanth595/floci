@@ -9,17 +9,20 @@ import software.amazon.awssdk.services.s3.model.AnnotationEntry;
 import software.amazon.awssdk.services.s3.model.BucketVersioningStatus;
 import software.amazon.awssdk.services.s3.model.ChecksumMode;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.DeleteMarkerEntry;
 import software.amazon.awssdk.services.s3.model.GetObjectAnnotationResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectAnnotationsRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectAnnotationsResponse;
+import software.amazon.awssdk.services.s3.model.ListObjectVersionsResponse;
 import software.amazon.awssdk.services.s3.model.NoSuchAnnotationException;
+import software.amazon.awssdk.services.s3.model.ObjectVersion;
 import software.amazon.awssdk.services.s3.model.PutBucketVersioningRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectAnnotationRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectAnnotationResponse;
 import software.amazon.awssdk.services.s3.model.VersioningConfiguration;
 
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -27,7 +30,6 @@ import static org.assertj.core.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class S3AnnotationsTest {
 
-    private static final Logger LOG = Logger.getLogger(S3AnnotationsTest.class.getName());
     private static S3Client s3;
     private static final String BUCKET = "sdk-annotations-bucket";
     private static final String KEY = "docs/annotated.txt";
@@ -41,20 +43,20 @@ class S3AnnotationsTest {
 
     @AfterAll
     static void teardown() {
-        // Cleanup failures are logged with context instead of swallowed: a leaked object or a
-        // bucket that failed to delete would otherwise hide from later test runs.
-        for (String key : new String[]{"docs/annotated.txt", "docs/annotated-copy.txt", "docs/annotated-copied.txt"}) {
-            try {
-                s3.deleteObject(r -> r.bucket(BUCKET).key(key));
-            } catch (Exception e) {
-                LOG.log(Level.WARNING, "Failed to clean up object " + BUCKET + "/" + key, e);
-            }
+        List<ObjectVersion> versions = new ArrayList<>();
+        List<DeleteMarkerEntry> markers = new ArrayList<>();
+        for (ListObjectVersionsResponse page : s3.listObjectVersionsPaginator(r -> r.bucket(BUCKET))) {
+            versions.addAll(page.versions());
+            markers.addAll(page.deleteMarkers());
         }
-        try {
-            s3.deleteBucket(r -> r.bucket(BUCKET));
-        } catch (Exception e) {
-            LOG.log(Level.WARNING, "Failed to clean up bucket " + BUCKET, e);
+        for (ObjectVersion version : versions) {
+            s3.deleteObject(r -> r.bucket(BUCKET).key(version.key()).versionId(version.versionId()));
         }
+        for (DeleteMarkerEntry marker : markers) {
+            s3.deleteObject(r -> r.bucket(BUCKET).key(marker.key()).versionId(marker.versionId()));
+        }
+        s3.deleteBucket(r -> r.bucket(BUCKET));
+        assertThat(s3.listBuckets().buckets()).noneMatch(bucket -> BUCKET.equals(bucket.name()));
     }
 
     @Test

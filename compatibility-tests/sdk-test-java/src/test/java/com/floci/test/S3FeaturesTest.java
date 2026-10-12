@@ -47,6 +47,11 @@ class S3FeaturesTest {
         quietDeleteBucket(BUCKET_PAB);
         quietDeleteBucket(BUCKET_PAGINATE);
         quietDeleteBucket(BUCKET_334);
+        assertThat(s3.listBuckets().buckets()).noneMatch(bucket ->
+                bucket.name().equals(BUCKET_VERSIONS)
+                        || bucket.name().equals(BUCKET_PAB)
+                        || bucket.name().equals(BUCKET_PAGINATE)
+                        || bucket.name().equals(BUCKET_334));
         s3.close();
     }
 
@@ -401,24 +406,28 @@ class S3FeaturesTest {
                 token = resp.isTruncated() ? resp.nextContinuationToken() : null;
             } while (token != null);
 
-            // Delete all versions and delete-markers
+            // Collect every page before deleting: deleting a page invalidates its resume marker.
+            List<ObjectVersion> versions = new ArrayList<>();
+            List<DeleteMarkerEntry> markers = new ArrayList<>();
             String keyMarker = null;
             String versionMarker = null;
             do {
                 ListObjectVersionsResponse resp = s3.listObjectVersions(
                         ListObjectVersionsRequest.builder()
                                 .bucket(bucket).keyMarker(keyMarker).versionIdMarker(versionMarker).build());
-                for (ObjectVersion v : resp.versions()) {
-                    s3.deleteObject(DeleteObjectRequest.builder()
-                            .bucket(bucket).key(v.key()).versionId(v.versionId()).build());
-                }
-                for (DeleteMarkerEntry dm : resp.deleteMarkers()) {
-                    s3.deleteObject(DeleteObjectRequest.builder()
-                            .bucket(bucket).key(dm.key()).versionId(dm.versionId()).build());
-                }
+                versions.addAll(resp.versions());
+                markers.addAll(resp.deleteMarkers());
                 keyMarker = resp.isTruncated() ? resp.nextKeyMarker() : null;
                 versionMarker = resp.isTruncated() ? resp.nextVersionIdMarker() : null;
             } while (keyMarker != null);
+            for (ObjectVersion version : versions) {
+                s3.deleteObject(DeleteObjectRequest.builder()
+                        .bucket(bucket).key(version.key()).versionId(version.versionId()).build());
+            }
+            for (DeleteMarkerEntry marker : markers) {
+                s3.deleteObject(DeleteObjectRequest.builder()
+                        .bucket(bucket).key(marker.key()).versionId(marker.versionId()).build());
+            }
         } catch (Exception ignored) {}
     }
 
