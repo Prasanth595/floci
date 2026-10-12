@@ -255,11 +255,10 @@ class RedshiftSpectrumIntegrationTest {
             RestAssuredJsonUtils.configureAwsContentTypes();
             String queryId = RestAssuredJsonUtils.awsAction("RedshiftData", "ExecuteStatement", """
                     {"ClusterIdentifier":"%s","DbUser":"admin","Database":"dev",
-                     "Sql":"SELECT SUM(amount) AS total FROM lake.events"}
+                     "Sql":"SELECT SUM(amount) AS total FROM lake.events","WaitTimeSeconds":30}
                     """.formatted(clusterId)).then().statusCode(200).extract().path("Id");
-            Awaitility.await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
-                    assertEquals("FINISHED", RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
-                            "{\"Id\":\"" + queryId + "\"}").then().statusCode(200).extract().path("Status")));
+            assertEquals("FINISHED", RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
+                    "{\"Id\":\"" + queryId + "\"}").then().statusCode(200).extract().path("Status"));
             Number total = RestAssuredJsonUtils.awsAction("RedshiftData", "GetStatementResult",
                     "{\"Id\":\"" + queryId + "\"}").then().statusCode(200).extract().path("Records[0][0].longValue");
             assertEquals(37L, total.longValue());

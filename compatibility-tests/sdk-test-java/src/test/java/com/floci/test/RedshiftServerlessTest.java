@@ -140,16 +140,11 @@ class RedshiftServerlessTest {
                 ExecuteStatementResponse executed = dataClient.executeStatement(request -> request
                         .workgroupName(workgroupName)
                         .database("dev")
-                        .sql("select 1"));
+                        .sql("select 1")
+                        .waitTimeSeconds(30));
                 assertThat(executed.workgroupName()).isEqualTo(workgroupName);
                 assertThat(executed.clusterIdentifier()).isNull();
-                Instant deadline = Instant.now().plusSeconds(30);
                 DescribeStatementResponse described = dataClient.describeStatement(request -> request.id(executed.id()));
-                while (Instant.now().isBefore(deadline) && (described.status() == StatusString.SUBMITTED
-                        || described.status() == StatusString.PICKED || described.status() == StatusString.STARTED)) {
-                    Thread.sleep(200);
-                    described = dataClient.describeStatement(request -> request.id(executed.id()));
-                }
                 assertThat(described.status()).isEqualTo(StatusString.FINISHED);
 
                 String arn = created.workgroupArn();

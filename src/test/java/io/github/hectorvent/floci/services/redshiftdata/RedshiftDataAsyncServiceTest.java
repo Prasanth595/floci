@@ -167,7 +167,8 @@ class RedshiftDataAsyncServiceTest {
             release.countDown();
             await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                     assertEquals("FAILED", service.describeStatement(id).path("Status").asText()));
-            assertFalse(service.cancelStatement(id).path("Status").asBoolean());
+            AwsException rejected = assertThrows(AwsException.class, () -> service.cancelStatement(id));
+            assertEquals("ValidationException", rejected.getErrorCode());
         }
     }
 

@@ -644,8 +644,12 @@ public class RedshiftDataService implements Resettable {
 
     public ObjectNode cancelStatement(JsonNode request) {
         RedshiftDataStatementStore.StoredStatement stored = require(request);
+        if (stored.status.isTerminal()) {
+            throw new AwsException("ValidationException",
+                    "Could not cancel a query that is already in " + stored.status.name() + " state.", 400);
+        }
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("Status", !stored.status.isTerminal() && executor.cancel(stored.accountId, stored.id));
+        response.put("Status", executor.cancel(stored.accountId, stored.id));
         return response;
     }
 
