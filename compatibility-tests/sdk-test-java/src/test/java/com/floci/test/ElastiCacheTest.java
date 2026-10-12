@@ -138,7 +138,7 @@ class ElastiCacheTest {
                 .engine("redis")
                 .authToken(authToken)
                 .build()))
-                .isInstanceOf(UserAlreadyExistsException.class)
+                .isInstanceOf(ElastiCacheException.class)
                 .hasMessageContaining("already exists");
     }
 
@@ -205,7 +205,7 @@ class ElastiCacheTest {
                         .passwords("user-password-1")
                         .build())
                 .build()))
-                .isInstanceOf(ElastiCacheException.class)
+                .isInstanceOf(UserAlreadyExistsException.class)
                 .hasMessageContaining("already exists");
     }
 
