@@ -1307,8 +1307,7 @@ public class AslExecutor {
 
         // AWS SDK service integration: EC2 DescribeRegions
         if (integration.isSdk("ec2", "describeRegions")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeAwsSdkEc2DescribeRegions(region);
+            return invokeAwsSdkEc2DescribeRegions(sm.getStateMachineArn());
         }
 
         // S3 PutObject — optimized and aws-sdk integrations
@@ -1415,10 +1414,17 @@ public class AslExecutor {
         }
     }
 
-    private JsonNode invokeAwsSdkEc2DescribeRegions(String executionRegion) {
+    /**
+     * The regions of the partition the state machine lives in. The partition is read from its ARN,
+     * so a state machine in a region no partition publishes (allowed by
+     * {@code floci.partitions.allow-unknown-regions}) lists the regions of the partition its ARN
+     * was minted in.
+     */
+    private JsonNode invokeAwsSdkEc2DescribeRegions(String stateMachineArn) {
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode regions = objectMapper.createArrayNode();
-        AwsPartition partition = AwsPartitions.forRegionOrCommercial(executionRegion);
+        AwsPartition partition = AwsPartitions.find(AwsArnUtils.parse(stateMachineArn).partition())
+                .orElseGet(() -> AwsPartitions.forRegionOrCommercial(extractRegionFromArn(stateMachineArn)));
         for (AwsPartition.Region name : ec2Service.describeRegions(partition, false)) {
             ObjectNode region = objectMapper.createObjectNode();
             region.put("RegionName", name.id());
