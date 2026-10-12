@@ -140,7 +140,6 @@ Explicitly requested termination and stale-instance cleanup continue independent
 Other suspended process names are stored and returned but do not pause their
 associated activities.
 
-
 ## Launch Source Compatibility
 
 Auto Scaling groups preserve either a launch configuration, a top-level launch template, or a `MixedInstancesPolicy`. These launch sources are mutually exclusive in create/update requests. When a mixed instances policy is supplied, Floci stores and returns:
