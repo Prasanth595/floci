@@ -149,7 +149,9 @@ class Ec2ServiceTest {
         String region = "us-east-1";
 
         assertEquals("default", service.createVpc(region, "10.90.0.0/16", false, false, null).getInstanceTenancy());
-        assertEquals("default", service.createVpc(region, "10.91.0.0/16", false, false, " ").getInstanceTenancy());
+        // A present blank is not an enum value; only an absent parameter defaults.
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> service.createVpc(region, "10.91.0.0/16", false, false, " ")).getErrorCode());
         assertEquals("dedicated", service.createVpc(region, "10.92.0.0/16", false, false, "dedicated").getInstanceTenancy());
 
         AwsException bogus = assertThrows(AwsException.class,

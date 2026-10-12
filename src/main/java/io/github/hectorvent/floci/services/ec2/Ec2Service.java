@@ -4639,7 +4639,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * this parameter" (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateVpc.html).
      */
     private static String requireVpcTenancy(String instanceTenancy) {
-        String tenancy = instanceTenancy == null || instanceTenancy.isBlank() ? "default" : instanceTenancy;
+        // Only an absent parameter defaults; a present blank is not one of the enum values.
+        String tenancy = instanceTenancy == null ? "default" : instanceTenancy;
         requireParameterValue("instanceTenancy", tenancy, "default", "dedicated");
         return tenancy;
     }
