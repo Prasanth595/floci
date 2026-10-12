@@ -1475,14 +1475,6 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * Substitutes {@code AWS::SSM::Parameter::Value<String>}-typed parameter values — which carry
-     * an SSM parameter <em>name</em> — with the value stored in Parameter Store for the stack's
-     * account and region, as real CloudFormation does before template processing. Missing
-     * parameters fail the stack operation with the real AWS ValidationError. The related types
-     * {@code AWS::SSM::Parameter::Value<List<String>>} and {@code AWS::SSM::Parameter::Name} are
-     * not resolved and pass through verbatim.
-     */
-    /**
      * The parameter values the SAM transform sees: the given ones over each {@code Default}, with
      * {@code AWS::SSM::Parameter::Value<String>} parameters already read from Parameter Store, as
      * CloudFormation resolves them before it runs the transform. A parameter that cannot be fetched
@@ -1498,6 +1490,14 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
+    /**
+     * Substitutes {@code AWS::SSM::Parameter::Value<String>}-typed parameter values — which carry
+     * an SSM parameter <em>name</em> — with the value stored in Parameter Store for the stack's
+     * account and region, as real CloudFormation does before template processing. Missing
+     * parameters fail the stack operation with the real AWS ValidationError. The related types
+     * {@code AWS::SSM::Parameter::Value<List<String>>} and {@code AWS::SSM::Parameter::Name} are
+     * not resolved and pass through verbatim.
+     */
     private Map<String, String> resolveSsmParameters(JsonNode template, Map<String, String> params, String region) {
         JsonNode paramDefs = template.path("Parameters");
         if (!paramDefs.isObject()) {

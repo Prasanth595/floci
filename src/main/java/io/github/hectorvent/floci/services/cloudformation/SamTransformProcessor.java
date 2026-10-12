@@ -5,14 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -1293,14 +1290,7 @@ class SamTransformProcessor {
      * kept so the names match; nothing here relies on it being collision-resistant.
      */
     private static String generatedConditionName(String name, String hashInput) {
-        String hash;
-        try {
-            hash = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-1")
-                    .digest(hashInput.getBytes(StandardCharsets.UTF_8))).substring(0, 10);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-1 is required of every Java runtime", e);
-        }
-        String conditionName = name + hash;
+        String conditionName = name + Digests.sha1Hex(hashInput).substring(0, 10);
         return conditionName.length() > 255 ? conditionName.substring(0, 255) : conditionName;
     }
 
