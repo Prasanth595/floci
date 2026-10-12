@@ -2543,9 +2543,7 @@ public class ApiGatewayExecuteController {
                     .type(MediaType.APPLICATION_JSON).build();
         }
 
-        io.github.hectorvent.floci.services.apigatewayv2.model.Stage stage =
-                apiGatewayV2Service.getStage(region, apiId, stageName);
-        Map<String, String> stageVariables = stage != null ? stage.getStageVariables() : null;
+        Map<String, String> stageVariables = apiGatewayV2Service.getStageVariables(region, apiId, stageName);
 
         // A route carries exactly one authorizationType, so AWS_IAM, JWT and CUSTOM are mutually
         // exclusive branches. AWS_IAM was previously absent here, which let an unsigned request
