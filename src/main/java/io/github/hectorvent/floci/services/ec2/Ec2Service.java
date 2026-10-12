@@ -5570,7 +5570,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * list a client just read. A zone name that is not this region's {@code <region><letter>}
      * keeps the first zone's id, which is what an unrecognised name resolved to before.
      */
-    static String zoneIdForZoneName(String region, String zoneName) {
+    public static String zoneIdForZoneName(String region, String zoneName) {
         if (zoneName != null && zoneName.length() == region.length() + 1 && zoneName.startsWith(region)) {
             char letter = Character.toLowerCase(zoneName.charAt(zoneName.length() - 1));
             if (letter >= 'a' && letter <= 'z') {
