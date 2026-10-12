@@ -437,6 +437,64 @@ class GuardDutyServiceTest {
     }
 
     @Test
+    void createPublishingDestinationRejectsClientTokenOverSixtyFourCharacters() throws Exception {
+        String detectorId = service.createDetector(REGION, ACCOUNT, request("{\"enable\":true}")).getId();
+        String body = "{\"destinationType\":\"S3\",\"clientToken\":\"%s\","
+                + "\"destinationProperties\":{\"destinationArn\":\"arn:aws:s3:::a\"}}";
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createPublishingDestination(REGION, detectorId, request(body.formatted("t".repeat(65)))));
+        assertEquals("BadRequestException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("clientToken must be at most 64 characters.", error.getMessage());
+        assertTrue(service.listPublishingDestinations(REGION, detectorId, null, null).items().isEmpty());
+
+        service.createPublishingDestination(REGION, detectorId, request(body.formatted("t".repeat(64))));
+        assertEquals(1, service.listPublishingDestinations(REGION, detectorId, null, null).items().size());
+    }
+
+    @Test
+    void publishingDestinationSurvivesPersistentStorageReloadWithClientToken(@TempDir Path tempDir)
+            throws Exception {
+        Path detectorFile = tempDir.resolve("detectors.json");
+        Path adminFile = tempDir.resolve("admins.json");
+        Path memberFile = tempDir.resolve("members.json");
+        Path destinationFile = tempDir.resolve("destinations.json");
+        GuardDutyService firstService = new GuardDutyService(
+                loadedStore(detectorFile, new TypeReference<Map<String, Detector>>() {
+                }),
+                loadedStore(adminFile, new TypeReference<Map<String, AdminAccount>>() {
+                }),
+                loadedStore(memberFile, new TypeReference<Map<String, MemberAccount>>() {
+                }),
+                loadedStore(destinationFile, new TypeReference<Map<String, PublishingDestination>>() {
+                }));
+        String detectorId = firstService.createDetector(REGION, ACCOUNT, request("{\"enable\":true}")).getId();
+        String body = "{\"destinationType\":\"S3\",\"clientToken\":\"tok-reload\","
+                + "\"destinationProperties\":{\"destinationArn\":\"arn:aws:s3:::a\","
+                + "\"kmsKeyArn\":\"arn:aws:kms:us-east-1:000000000000:key/k\"}}";
+        PublishingDestination created = firstService.createPublishingDestination(REGION, detectorId, request(body));
+
+        GuardDutyService reloadedService = new GuardDutyService(
+                loadedStore(detectorFile, new TypeReference<Map<String, Detector>>() {
+                }),
+                loadedStore(adminFile, new TypeReference<Map<String, AdminAccount>>() {
+                }),
+                loadedStore(memberFile, new TypeReference<Map<String, MemberAccount>>() {
+                }),
+                loadedStore(destinationFile, new TypeReference<Map<String, PublishingDestination>>() {
+                }));
+
+        assertEquals(created, reloadedService.describePublishingDestination(
+                REGION, detectorId, created.destinationId()));
+        assertEquals("tok-reload", reloadedService.describePublishingDestination(
+                REGION, detectorId, created.destinationId()).clientToken());
+        PublishingDestination replay = reloadedService.createPublishingDestination(REGION, detectorId, request(body));
+        assertEquals(created.destinationId(), replay.destinationId());
+        assertEquals(1, reloadedService.listPublishingDestinations(REGION, detectorId, null, null).items().size());
+    }
+
+    @Test
     void deleteDetectorRemovesItsPublishingDestinations() throws Exception {
         InMemoryStorage<String, PublishingDestination> destinations = new InMemoryStorage<>();
         GuardDutyService svc = new GuardDutyService(new InMemoryStorage<>(), new InMemoryStorage<>(),
