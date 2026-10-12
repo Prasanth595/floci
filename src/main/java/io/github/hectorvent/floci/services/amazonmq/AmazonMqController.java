@@ -187,7 +187,8 @@ public class AmazonMqController {
     @GET
     @Path("/v1/brokers/{broker-id}/shared-resources")
     public Response describeSharedResources(@PathParam("broker-id") String brokerId) {
-        // Floci has no resource sharing, so an existing broker never has shared resources.
+        // Always empty: a resource share reaches a broker only through UpdateBroker's
+        // resourceShareArns, and Floci has no UpdateBroker to associate one with the broker.
         service.describeBroker(brokerId);
         return Response.ok(Map.of("sharedResources", List.of())).build();
     }
