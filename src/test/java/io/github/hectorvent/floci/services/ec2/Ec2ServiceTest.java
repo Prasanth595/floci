@@ -65,6 +65,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -902,6 +903,75 @@ class Ec2ServiceTest {
         service.disassociateVpcCidrBlock("us-east-1", associationId);
         assertEquals("InvalidSubnet.Range", assertThrows(AwsException.class,
                 () -> service.createSubnet("us-east-1", vpcId, "10.1.2.0/24", "us-east-1a")).getErrorCode());
+    }
+
+    @Test
+    void associateVpcCidrBlockRejectsTheRestrictedRangesForThePrimaryBlock() {
+        // VPC User Guide, "IPv4 CIDR block association restrictions": the primary block's range
+        // decides which secondary blocks are refused.
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Map<String, List<String>> restricted = new LinkedHashMap<>();
+        restricted.put("10.0.0.0/16", List.of("172.16.0.0/16", "192.168.0.0/16", "198.19.0.0/24"));
+        restricted.put("10.1.0.0/16", List.of("10.0.0.0/16", "10.0.4.0/24"));
+        restricted.put("172.16.0.0/16", List.of("10.1.0.0/16", "192.168.0.0/16", "172.31.0.0/16", "198.19.0.0/24"));
+        restricted.put("192.168.0.0/20", List.of("10.1.0.0/16", "172.16.0.0/16", "198.19.0.0/24"));
+        restricted.put("198.19.0.0/16", List.of("10.1.0.0/16", "172.16.0.0/16", "192.168.0.0/16"));
+        restricted.put("100.64.0.0/16", List.of("10.1.0.0/16", "172.16.0.0/16", "192.168.0.0/16", "198.19.0.0/24"));
+        restricted.put("52.0.0.0/16", List.of("10.1.0.0/16", "172.16.0.0/16", "192.168.0.0/16", "198.19.0.0/24"));
+
+        restricted.forEach((primary, blocks) -> {
+            String vpcId = service.createVpc("us-east-1", primary, false).getVpcId();
+            for (String cidr : blocks) {
+                AwsException error = assertThrows(AwsException.class,
+                        () -> service.associateVpcCidrBlock("us-east-1", vpcId, cidr), primary + " + " + cidr);
+                assertEquals("InvalidVpc.Range", error.getErrorCode());
+                assertEquals("The CIDR '" + cidr + "' is restricted. Use a CIDR from the same private address "
+                        + "range as the current VPC CIDR, or use a publicly-routable CIDR. For additional "
+                        + "restrictions, see https://docs.aws.amazon.com/vpc/latest/userguide/vpc-cidr-blocks.html",
+                        error.getMessage());
+                assertEquals(400, error.getHttpStatus());
+            }
+            assertEquals(1, service.describeVpcs("us-east-1", List.of(vpcId), Map.of()).getFirst()
+                    .getCidrBlockAssociationSet().size());
+        });
+    }
+
+    @Test
+    void associateVpcCidrBlockAcceptsThePermittedRangesForThePrimaryBlock() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Map<String, List<String>> permitted = new LinkedHashMap<>();
+        permitted.put("10.0.0.0/16", List.of("10.2.0.0/16", "100.64.0.0/16", "52.0.0.0/16"));
+        permitted.put("10.2.0.0/16", List.of("10.0.0.0/16"));
+        permitted.put("172.16.0.0/16", List.of("172.20.0.0/16", "100.64.0.0/16", "52.0.0.0/16"));
+        permitted.put("192.168.0.0/20", List.of("192.168.16.0/20", "100.64.0.0/16", "52.0.0.0/16"));
+        permitted.put("198.19.0.0/16", List.of("100.64.0.0/16", "52.0.0.0/16"));
+        permitted.put("100.64.0.0/16", List.of("100.65.0.0/16", "52.0.0.0/16"));
+        permitted.put("52.0.0.0/16", List.of("52.1.0.0/16", "100.64.0.0/16"));
+
+        permitted.forEach((primary, blocks) -> {
+            String vpcId = service.createVpc("us-east-1", primary, false).getVpcId();
+            for (String cidr : blocks) {
+                assertEquals(cidr, service.associateVpcCidrBlock("us-east-1", vpcId, cidr).getCidrBlock(),
+                        primary + " + " + cidr);
+            }
+        });
+    }
+
+    @Test
+    void associateVpcCidrBlockRefuses172Dot31ForA172Dot16Vpc() {
+        // A 172.16.0.0/12 VPC cannot add from 172.31.0.0/16, its own primary's /16 included.
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "172.31.104.0/21", false).getVpcId();
+        assertEquals("InvalidVpc.Range", assertThrows(AwsException.class,
+                () -> service.associateVpcCidrBlock("us-east-1", vpcId, "172.31.120.0/21")).getErrorCode());
+        assertEquals("172.30.120.0/21",
+                service.associateVpcCidrBlock("us-east-1", vpcId, "172.30.120.0/21").getCidrBlock());
     }
 
     @Test

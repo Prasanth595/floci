@@ -4863,6 +4863,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (attachmentTopologyLock(region)) {
             synchronized (lockFor(key(region, vpcId))) {
                 Vpc vpc = getRequiredVpc(region, vpcId);
+                rejectRestrictedVpcCidrAssociation(vpc, cidrBlock);
                 VpcCidrBlockAssociation assoc = new VpcCidrBlockAssociation(
                         "vpc-cidr-assoc-" + randomHex(8), cidrBlock);
                 vpc.getCidrBlockAssociationSet().add(assoc);
@@ -4870,6 +4871,63 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 return assoc;
             }
         }
+    }
+
+    /**
+     * The VPC User Guide's "IPv4 CIDR block association restrictions" table. What a VPC may add
+     * depends on the range its primary block came from: a VPC created in one RFC 1918 range
+     * cannot add a block from another RFC 1918 range or from 198.19.0.0/16, and a VPC created with
+     * a block from 198.19.0.0/16, from 100.64.0.0/10 or from publicly routable space cannot add an
+     * RFC 1918 block, nor (outside 198.19.0.0/16 itself) one from 198.19.0.0/16. Two narrower rows
+     * apply within a range: a 172.16.0.0/12 VPC cannot add from 172.31.0.0/16, and a 10.0.0.0/8
+     * VPC with any block in 10.0.0.0/15 cannot add from 10.0.0.0/16. AWS answers each with
+     * InvalidVpc.Range. Requests whose block does not parse are left to the checks that already
+     * handle them.
+     */
+    private void rejectRestrictedVpcCidrAssociation(Vpc vpc, String cidrBlock) {
+        if (!Ipv4Cidrs.isIpv4(cidrBlock) || !Ipv4Cidrs.isIpv4(vpc.getCidrBlock())) {
+            return;
+        }
+        String primaryRange = rfc1918Range(vpc.getCidrBlock());
+        String requestedRange = rfc1918Range(cidrBlock);
+        boolean benchmarking = Ipv4Cidrs.overlaps(cidrBlock, "198.19.0.0/16");
+        boolean restricted;
+        if (primaryRange != null) {
+            restricted = (requestedRange != null && !requestedRange.equals(primaryRange))
+                    || benchmarking
+                    || ("172.16.0.0/12".equals(primaryRange) && Ipv4Cidrs.overlaps(cidrBlock, "172.31.0.0/16"))
+                    || ("10.0.0.0/8".equals(primaryRange) && Ipv4Cidrs.overlaps(cidrBlock, "10.0.0.0/16")
+                            && vpcHasIpv4BlockIn(vpc, "10.0.0.0/15"));
+        } else if (Ipv4Cidrs.overlaps(vpc.getCidrBlock(), "198.19.0.0/16")) {
+            restricted = requestedRange != null;
+        } else {
+            restricted = requestedRange != null || benchmarking;
+        }
+        if (restricted) {
+            throw new AwsException("InvalidVpc.Range", "The CIDR '" + cidrBlock + "' is restricted. Use a CIDR "
+                    + "from the same private address range as the current VPC CIDR, or use a publicly-routable "
+                    + "CIDR. For additional restrictions, see "
+                    + "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-cidr-blocks.html", 400);
+        }
+    }
+
+    /** The RFC 1918 range {@code cidrBlock} falls in, or null when it is outside all three. */
+    private static String rfc1918Range(String cidrBlock) {
+        for (String range : List.of("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")) {
+            if (Ipv4Cidrs.overlaps(cidrBlock, range)) {
+                return range;
+            }
+        }
+        return null;
+    }
+
+    private static boolean vpcHasIpv4BlockIn(Vpc vpc, String range) {
+        return Ipv4Cidrs.overlaps(vpc.getCidrBlock(), range)
+                || vpc.getCidrBlockAssociationSet().stream()
+                        .filter(association -> "associated".equalsIgnoreCase(association.getCidrBlockState()))
+                        .map(VpcCidrBlockAssociation::getCidrBlock)
+                        .filter(Ipv4Cidrs::isIpv4)
+                        .anyMatch(block -> Ipv4Cidrs.overlaps(block, range));
     }
 
     /**
