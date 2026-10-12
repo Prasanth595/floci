@@ -44,11 +44,11 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "cloudfront", "cloudmap", "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito",
             "configservice", "connect", "controlcatalog", "controltower", "datasync", "dlm", "dms", "dynamodb", "ec2",
             "ecr", "ecs", "efs", "eks", "elasticache", "elasticbeanstalk", "elbv2", "emr", "emrserverless",
-            "eventbridge", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics",
+            "eventbridge", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
             "lambdamicrovms", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
             "pipes", "ram", "rds", "redshift", "redshiftserverless", "resourceexplorer2", "route53resolver",
             "s3tables", "s3vectors", "sagemaker", "scheduler", "secretsmanager", "servicequotas", "ses", "sns", "sqs",
-            "timestreaminfluxdb", "transfer", "verifiedpermissions", "wafv2");
+            "stepfunctions", "timestreaminfluxdb", "transfer", "verifiedpermissions", "wafv2");
 
     private static final String JSON_1_0 = "application/x-amz-json-1.0";
     private static final String JSON_1_1 = "application/x-amz-json-1.1";
@@ -1394,6 +1394,37 @@ class PartitionCrossServiceSmokeIntegrationTest {
             .formParam("Version", "2012-12-01")
             .formParam("SnapshotCopyGrantName", name)
         .when().post("/"));
+        PartitionMatrix.assertArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource("nonCommercialCases")
+    void lambdaFunctionArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "lambda");
+        String name = unique("smoke-fn", partitionCase);
+        String arn = signed(region, "lambda")
+            .contentType(JSON)
+            .body("{\"FunctionName\":\"" + name + "\",\"Runtime\":\"nodejs20.x\",\"Handler\":\"index.handler\","
+                    + "\"Role\":\"arn:" + partitionCase.partition() + ":iam::000000000000:role/lambda-role\"}")
+        .when().post("/2015-03-31/functions").then().statusCode(201)
+            .extract().jsonPath().getString("FunctionArn");
+        cleanup.register(() -> signed(region, "lambda").when().delete("/2015-03-31/functions/" + name));
+        PartitionMatrix.assertArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource("nonCommercialCases")
+    void stepFunctionsStateMachineArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "states");
+        String definition = "{\\\"StartAt\\\":\\\"Done\\\","
+                + "\\\"States\\\":{\\\"Done\\\":{\\\"Type\\\":\\\"Pass\\\",\\\"End\\\":true}}}";
+        String arn = json10(region, "states", "AWSStepFunctions.CreateStateMachine",
+                "{\"name\":\"" + unique("smoke-sm", partitionCase) + "\",\"definition\":\"" + definition + "\","
+                        + "\"roleArn\":\"arn:" + partitionCase.partition() + ":iam::000000000000:role/sfn-role\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("stateMachineArn");
+        cleanup.register(() -> json10(region, "states", "AWSStepFunctions.DeleteStateMachine",
+                "{\"stateMachineArn\":\"" + arn + "\"}").when().post("/"));
         PartitionMatrix.assertArnIn(partitionCase, arn);
     }
 
