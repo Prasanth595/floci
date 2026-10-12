@@ -28,7 +28,7 @@ class EnforcementFixturesIntegrationTest {
         given().header("Authorization", authorization).when().put("/" + bucket)
                 .then().statusCode(200);
         given().header("Authorization", authorization).body("before versioning")
-                .when().put(key).then().statusCode(200);
+                .when().put("/" + bucket + "/null.txt").then().statusCode(200);
         given().header("Authorization", authorization)
                 .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
                 .queryParam("versioning", "")
@@ -46,6 +46,10 @@ class EnforcementFixturesIntegrationTest {
                 .when().get("/" + bucket).then().statusCode(200)
                 .body(containsString("<IsTruncated>true</IsTruncated>"))
                 .body(containsString("<NextKeyMarker>first.txt</NextKeyMarker>"));
+        given().header("Authorization", authorization).queryParam("versions", "")
+                .queryParam("prefix", "null.txt")
+                .when().get("/" + bucket).then().statusCode(200)
+                .body(containsString("<VersionId>null</VersionId>"));
 
         EnforcementFixtures.removeBucket(baseUri.getPort(), authorization, bucket);
 
