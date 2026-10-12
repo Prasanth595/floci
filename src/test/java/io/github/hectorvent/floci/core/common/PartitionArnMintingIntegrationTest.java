@@ -12,7 +12,6 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
-import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -29,7 +28,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class PartitionArnMintingIntegrationTest {
 
-    private static final String ACCOUNT = "000000000000";
     private static final String JSON_1_1 = "application/x-amz-json-1.1";
 
     @RegisterExtension
@@ -40,12 +38,8 @@ class PartitionArnMintingIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
-    static Stream<PartitionCase> nonCommercialCases() {
-        return PartitionMatrix.cases().filter(c -> !"aws".equals(c.partition()));
-    }
-
     @ParameterizedTest
-    @MethodSource("nonCommercialCases")
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
     void cloudFormationPseudoParametersFollowTheStackRegion(PartitionCase partitionCase) {
         String region = partitionCase.region();
         String partition = partitionCase.partition();
@@ -87,7 +81,7 @@ class PartitionArnMintingIntegrationTest {
     }
 
     @ParameterizedTest
-    @MethodSource("nonCommercialCases")
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
     void kmsDefaultKeyPolicyNamesTheRootPrincipalInTheRequestPartition(PartitionCase partitionCase) {
         String region = partitionCase.region();
         String partition = partitionCase.partition();
@@ -115,11 +109,11 @@ class PartitionArnMintingIntegrationTest {
             .body("{\"KeyId\":\"" + keyId + "\",\"PolicyName\":\"default\"}")
         .when().post("/").then().statusCode(200)
             .extract().jsonPath().getString("Policy");
-        assertTrue(policy.contains("arn:" + partition + ":iam::" + ACCOUNT + ":root"), policy);
+        assertTrue(policy.contains("arn:" + partition + ":iam::" + PartitionMatrix.ACCOUNT + ":root"), policy);
     }
 
     @ParameterizedTest
-    @MethodSource("nonCommercialCases")
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
     void ssmParameterArnIsMintedInTheRequestPartition(PartitionCase partitionCase) {
         String region = partitionCase.region();
         String name = "/partition/" + Long.toString(System.nanoTime(), 36);
@@ -143,7 +137,8 @@ class PartitionArnMintingIntegrationTest {
             .body("{\"Name\":\"" + name + "\"}")
         .when().post("/").then().statusCode(200)
             .extract().jsonPath().getString("Parameter.ARN");
-        assertEquals("arn:" + partitionCase.partition() + ":ssm:" + region + ":" + ACCOUNT + ":parameter" + name, arn);
+        assertEquals("arn:" + partitionCase.partition() + ":ssm:" + region + ":" + PartitionMatrix.ACCOUNT
+                + ":parameter" + name, arn);
     }
 
     /**
@@ -178,7 +173,7 @@ class PartitionArnMintingIntegrationTest {
     }
 
     @ParameterizedTest
-    @MethodSource("nonCommercialCases")
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
     void serviceCatalogPortfolioArnIsMintedInTheRequestPartition(PartitionCase partitionCase) {
         String region = partitionCase.region();
         String token = Long.toString(System.nanoTime(), 36);
@@ -198,7 +193,7 @@ class PartitionArnMintingIntegrationTest {
         .when().post("/"));
 
         String arn = created.jsonPath().getString("PortfolioDetail.ARN");
-        assertEquals("arn:" + partitionCase.partition() + ":catalog:" + region + ":" + ACCOUNT + ":portfolio/" + id,
-                arn);
+        assertEquals("arn:" + partitionCase.partition() + ":catalog:" + region + ":" + PartitionMatrix.ACCOUNT
+                + ":portfolio/" + id, arn);
     }
 }

@@ -10,7 +10,6 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
-import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -47,12 +46,8 @@ class S3PartitionIntegrationTest {
         cleanup.register(() -> s3(region).delete("/" + bucket));
     }
 
-    static Stream<PartitionCase> nonCommercialCases() {
-        return PartitionMatrix.cases().filter(c -> !"aws".equals(c.partition()));
-    }
-
     @ParameterizedTest
-    @MethodSource("nonCommercialCases")
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
     void aNonCommercialEndpointRequiresItsOwnLocationConstraint(PartitionCase partitionCase) {
         String region = partitionCase.region();
         String bucket = bucketName(partitionCase.partition());
