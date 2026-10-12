@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshiftdata;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -57,8 +58,8 @@ class RedshiftDataEventPublisher {
                 LOG.warnv("EventBridge rejected event for statement {0}, account {1}, region {2}: {3}",
                         statement.id, statement.accountId, statement.region, result.entries());
             }
-        } catch (RuntimeException failure) {
-            LOG.warnv(failure, "Event delivery failed for statement {0}, account {1}, region {2}",
+        } catch (AwsException rejected) {
+            LOG.warnv(rejected, "EventBridge refused event for statement {0}, account {1}, region {2}",
                     statement.id, statement.accountId, statement.region);
         }
     }

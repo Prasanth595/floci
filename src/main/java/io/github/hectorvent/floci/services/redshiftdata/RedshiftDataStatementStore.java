@@ -112,7 +112,7 @@ class RedshiftDataStatementStore {
     }
 
     List<StoredStatement> values() {
-        return statements.scan(k -> true).stream().map(StoredStatement::snapshot).toList();
+        return statements.scan(k -> true).stream().map(StoredStatement::summary).toList();
     }
 
     void clear() {
@@ -172,7 +172,20 @@ class RedshiftDataStatementStore {
         boolean withEvent;
         Instant expiresAt;
 
+        /**
+         * Independent copy for storage and reads. Result data is written once when the statement
+         * completes, so the row nodes and column metadata are shared instead of deep-copied.
+         */
         StoredStatement snapshot() {
+            return copy(true);
+        }
+
+        /** Copy without result data or sub-statements, for listings that only need statement metadata. */
+        StoredStatement summary() {
+            return copy(false);
+        }
+
+        private StoredStatement copy(boolean withResults) {
             StoredStatement copy = new StoredStatement();
             copy.id = id;
             copy.sql = sql;
@@ -192,9 +205,11 @@ class RedshiftDataStatementStore {
             copy.hasResultSet = hasResultSet;
             copy.resultRows = resultRows;
             copy.resultSize = resultSize;
-            copy.columnMetadata = columnMetadata == null ? null : columnMetadata.deepCopy();
-            copy.rows = rows == null ? null : rows.stream().map(ArrayNode::deepCopy).toList();
-            copy.subStatements = subStatements == null ? null : subStatements.stream().map(StoredStatement::snapshot).toList();
+            if (withResults) {
+                copy.columnMetadata = columnMetadata;
+                copy.rows = rows == null ? null : List.copyOf(rows);
+                copy.subStatements = subStatements == null ? null : subStatements.stream().map(StoredStatement::snapshot).toList();
+            }
             copy.accountId = accountId;
             copy.region = region;
             copy.resourceArn = resourceArn;

@@ -17,6 +17,8 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 @ApplicationScoped
@@ -27,7 +29,9 @@ class RedshiftDataExecutor implements AutoCloseable {
     private final ThreadPoolExecutor deliveries;
     private final Map<String, RedshiftDataExecution> executions = new HashMap<>();
     private final int shutdownSeconds;
-    private boolean closed;
+    // Status writes hold the read lock; reset holds the write lock, so no write lands after a reset.
+    private final ReentrantReadWriteLock resetLock = new ReentrantReadWriteLock();
+    private volatile boolean closed;
     private volatile long generation;
 
     @Inject
@@ -55,34 +59,66 @@ class RedshiftDataExecutor implements AutoCloseable {
                 }, new ThreadPoolExecutor.AbortPolicy());
     }
 
-    synchronized RedshiftDataExecution submit(String account, String region, String id,
-                                               Consumer<RedshiftDataExecution> work) {
-        if (closed) {
-            throw new AwsException("ActiveStatementsExceededException", "Data API is shutting down", 400);
-        }
-        String key = account + ":" + id;
-        RedshiftDataExecution execution = new RedshiftDataExecution(generation);
-        Runnable task = () -> {
+    RedshiftDataExecution submit(String account, String region, String id,
+                                 Consumer<RedshiftDataExecution> work) {
+        return submit(account, region, id, () -> { }, work, (execution, failure) -> { });
+    }
+
+    /**
+     * Admits a statement. {@code admit} runs under the reset read lock, so a reset cannot slip
+     * between persisting the statement and registering its execution. {@code onFailure} runs when
+     * the worker dies with an unexpected exception, so the statement can still reach a terminal state.
+     */
+    RedshiftDataExecution submit(String account, String region, String id, Runnable admit,
+                                 Consumer<RedshiftDataExecution> work,
+                                 BiConsumer<RedshiftDataExecution, RuntimeException> onFailure) {
+        resetLock.readLock().lock();
+        try {
+            if (closed) {
+                throw new AwsException("ActiveStatementsExceededException", "Data API is shutting down", 400);
+            }
+            String key = account + ":" + id;
+            RedshiftDataExecution execution = new RedshiftDataExecution(generation);
+            Runnable task = () -> {
+                try {
+                    RequestScopes.runAs(account, region, () -> work.accept(execution));
+                } catch (RuntimeException failure) {
+                    LOG.errorv(failure, "Redshift Data worker failed for statement {0} in account {1}", id, account);
+                    recover(execution, failure, onFailure, id, account, region);
+                } finally {
+                    execution.completed();
+                    synchronized (this) {
+                        executions.remove(key, execution);
+                    }
+                }
+            };
+            execution.task(task);
+            admit.run();
+            synchronized (this) {
+                executions.put(key, execution);
+            }
             try {
-                RequestScopes.runAs(account, region, () -> work.accept(execution));
-            } catch (RuntimeException failure) {
-                LOG.warnv(failure, "Redshift Data worker failed for statement {0} in account {1}", id, account);
-            } finally {
-                execution.completed();
+                workers.execute(task);
+            } catch (RejectedExecutionException failure) {
                 synchronized (this) {
                     executions.remove(key, execution);
                 }
+                throw new AwsException("ActiveStatementsExceededException", "Too many active statements", 400);
             }
-        };
-        execution.task(task);
-        executions.put(key, execution);
-        try {
-            workers.execute(task);
-        } catch (RejectedExecutionException failure) {
-            executions.remove(key, execution);
-            throw new AwsException("ActiveStatementsExceededException", "Too many active statements", 400);
+            return execution;
+        } finally {
+            resetLock.readLock().unlock();
         }
-        return execution;
+    }
+
+    private static void recover(RedshiftDataExecution execution, RuntimeException failure,
+                                BiConsumer<RedshiftDataExecution, RuntimeException> onFailure,
+                                String id, String account, String region) {
+        try {
+            RequestScopes.runAs(account, region, () -> onFailure.accept(execution, failure));
+        } catch (RuntimeException secondary) {
+            LOG.errorv(secondary, "Unable to mark statement {0} in account {1} failed after a worker error", id, account);
+        }
     }
 
     boolean cancel(String account, String id) {
@@ -99,38 +135,58 @@ class RedshiftDataExecutor implements AutoCloseable {
         return true;
     }
 
-    synchronized void publish(RedshiftDataExecution execution, Runnable write) {
-        if (execution.isValid() && execution.generation() == generation) {
-            write.run();
+    void publish(RedshiftDataExecution execution, Runnable write) {
+        resetLock.readLock().lock();
+        try {
+            if (execution.isValid() && execution.generation() == generation) {
+                write.run();
+            }
+        } finally {
+            resetLock.readLock().unlock();
         }
     }
 
-    synchronized void deliver(RedshiftDataExecution execution, String account, String region,
-                              String id, Runnable delivery) {
-        if (!execution.isValid() || execution.generation() != generation) {
-            return;
-        }
+    void deliver(RedshiftDataExecution execution, String account, String region,
+                 String id, Runnable delivery) {
+        resetLock.readLock().lock();
         try {
+            if (!execution.isValid() || execution.generation() != generation) {
+                return;
+            }
+            // Delivery runs outside the lock so a slow EventBridge call cannot block a reset.
             deliveries.execute(() -> RequestScopes.runAs(account, region, () -> {
                 if (execution.isValid() && execution.generation() == generation) {
-                    delivery.run();
+                    try {
+                        delivery.run();
+                    } catch (RuntimeException failure) {
+                        // The SQL outcome is already stored; log the lost event at error level and keep the pool alive.
+                        LOG.errorv(failure, "Event delivery failed for statement {0}, account {1}, region {2}",
+                                id, account, region);
+                    }
                 }
             }));
         } catch (RejectedExecutionException failure) {
             LOG.warnv("Event delivery rejected for statement {0}, account {1}, region {2}", id, account, region);
+        } finally {
+            resetLock.readLock().unlock();
         }
     }
 
     void clear(Runnable clearStorage) {
         List<RedshiftDataExecution> active;
-        synchronized (this) {
+        resetLock.writeLock().lock();
+        try {
             generation++;
-            active = new ArrayList<>(executions.values());
+            synchronized (this) {
+                active = new ArrayList<>(executions.values());
+                executions.clear();
+            }
             for (RedshiftDataExecution execution : active) {
                 execution.invalidate();
             }
-            executions.clear();
             clearStorage.run();
+        } finally {
+            resetLock.writeLock().unlock();
         }
         for (RedshiftDataExecution execution : active) {
             if (execution.requestCancellation()) {

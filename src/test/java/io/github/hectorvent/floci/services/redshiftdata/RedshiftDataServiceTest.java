@@ -13,6 +13,8 @@ import org.h2.Driver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.DriverManager;
 import java.sql.ResultSetMetaData;
@@ -454,5 +456,21 @@ class RedshiftDataServiceTest {
         ObjectNode described = service.describeTable(descReq, REGION);
         assertEquals(1, described.get("ColumnList").size());
         assertEquals("x", described.get("ColumnList").get(0).get("name").asText().toLowerCase());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "VACUUM t", "  -- note\n create database d", "CREATE INDEX CONCURRENTLY i ON t (c)",
+            "create unique index concurrently i on t (c)", "DROP INDEX CONCURRENTLY i",
+            "REINDEX TABLE CONCURRENTLY t", "ALTER SYSTEM SET work_mem = '8MB'"})
+    void transactionIncompatibleCommandsRunOutsideATransaction(String sql) {
+        assertTrue(RedshiftDataService.AUTO_COMMIT_SQL.matcher(sql).find(), sql);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "CREATE INDEX i ON t (c)", "REINDEX TABLE t", "select 'vacuum'", "CREATE TABLE concurrently (a int)"})
+    void ordinaryCommandsStayInsideATransaction(String sql) {
+        assertFalse(RedshiftDataService.AUTO_COMMIT_SQL.matcher(sql).find(), sql);
     }
 }

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.scheduler;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -448,19 +449,31 @@ public class ScheduleInvoker {
             }
             case "redshiftdata:executeStatement" -> {
                 requireRedshiftData();
+                JsonNode executeParams = withoutWait(params);
                 RequestScopes.callAs(scheduleAccountId, region,
-                        () -> redshiftDataService.executeStatement(params, region, principal));
+                        () -> redshiftDataService.executeStatement(executeParams, region, principal));
                 LOG.debugv("Scheduler submitted to the Redshift Data API (universal target): {0}", serviceAction);
             }
             case "redshiftdata:batchExecuteStatement" -> {
                 requireRedshiftData();
+                JsonNode batchParams = withoutWait(params);
                 RequestScopes.callAs(scheduleAccountId, region,
-                        () -> redshiftDataService.batchExecuteStatement(params, region, principal));
+                        () -> redshiftDataService.batchExecuteStatement(batchParams, region, principal));
                 LOG.debugv("Scheduler submitted to the Redshift Data API (universal target): {0}", serviceAction);
             }
             default -> throw new UnsupportedOperationException(
                     "Scheduler: unsupported universal target action: " + serviceAction);
         }
+    }
+
+    // The shared dispatcher thread must never wait for a statement to finish.
+    private static JsonNode withoutWait(JsonNode params) {
+        if (params instanceof ObjectNode object && object.has("WaitTimeSeconds")) {
+            ObjectNode copy = object.deepCopy();
+            copy.remove("WaitTimeSeconds");
+            return copy;
+        }
+        return params;
     }
 
     private void requireRedshiftData() {

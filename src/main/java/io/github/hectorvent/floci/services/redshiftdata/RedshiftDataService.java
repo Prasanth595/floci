@@ -39,9 +39,11 @@ import java.util.regex.Pattern;
 public class RedshiftDataService implements Resettable {
 
     private static final int PAGE_SIZE = 1000;
-    private static final Pattern AUTO_COMMIT_SQL = Pattern.compile(
+    static final Pattern AUTO_COMMIT_SQL = Pattern.compile(
             "(?is)\\A(?:\\s+|--[^\\r\\n]*(?:\\r?\\n|$)|/\\*.*?\\*/)*"
-                    + "(?:VACUUM\\b|(?:CREATE|DROP)\\s+DATABASE\\b)");
+                    + "(?:VACUUM\\b|(?:CREATE|DROP)\\s+(?:DATABASE|TABLESPACE)\\b|ALTER\\s+SYSTEM\\b"
+                    + "|CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+CONCURRENTLY\\b|DROP\\s+INDEX\\s+CONCURRENTLY\\b"
+                    + "|REINDEX\\b[^;]*?\\bCONCURRENTLY\\b)");
 
     private final RedshiftDataResourceResolver resolver;
     private final RedshiftDataConnectionFactory connectionFactory;
@@ -98,44 +100,25 @@ public class RedshiftDataService implements Resettable {
         }
         ObjectNode response = executeResponse(stored.snapshot());
         RedshiftDataExecution handle;
-        synchronized (executor) {
-            store.putForAccount(stored.accountId, stored);
-            try {
-                handle = executor.submit(stored.accountId, stored.region, stored.id, execution -> {
-                    try {
-                        execution.checkCancellation();
-                        stored.status = RedshiftDataStatementStore.Status.STARTED;
-                        executor.publish(execution, () -> store.putForAccount(stored.accountId, stored));
-                        pending.run().accept(execution);
-                    } catch (Exception failure) {
-                        stored.status = RedshiftDataStatementStore.Status.FAILED;
-                        stored.error = failure.getMessage();
-                    }
-                    execution.terminal();
-                    if (execution.isCancellationRequested()) {
-                        stored.status = RedshiftDataStatementStore.Status.ABORTED;
-                        stored.error = "Statement cancelled";
-                    }
-                    if (stored.status != RedshiftDataStatementStore.Status.FINISHED) {
-                        stored.hasResultSet = false;
-                        stored.rows = null;
-                        stored.resultRows = 0;
-                        stored.resultSize = 0;
-                    }
-                    stored.updatedAt = Instant.now();
-                    executor.publish(execution, () -> {
-                        store.putForAccount(stored.accountId, stored);
-                        if (stored.withEvent && publisher != null) {
-                            RedshiftDataStatementStore.StoredStatement terminal = stored.snapshot();
-                            executor.deliver(execution, stored.accountId, stored.region, stored.id,
-                                    () -> publisher.publish(terminal));
+        try {
+            handle = executor.submit(stored.accountId, stored.region, stored.id,
+                    () -> store.putForAccount(stored.accountId, stored),
+                    execution -> {
+                        try {
+                            execution.checkCancellation();
+                            stored.status = RedshiftDataStatementStore.Status.STARTED;
+                            executor.publish(execution, () -> store.putForAccount(stored.accountId, stored));
+                            pending.run().accept(execution);
+                        } catch (Exception failure) {
+                            stored.status = RedshiftDataStatementStore.Status.FAILED;
+                            stored.error = failure.getMessage();
                         }
-                    });
-                });
-            } catch (AwsException failure) {
-                store.deleteForAccount(stored.accountId, stored.id);
-                throw failure;
-            }
+                        complete(stored, execution);
+                    },
+                    (execution, failure) -> recoverStatement(stored, execution, failure));
+        } catch (AwsException failure) {
+            store.deleteForAccount(stored.accountId, stored.id);
+            throw failure;
         }
         if (waitSeconds > 0) {
             handle.await(Duration.ofSeconds(waitSeconds));
@@ -145,6 +128,41 @@ public class RedshiftDataService implements Resettable {
             }
         }
         return response;
+    }
+
+    private void complete(RedshiftDataStatementStore.StoredStatement stored, RedshiftDataExecution execution) {
+        execution.terminal();
+        if (execution.isCancellationRequested()) {
+            stored.status = RedshiftDataStatementStore.Status.ABORTED;
+            stored.error = "Statement cancelled";
+        }
+        if (stored.status != RedshiftDataStatementStore.Status.FINISHED) {
+            stored.hasResultSet = false;
+            stored.rows = null;
+            stored.resultRows = 0;
+            stored.resultSize = 0;
+        }
+        stored.updatedAt = Instant.now();
+        executor.publish(execution, () -> {
+            store.putForAccount(stored.accountId, stored);
+            if (stored.withEvent && publisher != null) {
+                RedshiftDataStatementStore.StoredStatement terminal = stored.snapshot();
+                executor.deliver(execution, stored.accountId, stored.region, stored.id,
+                        () -> publisher.publish(terminal));
+            }
+        });
+    }
+
+    /** Last resort for a worker that died outside the statement handler: never leave a statement active. */
+    private void recoverStatement(RedshiftDataStatementStore.StoredStatement stored,
+                                  RedshiftDataExecution execution, RuntimeException failure) {
+        RedshiftDataStatementStore.StoredStatement persisted = store.getForAccount(stored.accountId, stored.id);
+        if (persisted != null && persisted.status != null && persisted.status.isTerminal()) {
+            return;
+        }
+        stored.status = RedshiftDataStatementStore.Status.FAILED;
+        stored.error = "Internal error: " + failure.getMessage();
+        complete(stored, execution);
     }
 
     private static int waitSeconds(JsonNode request) {

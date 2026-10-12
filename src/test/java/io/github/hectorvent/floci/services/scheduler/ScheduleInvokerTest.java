@@ -830,4 +830,21 @@ class ScheduleInvokerTest {
         verify(sqsService).sendMessage(anyString(), body.capture(), eq(0), isNull(), isNull(), eq("us-east-1"));
         assertTrue(body.getValue().matches("[0-9a-f]{16}/1"), body.getValue());
     }
+
+    @Test
+    void universalRedshiftDataDoesNotWaitOnTheSharedDispatcherThread() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"ClusterIdentifier\":\"analytics\",\"Database\":\"dev\",\"Sql\":\"select 1\","
+                + "\"WaitTimeSeconds\":30}");
+
+        invoke(target, "us-east-1");
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(redshiftDataService).executeStatement(request.capture(), eq("us-east-1"),
+                eq("arn:aws:iam::000000000000:role/x"));
+        assertTrue(request.getValue().path("WaitTimeSeconds").isMissingNode());
+        assertEquals("select 1", request.getValue().path("Sql").asText());
+    }
 }

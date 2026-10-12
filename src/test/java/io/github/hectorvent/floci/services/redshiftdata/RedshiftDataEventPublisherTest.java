@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshiftdata;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import org.junit.jupiter.api.Test;
@@ -53,7 +54,7 @@ class RedshiftDataEventPublisherTest {
     }
 
     @Test
-    void failedEntriesAndExceptionsDoNotFailSqlCompletion() {
+    void rejectedEntriesAndRefusalsDoNotFailSqlCompletion() {
         EventBridgeService events = mock(EventBridgeService.class);
         ServiceRegistry registry = mock(ServiceRegistry.class);
         when(registry.isServiceEnabled("eventbridge")).thenReturn(true);
@@ -66,8 +67,10 @@ class RedshiftDataEventPublisherTest {
         statement.expiresAt = Instant.now();
         when(events.putEvents(anyList(), anyString(), anyString()))
                 .thenReturn(new EventBridgeService.PutEventsResult(1, List.of(Map.of("ErrorCode", "InternalFailure"))))
-                .thenThrow(new IllegalStateException("delivery failure"));
+                .thenThrow(new AwsException("InvalidEventPatternException", "refused", 400))
+                .thenThrow(new IllegalStateException("programming error"));
         assertDoesNotThrow(() -> publisher.publish(statement));
         assertDoesNotThrow(() -> publisher.publish(statement));
+        assertThrows(IllegalStateException.class, () -> publisher.publish(statement));
     }
 }

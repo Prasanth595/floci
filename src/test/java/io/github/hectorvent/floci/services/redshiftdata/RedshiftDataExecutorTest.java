@@ -130,4 +130,19 @@ class RedshiftDataExecutorTest {
             throw new AssertionError(expected);
         }
     }
+
+    @Test
+    void unexpectedWorkerFailureReachesTheFailureHandler() throws Exception {
+        try (RedshiftDataExecutor executor = new RedshiftDataExecutor(1, 1, 1)) {
+            AtomicBoolean recovered = new AtomicBoolean();
+            RedshiftDataExecution execution = executor.submit("111111111111", "us-east-1", "broken", () -> { },
+                    ignored -> {
+                        throw new IllegalStateException("storage unavailable");
+                    },
+                    (failed, failure) -> recovered.set("storage unavailable".equals(failure.getMessage())));
+            execution.await(Duration.ofSeconds(5));
+            assertTrue(execution.isDone());
+            assertTrue(recovered.get());
+        }
+    }
 }
