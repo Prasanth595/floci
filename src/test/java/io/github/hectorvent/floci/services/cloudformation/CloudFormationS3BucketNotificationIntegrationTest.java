@@ -20,7 +20,6 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * An {@code AWS::S3::Bucket}'s {@code NotificationConfiguration} reaches the bucket and delivers.
@@ -114,7 +113,7 @@ class CloudFormationS3BucketNotificationIntegrationTest {
     void theBucketCarriesItsNotificationConfigurationAndDeliversThroughIt() throws Exception {
         String name = "cfn-notify-" + Long.toString(System.nanoTime(), 36);
         String stackId = stack("CreateStack", name, template(name, QUEUE_AND_FUNCTION));
-        await(stackId, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "CREATE_COMPLETE");
 
         bucketGet(name, "notification")
             .body(containsString("<Queue>arn:aws:sqs:us-east-1:000000000000:" + name + "</Queue>"))
@@ -181,7 +180,7 @@ class CloudFormationS3BucketNotificationIntegrationTest {
               }
             }
             """.formatted(name));
-        await(stackId, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "CREATE_COMPLETE");
 
         bucketGet(name, "notification")
             .body(containsString("<Event>s3:ObjectCreated:*</Event>"))
@@ -200,7 +199,7 @@ class CloudFormationS3BucketNotificationIntegrationTest {
                 "Event": "s3:ObjectCreated:*",
                 "Queue": "arn:aws:sqs:us-east-1:000000000000:%s-absent" } ] }
             """.formatted(name)));
-        await(stackId, "ROLLBACK_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "ROLLBACK_COMPLETE");
         given().when().head("/" + name).then().statusCode(404);
 
         String events = given()
@@ -219,7 +218,7 @@ class CloudFormationS3BucketNotificationIntegrationTest {
     void anUpdateWithARejectedDestinationRollsBackToTheConfigurationItHad() throws Exception {
         String name = "cfn-notify-reject-" + Long.toString(System.nanoTime(), 36);
         String stackId = stack("CreateStack", name, template(name, QUEUE_AND_FUNCTION));
-        await(stackId, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "CREATE_COMPLETE");
 
         stack("UpdateStack", name, template(name, """
             , "VersioningConfiguration": { "Status": "Enabled" },
@@ -227,7 +226,7 @@ class CloudFormationS3BucketNotificationIntegrationTest {
                 "Event": "s3:ObjectCreated:*",
                 "Queue": "arn:aws:sqs:us-east-1:000000000000:%s-absent" } ] }
             """.formatted(name)));
-        await(stackId, "UPDATE_ROLLBACK_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "UPDATE_ROLLBACK_COMPLETE");
 
         bucketGet(name, "notification")
             .body(containsString("<Queue>arn:aws:sqs:us-east-1:000000000000:" + name + "</Queue>"))
@@ -243,14 +242,14 @@ class CloudFormationS3BucketNotificationIntegrationTest {
     void anUpdateFailingAfterTheNotificationPutRestoresTheConfigurationItReplaced() throws Exception {
         String name = "cfn-notify-later-" + Long.toString(System.nanoTime(), 36);
         String stackId = stack("CreateStack", name, template(name, QUEUE_AND_FUNCTION));
-        await(stackId, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "CREATE_COMPLETE");
 
         stack("UpdateStack", name, template(name, """
             , "VersioningConfiguration": { "Status": "Bogus" },
               "NotificationConfiguration": { "QueueConfigurations": [ {
                 "Event": "s3:ObjectRemoved:*", "Queue": { "Fn::GetAtt": ["Queue", "Arn"] } } ] }
             """));
-        await(stackId, "UPDATE_ROLLBACK_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "UPDATE_ROLLBACK_COMPLETE");
 
         bucketGet(name, "notification")
             .body(containsString("<Event>s3:ObjectCreated:*</Event>"))
@@ -264,7 +263,7 @@ class CloudFormationS3BucketNotificationIntegrationTest {
         String name = "cfn-notify-later-create-" + Long.toString(System.nanoTime(), 36);
         String stackId = stack("CreateStack", name, template(name, QUEUE_AND_FUNCTION
                 + ", \"VersioningConfiguration\": { \"Status\": \"Bogus\" }"));
-        await(stackId, "ROLLBACK_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "ROLLBACK_COMPLETE");
 
         given().when().head("/" + name).then().statusCode(404);
     }
@@ -298,7 +297,7 @@ class CloudFormationS3BucketNotificationIntegrationTest {
             }
             """;
         String stackId = stack("CreateStack", name, template.formatted(name, "first"));
-        await(stackId, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "CREATE_COMPLETE");
         String queueArn = "arn:aws:sqs:us-east-1:000000000000:" + name;
         given().contentType("application/xml").body("""
             <NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
@@ -308,7 +307,7 @@ class CloudFormationS3BucketNotificationIntegrationTest {
             .when().put("/" + name + "?notification").then().statusCode(200);
 
         stack("UpdateStack", name, template.formatted(name, "second"));
-        await(stackId, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "UPDATE_COMPLETE");
 
         bucketGet(name, "tagging").body(containsString("<Value>second</Value>"));
         bucketGet(name, "notification").body(containsString("<Event>s3:ObjectRemoved:*</Event>"));
@@ -319,12 +318,12 @@ class CloudFormationS3BucketNotificationIntegrationTest {
     void anUpdateThatKeepsTheConfigurationSendsNoNewTestEvent() throws Exception {
         String name = "cfn-notify-same-" + Long.toString(System.nanoTime(), 36);
         String stackId = stack("CreateStack", name, template(name, QUEUE_AND_FUNCTION));
-        await(stackId, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "CREATE_COMPLETE");
         drain(name);
 
         stack("UpdateStack", name, template(name, QUEUE_AND_FUNCTION
                 + ", \"Tags\": [ { \"Key\": \"touched\", \"Value\": \"yes\" } ]"));
-        await(stackId, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "UPDATE_COMPLETE");
 
         bucketGet(name, "tagging").body(containsString("<Key>touched</Key>"));
         assertEquals(List.of(), drain(name));
@@ -375,11 +374,11 @@ class CloudFormationS3BucketNotificationIntegrationTest {
     void anUpdateToAnEmptyConfigurationClearsTheBucket() throws Exception {
         String name = "cfn-notify-clear-" + Long.toString(System.nanoTime(), 36);
         String stackId = stack("CreateStack", name, template(name, QUEUE_AND_FUNCTION));
-        await(stackId, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "CREATE_COMPLETE");
         bucketGet(name, "notification").body(containsString("<QueueConfiguration>"));
 
         stack("UpdateStack", name, template(name, ", \"NotificationConfiguration\": {}"));
-        await(stackId, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "UPDATE_COMPLETE");
 
         bucketGet(name, "notification")
             .body(not(containsString("<QueueConfiguration>")))
@@ -391,11 +390,11 @@ class CloudFormationS3BucketNotificationIntegrationTest {
     void anUpdateThatRemovesTheConfigurationClearsTheBucket() throws Exception {
         String name = "cfn-notify-remove-" + Long.toString(System.nanoTime(), 36);
         String stackId = stack("CreateStack", name, template(name, QUEUE_AND_FUNCTION));
-        await(stackId, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "CREATE_COMPLETE");
         bucketGet(name, "notification").body(containsString("<QueueConfiguration>"));
 
         stack("UpdateStack", name, template(name, ""));
-        await(stackId, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "UPDATE_COMPLETE");
 
         bucketGet(name, "notification")
             .body(not(containsString("<QueueConfiguration>")))
@@ -412,7 +411,7 @@ class CloudFormationS3BucketNotificationIntegrationTest {
     void anUpdateThatDoesNotDeclareTheConfigurationLeavesTheBucketsOwn() throws Exception {
         String name = "cfn-notify-keep-" + Long.toString(System.nanoTime(), 36);
         String stackId = stack("CreateStack", name, template(name, ""));
-        await(stackId, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "CREATE_COMPLETE");
 
         String queueArn = "arn:aws:sqs:us-east-1:000000000000:" + name;
         given().contentType("application/xml").body("""
@@ -423,7 +422,7 @@ class CloudFormationS3BucketNotificationIntegrationTest {
             .when().put("/" + name + "?notification").then().statusCode(200);
 
         stack("UpdateStack", name, template(name, ", \"Tags\": [ { \"Key\": \"touched\", \"Value\": \"yes\" } ]"));
-        await(stackId, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "UPDATE_COMPLETE");
 
         bucketGet(name, "tagging").body(containsString("<Key>touched</Key>"));
         bucketGet(name, "notification").body(containsString("<Queue>" + queueArn + "</Queue>"));
@@ -462,30 +461,5 @@ class CloudFormationS3BucketNotificationIntegrationTest {
             .extract().asString();
         int start = xml.indexOf("<StackId>") + "<StackId>".length();
         return xml.substring(start, xml.indexOf("</StackId>", start));
-    }
-
-    private static void await(String stackId, String status) throws InterruptedException {
-        String xml = "";
-        long deadline = System.currentTimeMillis() + 10_000;
-        while (System.currentTimeMillis() < deadline) {
-            xml = given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackId)
-            .when().post("/").then().statusCode(200).extract().asString();
-            if (xml.contains("<StackStatus>" + status + "</StackStatus>")) {
-                return;
-            }
-            // A rollback passes through CREATE_FAILED or UPDATE_FAILED on its way, so while waiting
-            // for one only a failed rollback is final.
-            boolean settledElsewhere = status.contains("ROLLBACK")
-                    ? xml.contains("ROLLBACK_FAILED</StackStatus>")
-                    : xml.contains("_FAILED</StackStatus>") || xml.contains("ROLLBACK_COMPLETE</StackStatus>");
-            if (settledElsewhere) {
-                break;
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + stackId + " never reached " + status + ": " + xml);
     }
 }
