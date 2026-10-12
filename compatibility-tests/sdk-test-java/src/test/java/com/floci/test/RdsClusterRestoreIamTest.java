@@ -51,9 +51,9 @@ class RdsClusterRestoreIamTest {
                         boolean expected = Boolean.TRUE.equals(flag);
                         assertThat(restored.iamDatabaseAuthenticationEnabled()).isEqualTo(expected);
                         assertThat(rds.describeDBClusters(b -> b.dbClusterIdentifier(target)).dbClusters()
-                                .getFirst().iamDatabaseAuthenticationEnabled()).isEqualTo(expected);
+                                .get(0).iamDatabaseAuthenticationEnabled()).isEqualTo(expected);
                         assertThat(rds.describeDBClusters(b -> b.dbClusterIdentifier(source)).dbClusters()
-                                .getFirst().iamDatabaseAuthenticationEnabled()).isTrue();
+                                .get(0).iamDatabaseAuthenticationEnabled()).isTrue();
                     } finally {
                         deleteCluster(rds, target);
                     }

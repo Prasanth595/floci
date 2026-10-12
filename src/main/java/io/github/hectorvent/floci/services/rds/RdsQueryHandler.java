@@ -1711,13 +1711,10 @@ public class RdsQueryHandler {
 
         try {
             Integer requestedPort = parseIntegerParam(params, "Port");
-            DbInstance instance = requestedPort == null
-                    ? service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
-                            dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
-                            vpcSecurityGroupIds, tags, region)
-                    : service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
-                            dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
-                            vpcSecurityGroupIds, tags, region, requestedPort);
+            DbInstance instance = service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
+                    dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
+                    vpcSecurityGroupIds, tags, region, requestedPort,
+                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"));
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBInstanceFromDBSnapshot", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {

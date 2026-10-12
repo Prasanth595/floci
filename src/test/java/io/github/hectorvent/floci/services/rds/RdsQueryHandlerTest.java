@@ -2472,12 +2472,13 @@ class RdsQueryHandlerTest {
     @ParameterizedTest
     @CsvSource({
             "RestoreDBInstanceFromDBSnapshot, MultiAZ",
+            "RestoreDBInstanceFromDBSnapshot, EnableIAMDatabaseAuthentication",
             "RestoreDBClusterFromSnapshot, EnableIAMDatabaseAuthentication",
             "RestoreDBClusterToPointInTime, EnableIAMDatabaseAuthentication"
     })
     void restoreBooleanFlagsRejectMalformedValuesBeforeServiceCalls(String action, String parameter) {
         when(service.restoreDbInstanceFromDbSnapshot(any(), any(), any(), any(), anyBoolean(),
-                any(), any(), any(), any())).thenReturn(makeInstance("restored"));
+                any(), any(), any(), any(), any(), any())).thenReturn(makeInstance("restored"));
         when(service.restoreDbClusterFromSnapshot(any(), any(), any(), any(), any(), any(),
                 any(), any(), any(), any(), any(), any(), any())).thenReturn(makeCluster("restored"));
         when(service.restoreDbClusterToPointInTime(any(), any(), any(), any(), any(), any(),
@@ -2508,10 +2509,10 @@ class RdsQueryHandlerTest {
     void restoreInstanceSnapshotPreservesMultiAzValuesAndDefault(String value) {
         boolean enabled = Boolean.parseBoolean(value);
         when(service.restoreDbInstanceFromDbSnapshot(eq("restored"), eq("source"), isNull(), isNull(),
-                eq(enabled), isNull(), eq(List.of()), eq(Map.of()), isNull()))
+                eq(enabled), isNull(), eq(List.of()), eq(Map.of()), isNull(), isNull(), isNull()))
                 .thenReturn(makeInstance("restored"));
         when(service.restoreDbInstanceFromDbSnapshot(eq("restored"), eq("source"), isNull(), isNull(),
-                eq(enabled), isNull(), eq(List.of()), eq(Map.of()), isNull(), eq(5433)))
+                eq(enabled), isNull(), eq(List.of()), eq(Map.of()), isNull(), eq(5433), isNull()))
                 .thenReturn(makeInstance("restored"));
         MultivaluedMap<String, String> p = params();
         p.putSingle("DBInstanceIdentifier", "restored");
@@ -2522,11 +2523,33 @@ class RdsQueryHandlerTest {
 
         assertEquals(200, handler.handle("RestoreDBInstanceFromDBSnapshot", p).getStatus());
         verify(service).restoreDbInstanceFromDbSnapshot("restored", "source", null, null,
-                enabled, null, List.of(), Map.of(), null);
+                enabled, null, List.of(), Map.of(), null, null, null);
         p.putSingle("Port", "5433");
         assertEquals(200, handler.handle("RestoreDBInstanceFromDBSnapshot", p).getStatus());
         verify(service).restoreDbInstanceFromDbSnapshot("restored", "source", null, null,
-                enabled, null, List.of(), Map.of(), null, 5433);
+                enabled, null, List.of(), Map.of(), null, 5433, null);
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void restoreInstanceSnapshotForwardsIamFlagWithAndWithoutPort(String value) {
+        Boolean enabled = value == null ? null : Boolean.parseBoolean(value);
+        when(service.restoreDbInstanceFromDbSnapshot(any(), any(), any(), any(), anyBoolean(),
+                any(), any(), any(), any(), any(), eq(enabled))).thenReturn(makeInstance("restored"));
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBInstanceIdentifier", "restored");
+        p.putSingle("DBSnapshotIdentifier", "source");
+        if (value != null) {
+            p.putSingle("EnableIAMDatabaseAuthentication", value);
+        }
+        assertEquals(200, handler.handle("RestoreDBInstanceFromDBSnapshot", p).getStatus());
+        verify(service).restoreDbInstanceFromDbSnapshot("restored", "source", null, null,
+                false, null, List.of(), Map.of(), null, null, enabled);
+        p.putSingle("Port", "5433");
+        assertEquals(200, handler.handle("RestoreDBInstanceFromDBSnapshot", p).getStatus());
+        verify(service).restoreDbInstanceFromDbSnapshot("restored", "source", null, null,
+                false, null, List.of(), Map.of(), null, 5433, enabled);
     }
 
     @ParameterizedTest
@@ -2561,7 +2584,7 @@ class RdsQueryHandlerTest {
     @Test
     void restoreDbInstanceFromDbSnapshot_success() {
         DbInstance instance = makeInstance("mydb");
-        when(service.restoreDbInstanceFromDbSnapshot(eq("mydb"), eq("mysnap"), eq("db.t3.large"), eq("us-east-1a"), eq(true), eq("my-subnets"), eq(List.of("sg-123")), eq(Map.of("Env", "Prod")), isNull()))
+        when(service.restoreDbInstanceFromDbSnapshot(eq("mydb"), eq("mysnap"), eq("db.t3.large"), eq("us-east-1a"), eq(true), eq("my-subnets"), eq(List.of("sg-123")), eq(Map.of("Env", "Prod")), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();

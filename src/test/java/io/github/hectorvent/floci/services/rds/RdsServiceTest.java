@@ -3954,6 +3954,36 @@ class RdsServiceTest {
         verify(containerManager).createPostgresSnapshot(any(), eq("admin"));
     }
 
+    @ParameterizedTest
+    @CsvSource({"true, , false, ", "true, false, false, ", "true, true, true, ",
+            "false, , false, ", "false, false, false, ", "false, true, true, ",
+            "true, , false, 5433", "true, false, false, 5433", "true, true, true, 5433",
+            "false, , false, 5433", "false, false, false, 5433", "false, true, true, 5433"})
+    void instanceSnapshotRestoreIamDefaultsToDisabled(boolean sourceEnabled, Boolean requested,
+                                                       boolean expected, Integer port) {
+        DbInstance source = rdsService.createDbInstance("iam-source", "postgres", "16.3",
+                "admin", "password", "dbname", "db.t3.micro", 20, sourceEnabled,
+                null, null, null);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
+        DbSnapshot snapshot = rdsService.createDbSnapshot("iam-snapshot", "iam-source");
+        clearInvocations(proxyManager);
+
+        DbInstance restored = rdsService.restoreDbInstanceFromDbSnapshot("iam-restored", "iam-snapshot",
+                null, null, false, null, List.of(), Map.of(), "us-east-1", port, requested);
+
+        assertEquals(expected, restored.isIamDatabaseAuthenticationEnabled());
+        assertEquals(expected, rdsService.getDbInstance("iam-restored").isIamDatabaseAuthenticationEnabled());
+        assertEquals(sourceEnabled, source.isIamDatabaseAuthenticationEnabled());
+        assertEquals(sourceEnabled, snapshot.isIamDatabaseAuthenticationEnabled());
+        verify(proxyManager).startProxy(any(), any(), eq(expected), anyInt(), any(), anyInt(),
+                any(), any(), any(), any(), any(), any());
+        if (requested == null) {
+            DbInstance legacy = rdsService.restoreDbInstanceFromDbSnapshot("iam-legacy", "iam-snapshot",
+                    null, null, false, null, List.of(), Map.of(), "us-east-1");
+            assertFalse(legacy.isIamDatabaseAuthenticationEnabled());
+        }
+    }
+
     @Test
     void createCopyAndRestoreDbSnapshotPreserveEncryptionWithoutExplicitKmsKey() {
         DbInstance sourceInstance = rdsService.createDbInstance("mydb", "postgres", "13",
