@@ -1316,28 +1316,40 @@ public class CloudFormationService implements ResourceProvider {
             throw new AwsException("ValidationError",
                     "Either StackName or PhysicalResourceId must be specified.", 400);
         }
+        if (hasStackName && hasPhysicalId) {
+            throw new AwsException("ValidationError",
+                    "Cannot specify both StackName and PhysicalResourceId.", 400);
+        }
 
+        // A physical id names the stack, it does not narrow it: AWS returns "the associated
+        // resources of the stack that the resource belongs to", which is the whole stack.
         Stack stack = hasStackName
                 ? getStackOrThrow(stackName, region)
                 : stackContaining(physicalResourceId, region);
         List<StackResource> resources = new ArrayList<>(stack.resourcesSnapshot().values());
 
-        if (hasPhysicalId) {
-            resources.removeIf(r -> !physicalResourceId.equals(r.getPhysicalId()));
-        }
+        // Only a filter on the result. The reference documents no error for a logical id the
+        // stack does not have, and DescribeStackResource, the singular action where the resource
+        // is required rather than optional, is the one that raises for a miss.
         if (logicalResourceId != null && !logicalResourceId.isBlank()) {
             resources.removeIf(r -> !logicalResourceId.equals(r.getLogicalId()));
-            if (resources.isEmpty()) {
-                throw new AwsException("ValidationError", "Resource " + logicalResourceId
-                        + " does not exist for stack " + stack.getStackName(), 400);
-            }
         }
         return new StackResourcesView(stack.getStackName(), resources);
     }
 
-    /** The stack owning a physical id, for the {@code PhysicalResourceId}-only form of the call. */
+    /**
+     * The stack owning a physical id, for the {@code PhysicalResourceId}-only form of the call.
+     *
+     * <p>Live stacks are considered before deleted ones, newest first within each group.
+     * {@code listStacks} answers oldest first and keeps deleted stacks for their retention window,
+     * so walking it directly resolves a redeployed resource to the stack that used to own it.
+     */
     private Stack stackContaining(String physicalResourceId, String region) {
-        for (Stack stack : listStacks(region)) {
+        List<Stack> candidates = new ArrayList<>(listStacks(region));
+        candidates.sort(Comparator
+                .comparing((Stack s) -> "DELETE_COMPLETE".equals(s.getStatus()))
+                .thenComparing(Stack::getCreationTime, Comparator.reverseOrder()));
+        for (Stack stack : candidates) {
             boolean owns = stack.resourcesSnapshot().values().stream()
                     .anyMatch(r -> physicalResourceId.equals(r.getPhysicalId()));
             if (owns) {

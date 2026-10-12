@@ -23,7 +23,11 @@ class CloudFormationDescribeStackResourcesFilterIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
 
     private String createStack(String suffix) {
-        String stackName = "cfn-dsr-" + suffix;
+        return createStack("cfn-dsr-" + suffix, suffix);
+    }
+
+    /** Stack name and resource names chosen separately, so two stacks can own the same physical id. */
+    private String createStack(String stackName, String suffix) {
         String template = """
                 {
                   "Resources": {
@@ -71,30 +75,30 @@ class CloudFormationDescribeStackResourcesFilterIntegrationTest {
     }
 
     @Test
-    void aLogicalResourceIdTheStackDoesNotHaveIsAValidationError() {
+    void aLogicalResourceIdTheStackDoesNotHaveMatchesNothing() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = createStack(suffix);
 
-        // Not an empty list: a caller must not read the miss as "the stack has no resources".
+        // A filter that matches nothing, not an error: DescribeStackResource, the singular action
+        // where the resource is required rather than optional, is the one that raises for a miss.
         describe()
             .formParam("StackName", stackName)
             .formParam("LogicalResourceId", "NoSuchResource")
         .when()
             .post("/")
         .then()
-            .statusCode(400)
-            .body(containsString("ValidationError"))
-            .body(containsString("does not exist for stack " + stackName));
+            .statusCode(200)
+            .body(not(containsString("<LogicalResourceId>")));
     }
 
     @Test
-    void physicalResourceIdFindsTheStackWithoutAStackName() {
+    void physicalResourceIdNamesTheStackAndReturnsAllOfIt() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = createStack(suffix);
         String topicName = "cfn-dsr-t-" + suffix;
 
-        // AWS takes either StackName or PhysicalResourceId; given only the latter it resolves the
-        // stack that owns the resource.
+        // "the associated resources of the stack that the resource belongs to are returned": the
+        // physical id selects the stack, it does not narrow it to the one resource.
         describe()
             .formParam("PhysicalResourceId", "arn:aws:sns:us-east-1:000000000000:" + topicName)
         .when()
@@ -102,8 +106,55 @@ class CloudFormationDescribeStackResourcesFilterIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<LogicalResourceId>MyTopic</LogicalResourceId>"))
-            .body(not(containsString("<LogicalResourceId>MyQueue</LogicalResourceId>")))
+            .body(containsString("<LogicalResourceId>MyQueue</LogicalResourceId>"))
             .body(containsString("<StackName>" + stackName + "</StackName>"));
+    }
+
+    @Test
+    void bothStackNameAndPhysicalResourceIdIsAValidationError() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = createStack(suffix);
+
+        describe()
+            .formParam("StackName", stackName)
+            .formParam("PhysicalResourceId", "arn:aws:sns:us-east-1:000000000000:cfn-dsr-t-" + suffix)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("ValidationError"))
+            .body(containsString("Cannot specify both StackName and PhysicalResourceId."));
+    }
+
+    @Test
+    void aRedeployedPhysicalIdResolvesToTheLiveStackNotTheDeletedOne() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String topicArn = "arn:aws:sns:us-east-1:000000000000:cfn-dsr-t-" + suffix;
+        String dead = createStack("cfn-dsr-old-" + suffix, suffix);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", dead)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // The same resource names under a second, live stack. A deleted stack stays listed for its
+        // retention window and listStacks answers oldest first, so the dead one would win on a
+        // straight walk. The two stacks are named differently so the answer is tellable apart.
+        String live = createStack("cfn-dsr-new-" + suffix, suffix);
+
+        describe()
+            .formParam("PhysicalResourceId", topicArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackName>" + live + "</StackName>"))
+            .body(not(containsString("<StackName>" + dead + "</StackName>")));
     }
 
     @Test
