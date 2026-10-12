@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.iam.IamService.PresignedScope;
 import io.github.hectorvent.floci.services.iam.RequestPrincipal;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
+import io.github.hectorvent.floci.services.iam.ResourcePolicyProviders;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
@@ -1177,17 +1178,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     private List<ResourcePolicyProvider.ResourcePolicy> resolveResourcePolicies(String credentialScope, String resourceArn) {
-        if (resourcePolicyProviders == null || resourcePolicyProviders.isUnsatisfied()) {
-            return List.of();
-        }
-        List<ResourcePolicyProvider.ResourcePolicy> policies = new ArrayList<>();
-        for (ResourcePolicyProvider provider : resourcePolicyProviders) {
-            List<ResourcePolicyProvider.ResourcePolicy> providerPolicies = provider.getResourcePolicies(credentialScope, resourceArn);
-            if (providerPolicies != null && !providerPolicies.isEmpty()) {
-                policies.addAll(providerPolicies);
-            }
-        }
-        return policies;
+        return ResourcePolicyProviders.policiesFor(resourcePolicyProviders, credentialScope, resourceArn);
     }
 
     /**
