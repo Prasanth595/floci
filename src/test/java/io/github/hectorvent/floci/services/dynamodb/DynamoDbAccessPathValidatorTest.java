@@ -421,6 +421,98 @@ class DynamoDbAccessPathValidatorTest {
                 indexOnly.getMessage());
     }
 
+    @Test
+    void queryNamesAnEmptyStartKeyValueInKeySchemaOrder() {
+        AwsException tableKey = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateExclusiveStartKey(
+                        mapper.readTree("""
+                                {"sk": {"S": ""}, "pk": {"S": ""}, "other": {"S": "x"}}
+                                """), table, tablePath));
+        assertEquals("One or more parameter values are not valid. The AttributeValue for a key attribute "
+                + "cannot contain an empty string value. Key: pk", tableKey.getMessage());
+
+        AwsException indexKey = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateExclusiveStartKey(
+                        mapper.readTree("""
+                                {"pk": {"S": ""}, "sk": {"S": "a"}, "status": {"S": ""},
+                                 "createdAt": {"S": "a"}, "sequence": {"S": "a"}}
+                                """), table, gsiPath));
+        assertEquals("One or more parameter values are not valid. The AttributeValue for a key attribute "
+                + "cannot contain an empty string value. Key: status", indexKey.getMessage());
+    }
+
+    @Test
+    void queryReportsAWrongStartKeyTypeBeforeALaterEmptyValue() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateExclusiveStartKey(
+                        mapper.readTree("""
+                                {"pk": {"N": "1"}, "sk": {"S": ""}}
+                                """), table, tablePath));
+        assertEquals("The provided starting key is invalid", error.getMessage());
+    }
+
+    @Test
+    void scanNamesTheFirstIndexByNameForABadTableKey() {
+        AwsException empty = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateScanExclusiveStartKey(
+                        mapper.readTree("""
+                                {"pk": {"S": ""}, "sk": {"S": "a"}}
+                                """), table, tablePath));
+        assertEquals("One or more parameter values are not valid. A value specified for a secondary index key "
+                + "is not supported. The AttributeValue for a key attribute cannot contain an empty string value. "
+                + "IndexName: alternate-index, IndexKey: pk", empty.getMessage());
+
+        AwsException mismatch = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateScanExclusiveStartKey(
+                        mapper.readTree("""
+                                {"pk": {"S": ""}, "sk": {"BOOL": true}}
+                                """), table, tablePath));
+        assertEquals("One or more parameter values were invalid: Type mismatch for Index Key sk "
+                + "Expected: S Actual: BOOL IndexName: alternate-index", mismatch.getMessage());
+    }
+
+    @Test
+    void scanNamesTheIndexThatOwnsABadIndexKey() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateScanExclusiveStartKey(
+                        mapper.readTree("""
+                                {"pk": {"S": "a"}, "sk": {"S": "a"}, "tenantId": {"S": ""}}
+                                """), table, tablePath));
+        assertEquals("One or more parameter values are not valid. A value specified for a secondary index key "
+                + "is not supported. The AttributeValue for a key attribute cannot contain an empty string value. "
+                + "IndexName: tenant-region-index, IndexKey: tenantId", error.getMessage());
+    }
+
+    @Test
+    void scanOfAnIndexChecksOnlyThatIndex() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateScanExclusiveStartKey(
+                        mapper.readTree("""
+                                {"pk": {"S": "a"}, "sk": {"S": "a"}, "status": {"S": "a"},
+                                 "createdAt": {"S": "a"}, "sequence": {"S": "a"}, "alternate": {"S": ""}}
+                                """), table, gsiPath));
+        assertEquals("The provided starting key is invalid", error.getMessage());
+    }
+
+    @Test
+    void scanOfATableWithoutIndexesUsesTheKeyWording() {
+        TableDefinition plain = new TableDefinition();
+        plain.setKeySchema(List.of(
+                new KeySchemaElement("pk", "HASH"),
+                new KeySchemaElement("sk", "RANGE")));
+        plain.setAttributeDefinitions(List.of(
+                new AttributeDefinition("pk", "S"),
+                new AttributeDefinition("sk", "B")));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateScanExclusiveStartKey(
+                        mapper.readTree("""
+                                {"pk": {"S": "a"}, "sk": {"B": ""}}
+                                """), plain, DynamoDbAccessPath.resolve(plain, null)));
+        assertEquals("One or more parameter values are not valid. The AttributeValue for a key attribute "
+                + "cannot contain an empty binary value. Key: sk", error.getMessage());
+    }
+
     private void validateExpression(DynamoDbAccessPath accessPath, String expression) {
         DynamoDbAccessPathValidator.validateQuery(
                 table, accessPath, null, expression, null, null, null,
