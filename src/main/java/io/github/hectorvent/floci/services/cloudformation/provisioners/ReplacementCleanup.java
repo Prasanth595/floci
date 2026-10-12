@@ -69,10 +69,6 @@ public final class ReplacementCleanup {
     static void record(StackResource r, ProvisionContext ctx, Map<String, String> attributesBeforeProvision,
                        boolean replaced) {
         ObjectNode cleanup = readOrEmpty(r);
-        String livePhysicalId = liveEntityId(r);
-        if (livePhysicalId != null) {
-            removeDisplaced(cleanup, livePhysicalId);
-        }
         cleanup.remove("priorPhysicalId");
         cleanup.remove("priorAttributes");
         cleanup.put("region", ctx.region());
@@ -299,8 +295,7 @@ public final class ReplacementCleanup {
 
     /**
      * Carries the entities {@code from} owes a delete onto {@code into}, keeping their attempt
-     * counts and regions, replacing known entries with the attempt's latest state and skipping ids
-     * {@code into} owns. The engine calls this
+     * counts and regions and skipping ids {@code into} already lists or owns. The engine calls this
      * through {@code mergeFailedUpdateResourceTracking} when it restores the previous resource
      * after a failed update, so an orphan the attempt recorded is not lost with the attempt.
      */
@@ -320,10 +315,8 @@ public final class ReplacementCleanup {
                 continue;
             }
             boolean present = false;
-            for (int index = 0; index < displaced.size(); index++) {
-                JsonNode existing = displaced.get(index);
+            for (JsonNode existing : displaced) {
                 if (physicalId.equals(existing.path("physicalId").asText(null))) {
-                    displaced.set(index, entry.deepCopy());
                     present = true;
                     break;
                 }

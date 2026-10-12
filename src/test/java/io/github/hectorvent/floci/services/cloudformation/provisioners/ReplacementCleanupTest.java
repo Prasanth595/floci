@@ -1,12 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -172,7 +167,7 @@ class ReplacementCleanupTest {
     }
 
     @Test
-    void mergingCarriesLatestOrphanAttemptsWithoutDuplicatingKnownIds() throws Exception {
+    void mergingCarriesUnknownOrphansWithTheirAttemptsAndSkipsKnownOrOwnIds() {
         // The attempt's own id is left out of the record on purpose (complete/cleanupPhysicalId skip
         // it), which is why the engine merges the record onto the restored previous resource.
         StackResource attempted = resource("subnet-attempt");
@@ -186,58 +181,12 @@ class ReplacementCleanupTest {
         ReplacementCleanup.mergeDisplaced(previous, attempted);
 
         String record = previous.getAttributes().get(CfnRollback.REPLACEMENT_CLEANUP_ATTR);
-        JsonNode debts = new ObjectMapper().readTree(record).path("displaced");
-        assertEquals(1, debts.get(0).path("cleanupAttempts").asInt(),
-                "the known orphan carries the attempt's latest retry count");
         assertTrue(record.indexOf("subnet-old-orphan") == record.lastIndexOf("subnet-old-orphan"), "the known orphan is listed once: " + record);
         assertTrue(record.contains("\"physicalId\":\"subnet-replacement\",\"resourceType\":\"AWS::EC2::Subnet\",\"region\":\"us-east-1\",\"retainable\":false,\"cleanupAttempts\":1"),
                 "the new orphan keeps its attempt count: " + record);
         List<String> owed = new ArrayList<>();
         ReplacementCleanup.complete(previous, (type, id, region) -> owed.add(id));
         assertEquals(List.of("subnet-old-orphan", "subnet-replacement"), owed);
-        assertFalse(ReplacementCleanup.hasReplacement(previous));
-    }
-
-    @ParameterizedTest
-    @CsvSource({"2,false", "3,false", "2,true", "3,true"})
-    void aFreshReplacementAtAnOldAddressGetsANewOrphanBudget(int attempts, boolean retainable) throws Exception {
-        ObjectMapper mapper = new ObjectMapper();
-        ObjectNode cleanup = mapper.createObjectNode().put("region", "us-east-1");
-        cleanup.putArray("displaced").addObject().put("physicalId", "subnet-reused")
-                .put("resourceType", "AWS::EC2::Subnet").put("region", "us-east-1")
-                .put("retainable", retainable).put("cleanupAttempts", attempts);
-        StackResource previous = resource("subnet-prior");
-        previous.getAttributes().put(CfnRollback.REPLACEMENT_CLEANUP_ATTR, cleanup.toString());
-        ReplacementCleanup.recordOrphan(previous, "subnet-unrelated", "AWS::EC2::Subnet", "us-west-2");
-        StackResource attempted = resource("subnet-reused");
-        attempted.setUpdateReplacePolicy("Retain");
-        attempted.getAttributes().putAll(previous.getAttributes());
-        ReplacementCleanup.recordOrphan(previous, "subnet-target-only", "AWS::EC2::Subnet", "eu-west-1");
-
-        ReplacementCleanup.record(attempted, update("subnet-prior"), Map.of("VpcId", "vpc-original"));
-        assertThrows(IllegalStateException.class, () -> ReplacementCleanup.rollback(attempted,
-                (type, id, region) -> { throw new IllegalStateException("fresh replacement deletion failed"); }));
-
-        JsonNode newOrphan = mapper.readTree(attempted.getAttributes().get(CfnRollback.REPLACEMENT_CLEANUP_ATTR))
-                .path("displaced").get(1);
-        assertEquals("subnet-reused", newOrphan.path("physicalId").asText());
-        assertEquals(0, newOrphan.path("cleanupAttempts").asInt());
-        assertFalse(newOrphan.path("retainable").asBoolean());
-        ReplacementCleanup.mergeDisplaced(previous, attempted);
-        JsonNode merged = mapper.readTree(previous.getAttributes().get(CfnRollback.REPLACEMENT_CLEANUP_ATTR))
-                .path("displaced");
-        assertEquals(3, merged.size());
-        assertEquals(0, merged.get(0).path("cleanupAttempts").asInt());
-        assertFalse(merged.get(0).path("retainable").asBoolean());
-        assertEquals("subnet-unrelated", merged.get(1).path("physicalId").asText());
-        assertEquals("us-west-2", merged.get(1).path("region").asText());
-        assertEquals("subnet-target-only", merged.get(2).path("physicalId").asText());
-        assertEquals("eu-west-1", merged.get(2).path("region").asText());
-        assertEquals(0, merged.get(2).path("cleanupAttempts").asInt());
-        previous.setUpdateReplacePolicy("Retain");
-        List<String> deleted = new ArrayList<>();
-        assertTrue(ReplacementCleanup.complete(previous, (type, id, region) -> deleted.add(id)).complete());
-        assertEquals(List.of("subnet-reused", "subnet-unrelated", "subnet-target-only"), deleted);
         assertFalse(ReplacementCleanup.hasReplacement(previous));
     }
 

@@ -811,33 +811,6 @@ class CognitoResourceServerCfnProvisionerTest {
         verifyNoInteractions(cognito);
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void freshReplacementAtAHistoricalAddressKeepsItsOwnRollbackCleanupBudget(boolean retainable) throws Exception {
-        StackResource previous = resource(IDENTIFIER, POOL);
-        previous.setUpdateReplacePolicy("Retain");
-        oweCleanup(previous, NEW_POOL, IDENTIFIER, retainable, 3);
-        StackResource attempted = resource(IDENTIFIER, POOL);
-        attempted.setUpdateReplacePolicy("Retain");
-        attempted.getAttributes().putAll(previous.getAttributes());
-        provisioner.provision(attempted, properties(NEW_POOL, IDENTIFIER, "Fresh API"), ctx(IDENTIFIER));
-        doThrow(new AwsException("InternalErrorException", "fresh replacement delete failed", 500))
-                .when(cognito).deleteResourceServer(NEW_POOL, IDENTIFIER);
-
-        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(attempted));
-        ReplacementCleanup.mergeDisplaced(previous, attempted);
-
-        JsonNode orphan = mapper.readTree(previous.getAttributes().get(CfnRollback.REPLACEMENT_CLEANUP_ATTR))
-                .path("displaced").get(0);
-        assertFalse(orphan.path("retainable").asBoolean());
-        assertEquals(0, orphan.path("cleanupAttempts").asInt());
-        UpdateCleanupResult result = provisioner.completeDeleteCleanup(previous);
-        assertFalse(result.complete());
-        assertEquals(1, result.attempts());
-        verify(cognito, times(2)).deleteResourceServer(NEW_POOL, IDENTIFIER);
-        verify(cognito, never()).deleteResourceServer(POOL, IDENTIFIER);
-    }
-
     @Test
     void validatesSchemaBoundsBeforeCallingCognito() {
         assertThrows(AwsException.class, () -> provisioner.provision(resource(null, null),

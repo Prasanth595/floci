@@ -121,8 +121,7 @@ so changing only the pool still cleans up the displaced server without changing 
 
 Replacement rollback and historical cleanup use the shared bounded replacement lifecycle.
 Provisioning leaves historical cleanup for a committed update or stack deletion. A failed provision
-keeps that debt and its remaining retry budget. A new replacement at an old cleanup address consumes
-the old debt; if its rollback delete fails, the new orphan starts its own non-retainable retry budget.
+keeps that debt and its remaining retry budget.
 Committed replacements honor `UpdateReplacePolicy: Retain`; failed rollback replacements remain
 owed cleanup while their retry budget remains. Exhausted historical records are abandoned across
 later updates and stack-delete retries. Historical cleanup is address-based and does not provide
