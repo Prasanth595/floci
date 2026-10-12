@@ -29,6 +29,14 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 | `UpdateAutoScalingGroup` | Updates capacity bounds, cooldown, launch source, AZs |
 | `DeleteAutoScalingGroup` | `ForceDelete=true` terminates all instances before deletion |
 
+`CreateAutoScalingGroup` accepts both `subnet-a,subnet-b` and
+`subnet-a, subnet-b` in `VPCZoneIdentifier`. `DescribeAutoScalingGroups` returns the
+comma-only form. This matches a live AWS comparison in `us-east-1` on October 12,
+2026 at 17:30 UTC: two subnets, matching Availability Zones, one launch template
+and zero capacity. Both groups had identical configuration except for name, ARN
+and creation time. The SDK regression is
+`compatibility-tests/sdk-test-python/tests/test_autoscaling_subnet_whitespace.py`.
+
 ### Instance Management
 
 | Operation | Notes |
