@@ -1199,7 +1199,7 @@ account key carries no identity policies of its own.
 - `NumericEquals`, `NumericNotEquals`, `NumericLessThan`, `NumericGreaterThan` (and Equals variants)
 - `DateEquals`, `DateNotEquals`, `DateLessThan`, `DateGreaterThan` (and Equals variants)
 - `Bool`, `IpAddress`, `NotIpAddress`, `Null`
-- Supports `...IfExists` variants for all operators.
+- Supports `...IfExists` variants for all operators except `Null`.
 - Set operators `ForAllValues:` and `ForAnyValue:` over multi-valued condition keys, in AWS's
   own spelling (the prefix match is case-sensitive). They compose with `IfExists`
   (`ForAnyValue:StringEqualsIfExists`). `ForAllValues:` matches when the context key is absent
