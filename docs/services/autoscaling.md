@@ -69,6 +69,21 @@ EC2 instance can use a default subnet in a different zone.
 | `SuspendProcesses` | Records suspended scaling processes (empty list suspends all); reported back by `DescribeAutoScalingGroups` |
 | `ResumeProcesses` | Clears suspended processes (empty list resumes all) |
 
+### Instance Refresh Recovery
+
+New instance refreshes retain the selected instances and their replacement progress
+across persistent, hybrid, and WAL storage reloads. Suspending `InstanceRefresh`,
+`Launch`, or `Terminate` pauses refresh replacements; resuming those processes lets
+the refresh continue. A failed replacement launch remains part of the refresh, so
+ordinary desired-capacity reconciliation does not bypass the pause. Explicit
+`TerminateInstanceInAutoScalingGroup` requests still run, and independent capacity
+increases can proceed while only `InstanceRefresh` is suspended.
+
+This does not implement rolling health-percentage limits, checkpoints, rollback,
+or cancellation. Refreshes saved by older versions without replacement ownership
+retain the previous reconciliation behavior. Storage reload coverage does not
+imply an atomic transaction spanning Auto Scaling and EC2 after a process crash.
+
 ### Load Balancer Attachment
 
 | Operation | Notes |

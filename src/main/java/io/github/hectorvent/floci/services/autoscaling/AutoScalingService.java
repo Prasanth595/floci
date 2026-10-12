@@ -700,6 +700,13 @@ public class AutoScalingService {
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ValidationError",
                         "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
+        InstanceRefresh refresh = activeInstanceRefresh(asg);
+        if (refresh != null && refresh.getReplacements() != null) {
+            refresh.getReplacements().removeIf(replacement ->
+                    instanceId.equals(replacement.getOriginalInstanceId())
+                            || instanceId.equals(replacement.getReplacementInstanceId()));
+            saveInstanceRefresh(refresh);
+        }
         asg.getInstances().stream()
                 .filter(i -> instanceId.equals(i.getInstanceId()))
                 .findFirst()
@@ -736,6 +743,14 @@ public class AutoScalingService {
 
         applyDesiredConfiguration(asg, refresh);
         List<String> instanceIds = markInstancesForRefresh(asg, refresh);
+        List<InstanceRefreshReplacement> replacements = new ArrayList<>();
+        for (String instanceId : instanceIds) {
+            InstanceRefreshReplacement replacement = new InstanceRefreshReplacement();
+            replacement.setOriginalInstanceId(instanceId);
+            replacement.setLaunchClientToken(UUID.randomUUID().toString());
+            replacements.add(replacement);
+        }
+        refresh.setReplacements(replacements);
         if (instanceIds.isEmpty()) {
             refresh.setStatus("Successful");
             refresh.setStatusReason("Instance refresh completed.");
@@ -763,6 +778,19 @@ public class AutoScalingService {
         return refresh;
     }
 
+    InstanceRefresh activeInstanceRefresh(AutoScalingGroup asg) {
+        return instanceRefreshes.values().stream()
+                .filter(refresh -> asg.getRegion().equals(refresh.getRegion()))
+                .filter(refresh -> asg.getAutoScalingGroupName().equals(refresh.getAutoScalingGroupName()))
+                .filter(refresh -> isActiveRefreshStatus(refresh.getStatus()))
+                .findFirst().orElse(null);
+    }
+
+    void saveInstanceRefresh(InstanceRefresh refresh) {
+        instanceRefreshes.put(instanceRefreshKey(refresh.getRegion(), refresh.getAutoScalingGroupName(),
+                refresh.getInstanceRefreshId()), refresh);
+    }
+
     public void completeInstanceRefreshIfSettled(String region, String asgName) {
         AutoScalingGroup asg = requireGroup(region, asgName);
         List<InstanceRefresh> activeRefreshes = instanceRefreshes.values().stream()
@@ -771,7 +799,19 @@ public class AutoScalingService {
                 .filter(r -> isActiveRefreshStatus(r.getStatus()))
                 .collect(Collectors.toList());
         for (InstanceRefresh refresh : activeRefreshes) {
-            int remaining = remainingInstancesToUpdate(asg);
+            if (refresh.getReplacements() != null) {
+                for (InstanceRefreshReplacement replacement : refresh.getReplacements()) {
+                    if (asg.getInstances().stream().anyMatch(instance ->
+                            instance.getInstanceId().equals(replacement.getReplacementInstanceId())
+                                    && "InService".equals(instance.getLifecycleState()))) {
+                        replacement.setPhase("Complete");
+                    }
+                }
+            }
+            int remaining = refresh.getReplacements() == null ? remainingInstancesToUpdate(asg)
+                    : (int) refresh.getReplacements().stream()
+                    .filter(replacement -> !replacement.isComplete())
+                    .count();
             refresh.setInstancesToUpdate(remaining);
             refresh.setPercentageComplete(remaining == 0 ? 100 : 0);
             if (remaining == 0) {

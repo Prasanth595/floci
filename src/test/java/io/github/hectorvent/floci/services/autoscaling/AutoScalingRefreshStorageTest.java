@@ -1,0 +1,362 @@
+package io.github.hectorvent.floci.services.autoscaling;
+
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
+import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
+import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
+import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefresh;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.Reservation;
+import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class AutoScalingRefreshStorageTest {
+    @TempDir Path storagePath;
+    private final List<StorageFactory> factories = new ArrayList<>();
+    private static final String REGION = "us-east-1";
+    private AutoScalingService service;
+    private Ec2Service ec2;
+    private AutoScalingReconciler reconciler;
+    private AutoScalingGroup group;
+
+    private void setUp(String mode) {
+        service = storedService(mode);
+        service.createAutoScalingGroup(REGION, "suspended-group", null, "lt-original", null, "1", null,
+                0, 3, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(), "EC2", 0,
+                List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
+        group = service.describeAutoScalingGroups(REGION, List.of("suspended-group")).getFirst();
+        AsgInstance existing = new AsgInstance();
+        existing.setInstanceId("i-original");
+        existing.setLifecycleState("InService");
+        existing.setHealthStatus("Healthy");
+        existing.setLaunchTemplateId("lt-original");
+        existing.setLaunchTemplateVersion("1");
+        group.getInstances().add(existing);
+        service.saveAutoScalingGroupIfPresent(group);
+        ec2 = mock(Ec2Service.class);
+        service.ec2Service = ec2;
+        reconciler = new AutoScalingReconciler(service, ec2, mock(ElbV2Service.class));
+        when(ec2.isInstanceContainerRunning(anyString())).thenReturn(true);
+        when(ec2.describeInstances(eq(REGION), anyList(), isNull()))
+                .thenReturn(List.of(reservation("i-original")));
+        LaunchTemplate template = new LaunchTemplate();
+        template.setLaunchTemplateId("lt-original");
+        template.setLatestVersionNumber("1");
+        template.getData().setImageId("ami-original");
+        template.getData().setInstanceType("t3.micro");
+        when(ec2.describeLaunchTemplates(eq(REGION), anyList(), anyList(), anyMap())).thenReturn(List.of(template));
+        when(ec2.describeLaunchTemplateVersions(eq(REGION), eq("lt-original"), isNull(), anyList()))
+                .thenReturn(List.of(template));
+        when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
+                anyList(), any(), any(), any())).thenReturn(reservation("i-replacement"));
+    }
+
+    private AutoScalingService storedService(String mode) {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        EmulatorConfig.WalConfig wal = mock(EmulatorConfig.WalConfig.class);
+        when(config.storage()).thenReturn(storage);
+        when(config.defaultAccountId()).thenReturn("000000000000");
+        when(storage.persistentPath()).thenReturn(storagePath.toString());
+        when(storage.wal()).thenReturn(wal);
+        when(wal.compactionIntervalMs()).thenReturn(60000L);
+        ServiceConfigAccess access = mock(ServiceConfigAccess.class);
+        when(access.storageMode("autoscaling")).thenReturn(mode);
+        when(access.storageFlushInterval("autoscaling")).thenReturn(60000L);
+        StorageFactory factory = new StorageFactory(config, access);
+        factories.add(factory);
+        AutoScalingService created = new AutoScalingService();
+        created.regionResolver = new RegionResolver(REGION, "000000000000");
+        created.storageFactory = factory;
+        created.initializeStorage();
+        return created;
+    }
+
+    private void restart(String mode) throws IOException {
+        AutoScalingGroup previous = group;
+        factories.removeFirst().shutdownAll();
+        try (Stream<Path> files = Files.list(storagePath)) {
+            assertTrue(files.anyMatch(p -> p.getFileName().toString().contains("autoscaling-groups")),
+                    "No real group snapshot was written");
+        }
+        service = storedService(mode);
+        service.ec2Service = ec2;
+        group = service.describeAutoScalingGroups(REGION, List.of("suspended-group")).getFirst();
+        assertNotSame(previous, group, "Restart reused the in-memory group");
+        reconciler = new AutoScalingReconciler(service, ec2, mock(ElbV2Service.class));
+    }
+
+    @AfterEach
+    void closeStorage() {
+        factories.forEach(StorageFactory::shutdownAll);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "persistent,Launch,true", "persistent,Terminate,true", "persistent,InstanceRefresh,true",
+        "persistent,Launch,false", "persistent,Terminate,false", "persistent,InstanceRefresh,false",
+        "hybrid,Launch,true", "hybrid,Terminate,true", "hybrid,InstanceRefresh,true",
+        "hybrid,Launch,false", "hybrid,Terminate,false", "hybrid,InstanceRefresh,false",
+        "wal,Launch,true", "wal,Terminate,true", "wal,InstanceRefresh,true",
+        "wal,Launch,false", "wal,Terminate,false", "wal,InstanceRefresh,false"
+    })
+    void refreshPauseSurvivesRealStorageRestart(String mode, String process, boolean suspendBefore) throws IOException {
+        setUp(mode);
+        if (suspendBefore) {
+            service.suspendProcesses(REGION, "suspended-group", List.of(process));
+        }
+        InstanceRefresh started = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        if (!suspendBefore) {
+            service.suspendProcesses(REGION, "suspended-group", List.of(process));
+        }
+        restart(mode);
+        InstanceRefresh restored = service.describeInstanceRefreshes(REGION, "suspended-group", null, null, null)
+                .instanceRefreshes().getFirst();
+        assertNotSame(started, restored);
+        assertEquals(started.getInstanceRefreshId(), restored.getInstanceRefreshId());
+        assertTrue(group.getSuspendedProcesses().contains(process));
+        reconciler.reconcile(group);
+        assertAll(
+                () -> verify(ec2, never()).terminateInstances(anyString(), anyList()),
+                () -> verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(),
+                        any(), any(), anyList(), any(), any(), any()),
+                () -> assertEquals(List.of("i-original"), group.getInstances().stream()
+                        .map(AsgInstance::getInstanceId).toList()),
+                () -> assertNotEquals("Successful", service.describeInstanceRefreshes(
+                        REGION, "suspended-group", null, null, null).instanceRefreshes().getFirst().getStatus()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void failedReplacementLaunchRemainsPausedAfterRestart(String mode) throws IOException {
+        setUp(mode);
+        when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
+                anyList(), any(), any(), any()))
+                .thenThrow(new IllegalStateException("launch unavailable"))
+                .thenReturn(reservation("i-replacement"));
+        service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        reconciler.reconcile(group);
+        verify(ec2).terminateInstances(REGION, List.of("i-original"));
+        assertTrue(group.getInstances().isEmpty());
+        service.suspendProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        restart(mode);
+        InstanceRefresh restored = service.describeInstanceRefreshes(REGION, "suspended-group", null, null, null)
+                .instanceRefreshes().getFirst();
+        assertEquals("InProgress", restored.getStatus());
+        assertEquals(1, restored.getInstancesToUpdate());
+        reconciler.reconcile(group);
+        assertAll(
+                () -> verify(ec2, times(1)).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(),
+                        anyList(), any(), any(), anyList(), any(), any(), any()),
+                () -> assertTrue(group.getInstances().isEmpty()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void resumedRefreshReplacesOriginalAfterRestart(String mode) throws IOException {
+        setUp(mode);
+        service.suspendProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        restart(mode);
+        service.resumeProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        reconciler.reconcile(group);
+        verify(ec2).terminateInstances(REGION, List.of("i-original"));
+        assertEquals(List.of("i-replacement"), group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void manualTerminationDuringPausedRefreshStillRunsAfterRestart(String mode) throws IOException {
+        setUp(mode);
+        service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        AsgInstance manual = new AsgInstance();
+        manual.setInstanceId("i-manual");
+        manual.setLifecycleState("InService");
+        manual.setHealthStatus("Healthy");
+        group.getInstances().add(manual);
+        group.setDesiredCapacity(2);
+        service.saveAutoScalingGroupIfPresent(group);
+        service.terminateInstanceInAutoScalingGroup(REGION, "i-manual", true);
+        service.suspendProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        restart(mode);
+        reconciler.reconcile(group);
+        assertAll(
+                () -> verify(ec2).terminateInstances(REGION, List.of("i-manual")),
+                () -> assertEquals(List.of("i-original"), group.getInstances().stream()
+                        .map(AsgInstance::getInstanceId).toList()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void manualTerminationStillRunsAfterRestart(String mode) throws IOException {
+        setUp(mode);
+        service.suspendProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        service.terminateInstanceInAutoScalingGroup(REGION, "i-original", true);
+        restart(mode);
+        reconciler.reconcile(group);
+        verify(ec2).terminateInstances(REGION, List.of("i-original"));
+        assertTrue(group.getInstances().isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void launchRetryResumesWithSavedToken(String mode) throws IOException {
+        setUp(mode);
+        when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
+                anyList(), any(), any(), any()))
+                .thenThrow(new IllegalStateException("launch unavailable"))
+                .thenReturn(reservation("i-replacement"));
+        InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        String token = refresh.getReplacements().getFirst().getLaunchClientToken();
+        reconciler.reconcile(group);
+        restart(mode);
+        reconciler.reconcile(group);
+        reconciler.reconcile(group);
+        verify(ec2, times(2)).runInstances(eq(REGION), any(), any(), eq(1), eq(1), any(), anyList(), any(),
+                eq(token), anyList(), any(), any(), any());
+        verify(ec2, times(1)).terminateInstances(REGION, List.of("i-original"));
+        assertEquals("Successful", service.describeInstanceRefreshes(REGION, "suspended-group", null, null, null)
+                .instanceRefreshes().getFirst().getStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void recoversEc2LaunchWhoseMembershipWasNotSaved(String mode) throws IOException {
+        setUp(mode);
+        InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        Reservation launched = reservation("i-recovered");
+        launched.getInstances().getFirst().setClientToken(refresh.getReplacements().getFirst().getLaunchClientToken());
+        when(ec2.describeInstances(REGION, null, null)).thenReturn(List.of(launched));
+        group.getInstances().clear();
+        service.saveAutoScalingGroupIfPresent(group);
+        restart(mode);
+        reconciler.reconcile(group);
+        assertEquals(List.of("i-recovered"), group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+        verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
+                any(), anyList(), any(), any(), any());
+        reconciler.reconcile(group);
+        assertEquals(1, group.getInstances().size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void explicitTerminationOfSelectedOriginalIsNotPaused(String mode) throws IOException {
+        setUp(mode);
+        service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        service.suspendProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        service.terminateInstanceInAutoScalingGroup(REGION, "i-original", true);
+        restart(mode);
+        reconciler.reconcile(group);
+        verify(ec2).terminateInstances(REGION, List.of("i-original"));
+        assertTrue(group.getInstances().isEmpty());
+        verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
+                any(), anyList(), any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void pausedRefreshDoesNotBlockIndependentCapacityIncrease(String mode) throws IOException {
+        setUp(mode);
+        service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        service.suspendProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        group.setDesiredCapacity(2);
+        service.saveAutoScalingGroupIfPresent(group);
+        restart(mode);
+        reconciler.reconcile(group);
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+        verify(ec2).runInstances(eq(REGION), any(), any(), eq(1), eq(1), any(), anyList(), any(), isNull(),
+                anyList(), any(), any(), any());
+        assertEquals(2, group.getInstances().size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void capacityReductionDoesNotLaunchUnneededReplacement(String mode) throws IOException {
+        setUp(mode);
+        service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        group.setDesiredCapacity(0);
+        service.saveAutoScalingGroupIfPresent(group);
+        restart(mode);
+        reconciler.reconcile(group);
+        verify(ec2).terminateInstances(REGION, List.of("i-original"));
+        verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
+                any(), anyList(), any(), any(), any());
+        assertTrue(group.getInstances().isEmpty());
+        assertEquals("Successful", service.describeInstanceRefreshes(REGION, "suspended-group", null, null, null)
+                .instanceRefreshes().getFirst().getStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void missingOriginalRetainsPausedReplacementReservation(String mode) throws IOException {
+        setUp(mode);
+        service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        service.suspendProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        when(ec2.describeInstances(REGION, List.of("i-original"), null)).thenReturn(List.of());
+        restart(mode);
+        reconciler.reconcile(group);
+        assertTrue(group.getInstances().isEmpty());
+        verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
+                any(), anyList(), any(), any(), any());
+        service.resumeProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        restart(mode);
+        reconciler.reconcile(group);
+        assertEquals(List.of("i-replacement"), group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void recoveredLaunchAlreadyInGroupDoesNotDuplicateMembership(String mode) throws IOException {
+        setUp(mode);
+        InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        Reservation launched = reservation("i-recovered");
+        launched.getInstances().getFirst().setClientToken(refresh.getReplacements().getFirst().getLaunchClientToken());
+        when(ec2.describeInstances(REGION, null, null)).thenReturn(List.of(launched));
+        group.getInstances().clear();
+        AsgInstance member = new AsgInstance();
+        member.setInstanceId("i-recovered");
+        member.setLifecycleState("Pending");
+        member.setHealthStatus("Healthy");
+        group.getInstances().add(member);
+        service.saveAutoScalingGroupIfPresent(group);
+        restart(mode);
+        reconciler.reconcile(group);
+        assertEquals(1, group.getInstances().size());
+        InstanceRefresh restored = service.describeInstanceRefreshes(REGION, "suspended-group", null, null, null)
+                .instanceRefreshes().getFirst();
+        assertEquals("i-recovered", restored.getReplacements().getFirst().getReplacementInstanceId());
+        assertEquals("Successful", restored.getStatus());
+        verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
+                any(), anyList(), any(), any(), any());
+    }
+
+    private static Reservation reservation(String id) {
+        Instance instance = new Instance();
+        instance.setInstanceId(id);
+        instance.setState(InstanceState.running());
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(instance));
+        return reservation;
+    }
+}
