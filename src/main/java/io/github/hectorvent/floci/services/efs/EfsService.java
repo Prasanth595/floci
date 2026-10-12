@@ -1,11 +1,11 @@
 package io.github.hectorvent.floci.services.efs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AvailabilityZoneIds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.efs.model.AccessPointDescription;
 import io.github.hectorvent.floci.services.efs.model.BackupPolicy;
 import io.github.hectorvent.floci.services.efs.model.CreateAccessPointRequest;
@@ -122,7 +122,7 @@ public class EfsService implements Resettable {
         fs.setKmsKeyId(request.getKmsKeyId());
         if (request.getAvailabilityZoneName() != null) {
             fs.setAvailabilityZoneName(request.getAvailabilityZoneName());
-            fs.setAvailabilityZoneId(Ec2Service.zoneIdForZoneName(region, request.getAvailabilityZoneName()));
+            fs.setAvailabilityZoneId(AvailabilityZoneIds.forZoneName(region, request.getAvailabilityZoneName()));
         }
         
         if (request.getTags() != null) {
@@ -405,7 +405,7 @@ public class EfsService implements Resettable {
             mt.setLifeCycleState(LifeCycleState.available);
             mt.setVpcId("vpc-12345678");
             mt.setAvailabilityZoneName(region + "a");
-            mt.setAvailabilityZoneId(Ec2Service.zoneIdForZoneName(region, region + "a"));
+            mt.setAvailabilityZoneId(AvailabilityZoneIds.forZoneName(region, region + "a"));
         mt.setNetworkInterfaceId("eni-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17));
         if (request.getSecurityGroups() != null) {
             mt.setSecurityGroups(new ArrayList<>(request.getSecurityGroups()));

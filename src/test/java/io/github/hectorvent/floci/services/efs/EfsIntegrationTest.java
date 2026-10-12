@@ -103,7 +103,7 @@ class EfsIntegrationTest {
             .body("SubnetId", equalTo("subnet-12345"))
             .body("AvailabilityZoneName", equalTo("us-east-1a"))
             // The zone id EC2 reports for the same zone, so a mount target agrees with its subnet.
-            .body("AvailabilityZoneId", equalTo("us-east-1-az1"))
+            .body("AvailabilityZoneId", equalTo("use1-az1"))
             .extract().jsonPath().getString("MountTargetId");
     }
 
