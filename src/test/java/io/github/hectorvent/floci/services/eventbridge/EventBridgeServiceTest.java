@@ -1551,7 +1551,7 @@ class EventBridgeServiceTest {
 
     @Test
     void putEventsReportsSourceFirstWhenMultipleRequiredFieldsAreMissing() {
-        var result = service.putEvents(List.of(Map.of("Detail", "{}")), REGION);
+        EventBridgeService.PutEventsResult result = service.putEvents(List.of(Map.of("Detail", "{}")), REGION);
         assertEquals(1, result.failedCount());
         assertEquals("Parameter Source is not valid. Reason: Source is a required argument.",
                 result.entries().get(0).get("ErrorMessage"));
