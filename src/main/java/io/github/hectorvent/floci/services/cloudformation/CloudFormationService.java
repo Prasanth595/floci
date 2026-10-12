@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -1436,6 +1437,9 @@ public class CloudFormationService implements ResourceProvider {
             Set<String> changedResourceIds = isCreate
                     ? Set.of()
                     : changedResourceIds(stack, templateBody, params, region);
+            JsonNode previousResources = isCreate
+                    ? objectMapper.missingNode()
+                    : previousResources(stack, previousState, region, accountId);
             JsonNode template = parseTemplate(templateBody);
             stack.setOriginalTemplateBody(templateBody);
 
@@ -1545,11 +1549,16 @@ public class CloudFormationService implements ResourceProvider {
                                 props.isMissingNode() ? null : props,
                                 engine, region, accountId, isCreate, previousResource);
                     } else {
+                        JsonNode previousDefinition = previousResources.path(logicalId);
+                        JsonNode priorProps = type.equals(previousDefinition.path("Type").asText())
+                                && previousDefinition.path("Properties").isObject()
+                                ? previousDefinition.path("Properties") : null;
                         resource = dispatcher.provision(logicalId, type, props.isMissingNode() ? null : props,
                                 engine, region, accountId, stack.getStackName(),
                                 resource.getPhysicalId(), resource.getAttributes(),
                                 event -> addEvent(stack, logicalId, event.getPhysicalResourceId(), type,
-                                        event.getResourceStatus(), event.getResourceStatusReason()));
+                                        event.getResourceStatus(), event.getResourceStatusReason()),
+                                priorProps);
                     }
                     resource.setUpdateReplacePolicy(
                             resDef.path("UpdateReplacePolicy").asText(null));
@@ -2168,6 +2177,71 @@ public class CloudFormationService implements ResourceProvider {
         }
         existing.addSuppressed(additional);
         return existing;
+    }
+
+    /**
+     * The resources of the processed template an update replaces, so a provisioner can tell a
+     * property the update removes from one the stack never declared. All of them, since an update
+     * can provision a resource whose own definition did not change. Evaluated under the previous
+     * deployment's conditions: a top-level property whose {@code Fn::If} chose {@code AWS::NoValue}
+     * was never applied and is left out. Missing when there is no previous template, and when it no
+     * longer parses: the update then proceeds as if nothing had been declared.
+     */
+    private JsonNode previousResources(Stack stack, StackUpdateSnapshot previousState, String region,
+                                       String accountId) {
+        if (previousState.templateBody() == null) {
+            return objectMapper.missingNode();
+        }
+        try {
+            JsonNode previousTemplate = parseTemplate(previousState.templateBody());
+            // As the change-set preview does: raw parameters for a stack persisted before
+            // resolvedParameters existed.
+            Map<String, String> previousParams = previousState.resolvedParameters().isEmpty()
+                    ? previousState.parameters() : previousState.resolvedParameters();
+            Map<String, Boolean> conditions = resolveConditions(previousTemplate, previousParams, stack, region,
+                    accountId);
+            ObjectNode resources = objectMapper.createObjectNode();
+            for (Map.Entry<String, JsonNode> entry : previousTemplate.path("Resources").properties()) {
+                JsonNode definition = entry.getValue();
+                ObjectNode applied = resources.putObject(entry.getKey());
+                applied.set("Type", definition.path("Type"));
+                if (definition.path("Properties").isObject()) {
+                    applied.set("Properties", appliedProperties(definition.path("Properties"), conditions));
+                }
+            }
+            return resources;
+        } catch (Exception e) {
+            LOG.warnv("Previous template of stack {0} could not be evaluated ({1}); its updated resources see no prior properties",
+                    stack.getStackName(), e.getMessage());
+            return objectMapper.missingNode();
+        }
+    }
+
+    /**
+     * The top-level properties left after each one's {@code Fn::If} is decided, without those that
+     * chose {@code AWS::NoValue}. Decided as the template engine decides it: a condition the
+     * template does not define is false.
+     */
+    private ObjectNode appliedProperties(JsonNode properties, Map<String, Boolean> conditions) {
+        ObjectNode applied = objectMapper.createObjectNode();
+        for (Map.Entry<String, JsonNode> property : properties.properties()) {
+            JsonNode value = decideIf(property.getValue(), conditions);
+            boolean noValue = value.isObject() && value.size() == 1 && "AWS::NoValue".equals(value.path("Ref").asText());
+            if (!noValue) {
+                applied.set(property.getKey(), property.getValue());
+            }
+        }
+        return applied;
+    }
+
+    /** The branch an {@code Fn::If} chose, following nested ones; any other value as it is. */
+    private static JsonNode decideIf(JsonNode value, Map<String, Boolean> conditions) {
+        while (value.isObject() && value.size() == 1 && value.path("Fn::If").isArray()
+                && value.path("Fn::If").size() >= 3) {
+            JsonNode branches = value.path("Fn::If");
+            value = conditions.getOrDefault(branches.get(0).asText(), false) ? branches.get(1) : branches.get(2);
+        }
+        return value;
     }
 
     private StackUpdateSnapshot snapshotForUpdate(Stack stack) {

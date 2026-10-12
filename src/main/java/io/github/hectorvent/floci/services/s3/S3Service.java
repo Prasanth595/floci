@@ -5898,6 +5898,14 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     /**
+     * Whether the calling account has the bucket, which is the lookup {@link #createBucket} makes.
+     * Unlike {@link #bucketExists}, it never spans other accounts' buckets.
+     */
+    public boolean ownsBucket(String bucketName) {
+        return bucketStore.get(bucketName).isPresent();
+    }
+
+    /**
      * Resolves a bucket for existence/access. With {@code globalBucketNamespace} enabled, the
      * lookup spans every account's partition (AWS bucket names are globally unique and reachable
      * cross-account); otherwise it stays scoped to the calling account. Write-side ownership
