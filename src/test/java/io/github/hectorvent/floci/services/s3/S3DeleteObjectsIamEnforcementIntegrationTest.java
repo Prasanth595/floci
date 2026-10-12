@@ -1,14 +1,19 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -18,6 +23,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -43,6 +49,12 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
 
     @Inject
     IamService iamService;
+
+    @TestHTTPResource("/")
+    static URI baseUri;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @Test
     void anIdentityPolicyOnOnePrefixDeletesOnlyThatPrefix() {
@@ -474,12 +486,8 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
                 .head("/" + bucket + "/" + key + "?versionId=" + versionId).then().statusCode(200);
     }
 
-    private static String createUser(String user) {
-        given().formParam("Action", "CreateUser").formParam("UserName", user)
-                .header("Authorization", auth(ADMIN, "iam")).when().post("/").then().statusCode(200);
-        return given().formParam("Action", "CreateAccessKey").formParam("UserName", user)
-                .header("Authorization", auth(ADMIN, "iam")).when().post("/").then().statusCode(200)
-                .extract().path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
+    private String createUser(String user) {
+        return EnforcementFixtures.createUser(cleanup, baseUri.getPort(), auth(ADMIN, "iam"), user).accessKeyId();
     }
 
     private static String allow(String action, String resource) {
@@ -505,10 +513,5 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
         given().header("Authorization", auth(ADMIN, "s3")).contentType("application/json")
                 .body("{\"Version\":\"2012-10-17\",\"Statement\":[" + statement + "]}")
                 .when().put("/" + bucket + "?policy").then().statusCode(200);
-    }
-
-    private static String auth(String accessKeyId, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260629/" + REGION + "/" + service
-                + "/aws4_request, SignedHeaders=host, Signature=abc";
     }
 }

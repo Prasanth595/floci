@@ -1,15 +1,22 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
+import io.github.hectorvent.floci.testing.EnforcementFixtures.UserCredentials;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.S3IamEnforcementProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.xml.XmlPath;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.net.URI;
 import java.util.List;
 import java.util.UUID;
 
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -32,11 +39,11 @@ class S3DeleteObjectsSignedIamEnforcementIntegrationTest {
     private static final String ACCOUNT_A = "111122223333";
     private static final String ACCOUNT_B = "222233334444";
 
-    private record UserCredentials(String accessKeyId, String secretAccessKey) {
-        S3RequestSigner signer() {
-            return S3RequestSigner.signedAs(accessKeyId, secretAccessKey);
-        }
-    }
+    @TestHTTPResource("/")
+    static URI baseUri;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @Test
     void aBucketPolicyDenyOnRequestedRegionAppliesAsItDoesToASingleDelete() {
@@ -52,8 +59,8 @@ class S3DeleteObjectsSignedIamEnforcementIntegrationTest {
                 {"Effect":"Deny","Principal":"*","Action":"s3:DeleteObject","Resource":"arn:aws:s3:::%s/*",
                  "Condition":{"StringEquals":{"aws:RequestedRegion":"%s"}}}""".formatted(bucket, REGION));
 
-        given().filter(caller.signer()).when().delete("/" + bucket + "/single.txt").then().statusCode(403);
-        XmlPath result = deleteObjects(caller.signer(), bucket, "batch.txt");
+        given().filter(signer(caller)).when().delete("/" + bucket + "/single.txt").then().statusCode(403);
+        XmlPath result = deleteObjects(signer(caller), bucket, "batch.txt");
 
         assertEquals(List.of(), result.getList("DeleteResult.Deleted.Key"));
         assertDenied(result, "batch.txt");
@@ -70,19 +77,19 @@ class S3DeleteObjectsSignedIamEnforcementIntegrationTest {
         String owner = "delobj-owner-" + suffix;
         UserCredentials ownerCredentials = createUser(owner, ACCOUNT_A);
         userPolicy(owner, ACCOUNT_A, "{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"}");
-        createBucket(bucket, ownerCredentials.signer());
-        put(bucket, "shared.txt", ownerCredentials.signer());
+        createBucket(bucket, signer(ownerCredentials));
+        put(bucket, "shared.txt", signer(ownerCredentials));
         String user = "delobj-cross-user-" + suffix;
         UserCredentials caller = createUser(user, ACCOUNT_B);
-        bucketPolicy(bucket, ownerCredentials.signer(), """
+        bucketPolicy(bucket, signer(ownerCredentials), """
                 {"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::%s:user/%s"},
                  "Action":"s3:DeleteObject","Resource":"arn:aws:s3:::%s/*"}""".formatted(ACCOUNT_B, user, bucket));
 
-        XmlPath result = deleteObjects(caller.signer(), bucket, "shared.txt");
+        XmlPath result = deleteObjects(signer(caller), bucket, "shared.txt");
 
         assertEquals(List.of(), result.getList("DeleteResult.Deleted.Key"));
         assertDenied(result, "shared.txt");
-        assertPresent(bucket, "shared.txt", ownerCredentials.signer());
+        assertPresent(bucket, "shared.txt", signer(ownerCredentials));
     }
 
     // The IAM layer skips an access key it does not know, as it skips an unsigned request, so with S3
@@ -149,25 +156,17 @@ class S3DeleteObjectsSignedIamEnforcementIntegrationTest {
                 .when().put("/" + bucket + "?policy").then().statusCode(200);
     }
 
-    private static UserCredentials createUser(String user, String accountKey) {
-        given().formParam("Action", "CreateUser").formParam("UserName", user)
-                .header("Authorization", auth(accountKey, "iam")).when().post("/").then().statusCode(200);
-        XmlPath key = given().formParam("Action", "CreateAccessKey").formParam("UserName", user)
-                .header("Authorization", auth(accountKey, "iam")).when().post("/").then().statusCode(200)
-                .extract().xmlPath();
-        return new UserCredentials(
-                key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId"),
-                key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.SecretAccessKey"));
+    private UserCredentials createUser(String user, String accountKey) {
+        return EnforcementFixtures.createUser(cleanup, baseUri.getPort(), auth(accountKey, "iam"), user);
+    }
+
+    private static S3RequestSigner signer(UserCredentials credentials) {
+        return S3RequestSigner.signedAs(credentials.accessKeyId(), credentials.secretAccessKey());
     }
 
     private static void userPolicy(String user, String accountKey, String statement) {
         given().formParam("Action", "PutUserPolicy").formParam("UserName", user).formParam("PolicyName", "p")
                 .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[" + statement + "]}")
                 .header("Authorization", auth(accountKey, "iam")).when().post("/").then().statusCode(200);
-    }
-
-    private static String auth(String accessKeyId, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260629/" + REGION + "/" + service
-                + "/aws4_request, SignedHeaders=host, Signature=abc";
     }
 }
