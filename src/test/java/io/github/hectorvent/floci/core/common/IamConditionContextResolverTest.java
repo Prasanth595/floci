@@ -26,9 +26,11 @@ import org.mockito.ArgumentCaptor;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -220,19 +222,25 @@ class IamConditionContextResolverTest {
     }
 
     @Test
-    void omitsLeadingKeysForAMultiTableBatch() {
-        // A batch spanning two tables has no single key schema: applying table A's partition
-        // key name to table B's items would be wrong, so no leading keys are produced.
+    void resolvesEachBatchTableWithItsOwnSchema() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         when(containerRequest.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
                 {"RequestItems":{
                    "FgacTable":{"Keys":[{"PK":{"S":"USER_alice"}}]},
-                   "OtherTable":{"Keys":[{"PK":{"S":"USER_bob"}}]}}}"""));
+                   "OtherTable":{"Keys":[{"Tenant":{"S":"USER_bob"}}]}}}"""));
 
+        TableDefinition other = new TableDefinition();
+        other.setTableName("OtherTable");
+        other.setKeySchema(List.of(new KeySchemaElement("Tenant", "HASH")));
+        when(dynamoDbService.findTable("FgacTable", "us-east-1")).thenReturn(Optional.of(fgacTable()));
+        when(dynamoDbService.findTable("OtherTable", "us-east-1")).thenReturn(Optional.of(other));
         Map<String, List<String>> conditions =
                 resolver.resolve("dynamodb", "dynamodb:BatchGetItem", containerRequest);
 
-        assertFalse(conditions.containsKey("dynamodb:LeadingKeys"));
+        assertEquals(List.of("USER_alice", "USER_bob"), conditions.get("dynamodb:LeadingKeys"));
+        assertEquals(List.of("USER_bob"), resolver.dynamoDbBatchConditionContext(
+                "dynamodb:BatchGetItem", containerRequest,
+                "arn:aws:dynamodb:us-east-1:000000000000:table/OtherTable").get("dynamodb:LeadingKeys"));
     }
 
     // ── aws:RequestTag and aws:ResourceTag ─────────────────────────────────────
@@ -249,6 +257,7 @@ class IamConditionContextResolverTest {
 
         assertEquals(List.of("payments"), conditions.get("aws:RequestTag/Team"));
         assertEquals(List.of("prod"), conditions.get("aws:RequestTag/Env"));
+        assertEquals(Set.of("Team", "Env"), new HashSet<>(conditions.get("aws:TagKeys")));
     }
 
     @Test
@@ -295,6 +304,7 @@ class IamConditionContextResolverTest {
 
         assertEquals(List.of("payments"), conditions.get("aws:RequestTag/Team"));
         assertEquals(List.of("prod"), conditions.get("aws:RequestTag/Env"));
+        assertEquals(List.of("Team", "Env"), conditions.get("aws:TagKeys"));
         assertFalse(conditions.containsKey("aws:ResourceTag/Team"));
     }
 

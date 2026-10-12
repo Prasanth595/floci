@@ -684,6 +684,16 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             for (Map<String, List<String>> targetContext : targetContexts) {
                 Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
                         targetContext, resource, region, accountId, resourceOwnerAccountId);
+                if ("dynamodb".equals(credentialScope)) {
+                    Map<String, List<String>> batchContext =
+                            conditionContextResolver.dynamoDbBatchConditionContext(action, ctx, resource);
+                    if (batchContext != null) {
+                        effectiveContext.remove("dynamodb:LeadingKeys");
+                        effectiveContext.remove("dynamodb:Attributes");
+                        effectiveContext.remove("dynamodb:Select");
+                        effectiveContext.putAll(batchContext);
+                    }
+                }
                 ResourcePolicyDecision resourcePolicyDecision = evaluator.evaluateResourcePolicyFor(
                         effectiveResourcePolicies, principal, action, resource, effectiveContext);
                 Decision decision = evaluator.evaluateResolvedResourcePolicy(

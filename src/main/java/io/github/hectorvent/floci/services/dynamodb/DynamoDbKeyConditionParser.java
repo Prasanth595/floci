@@ -51,15 +51,17 @@ final class DynamoDbKeyConditionParser {
         }
         List<Expr> conditions = root instanceof AndExpr and ? and.operands() : List.of(root);
         for (Expr condition : conditions) {
-            if (!(condition instanceof CompareExpr compare)
-                    || compare.op() != TokenType.EQ
-                    || !(compare.right() instanceof PlaceholderOperand placeholder)) {
+            if (!(condition instanceof CompareExpr compare) || compare.op() != TokenType.EQ) {
                 continue;
             }
-            if (!pkName.equals(topLevelAttribute(compare.left(), exprAttrNames))) {
-                continue;
+            if (compare.right() instanceof PlaceholderOperand placeholder
+                    && pkName.equals(topLevelAttribute(compare.left(), exprAttrNames))) {
+                return scalarValue(exprAttrValues.get(placeholder.name()));
             }
-            return scalarValue(exprAttrValues.get(placeholder.name()));
+            if (compare.left() instanceof PlaceholderOperand placeholder
+                    && pkName.equals(topLevelAttribute(compare.right(), exprAttrNames))) {
+                return scalarValue(exprAttrValues.get(placeholder.name()));
+            }
         }
         return null;
     }
