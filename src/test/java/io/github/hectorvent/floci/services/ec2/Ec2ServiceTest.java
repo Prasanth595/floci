@@ -767,11 +767,12 @@ class Ec2ServiceTest {
     @Test
     void createSubnetRejectsIpv4PrefixOutsideSlash16ToSlash28() {
         // VPC User Guide: "The allowed IPv4 CIDR block size for a subnet is between a /28 netmask and /16 netmask."
+        AccountAwareStorageBackend<Vpc> vpcStore = AccountAwareStorageBackend.inMemory("000000000000");
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
-                new InMemoryStorageFactory());
-        String vpcId = service.createVpc("us-east-1", "10.0.0.0/8", false).getVpcId();
+                new InMemoryStorageFactory(Map.of("ec2-vpcs.json", vpcStore)));
+        String vpcId = slashEightVpc(service, vpcStore);
 
         for (String cidr : List.of("10.0.0.0/15", "10.2.0.0/29", "10.2.0.16/30", "10.2.0.32/32")) {
             AwsException error = assertThrows(AwsException.class,
@@ -786,16 +787,25 @@ class Ec2ServiceTest {
 
     @Test
     void createSubnetAcceptsTheSlash16AndSlash28PrefixBounds() {
+        AccountAwareStorageBackend<Vpc> vpcStore = AccountAwareStorageBackend.inMemory("000000000000");
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
-                new InMemoryStorageFactory());
-        String vpcId = service.createVpc("us-east-1", "10.0.0.0/8", false).getVpcId();
+                new InMemoryStorageFactory(Map.of("ec2-vpcs.json", vpcStore)));
+        String vpcId = slashEightVpc(service, vpcStore);
 
         assertEquals("10.1.0.0/16", service.createSubnet("us-east-1", vpcId, "10.1.0.0/16", "us-east-1a")
                 .getCidrBlock());
         assertEquals("10.2.0.0/28", service.createSubnet("us-east-1", vpcId, "10.2.0.0/28", "us-east-1a")
                 .getCidrBlock());
+    }
+
+    /** CreateVpc refuses a /8, so the VPC is created as a /16 and widened to 10.0.0.0/8 in the store. */
+    private static String slashEightVpc(Ec2Service service, AccountAwareStorageBackend<Vpc> vpcStore) {
+        Vpc vpc = service.createVpc("us-east-1", "10.0.0.0/16", false);
+        vpc.setCidrBlock("10.0.0.0/8");
+        vpcStore.put("us-east-1::" + vpc.getVpcId(), vpc);
+        return vpc.getVpcId();
     }
 
     @Test
@@ -939,10 +949,11 @@ class Ec2ServiceTest {
         assertEquals("10.1.0.0/16", service.createVpc("us-east-1", "10.1.0.0/16", false).getCidrBlock());
         Vpc smallest = service.createVpc("us-east-1", "10.2.0.0/28", false);
         assertEquals("10.2.0.0/28", smallest.getCidrBlock());
-        assertEquals("192.168.0.0/16", service.associateVpcCidrBlock("us-east-1", smallest.getVpcId(),
-                "192.168.0.0/16").getCidrBlock());
-        assertEquals("172.16.0.0/28", service.associateVpcCidrBlock("us-east-1", smallest.getVpcId(),
-                "172.16.0.0/28").getCidrBlock());
+        // Secondary blocks stay in 10.0.0.0/8, the range AWS lets a 10.x VPC add from.
+        assertEquals("10.3.0.0/16", service.associateVpcCidrBlock("us-east-1", smallest.getVpcId(),
+                "10.3.0.0/16").getCidrBlock());
+        assertEquals("10.4.0.0/28", service.associateVpcCidrBlock("us-east-1", smallest.getVpcId(),
+                "10.4.0.0/28").getCidrBlock());
     }
 
     @Test
