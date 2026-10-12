@@ -320,7 +320,7 @@ software-token MFA, which is what AWS documents.
 - In `USER_AUTH`, a user with software-token MFA turned on in an optional-MFA pool is offered only
   `PASSWORD` and `PASSWORD_SRP`, as AWS documents for users with MFA, so the second factor still
   follows. Email MFA does not restrict the choice, because Floci does not send an email MFA code
-  after a password.
+  after a password. A user who also turned passkey MFA on keeps `WEB_AUTHN` (see [Passkeys](#passkeys)).
 
 SMS and email MFA challenges, and managed-login MFA, are not emulated.
 
@@ -340,18 +340,20 @@ Passkeys are on for a pool whose `Policies.SignInPolicy.AllowedFirstAuthFactors`
 - `FactorConfiguration`: `MULTI_FACTOR_WITH_USER_VERIFICATION` makes passkey MFA possible, and each
   user turns it on with `WebAuthnMfaSettings` in `SetUserMFAPreference` or
   `AdminSetUserMFAPreference`. For a user who did, a passkey sign-in asks for user verification and,
-  verified, satisfies MFA. Turning it on in a pool with `SINGLE_FACTOR` or none fails with
-  `InvalidParameterException`. A pool that requires MFA offers `WEB_AUTHN` only to users with passkey
-  MFA on; elsewhere, a passkey sign-in by a user without it goes through the pool's MFA rules, as
-  after a password.
+  verified, satisfies MFA. Turning it on in a pool with `SINGLE_FACTOR` or none, or in a Lite pool,
+  fails with `InvalidParameterException`. A pool that requires MFA offers `WEB_AUTHN` only to users
+  with passkey MFA on, and an optional-MFA pool keeps offering it to a user with software-token MFA
+  only when passkey MFA is on too, as the AWS MFA table describes; elsewhere, a passkey sign-in by a
+  user without it goes through the pool's MFA rules, as after a password.
 
 Registration: `StartWebAuthnRegistration` returns `CredentialCreationOptions` (ES256 and RS256
 keys, a discoverable credential, the user's `sub` as the user handle, the user's existing passkeys
-excluded), and `CompleteWebAuthnRegistration` verifies the browser's `RegistrationResponseJSON`
-with [webauthn4j](https://github.com/webauthn4j/webauthn4j). As in Cognito, attestation is not
-enforced: `none`, `packed` (self or full), `fido-u2f`, `android-key`, `tpm` and `apple` statements
-are accepted once their signature checks out, without a trust check of their certificates. The origin must be the relying party ID or one of its subdomains, over HTTPS, or
-over HTTP for `localhost`, the one insecure origin browsers allow. Errors follow the API reference:
+excluded), and `CompleteWebAuthnRegistration` verifies the browser's `RegistrationResponseJSON`:
+the challenge, the origin, the relying party ID, user presence, user verification when required,
+and an ES256 or RS256 public key. As in Cognito, attestation is not enforced, so the attestation
+statement is not verified, whatever its format. The origin must be the relying party ID or one of
+its subdomains, over HTTPS, or over HTTP for `localhost`, the one insecure origin browsers allow.
+Errors follow the API reference:
 `WebAuthnChallengeNotFoundException` (no pending registration, or one older than five minutes),
 `WebAuthnClientMismatchException` (an access token from another app client),
 `WebAuthnOriginNotAllowedException`, `WebAuthnRelyingPartyMismatchException`, and

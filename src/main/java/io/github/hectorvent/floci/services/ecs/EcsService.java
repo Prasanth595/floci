@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
@@ -2402,8 +2403,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         int end = Math.min(offset + pageSize, arns.size());
         String token = end < arns.size()
-                ? Base64.getUrlEncoder().withoutPadding()
-                        .encodeToString(String.valueOf(end).getBytes(StandardCharsets.UTF_8))
+                ? Base64Url.encode(String.valueOf(end))
                 : null;
         return new ListPage(List.copyOf(arns.subList(offset, end)), token);
     }
@@ -3215,8 +3215,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         int end = Math.min(offset + pageSize, filtered.size());
         String token = end < filtered.size()
-                ? Base64.getUrlEncoder().withoutPadding()
-                        .encodeToString(String.valueOf(end).getBytes(StandardCharsets.UTF_8))
+                ? Base64Url.encode(String.valueOf(end))
                 : null;
         return new AccountSettingPage(List.copyOf(filtered.subList(offset, end)), token);
     }
@@ -3378,8 +3377,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         int end = Math.min(offset + pageSize, matches.size());
         String token = end < matches.size()
-                ? Base64.getUrlEncoder().withoutPadding()
-                        .encodeToString(String.valueOf(end).getBytes(StandardCharsets.UTF_8))
+                ? Base64Url.encode(String.valueOf(end))
                 : null;
         return new ListAttributesPage(List.copyOf(matches.subList(offset, end)), token);
     }

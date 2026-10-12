@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.acm.AcmService;
@@ -70,7 +71,7 @@ class CognitoWebAuthnTest {
         assertEquals(List.of(-7, -257), List.of(options.path("pubKeyCredParams").get(0).path("alg").asInt(),
                 options.path("pubKeyCredParams").get(1).path("alg").asInt()));
         String sub = service.adminGetUser(pool.getId(), USERNAME).getAttributes().get("sub");
-        assertEquals(WebAuthnTestAuthenticator.base64Url(sub.getBytes()), options.path("user").path("id").asText());
+        assertEquals(Base64Url.encode(sub.getBytes()), options.path("user").path("id").asText());
 
         WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256(ORIGIN);
         service.completeWebAuthnRegistration(accessToken, authenticator.register(options, "none"));
@@ -119,14 +120,19 @@ class CognitoWebAuthnTest {
     }
 
     @Test
-    void packedAttestationSignatureIsChecked() throws Exception {
+    void attestationStatementIsNotVerified() throws Exception {
         String accessToken = accessToken();
-        JsonNode options = creationOptions(accessToken);
-        WebAuthnTestAuthenticator forged = WebAuthnTestAuthenticator.es256(ORIGIN).corruptAttestation();
-        assertEquals("InvalidParameterException", assertThrows(AwsException.class,
-                () -> service.completeWebAuthnRegistration(accessToken, forged.register(options, "packed")))
-                .getErrorCode());
-        assertTrue(service.adminGetUser(pool.getId(), USERNAME).getWebAuthnCredentials().isEmpty());
+        WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256(ORIGIN).corruptAttestation();
+        service.completeWebAuthnRegistration(accessToken, authenticator.register(creationOptions(accessToken),
+                "packed"));
+        assertEquals(1, service.adminGetUser(pool.getId(), USERNAME).getWebAuthnCredentials().size(),
+                "Cognito does not enforce attestation, so a statement that does not verify is not refused");
+
+        Map<String, Object> challenge = userAuth("WEB_AUTHN");
+        String credential = authenticator.authenticate(challengeParameters(challenge).get("CREDENTIAL_REQUEST_OPTIONS"));
+        assertNotNull(service.respondToAuthChallenge(client.getClientId(), "WEB_AUTHN",
+                (String) challenge.get("Session"), Map.of("USERNAME", USERNAME, "CREDENTIAL", credential))
+                .get("AuthenticationResult"));
     }
 
     @Test
@@ -212,7 +218,7 @@ class CognitoWebAuthnTest {
         ObjectNode response = (ObjectNode) tampered.path("response");
         byte[] signature = Base64.getUrlDecoder().decode(response.path("signature").asText());
         signature[signature.length - 1] ^= 0x01;
-        response.put("signature", WebAuthnTestAuthenticator.base64Url(signature));
+        response.put("signature", Base64Url.encode(signature));
         assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
                 () -> service.respondToAuthChallenge(client.getClientId(), "WEB_AUTHN",
                         (String) challenge.get("Session"),
@@ -225,6 +231,28 @@ class CognitoWebAuthnTest {
                 () -> service.respondToAuthChallenge(client.getClientId(), "WEB_AUTHN",
                         (String) retry.get("Session"), Map.of("USERNAME", USERNAME, "CREDENTIAL", unknown)))
                 .getErrorCode());
+    }
+
+    @Test
+    void signInRejectsASignatureCounterThatDoesNotMoveForward() throws Exception {
+        String accessToken = accessToken();
+        WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256(ORIGIN);
+        service.completeWebAuthnRegistration(accessToken, authenticator.register(creationOptions(accessToken), "none"));
+
+        Map<String, Object> earlier = userAuth("WEB_AUTHN");
+        String earlierCredential = authenticator.authenticate(
+                challengeParameters(earlier).get("CREDENTIAL_REQUEST_OPTIONS"));
+        Map<String, Object> later = userAuth("WEB_AUTHN");
+        String laterCredential = authenticator.authenticate(
+                challengeParameters(later).get("CREDENTIAL_REQUEST_OPTIONS"));
+        assertNotNull(service.respondToAuthChallenge(client.getClientId(), "WEB_AUTHN", (String) later.get("Session"),
+                Map.of("USERNAME", USERNAME, "CREDENTIAL", laterCredential)).get("AuthenticationResult"));
+
+        assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                () -> service.respondToAuthChallenge(client.getClientId(), "WEB_AUTHN",
+                        (String) earlier.get("Session"), Map.of("USERNAME", USERNAME, "CREDENTIAL", earlierCredential)))
+                .getErrorCode(), "a counter below the stored one suggests a cloned authenticator");
+        assertEquals(2, service.adminGetUser(pool.getId(), USERNAME).getWebAuthnCredentials().get(0).getSignCount());
     }
 
     @Test
@@ -367,6 +395,45 @@ class CognitoWebAuthnTest {
                 () -> service.respondToAuthChallenge(client.getClientId(), "WEB_AUTHN",
                         (String) mfaChallenge.get("Session"),
                         Map.of("USERNAME", USERNAME, "CREDENTIAL", withoutVerification))).getErrorCode());
+    }
+
+    @Test
+    void optionalMfaKeepsPasskeysForTotpUsersWhosePasskeySatisfiesMfa() throws Exception {
+        String accessToken = accessToken();
+        WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256(ORIGIN);
+        service.completeWebAuthnRegistration(accessToken, authenticator.register(creationOptions(accessToken), "none"));
+        service.setUserPoolMfaConfig(pool.getId(), "OPTIONAL", true, false,
+                webAuthnConfiguration(RP_ID, "preferred", "MULTI_FACTOR_WITH_USER_VERIFICATION"));
+        String secret = (String) service.associateSoftwareToken(accessToken, null).get("SecretCode");
+        service.verifySoftwareToken(accessToken, null, CognitoTotp.code(secret, clock.instant()));
+        service.setUserMFAPreference(accessToken, UNCHANGED, new CognitoService.MfaSettingsUpdate(true, true));
+        assertEquals(List.of("PASSWORD", "PASSWORD_SRP"), userAuth(null).get("AvailableChallenges"),
+                "a user with MFA in an optional-MFA pool signs in with a password");
+
+        service.setUserMFAPreference(accessToken, UNCHANGED, UNCHANGED, true);
+        assertEquals(List.of("PASSWORD", "PASSWORD_SRP", "WEB_AUTHN"), userAuth(null).get("AvailableChallenges"),
+                "a user-verified passkey satisfies MFA on its own");
+        Map<String, Object> challenge = userAuth("WEB_AUTHN");
+        String credential = authenticator.authenticate(challengeParameters(challenge).get("CREDENTIAL_REQUEST_OPTIONS"));
+        Map<String, Object> signedIn = service.respondToAuthChallenge(client.getClientId(), "WEB_AUTHN",
+                (String) challenge.get("Session"), Map.of("USERNAME", USERNAME, "CREDENTIAL", credential));
+        assertNotNull(signedIn.get("AuthenticationResult"));
+        assertNull(signedIn.get("ChallengeName"));
+    }
+
+    @Test
+    void passkeyMfaNeedsTheEssentialsTierOrHigher() {
+        UserPool lite = service.createUserPool(Map.of("PoolName", "LitePool", "UserPoolTier", "LITE"), "us-east-1");
+        service.setUserPoolMfaConfig(lite.getId(), "OFF", null, false,
+                webAuthnConfiguration(RP_ID, null, "MULTI_FACTOR_WITH_USER_VERIFICATION"));
+        service.adminCreateUser(lite.getId(), USERNAME, Map.of(), null);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.adminSetUserMFAPreference(lite.getId(), USERNAME, UNCHANGED, UNCHANGED, true));
+        assertEquals("InvalidParameterException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("Essentials"), refused.getMessage());
+        assertFalse(service.adminGetUser(lite.getId(), USERNAME).isWebAuthnMfaEnabled());
+        service.adminSetUserMFAPreference(lite.getId(), USERNAME, UNCHANGED, UNCHANGED, false);
     }
 
     @Test

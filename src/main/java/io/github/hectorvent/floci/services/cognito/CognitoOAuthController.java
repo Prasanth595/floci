@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.cognito;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationCode;
 import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationTransaction;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
@@ -31,7 +33,6 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -779,20 +780,12 @@ public class CognitoOAuthController {
         if (!CODE_VERIFIER_PATTERN.matcher(codeVerifier).matches()) {
             return "code_verifier must be 43 to 128 unreserved characters";
         }
-        byte[] computed = Base64.getUrlEncoder().withoutPadding()
-                .encode(sha256(codeVerifier.getBytes(StandardCharsets.US_ASCII)));
+        byte[] computed = Base64Url.encode(Digests.sha256(codeVerifier.getBytes(StandardCharsets.US_ASCII)))
+                .getBytes(StandardCharsets.US_ASCII);
         if (!MessageDigest.isEqual(computed, codeChallenge.getBytes(StandardCharsets.US_ASCII))) {
             return "code_verifier does not match the code_challenge";
         }
         return null;
-    }
-
-    private static byte[] sha256(byte[] value) {
-        try {
-            return MessageDigest.getInstance("SHA-256").digest(value);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 is required for PKCE", e);
-        }
     }
 
     /** AWS puts the authorization request's nonce in the ID token. */

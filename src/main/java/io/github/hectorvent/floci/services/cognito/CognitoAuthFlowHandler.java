@@ -1253,9 +1253,12 @@ final class CognitoAuthFlowHandler {
         available.removeIf(challenge -> !allowed.contains("PASSWORD_SRP".equals(challenge) ? "PASSWORD" : challenge));
         // Where MFA is optional, AWS lets a user who has turned on an MFA factor sign in with a password
         // only, so that the second factor still follows. Floci asks for software-token codes, not for
-        // email or SMS ones, so only that factor restricts the choice here.
+        // email or SMS ones, so only that factor restricts the choice here. A user who turned passkey MFA
+        // on keeps WEB_AUTHN, since a user-verified passkey satisfies MFA on its own.
         if ("OPTIONAL".equals(pool.getMfaConfiguration()) && CognitoService.softwareTokenMfaEnabled(user)) {
-            available.removeIf(challenge -> !"PASSWORD".equals(challenge) && !"PASSWORD_SRP".equals(challenge));
+            boolean passkeyIsMfa = passkeySatisfiesMfa(pool, user);
+            available.removeIf(challenge -> !"PASSWORD".equals(challenge) && !"PASSWORD_SRP".equals(challenge)
+                    && !(passkeyIsMfa && "WEB_AUTHN".equals(challenge)));
         }
         // Where MFA is required, a passkey is a sign-in choice only for a user whose passkey satisfies MFA.
         if ("ON".equals(pool.getMfaConfiguration()) && !passkeySatisfiesMfa(pool, user)) {

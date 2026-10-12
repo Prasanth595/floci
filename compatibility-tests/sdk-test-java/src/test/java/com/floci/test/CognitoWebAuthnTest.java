@@ -19,8 +19,8 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.MessageActi
 import software.amazon.awssdk.services.cognitoidentityprovider.model.RespondToAuthChallengeResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UserPoolMfaType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UserVerificationType;
-import software.amazon.awssdk.services.cognitoidentityprovider.model.WebAuthnFactorConfigurationType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.WebAuthnCredentialDescription;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.WebAuthnFactorConfigurationType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.WebAuthnNotEnabledException;
 
 import java.util.ArrayList;

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -5496,8 +5497,7 @@ class CognitoServiceTest {
                 otherPool.getId(), "other-client", false, false, List.of(), List.of());
 
         String[] parts = valid.split("\\.");
-        String unsigned = Base64.getUrlEncoder().withoutPadding()
-                .encodeToString("{\"alg\":\"none\",\"typ\":\"JWT\"}".getBytes(StandardCharsets.UTF_8))
+        String unsigned = Base64Url.encode("{\"alg\":\"none\",\"typ\":\"JWT\"}")
                 + "." + parts[1] + ".";
         assertInvalidAccessToken(unsigned, "alg=none");
         assertInvalidAccessToken(withClaim(valid, "username", "mallory"), "modified payload");
@@ -5628,8 +5628,7 @@ class CognitoServiceTest {
         String[] parts = token.split("\\.");
         Map<String, Object> claims = MAPPER.readValue(jwtPayload(token), new TypeReference<>() {});
         claims.put(name, value);
-        String payload = Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(MAPPER.writeValueAsBytes(claims));
+        String payload = Base64Url.encode(MAPPER.writeValueAsBytes(claims));
         return parts[0] + "." + payload + "." + parts[2];
     }
 

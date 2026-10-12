@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cognito;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationCode;
 import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationTransaction;
 import io.github.hectorvent.floci.services.cognito.model.CognitoManagedLoginSession;
@@ -763,7 +764,7 @@ class CognitoOAuthControllerTest {
     }
 
     private static String jwtShape(String header, String signature) {
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(header.getBytes(StandardCharsets.UTF_8))
+        return Base64Url.encode(header)
                 + ".payload." + signature;
     }
 

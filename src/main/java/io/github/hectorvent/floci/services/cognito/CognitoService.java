@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -3504,17 +3506,19 @@ public class CognitoService implements ResourceProvider {
         }
     }
 
-    /**
-     * Passkeys are on for a pool whose sign-in policy allows {@code WEB_AUTHN} as a first factor,
-     * which AWS offers in every feature plan but Lite.
-     */
+    /** Passkeys are on for a pool whose sign-in policy allows {@code WEB_AUTHN} as a first factor. */
     private static void requireWebAuthnEnabled(UserPool pool) {
-        if ("LITE".equals(pool.getUserPoolTier())
+        if (!passkeysInFeaturePlan(pool)
                 || !CognitoAuthFlowHandler.allowedFirstAuthFactors(pool).contains("WEB_AUTHN")) {
             throw new AwsException("WebAuthnNotEnabledException",
                     "Passkey sign-in is not enabled for this user pool. Add WEB_AUTHN to the pool's "
                             + "SignInPolicy AllowedFirstAuthFactors.", 400);
         }
+    }
+
+    /** AWS offers passkeys, and passkey MFA with them, in every feature plan but Lite. */
+    private static boolean passkeysInFeaturePlan(UserPool pool) {
+        return !"LITE".equals(pool.getUserPoolTier());
     }
 
     /**
@@ -4380,14 +4384,12 @@ public class CognitoService implements ResourceProvider {
         String headerJson = String.format(
                 "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
                 escapeJson(getSigningKeyId(pool)));
-        return Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(headerJson.getBytes(StandardCharsets.UTF_8));
+        return Base64Url.encode(headerJson);
     }
 
     private static String encodeJsonBase64Url(Map<String, Object> claims) {
         try {
-            return Base64.getUrlEncoder().withoutPadding()
-                    .encodeToString(MAPPER.writeValueAsBytes(claims));
+            return Base64Url.encode(MAPPER.writeValueAsBytes(claims));
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Failed to serialize JWT claims", e);
         }
@@ -4399,8 +4401,7 @@ public class CognitoService implements ResourceProvider {
         String headerJson = String.format(
                 "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
                 escapeJson(getSigningKeyId(pool)));
-        String header = Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(headerJson.getBytes(StandardCharsets.UTF_8));
+        String header = Base64Url.encode(headerJson);
         String clientId = client != null ? client.getClientId() : null;
         String audFragment = (clientId != null && !clientId.isBlank() && "id".equals(type))
                 ? ",\"aud\":\"" + escapeJson(clientId) + "\""
@@ -4410,8 +4411,7 @@ public class CognitoService implements ResourceProvider {
                 "\"exp\":%d,\"iat\":%d,\"username\":\"%s\"%s}",
                 UUID.randomUUID(), type, escapeJson(getIssuer(pool.getId())), now + lifetimeSeconds, now, username, audFragment
         );
-        String payload = Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(payloadJson.getBytes(StandardCharsets.UTF_8));
+        String payload = Base64Url.encode(payloadJson);
         return signJwt(header, payload, getSigningPrivateKey(pool));
     }
 
@@ -4419,8 +4419,7 @@ public class CognitoService implements ResourceProvider {
         String headerJson = String.format(
                 "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
                 escapeJson(getSigningKeyId(pool)));
-        String header = Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(headerJson.getBytes(StandardCharsets.UTF_8));
+        String header = Base64Url.encode(headerJson);
 
         long now = System.currentTimeMillis() / 1000L;
         long lifetimeSeconds = resolveAccessTokenLifetimeSeconds(client);
@@ -4439,8 +4438,7 @@ public class CognitoService implements ResourceProvider {
         }
         payloadJson.append("}");
 
-        String payload = Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(payloadJson.toString().getBytes(StandardCharsets.UTF_8));
+        String payload = Base64Url.encode(payloadJson.toString());
         return signJwt(header, payload, getSigningPrivateKey(pool));
     }
 
@@ -4690,7 +4688,7 @@ public class CognitoService implements ResourceProvider {
             signature.initSign(signingKey);
             signature.update(data.getBytes(StandardCharsets.UTF_8));
             byte[] sig = signature.sign();
-            return Base64.getUrlEncoder().withoutPadding().encodeToString(sig);
+            return Base64Url.encode(sig);
         } catch (Exception e) {
             throw new RuntimeException("JWT signing failed", e);
         }
@@ -4787,17 +4785,7 @@ public class CognitoService implements ResourceProvider {
     }
 
     String hashPassword(String password) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(password.getBytes(StandardCharsets.UTF_8));
-            StringBuilder hex = new StringBuilder();
-            for (byte b : hash) {
-                hex.append(String.format("%02x", b));
-            }
-            return hex.toString();
-        } catch (Exception e) {
-            throw new RuntimeException("Password hashing failed", e);
-        }
+        return Digests.sha256Hex(password);
     }
 
     private void updateUserPassword(CognitoUser user, String password) {
@@ -5866,14 +5854,23 @@ public class CognitoService implements ResourceProvider {
 
     /**
      * A user can turn passkey MFA on only where the pool's {@code WebAuthnConfiguration} lets a passkey
-     * stand in for MFA ({@code FactorConfiguration} {@code MULTI_FACTOR_WITH_USER_VERIFICATION}), as the
-     * SetUserMFAPreference reference requires. Turning it off is always accepted.
+     * stand in for MFA ({@code FactorConfiguration} {@code MULTI_FACTOR_WITH_USER_VERIFICATION}) and the
+     * pool is in the Essentials tier or higher, as the SetUserMFAPreference reference requires. Turning
+     * it off is always accepted.
      */
     private static void requirePasskeyMfaAvailable(UserPool pool, Boolean webAuthnMfaEnabled) {
-        if (Boolean.TRUE.equals(webAuthnMfaEnabled) && !CognitoAuthFlowHandler.passkeyMfaAllowed(pool)) {
+        if (!Boolean.TRUE.equals(webAuthnMfaEnabled)) {
+            return;
+        }
+        if (!CognitoAuthFlowHandler.passkeyMfaAllowed(pool)) {
             throw new AwsException("InvalidParameterException",
                     "Passkey MFA cannot be enabled because the user pool's WebAuthnConfiguration "
                             + "FactorConfiguration is not MULTI_FACTOR_WITH_USER_VERIFICATION.", 400);
+        }
+        if (!passkeysInFeaturePlan(pool)) {
+            throw new AwsException("InvalidParameterException",
+                    "Passkey MFA cannot be enabled because the user pool is not in the Essentials tier or higher.",
+                    400);
         }
     }
 

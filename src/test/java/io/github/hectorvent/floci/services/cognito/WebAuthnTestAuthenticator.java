@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.cognito;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.Digests;
 
 import java.io.ByteArrayOutputStream;
 import java.math.BigInteger;
@@ -10,13 +12,11 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
-import java.security.MessageDigest;
 import java.security.Signature;
 import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.ECGenParameterSpec;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.UUID;
 
 /**
@@ -83,7 +83,7 @@ final class WebAuthnTestAuthenticator {
     }
 
     String credentialId() {
-        return base64Url(credentialId);
+        return Base64Url.encode(credentialId);
     }
 
     ObjectNode register(JsonNode creationOptions, String format) throws Exception {
@@ -91,7 +91,7 @@ final class WebAuthnTestAuthenticator {
                 ? relyingPartyIdOverride : creationOptions.path("rp").path("id").asText();
         byte[] clientData = clientData("webauthn.create", creationOptions.path("challenge").asText());
         ByteArrayOutputStream authData = new ByteArrayOutputStream();
-        authData.write(sha256(relyingPartyId.getBytes(StandardCharsets.UTF_8)));
+        authData.write(Digests.sha256(relyingPartyId.getBytes(StandardCharsets.UTF_8)));
         authData.write(FLAG_UP | FLAG_AT | (userVerified ? FLAG_UV : 0));
         authData.write(ByteBuffer.allocate(4).putInt((int) signCount).array());
         authData.write(new byte[16]);
@@ -102,7 +102,7 @@ final class WebAuthnTestAuthenticator {
 
         Cbor statement = new Cbor();
         if ("packed".equals(format)) {
-            byte[] signed = concat(authenticatorData, sha256(clientData));
+            byte[] signed = concat(authenticatorData, Digests.sha256(clientData));
             if (corruptAttestation) {
                 signed[0] ^= 0x01;
             }
@@ -123,8 +123,8 @@ final class WebAuthnTestAuthenticator {
         credential.put("authenticatorAttachment", "platform");
         credential.putObject("clientExtensionResults");
         ObjectNode response = credential.putObject("response");
-        response.put("clientDataJSON", base64Url(clientData));
-        response.put("attestationObject", base64Url(attestationObject));
+        response.put("clientDataJSON", Base64Url.encode(clientData));
+        response.put("attestationObject", Base64Url.encode(attestationObject));
         response.putArray("transports").add("internal").add("hybrid");
         return credential;
     }
@@ -134,7 +134,7 @@ final class WebAuthnTestAuthenticator {
         String relyingPartyId = relyingPartyIdOverride != null ? relyingPartyIdOverride : options.path("rpId").asText();
         byte[] clientData = clientData("webauthn.get", options.path("challenge").asText());
         signCount++;
-        byte[] authenticatorData = concat(sha256(relyingPartyId.getBytes(StandardCharsets.UTF_8)),
+        byte[] authenticatorData = concat(Digests.sha256(relyingPartyId.getBytes(StandardCharsets.UTF_8)),
                 new byte[] {(byte) (FLAG_UP | (userVerified ? FLAG_UV : 0))},
                 ByteBuffer.allocate(4).putInt((int) signCount).array());
 
@@ -145,9 +145,9 @@ final class WebAuthnTestAuthenticator {
         credential.put("authenticatorAttachment", "platform");
         credential.putObject("clientExtensionResults");
         ObjectNode response = credential.putObject("response");
-        response.put("authenticatorData", base64Url(authenticatorData));
-        response.put("clientDataJSON", base64Url(clientData));
-        response.put("signature", base64Url(sign(concat(authenticatorData, sha256(clientData)))));
+        response.put("authenticatorData", Base64Url.encode(authenticatorData));
+        response.put("clientDataJSON", Base64Url.encode(clientData));
+        response.put("signature", Base64Url.encode(sign(concat(authenticatorData, Digests.sha256(clientData)))));
         return JSON.writeValueAsString(credential);
     }
 
@@ -187,10 +187,6 @@ final class WebAuthnTestAuthenticator {
         return signature.sign();
     }
 
-    private static byte[] sha256(byte[] data) throws Exception {
-        return MessageDigest.getInstance("SHA-256").digest(data);
-    }
-
     private static byte[] concat(byte[]... parts) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         for (byte[] part : parts) {
@@ -209,10 +205,6 @@ final class WebAuthnTestAuthenticator {
         byte[] padded = new byte[size];
         System.arraycopy(bytes, 0, padded, size - bytes.length, bytes.length);
         return padded;
-    }
-
-    static String base64Url(byte[] bytes) {
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
 
     /** The few CBOR items an attestation object and a COSE key need. */
