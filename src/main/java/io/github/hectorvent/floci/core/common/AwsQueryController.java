@@ -104,6 +104,7 @@ public class AwsQueryController {
             "TagPolicy", "UntagPolicy", "ListPolicyTags",
             "TagInstanceProfile", "UntagInstanceProfile", "ListInstanceProfileTags",
             "CreateLoginProfile", "GetLoginProfile", "DeleteLoginProfile", "UpdateLoginProfile",
+            "ChangePassword",
             "GenerateCredentialReport", "GetCredentialReport",
             "GetAccountSummary", "GetAccountAuthorizationDetails",
             "SimulatePrincipalPolicy", "SimulateCustomPolicy",
