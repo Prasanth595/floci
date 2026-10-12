@@ -1458,7 +1458,7 @@ class EventBridgeServiceTest {
 
     @Test
     void putEventsRejectsMalformedDetailWithTrailingGarbage() {
-        var result = service.putEvents(
+        EventBridgeService.PutEventsResult result = service.putEvents(
                 List.of(Map.of("Source", "s", "DetailType", "d",
                         "Detail", "{} garbage")),
                 REGION);
@@ -1467,7 +1467,7 @@ class EventBridgeServiceTest {
 
     @Test
     void putEventsRejectsTwoConcatenatedValidJsonObjects() {
-        var result = service.putEvents(
+        EventBridgeService.PutEventsResult result = service.putEvents(
                 List.of(Map.of("Source", "s", "DetailType", "d",
                         "Detail", "{\"a\":1}{\"b\":2}")),
                 REGION);
@@ -1476,7 +1476,7 @@ class EventBridgeServiceTest {
 
     @Test
     void putEventsRejectsTwoConcatenatedEmptyObjects() {
-        var result = service.putEvents(
+        EventBridgeService.PutEventsResult result = service.putEvents(
                 List.of(Map.of("Source", "s", "DetailType", "d",
                         "Detail", "{} {}")),
                 REGION);
@@ -1485,7 +1485,7 @@ class EventBridgeServiceTest {
 
     @Test
     void putEventsAcceptsSingleObjectWithTrailingWhitespace() {
-        var result = service.putEvents(
+        EventBridgeService.PutEventsResult result = service.putEvents(
                 List.of(Map.of("Source", "s", "DetailType", "d",
                         "Detail", "{\"a\":1}   \n\t")),
                 REGION);
@@ -1507,7 +1507,7 @@ class EventBridgeServiceTest {
 
     private static void assertMalformedDetail(EventBridgeService.PutEventsResult r) {
         assertEquals(1, r.failedCount());
-        var entry = r.entries().getFirst();
+        Map<String, String> entry = r.entries().getFirst();
         assertEquals("MalformedDetail", entry.get("ErrorCode"));
         assertNull(entry.get("EventId"));
     }

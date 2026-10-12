@@ -378,7 +378,7 @@ class PipesTargetInvokerTest {
         Pipe pipe = createPipe(busArn, null);
         String payload = "{\"key\":\"value\"}";
 
-        var success = new EventBridgeService.PutEventsResult(
+        EventBridgeService.PutEventsResult success = new EventBridgeService.PutEventsResult(
                 0,
                 List.of(Map.of("EventId", "evt-123")));
 
@@ -400,7 +400,7 @@ class PipesTargetInvokerTest {
         Map<String, String> failedEntry = new HashMap<>();
         failedEntry.put("ErrorCode", "MalformedDetail");
         failedEntry.put("ErrorMessage", "The JSON provided is not valid.");
-        var failure = new EventBridgeService.PutEventsResult(1, List.of(failedEntry));
+        EventBridgeService.PutEventsResult failure = new EventBridgeService.PutEventsResult(1, List.of(failedEntry));
 
         when(eventBridgeService.putEvents(anyList(), eq(region))).thenReturn(failure);
 
