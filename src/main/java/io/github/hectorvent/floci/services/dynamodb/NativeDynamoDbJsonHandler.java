@@ -1259,6 +1259,13 @@ public class NativeDynamoDbJsonHandler {
         }
         throwValidationErrors(rangeErrors);
 
+        String rccScan = request.has("ReturnConsumedCapacity") ? request.get("ReturnConsumedCapacity").asText() : null;
+        if (rccScan != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(rccScan)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + rccScan + "' at 'returnConsumedCapacity' "
+                    + "failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]", 400);
+        }
+
         rejectMixedParameters(request,
                 List.of("AttributesToGet", "ScanFilter", "ConditionalOperator"),
                 List.of("ProjectionExpression", "FilterExpression"));
