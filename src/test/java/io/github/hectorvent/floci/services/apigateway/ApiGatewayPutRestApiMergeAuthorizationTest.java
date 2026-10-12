@@ -448,6 +448,49 @@ class ApiGatewayPutRestApiMergeAuthorizationTest {
     }
 
     @Test
+    void importedNonHeaderApiKeySchemesDoNotRequireApiKey() throws Exception {
+        List<String> nonApiGatewayKeySpecs = List.of(
+                API_KEY_SPEC.replace("\"name\": \"x-api-key\", \"in\": \"header\"",
+                        "\"name\": \"x-api-key\", \"in\": \"query\""),
+                API_KEY_SPEC.replace("\"name\": \"x-api-key\", \"in\": \"header\"",
+                        "\"name\": \"X-Custom-Key\", \"in\": \"header\""));
+        for (String spec : nonApiGatewayKeySpecs) {
+            String apiId = importApi(spec);
+            try {
+                JsonNode method = getJson(methodPath(apiId));
+                assertFalse(method.path("apiKeyRequired").asBoolean());
+            } finally {
+                given().delete("/restapis/" + apiId).then().statusCode(202);
+            }
+        }
+
+        String mixedCaseHeaderSpec = API_KEY_SPEC.replace("\"name\": \"x-api-key\", \"in\": \"header\"",
+                "\"name\": \"X-API-KEY\", \"in\": \"header\"");
+        String apiId = importApi(mixedCaseHeaderSpec);
+        try {
+            JsonNode method = getJson(methodPath(apiId));
+            assertTrue(method.path("apiKeyRequired").asBoolean());
+        } finally {
+            given().delete("/restapis/" + apiId).then().statusCode(202);
+        }
+
+        String authorizerApiKeySpec = API_KEY_SPEC.replace(
+                "\"client_key\": {\"type\": \"apiKey\", \"name\": \"x-api-key\", \"in\": \"header\"}",
+                "\"client_key\": {\"type\": \"apiKey\", \"name\": \"x-api-key\", \"in\": \"header\", "
+                        + "\"x-amazon-apigateway-authorizer\": {\"type\": \"token\", "
+                        + "\"authorizerUri\": \"" + AUTHORIZER_URI + "\"}}");
+        String authorizerApiId = importApi(authorizerApiKeySpec);
+        try {
+            JsonNode method = getJson(methodPath(authorizerApiId));
+            assertAll(
+                    () -> assertFalse(method.path("apiKeyRequired").asBoolean()),
+                    () -> assertEquals("CUSTOM", method.path("authorizationType").asText()));
+        } finally {
+            given().delete("/restapis/" + authorizerApiId).then().statusCode(202);
+        }
+    }
+
+    @Test
     void importedApiKeysAreEnforcedForImportAndPutRestApi() throws Exception {
         List<String> apiKeySpecs = List.of(API_KEY_SPEC, ROOT_API_KEY_SPEC);
         List<String> modes = List.of("import", "merge", "overwrite");

@@ -3410,7 +3410,8 @@ public class ApiGatewayService implements ResourceProvider {
                 Map<String, Object> authDef = importedAuthorizerDefinition(scheme, schemeName);
                 if (authDef == null && scheme != null
                         && SecurityScheme.Type.APIKEY.equals(scheme.getType())
-                        && (authtype == null || "apiKey".equalsIgnoreCase(authtype))) {
+                        && scheme.getIn() != null && "header".equalsIgnoreCase(scheme.getIn().toString())
+                        && scheme.getName() != null && "x-api-key".equalsIgnoreCase(scheme.getName())) {
                     apiKeySchemes.add(schemeName);
                 }
                 if (authDef != null) {
