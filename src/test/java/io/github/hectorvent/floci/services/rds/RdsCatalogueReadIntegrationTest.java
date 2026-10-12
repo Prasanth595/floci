@@ -1,20 +1,27 @@
 package io.github.hectorvent.floci.services.rds;
 
+import io.github.hectorvent.floci.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * The RDS catalogue reads over the Query protocol: engine versions with their families, defaults
  * and upgrade targets, the engine default parameter calls, and the storage an instance can move to.
  */
 @QuarkusTest
+@TestProfile(RdsMockProfile.class)
 class RdsCatalogueReadIntegrationTest {
 
     private static final String VERSIONS =
@@ -74,6 +81,83 @@ class RdsCatalogueReadIntegrationTest {
         .when().post("/").then().statusCode(200)
                 .body(VERSIONS + ".size()", equalTo(19))
                 .body(not(containsString("<Marker>")));
+    }
+
+    @Test
+    void engineVersionsReportWhatFlociSupports() {
+        query("DescribeDBEngineVersions").formParam("Engine", "postgres").formParam("EngineVersion", "16.3")
+        .when().post("/").then()
+                .statusCode(200)
+                .body(VERSIONS + ".ExportableLogTypes.member", contains("postgresql", "upgrade"))
+                .body(VERSIONS + ".SupportsLogExportsToCloudwatchLogs", equalTo("true"))
+                .body(VERSIONS + ".SupportsReadReplica", equalTo("true"))
+                .body(VERSIONS + ".SupportedFeatureNames.member", contains("s3Import", "s3Export", "Lambda"))
+                .body(VERSIONS + ".SupportsParallelQuery", equalTo("false"))
+                .body(VERSIONS + ".SupportsGlobalDatabases", equalTo("false"))
+                .body(VERSIONS + ".SupportsBabelfish", equalTo("false"));
+        query("DescribeDBEngineVersions").formParam("Engine", "aurora-mysql").formParam("DefaultOnly", "true")
+        .when().post("/").then()
+                .statusCode(200)
+                .body(VERSIONS + ".ExportableLogTypes.member", contains("audit", "error", "general", "slowquery"))
+                .body(VERSIONS + ".SupportsReadReplica", equalTo("false"))
+                .body(containsString("<SupportedFeatureNames></SupportedFeatureNames>"))
+                .body(VERSIONS + ".SupportsGlobalDatabases", equalTo("true"));
+    }
+
+    @Test
+    void engineVersionsPageByOffset() {
+        query("DescribeDBEngineVersions").formParam("Marker", "15")
+        .when().post("/").then().statusCode(200)
+                .body(VERSIONS + ".size()", equalTo(4))
+                .body(not(containsString("<Marker>")));
+        query("DescribeDBEngineVersions").formParam("Marker", "next")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"));
+        query("DescribeDBEngineVersions").formParam("MaxRecords", "19")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"));
+    }
+
+    /** A create that names no version gets the version DescribeDBEngineVersions calls the default. */
+    @ParameterizedTest
+    @CsvSource({"postgres", "mysql", "mariadb", "sqlserver-se"})
+    void instanceCreatedWithoutAVersionGetsTheCataloguesDefault(String engine) {
+        String id = "default-" + engine;
+        String created = query("CreateDBInstance")
+                .formParam("DBInstanceIdentifier", id)
+                .formParam("Engine", engine)
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "password123")
+                .formParam("DBInstanceClass", "db.t3.micro")
+                .formParam("AllocatedStorage", "20")
+        .when().post("/").then().statusCode(200)
+                .extract().xmlPath().getString("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.EngineVersion");
+        assertEquals(defaultVersion(engine), created);
+        query("DeleteDBInstance").formParam("DBInstanceIdentifier", id).formParam("SkipFinalSnapshot", "true")
+        .when().post("/").then().statusCode(200);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"aurora-mysql, 8.0.mysql_aurora.3.05.2", "aurora-postgresql, 16.3"})
+    void clusterCreatedWithoutAVersionGetsTheCataloguesDefault(String engine, String expected) {
+        String id = "default-" + engine;
+        String created = query("CreateDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("Engine", engine)
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "password123")
+        .when().post("/").then().statusCode(200)
+                .extract().xmlPath().getString("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.EngineVersion");
+        assertEquals(expected, created);
+        assertEquals(defaultVersion(engine), created);
+        query("DeleteDBCluster").formParam("DBClusterIdentifier", id).formParam("SkipFinalSnapshot", "true")
+        .when().post("/").then().statusCode(200);
+    }
+
+    private static String defaultVersion(String engine) {
+        return query("DescribeDBEngineVersions").formParam("Engine", engine).formParam("DefaultOnly", "true")
+        .when().post("/").then().statusCode(200)
+                .extract().xmlPath().getString(VERSIONS + ".EngineVersion");
     }
 
     @Test

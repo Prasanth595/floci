@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * The engine versions RDS reports through DescribeDBEngineVersions and
@@ -64,6 +65,60 @@ final class RdsEngineCatalog {
     private static EngineVersion postgres(String version, String major, boolean isDefault, List<String> classes) {
         return new EngineVersion("postgres", version, major, "postgres" + major, "PostgreSQL", isDefault,
                 classes, PROVISIONED);
+    }
+
+    // The log types each engine has long published to CloudWatch Logs, per the RDS and Aurora user
+    // guides. Floci stores EnableCloudwatchLogsExports as given and ships nothing.
+    private static final Map<String, List<String>> EXPORTABLE_LOG_TYPES = Map.of(
+            "postgres", List.of("postgresql", "upgrade"),
+            "mysql", List.of("audit", "error", "general", "slowquery"),
+            "mariadb", List.of("audit", "error", "general", "slowquery"),
+            "sqlserver-se", List.of("agent", "error"),
+            "aurora-mysql", List.of("audit", "error", "general", "slowquery"),
+            "aurora-postgresql", List.of("postgresql"));
+
+    // The FeatureName values AddRoleToDBInstance and AddRoleToDBCluster accept for each engine, per
+    // the user guides; MySQL, MariaDB and Aurora MySQL take none (Aurora MySQL names its roles in
+    // cluster parameters instead).
+    private static final Map<String, List<String>> FEATURE_NAMES = Map.of(
+            "postgres", List.of("s3Import", "s3Export", "Lambda"),
+            "sqlserver-se", List.of("S3_INTEGRATION"),
+            "aurora-postgresql", List.of("s3Import", "s3Export", "Lambda", "Comprehend", "SageMaker"));
+
+    static List<String> exportableLogTypes(EngineVersion version) {
+        return EXPORTABLE_LOG_TYPES.getOrDefault(version.engine(), List.of());
+    }
+
+    static List<String> supportedFeatureNames(EngineVersion version) {
+        return FEATURE_NAMES.getOrDefault(version.engine(), List.of());
+    }
+
+    /** Floci creates read replicas of PostgreSQL instances only. */
+    static boolean supportsReadReplica(EngineVersion version) {
+        return version.engine().equals("postgres");
+    }
+
+    static boolean supportsGlobalDatabases(EngineVersion version) {
+        return RdsService.GLOBAL_CLUSTER_ENGINES.contains(version.engine());
+    }
+
+    /**
+     * The version a create request that names none gets: the engine's flagged default. {@code aurora}
+     * is Aurora MySQL's older engine name and the SQL Server editions share one entry. Null when the
+     * catalogue does not know the engine; no engine at all means PostgreSQL.
+     */
+    static String defaultVersion(String engine) {
+        String name = engine == null ? "postgres" : engine.toLowerCase(Locale.ROOT);
+        String catalogued = switch (name) {
+            case "aurora" -> "aurora-mysql";
+            case "sqlserver-ee", "sqlserver-ex", "sqlserver-web" -> "sqlserver-se";
+            default -> name;
+        };
+        return VERSIONS.stream()
+                .filter(v -> v.isDefault() && v.engine().equals(catalogued))
+                .map(EngineVersion::version)
+                .findFirst()
+                .orElse(null);
     }
 
     /**

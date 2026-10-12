@@ -32,10 +32,10 @@ import software.amazon.awssdk.services.rds.model.DbSnapshotNotFoundException;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxiesResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxyTargetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxyTargetsResponse;
-import software.amazon.awssdk.services.rds.model.EngineDefaults;
 import software.amazon.awssdk.services.rds.model.DescribeDbSubnetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOptionGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOrderableDbInstanceOptionsResponse;
+import software.amazon.awssdk.services.rds.model.EngineDefaults;
 import software.amazon.awssdk.services.rds.model.InvalidDbInstanceStateException;
 import software.amazon.awssdk.services.rds.model.InvalidOptionGroupStateException;
 import software.amazon.awssdk.services.rds.model.InvalidRestoreException;
@@ -765,9 +765,21 @@ class RdsControlPlaneTest {
         assertThat(postgres.dbParameterGroupFamily()).isEqualTo("postgres16");
         assertThat(postgres.validUpgradeTarget()).extracting(UpgradeTarget::engineVersion).contains("17.4");
         assertThat(postgres.supportedEngineModes()).containsExactly("provisioned");
+        assertThat(postgres.exportableLogTypes()).containsExactly("postgresql", "upgrade");
+        assertThat(postgres.supportsLogExportsToCloudwatchLogs()).isTrue();
+        assertThat(postgres.supportsReadReplica()).isTrue();
+        assertThat(postgres.supportedFeatureNames()).containsExactly("s3Import", "s3Export", "Lambda");
+        assertThat(postgres.supportsParallelQuery()).isFalse();
+        assertThat(postgres.supportsGlobalDatabases()).isFalse();
+        assertThat(postgres.supportsBabelfish()).isFalse();
 
         assertThat(rds.describeDBEngineVersions(b -> b.engine("mysql").defaultOnly(true)).dbEngineVersions())
                 .extracting(DBEngineVersion::engineVersion).containsExactly("8.0.36");
+        DBEngineVersion auroraMysql = rds.describeDBEngineVersions(b -> b
+                .engine("aurora-mysql").defaultOnly(true)).dbEngineVersions().get(0);
+        assertThat(auroraMysql.engineVersion()).isEqualTo("8.0.mysql_aurora.3.05.2");
+        assertThat(auroraMysql.supportsGlobalDatabases()).isTrue();
+        assertThat(auroraMysql.supportedFeatureNames()).isEmpty();
 
         EngineDefaults defaults = rds.describeEngineDefaultParameters(b -> b
                 .dbParameterGroupFamily("postgres16")).engineDefaults();

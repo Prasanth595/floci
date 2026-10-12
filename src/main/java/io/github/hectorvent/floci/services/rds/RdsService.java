@@ -3131,10 +3131,7 @@ public class RdsService implements Resettable, ResourceProvider {
     public EngineVersionPage describeDbEngineVersions(String engine, String engineVersion, String family,
                                                       boolean defaultOnly, Map<String, List<String>> filters,
                                                       Integer maxRecords, String marker) {
-        if (maxRecords != null && (maxRecords < MIN_MAX_RECORDS || maxRecords > MAX_MAX_RECORDS)) {
-            throw new AwsException("InvalidParameterValue",
-                    "MaxRecords must be between " + MIN_MAX_RECORDS + " and " + MAX_MAX_RECORDS + ".", 400);
-        }
+        requireValidMaxRecords(maxRecords);
         List<RdsEngineCatalog.EngineVersion> matching = RdsEngineCatalog.VERSIONS.stream()
                 .filter(v -> isBlank(engine) || v.engine().equalsIgnoreCase(engine))
                 .filter(v -> isBlank(engineVersion) || RdsEngineCatalog.versionMatches(v.version(), engineVersion))
@@ -3161,18 +3158,8 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             matching = List.copyOf(defaults.values());
         }
-        int from = 0;
-        if (!isBlank(marker)) {
-            try {
-                from = Integer.parseInt(marker);
-            } catch (NumberFormatException e) {
-                throw new AwsException("InvalidParameterValue", "Invalid marker: " + marker, 400);
-            }
-        }
-        int limit = maxRecords == null ? DEFAULT_MAX_RECORDS : maxRecords;
-        int start = Math.min(Math.max(from, 0), matching.size());
-        int to = Math.min(matching.size(), start + limit);
-        return new EngineVersionPage(matching.subList(start, to), to < matching.size() ? Integer.toString(to) : null);
+        OffsetPage<RdsEngineCatalog.EngineVersion> page = offsetPage(matching, maxRecords, marker);
+        return new EngineVersionPage(page.items(), page.marker());
     }
 
     private static List<String> filterValues(Map<String, List<String>> filters, String name) {
@@ -4708,7 +4695,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     // ── Global clusters (Aurora global databases) ─────────────────────────────
 
-    private static final Set<String> GLOBAL_CLUSTER_ENGINES = Set.of("aurora-mysql", "aurora-postgresql");
+    static final Set<String> GLOBAL_CLUSTER_ENGINES = Set.of("aurora-mysql", "aurora-postgresql");
 
     /**
      * Creates an Aurora global database, empty or with an existing cluster (named by ARN or, in
@@ -4770,7 +4757,7 @@ public class RdsService implements Resettable, ResourceProvider {
             requireGlobalClusterEngine(engine, null);
             global.setEngine(engine.toLowerCase(Locale.ROOT));
             global.setEngineVersion(hasText(engineVersion)
-                    ? engineVersion : defaultGlobalEngineVersion(global.getEngine()));
+                    ? engineVersion : RdsEngineCatalog.defaultVersion(global.getEngine()));
             global.setDatabaseName(hasText(databaseName) ? databaseName : null);
             global.setStorageEncrypted(Boolean.TRUE.equals(storageEncrypted));
         }
@@ -5221,9 +5208,6 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
-    private static String defaultGlobalEngineVersion(String engine) {
-        return "aurora-mysql".equals(engine) ? "8.0.mysql_aurora.3.05.2" : "16.3";
-    }
 
     private static boolean sameMajorVersion(String current, String requested) {
         if (current == null || requested == null) {
@@ -6928,13 +6912,10 @@ public class RdsService implements Resettable, ResourceProvider {
         String normalizedEngine = effectiveEngineName(engineParam).toLowerCase();
         String effectiveVersion = engineVersion;
         if (effectiveVersion == null || effectiveVersion.isBlank()) {
-            effectiveVersion = switch (normalizedEngine) {
-                case "postgres", "aurora-postgresql" -> "16.3";
-                case "mysql", "aurora", "aurora-mysql" -> "8.0.36";
-                case "mariadb" -> "11.2";
-                case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web" -> "15.00";
-                default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
-            };
+            effectiveVersion = RdsEngineCatalog.defaultVersion(normalizedEngine);
+            if (effectiveVersion == null) {
+                throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+            }
         }
 
         Matcher matcher = IMAGE_TAG_VERSION_PATTERN.matcher(effectiveVersion.trim());
@@ -9312,6 +9293,35 @@ public class RdsService implements Resettable, ResourceProvider {
     private static final int MAX_MAX_RECORDS = 100;
     private static final int DEFAULT_MAX_RECORDS = 100;
 
+    private static void requireValidMaxRecords(Integer maxRecords) {
+        if (maxRecords != null && (maxRecords < MIN_MAX_RECORDS || maxRecords > MAX_MAX_RECORDS)) {
+            throw new AwsException("InvalidParameterValue",
+                    "MaxRecords must be between " + MIN_MAX_RECORDS + " and " + MAX_MAX_RECORDS + ".", 400);
+        }
+    }
+
+    private record OffsetPage<T>(List<T> items, String marker) {}
+
+    /**
+     * One page of a list whose marker is the offset of the page's first item, as
+     * DescribeDBEngineVersions and DescribeDBClusterEndpoints page. The next marker is null on the
+     * last page.
+     */
+    private static <T> OffsetPage<T> offsetPage(List<T> matching, Integer maxRecords, String marker) {
+        int from = 0;
+        if (!isBlank(marker)) {
+            try {
+                from = Integer.parseInt(marker);
+            } catch (NumberFormatException e) {
+                throw new AwsException("InvalidParameterValue", "Invalid marker: " + marker, 400);
+            }
+        }
+        int limit = maxRecords == null ? DEFAULT_MAX_RECORDS : maxRecords;
+        int start = Math.min(Math.max(from, 0), matching.size());
+        int to = Math.min(matching.size(), start + limit);
+        return new OffsetPage<>(matching.subList(start, to), to < matching.size() ? Integer.toString(to) : null);
+    }
+
     /**
      * Nothing is published to the topic. The subscription is stored and reported back so a client
      * can manage it, and no RDS event reaches SNS through it.
@@ -9467,10 +9477,7 @@ public class RdsService implements Resettable, ResourceProvider {
         // Ahead of the named-subscription shortcut, so a bad page size is rejected whether or not
         // the request also names a subscription. Request validation does not depend on which branch
         // serves the read.
-        if (maxRecords != null && (maxRecords < MIN_MAX_RECORDS || maxRecords > MAX_MAX_RECORDS)) {
-            throw new AwsException("InvalidParameterValue",
-                    "MaxRecords must be between " + MIN_MAX_RECORDS + " and " + MAX_MAX_RECORDS + ".", 400);
-        }
+        requireValidMaxRecords(maxRecords);
         if (subscriptionName != null && !subscriptionName.isBlank()) {
             return new EventSubscriptionPage(
                     List.of(requireEventSubscription(region, subscriptionName)), null);
@@ -9628,10 +9635,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                                                        Map<String, List<String>> filters,
                                                                        Integer maxRecords, String marker) {
         String effectiveRegion = effectiveRegion(region);
-        if (maxRecords != null && (maxRecords < MIN_MAX_RECORDS || maxRecords > MAX_MAX_RECORDS)) {
-            throw new AwsException("InvalidParameterValue",
-                    "MaxRecords must be between " + MIN_MAX_RECORDS + " and " + MAX_MAX_RECORDS + ".", 400);
-        }
+        requireValidMaxRecords(maxRecords);
         List<DbCluster> scope = !isBlank(clusterId)
                 ? List.of(getDbCluster(clusterId, effectiveRegion))
                 : listDbClusters(null, effectiveRegion).stream()
@@ -9660,19 +9664,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 .filter(e -> matchesFilter(filters, "db-cluster-endpoint-id", e.getDbClusterEndpointIdentifier()))
                 .filter(e -> matchesFilter(filters, "db-cluster-endpoint-status", e.getStatus()))
                 .toList();
-        int from = 0;
-        if (!isBlank(marker)) {
-            try {
-                from = Integer.parseInt(marker);
-            } catch (NumberFormatException e) {
-                throw new AwsException("InvalidParameterValue", "Invalid marker: " + marker, 400);
-            }
-        }
-        int limit = maxRecords == null ? DEFAULT_MAX_RECORDS : maxRecords;
-        int start = Math.min(Math.max(from, 0), matching.size());
-        int to = Math.min(matching.size(), start + limit);
-        return new ClusterEndpointPage(matching.subList(start, to),
-                to < matching.size() ? Integer.toString(to) : null);
+        OffsetPage<DbClusterEndpoint> page = offsetPage(matching, maxRecords, marker);
+        return new ClusterEndpointPage(page.items(), page.marker());
     }
 
     private static void requireAuroraCluster(DbCluster cluster) {

@@ -746,10 +746,7 @@ public class RdsQueryHandler {
                .elem("DBParameterGroupFamily", v.family())
                .elem("DBEngineDescription", v.engineDescription())
                .elem("DBEngineVersionDescription", v.versionDescription())
-               .elem("Status", "available")
-               .start("SupportedEngineModes");
-            v.engineModes().forEach(mode -> xml.elem("member", mode));
-            xml.end("SupportedEngineModes").start("ValidUpgradeTarget");
+               .start("ValidUpgradeTarget");
             for (RdsEngineCatalog.EngineVersion target : RdsEngineCatalog.upgradeTargets(v)) {
                 xml.start("UpgradeTarget")
                    .elem("Engine", target.engine())
@@ -759,7 +756,21 @@ public class RdsQueryHandler {
                    .elem("IsMajorVersionUpgrade", !target.majorVersion().equals(v.majorVersion()))
                    .end("UpgradeTarget");
             }
-            xml.end("ValidUpgradeTarget").end("DBEngineVersion");
+            xml.end("ValidUpgradeTarget").start("ExportableLogTypes");
+            RdsEngineCatalog.exportableLogTypes(v).forEach(type -> xml.elem("member", type));
+            xml.end("ExportableLogTypes")
+               .elem("SupportsLogExportsToCloudwatchLogs", !RdsEngineCatalog.exportableLogTypes(v).isEmpty())
+               .elem("SupportsReadReplica", RdsEngineCatalog.supportsReadReplica(v))
+               .start("SupportedEngineModes");
+            v.engineModes().forEach(mode -> xml.elem("member", mode));
+            xml.end("SupportedEngineModes").start("SupportedFeatureNames");
+            RdsEngineCatalog.supportedFeatureNames(v).forEach(name -> xml.elem("member", name));
+            xml.end("SupportedFeatureNames")
+               .elem("Status", "available")
+               .elem("SupportsParallelQuery", false)
+               .elem("SupportsGlobalDatabases", RdsEngineCatalog.supportsGlobalDatabases(v))
+               .elem("SupportsBabelfish", false)
+               .end("DBEngineVersion");
         }
         xml.end("DBEngineVersions");
         if (page.marker() != null) {
@@ -3308,16 +3319,9 @@ public class RdsQueryHandler {
         }
     }
 
+    /** The catalogue's default for the engine, or {@code 1.0} for an engine it does not list. */
     private static String defaultEngineVersion(String engine) {
-        if (engine == null) {
-            return "16.3";
-        }
-        return switch (engine.toLowerCase()) {
-            case "postgres", "aurora-postgresql" -> "16.3";
-            case "mysql", "aurora-mysql", "aurora" -> "8.0.36";
-            case "mariadb" -> "11.2";
-            case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web" -> "15.00";
-            default -> "1.0";
-        };
+        String version = RdsEngineCatalog.defaultVersion(engine);
+        return version != null ? version : "1.0";
     }
 }

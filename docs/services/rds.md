@@ -558,8 +558,12 @@ groups (PostgreSQL 13 to 18, MySQL 8.0 and 8.4, MariaDB 10.11, 11.2 and 11.4, SQ
 Aurora PostgreSQL 15 to 17 and Aurora MySQL 8.0). It is not AWS's full version list. Each version
 reports the parameter group family the create path computes for it, its major version and its upgrade
 targets (the engine's later versions, with `IsMajorVersionUpgrade` set across a major version). Each
-engine's default sits in the family Floci assumes when a create request names no version (for Aurora
-MySQL it is the version global clusters default to), so `DefaultOnly` agrees with what Floci builds. `EngineVersion` takes an exact version or a major version such as `16`, and the
+engine's default is the version a create request that names none gets (instances, clusters and global
+clusters alike), so `DefaultOnly` agrees with what Floci builds; for Aurora MySQL that is
+`8.0.mysql_aurora.3.05.2`. Each version also reports what Floci supports for it: `SupportsReadReplica`
+for PostgreSQL only, `SupportsGlobalDatabases` for the two Aurora engines, and `SupportsParallelQuery`
+and `SupportsBabelfish` as false. `ExportableLogTypes` and `SupportedFeatureNames` list the engine's
+documented log types and IAM role feature names. `EngineVersion` takes an exact version or a major version such as `16`, and the
 documented filters (`db-parameter-group-family`, `engine`, `engine-mode`, `engine-version`, `status`)
 apply. Every version is `available`, so `IncludeAll` changes nothing.
 
