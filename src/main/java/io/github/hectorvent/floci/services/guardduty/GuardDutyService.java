@@ -324,7 +324,7 @@ public class GuardDutyService {
         JsonNode properties = request.get("destinationProperties");
         requireObject(properties, "destinationProperties");
         String clientToken = optionalText(request, "clientToken");
-        if (clientToken != null && clientToken.length() > 64) {
+        if (clientToken != null && clientToken.codePointCount(0, clientToken.length()) > 64) {
             // botocore's ClientToken shape: string, min 0, max 64.
             throw badRequest("clientToken must be at most 64 characters.");
         }

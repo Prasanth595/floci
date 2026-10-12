@@ -453,6 +453,23 @@ class GuardDutyServiceTest {
         assertEquals(1, service.listPublishingDestinations(REGION, detectorId, null, null).items().size());
     }
 
+    /** The model's length constraint counts Unicode code points, not UTF-16 code units. */
+    @Test
+    void createPublishingDestinationMeasuresClientTokenInCodePoints() throws Exception {
+        String detectorId = service.createDetector(REGION, ACCOUNT, request("{\"enable\":true}")).getId();
+        String body = "{\"destinationType\":\"S3\",\"clientToken\":\"%s\","
+                + "\"destinationProperties\":{\"destinationArn\":\"arn:aws:s3:::a\"}}";
+        String emoji = "😀";
+
+        service.createPublishingDestination(REGION, detectorId, request(body.formatted(emoji.repeat(64))));
+        assertEquals(1, service.listPublishingDestinations(REGION, detectorId, null, null).items().size());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createPublishingDestination(REGION, detectorId, request(body.formatted(emoji.repeat(65)))));
+        assertEquals("clientToken must be at most 64 characters.", error.getMessage());
+        assertEquals(1, service.listPublishingDestinations(REGION, detectorId, null, null).items().size());
+    }
+
     @Test
     void publishingDestinationSurvivesPersistentStorageReloadWithClientToken(@TempDir Path tempDir)
             throws Exception {
