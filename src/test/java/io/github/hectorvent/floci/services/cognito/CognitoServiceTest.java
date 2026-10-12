@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.acm.model.Certificate;
@@ -5819,6 +5820,33 @@ class CognitoServiceTest {
         UserPool pool = service.createUserPool(Map.of("PoolName", "DomainPool"), "us-east-1");
         service.createUserPoolDomain(domain, pool.getId(), Map.of("CertificateArn", CERTIFICATE_ARN), 1);
         return pool;
+    }
+
+    @Test
+    void findDomainNamesForPoolIncludesOwnedLegacyDomainRecords() {
+        InMemoryStorage<String, UserPoolDomain> legacyStore = new InMemoryStorage<>();
+        UserPoolDomain legacyDomain = new UserPoolDomain();
+        legacyDomain.setDomain("legacy-prefix");
+        legacyDomain.setUserPoolId("pool-id");
+        legacyDomain.setAwsAccountId("000000000000");
+        legacyStore.put("legacy-prefix", legacyDomain);
+        UserPoolDomain otherAccountDomain = new UserPoolDomain();
+        otherAccountDomain.setDomain("other-prefix");
+        otherAccountDomain.setUserPoolId("pool-id");
+        otherAccountDomain.setAwsAccountId("111111111111");
+        legacyStore.put("other-prefix", otherAccountDomain);
+
+        CognitoService legacyService = new CognitoService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new AccountAwareStorageBackend<>(legacyStore, null, "000000000000"), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                "http://localhost:4566", "cloudfront.net", regionResolver, null, acmService,
+                null, null, null);
+
+        CognitoService.UserPoolDomainNames domainNames = legacyService.findDomainNamesForPool("pool-id");
+
+        assertEquals("legacy-prefix", domainNames.domain());
+        assertNull(domainNames.customDomain());
     }
 
     private static final String AWS_CERTIFICATE_MESSAGE = "The specified SSL certificate doesn't exist, "

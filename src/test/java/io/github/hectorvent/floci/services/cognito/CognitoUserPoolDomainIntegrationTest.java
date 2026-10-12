@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.cognito;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.QuarkusTestProfile;
+import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -13,6 +15,7 @@ import java.util.UUID;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
+import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -24,8 +27,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
  * the certificate's InUseBy bookkeeping in ACM.
  */
 @QuarkusTest
+@TestProfile(CognitoUserPoolDomainIntegrationTest.DomainResetIsolationProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CognitoUserPoolDomainIntegrationTest {
+
+    /** HTTP state reset clears every service, so isolate this suite from other Quarkus tests. */
+    public static class DomainResetIsolationProfile implements QuarkusTestProfile {}
 
     private static String poolId;
     private static String prefixDomain;
@@ -459,6 +466,46 @@ class CognitoUserPoolDomainIntegrationTest {
             cognitoAction("DeleteUserPool", """
                     { "UserPoolId": "%s" }
                     """.formatted(sharedPoolId)).then().statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(19)
+    void recreatedPoolDoesNotInheritDomainAfterStateReset() throws Exception {
+        String pinnedPoolId = "us-east-1_reset" + UUID.randomUUID().toString().substring(0, 8);
+        String resetDomain = "floci-reset-" + UUID.randomUUID().toString().substring(0, 8);
+
+        try {
+            cognitoJson("CreateUserPool", """
+                    {
+                      "PoolName": "DomainResetPool",
+                      "UserPoolTags": { "floci:override-id": "%s" }
+                    }
+                    """.formatted(pinnedPoolId));
+            cognitoJson("CreateUserPoolDomain", """
+                    {
+                      "Domain": "%s",
+                      "UserPoolId": "%s"
+                    }
+                    """.formatted(resetDomain, pinnedPoolId));
+
+            assertEquals(resetDomain, cognitoJson("DescribeUserPool", """
+                    { "UserPoolId": "%s" }
+                    """.formatted(pinnedPoolId)).path("UserPool").path("Domain").asText());
+
+            given().when().post("/_floci/state/reset").then().statusCode(200);
+
+            JsonNode recreatedPool = cognitoJson("CreateUserPool", """
+                    {
+                      "PoolName": "DomainResetPoolAgain",
+                      "UserPoolTags": { "floci:override-id": "%s" }
+                    }
+                    """.formatted(pinnedPoolId)).path("UserPool");
+
+            assertNull(recreatedPool.get("Domain"), "a reset pool must not inherit its old domain");
+            assertNull(recreatedPool.get("CustomDomain"));
+        } finally {
+            given().when().post("/_floci/state/reset").then().statusCode(200);
         }
     }
 }
