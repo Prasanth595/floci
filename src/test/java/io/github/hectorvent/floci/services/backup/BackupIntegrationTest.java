@@ -1564,4 +1564,46 @@ class BackupIntegrationTest {
         .then().body("__type", equalTo("ResourceNotFoundException"));
     }
 
+    @Test
+    @Order(179)
+    void anAirGappedVaultRefusesToDeleteARecoveryPointInsideMinRetention() {
+        // Same mechanism as aLockedVaultRefusesToDeleteARecoveryPointInsideMinRetention, but
+        // the lock comes from creation alone: no PutBackupVaultLockConfiguration call. Asserting
+        // Locked=true is not enough; this is the behaviour Locked is supposed to buy.
+        String vault = "air-gapped-retention-vault";
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30}")
+        .when().put("/logically-air-gapped-backup-vaults/" + vault).then().statusCode(200);
+
+        String jid = given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "%s",
+                  "IamRoleArn": "%s",
+                  "Lifecycle": {"DeleteAfterDays": 14}
+                }
+                """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+
+        awaitJobCompleted(jid);
+        String rpArn = given().header("Authorization", AUTH)
+        .when().get("/backup-jobs/" + jid).then().statusCode(200)
+            .body("State", equalTo("COMPLETED"))
+            .extract().path("RecoveryPointArn");
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + vault + "/recovery-points/" + rpArn)
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", containsString("7"));
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault + "/recovery-points/" + rpArn)
+        .then().statusCode(200);
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault)
+        .then().statusCode(200).body("NumberOfRecoveryPoints", equalTo(1));
+    }
+
 }
