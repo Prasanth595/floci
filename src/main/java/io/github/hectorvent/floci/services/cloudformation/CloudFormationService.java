@@ -1287,11 +1287,11 @@ public class CloudFormationService implements ResourceProvider {
     /**
      * The stack's resources, narrowed by the two filters {@code DescribeStackResources} accepts.
      *
-     * <p>AWS takes either {@code StackName} or {@code PhysicalResourceId}: given a physical id and
-     * no stack name it finds the stack that resource belongs to. {@code LogicalResourceId} narrows
-     * to one resource within the stack, and naming one the stack does not have is a
-     * {@code ValidationError} rather than an empty answer, so a caller cannot read the miss as
-     * "no resources".
+     * <p>AWS takes either {@code StackName} or {@code PhysicalResourceId}, never both: given a
+     * physical id it answers with the whole stack that resource belongs to, rather than that one
+     * resource. {@code LogicalResourceId} is only a filter on the result, so naming one the stack
+     * does not have is an empty answer; {@code DescribeStackResource}, the singular action where
+     * the resource is required rather than optional, is the one that raises for a miss.
      *
      * <p>Both filters being silently ignored is worse than it sounds for a caller that filters and
      * then reads the first member: it gets whichever resource the stack happens to list first.

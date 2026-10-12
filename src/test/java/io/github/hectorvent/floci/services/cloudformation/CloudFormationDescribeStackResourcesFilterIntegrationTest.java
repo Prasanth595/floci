@@ -142,6 +142,11 @@ class CloudFormationDescribeStackResourcesFilterIntegrationTest {
         .then()
             .statusCode(200);
 
+        // DeleteStack answers before the deletion runs. Without this the old stack can still be
+        // DELETE_IN_PROGRESS when the new one is created, which sorts it with the live stacks and
+        // lets the test pass on creation time alone without ever exercising the deleted branch.
+        CfnStackWaits.awaitStackDeleted(dead);
+
         // The same resource names under a second, live stack. A deleted stack stays listed for its
         // retention window and listStacks answers oldest first, so the dead one would win on a
         // straight walk. The two stacks are named differently so the answer is tellable apart.
