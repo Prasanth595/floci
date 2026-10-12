@@ -1823,6 +1823,9 @@ public class DynamoDbService {
             for (JsonNode transactItem : transactItems) {
                 TransactionCanceledException.CancellationReason failReason =
                         evaluateTransactCondition(transactItem, region, staged);
+                if (failReason == null) {
+                    failReason = transactItemValidationFailure(transactItem, region, staged);
+                }
                 if (failReason != null) {
                     hasFailed = true;
                     cancellationReasons.add(failReason);
@@ -1832,15 +1835,6 @@ public class DynamoDbService {
             }
             if (hasFailed) {
                 throw new TransactionCanceledException(cancellationReasons);
-            }
-
-            for (int i = 0; i < transactItems.size(); i++) {
-                try {
-                    validateTransactItem(transactItems.get(i), region, staged);
-                } catch (KeySchemaMismatchException | ItemNestingExceededException
-                        | UpdatedItemTooLargeException e) {
-                    throw cancelledByMember(transactItems.size(), i, e.getMessage());
-                }
             }
             List<JsonNode> oldImages = stagedImages(memberParticipants, staged);
             for (JsonNode transactItem : transactItems) {
@@ -2028,6 +2022,17 @@ public class DynamoDbService {
                     : new TransactionCanceledException.CancellationReason("", null));
         }
         return new TransactionCanceledException(reasons);
+    }
+
+    private TransactionCanceledException.CancellationReason transactItemValidationFailure(
+            JsonNode transactItem, String region,
+            Map<String, ConcurrentSkipListMap<String, JsonNode>> staged) {
+        try {
+            validateTransactItem(transactItem, region, staged);
+            return null;
+        } catch (KeySchemaMismatchException | ItemNestingExceededException | UpdatedItemTooLargeException e) {
+            return new TransactionCanceledException.CancellationReason("ValidationError", null, e.getMessage());
+        }
     }
 
     private TransactionCanceledException.CancellationReason evaluateTransactCondition(JsonNode transactItem, String region) {
