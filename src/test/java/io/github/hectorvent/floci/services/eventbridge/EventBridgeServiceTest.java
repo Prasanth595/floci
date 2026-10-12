@@ -1511,4 +1511,26 @@ class EventBridgeServiceTest {
         assertEquals("MalformedDetail", entry.get("ErrorCode"));
         assertNull(entry.get("EventId"));
     }
+
+    @Test
+    void putEventsReportsMissingDetailDistinctlyFromMalformedDetail() {
+        EventBridgeService.PutEventsResult result = service.putEvents(
+                List.of(
+                        Map.of("Source", "s", "DetailType", "d"),                       // no Detail
+                        Map.of("Source", "s", "DetailType", "d", "Detail", "not json")  // malformed
+                ),
+                REGION);
+
+        assertEquals(2, result.failedCount());
+
+        Map<String, String> missing = result.entries().getFirst();
+        assertEquals("InvalidArgument", missing.get("ErrorCode"));
+        assertTrue(missing.get("ErrorMessage").contains("Detail"),
+                "missing-Detail message should name the parameter; was: " + missing.get("ErrorMessage"));
+        assertNull(missing.get("EventId"));
+
+        Map<String, String> malformed = result.entries().get(1);
+        assertEquals("MalformedDetail", malformed.get("ErrorCode"));
+        assertNull(malformed.get("EventId"));
+    }
 }

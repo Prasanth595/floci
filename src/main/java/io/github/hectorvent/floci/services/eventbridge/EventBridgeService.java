@@ -790,6 +790,14 @@ public class EventBridgeService implements ResourceProvider {
             // inconsistent observable.
             Map<String, Object> entry = new HashMap<>(originalEntry);
 
+            if(!entry.containsKey("Detail") || entry.get("Detail") == null) {
+                Map<String, String> errorEntry = new HashMap<>();
+                errorEntry.put("ErrorCode", "InvalidArgument");
+                errorEntry.put("ErrorMessage", "Missing parameter: Detail");
+                resultEntries.add(errorEntry);
+                failed++;
+                continue;
+            }
             if (!isValidDetailJson(entry)) {
                 Map<String, String> errorEntry = new HashMap<>();
                 errorEntry.put("ErrorCode", "MalformedDetail");
