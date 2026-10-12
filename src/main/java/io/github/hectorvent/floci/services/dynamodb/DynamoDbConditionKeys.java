@@ -307,7 +307,7 @@ public final class DynamoDbConditionKeys {
      * Top-level attribute names a DynamoDB expression references: a FilterExpression,
      * ConditionExpression or KeyConditionExpression. Walks the parsed tree so a literal name
      * such as {@code ssn} in {@code "ssn = :x"} is captured, not only {@code #alias}es.
-     * A malformed expression yields nothing, which only ever denies.
+     * A malformed expression yields no attribute names; normal absent-key condition rules apply.
      */
     private static void addExpressionAttributes(Set<String> attributes, String expression,
                                                 JsonNode exprAttrNames) {
