@@ -4424,7 +4424,7 @@ public class DynamoDbService {
         if (exclusiveStartKey == null || exclusiveStartKey.isNull()) {
             return;
         }
-        DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, false);
+        DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath);
 
         boolean withinBounds = keyConditionExpression != null
                 ? ExpressionEvaluator.matches(keyConditionExpression, exclusiveStartKey,
