@@ -720,7 +720,7 @@ class Ec2ServiceTest {
 
     @Test
     void createSubnetRejectsIpv4PrefixOutsideSlash16ToSlash28() {
-        // VPC User Guide: "The allowed block size is between a /28 netmask and /16 netmask."
+        // VPC User Guide: "The allowed IPv4 CIDR block size for a subnet is between a /28 netmask and /16 netmask."
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
@@ -1613,12 +1613,20 @@ class Ec2ServiceTest {
 
     @Test
     void interfaceEndpointIsRefusedInASubnetWithNoAssignableAddress() {
+        // CreateSubnet refuses a /30, so the subnet is written straight into the subnet store.
+        AccountAwareStorageBackend<Subnet> subnetStore = AccountAwareStorageBackend.inMemory("000000000000");
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
-                mock(Ec2PortForwardManager.class),
-                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
-                new InMemoryStorageFactory());
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-subnets.json", subnetStore)));
         String vpcId = service.createVpc("us-east-1", "10.64.0.0/16", false).getVpcId();
-        String tiny = service.createSubnet("us-east-1", vpcId, "10.64.1.0/30", "us-east-1a").getSubnetId();
+        Subnet tinySubnet = new Subnet();
+        tinySubnet.setSubnetId("subnet-0000000000000031");
+        tinySubnet.setVpcId(vpcId);
+        tinySubnet.setRegion("us-east-1");
+        tinySubnet.setCidrBlock("10.64.1.0/30");
+        tinySubnet.setAvailabilityZone("us-east-1a");
+        subnetStore.put("us-east-1::" + tinySubnet.getSubnetId(), tinySubnet);
+        String tiny = tinySubnet.getSubnetId();
         String roomy = service.createSubnet("us-east-1", vpcId, "10.64.2.0/28", "us-east-1b").getSubnetId();
 
         AwsException createError = assertThrows(AwsException.class, () ->

@@ -5714,9 +5714,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * The VPC User Guide limits an IPv4 subnet to a prefix between /16 and /28 ("The allowed block
-     * size is between a /28 netmask and /16 netmask"), and AWS answers anything else with
-     * InvalidSubnet.Range. Requests with no IPv4 CIDR, or one that does not parse, are left to the
+     * The VPC User Guide limits an IPv4 subnet to a prefix between /16 and /28 ("The allowed IPv4
+     * CIDR block size for a subnet is between a /28 netmask and /16 netmask."), and AWS answers
+     * anything else with InvalidSubnet.Range. Requests with no IPv4 CIDR, or one that does not parse, are left to the
      * checks that already handle them.
      */
     private void rejectOutOfRangeSubnetPrefix(String cidrBlock) {
