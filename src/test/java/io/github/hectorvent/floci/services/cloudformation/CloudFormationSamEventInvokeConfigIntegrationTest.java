@@ -307,6 +307,85 @@ class CloudFormationSamEventInvokeConfigIntegrationTest {
             .body("DestinationConfig.OnFailure.Destination", equalTo(topicArn));
     }
 
+    /**
+     * CloudFormation resolves an AWS::SSM::Parameter::Value parameter before it runs the
+     * transform, so SAM reads the stored value. Measured on CloudFormation (us-east-2): a Type
+     * taken from such a parameter holding SNS creates the topic and makes it the destination.
+     */
+    @Test
+    void aTypeFromAnSsmParameterUsesTheStoredValue() {
+        String name = "sam-eic-ssm-" + Long.toString(System.nanoTime(), 36);
+        String parameterName = "/" + name + "/dest-type";
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .body("{\"Name\": \"" + parameterName + "\", \"Type\": \"String\", \"Value\": \"SNS\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        createStack(name, """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Parameters": { "DestType": { "Type": "AWS::SSM::Parameter::Value<String>", "Default": "%2$s" } },
+              "Resources": {
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "FunctionName": "%1$s",
+                    "Runtime": "python3.12",
+                    "Handler": "index.handler",
+                    "InlineCode": "def handler(e, c): return 'ok'",
+                    "EventInvokeConfig": { "DestinationConfig": { "OnFailure": { "Type": { "Ref": "DestType" } } } }
+                  }
+                }
+              }
+            }
+            """.formatted(name, parameterName));
+        CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE");
+
+        String topicArn = physicalId(name, "FnEventInvokeConfigOnFailureTopic");
+        given().queryParam("Qualifier", "$LATEST")
+        .when().get("/2019-09-25/functions/" + name + "/event-invoke-config")
+        .then()
+            .statusCode(200)
+            .body("DestinationConfig.OnFailure.Destination", equalTo(topicArn));
+    }
+
+    /**
+     * A Destination of AWS::NoValue passes through SAM unchanged and leaves the destination without
+     * an ARN. Measured on CloudFormation (us-east-2): the stack fails validation instead of
+     * creating a configuration with an empty destination.
+     */
+    @Test
+    void aNoValueDestinationFailsTheStackInsteadOfStoringAnEmptyOne() {
+        String name = "sam-eic-novalue-" + Long.toString(System.nanoTime(), 36);
+        createStack(name, """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "python3.12",
+                    "Handler": "index.handler",
+                    "InlineCode": "def handler(e, c): return 'ok'",
+                    "EventInvokeConfig": { "DestinationConfig": { "OnFailure": { "Type": "SQS", "Destination": { "Ref": "AWS::NoValue" } } } }
+                  }
+                }
+              }
+            }
+            """.formatted(name));
+        CfnStackWaits.StackState state = CfnStackWaits.awaitStatus(name, "ROLLBACK_COMPLETE");
+
+        given().queryParam("Qualifier", "$LATEST")
+        .when().get("/2019-09-25/functions/" + name + "/event-invoke-config")
+        .then()
+            .statusCode(404);
+        assertEquals("ROLLBACK_COMPLETE", state.status());
+    }
+
     private void createStack(String stackName, String template) {
         stacksToDelete.add(stackName);
         given()

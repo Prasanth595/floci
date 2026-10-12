@@ -354,7 +354,7 @@ public class CloudFormationService implements ResourceProvider {
         // unpackaged DefinitionUri) does not fail the API call: it creates the change set and
         // marks it FAILED, with the transform's own error in StatusReason. Match that here instead
         // of throwing, so this failure is reported by the change set, not by a 400 on creation.
-        String samTransformFailureReason = samTransformFailureReason(stackName, resolvedTemplate, parameters);
+        String samTransformFailureReason = samTransformFailureReason(stackName, resolvedTemplate, parameters, region);
 
         // Reject an unresolvable or circular dependency graph up front, before any stack state is
         // created, so CreateStack/UpdateStack fail synchronously the way real CloudFormation does.
@@ -493,7 +493,8 @@ public class CloudFormationService implements ResourceProvider {
      * transform's own per-resource message. The count is always 1: {@code expandSamTemplate}
      * throws on the first bad resource rather than accumulating them.
      */
-    private String samTransformFailureReason(String stackName, String templateBody, Map<String, String> parameters) {
+    private String samTransformFailureReason(String stackName, String templateBody, Map<String, String> parameters,
+                                             String region) {
         JsonNode template;
         try {
             template = parseTemplate(templateBody);
@@ -507,7 +508,7 @@ public class CloudFormationService implements ResourceProvider {
         }
         JsonNode expanded;
         try {
-            expanded = samTransformProcessor.expandSamTemplate(template, parameters != null ? parameters : Map.of());
+            expanded = samTransformProcessor.expandSamTemplate(template, samTransformParameters(template, parameters, region));
         } catch (AwsException e) {
             return "Transform AWS::Serverless-2016-10-31 failed with: Invalid Serverless "
                     + "Application Specification document. Number of errors found: 1. "
@@ -563,7 +564,7 @@ public class CloudFormationService implements ResourceProvider {
                 // executeTemplate); comparing the change set's raw SAM source against it would
                 // report every SAM-generated resource as Add/Remove even on a no-op update.
                 newTemplate = samTransformProcessor.expandSamTemplate(newTemplate,
-                        cs.getParameters() != null ? cs.getParameters() : Map.of());
+                        samTransformParameters(newTemplate, cs.getParameters(), region));
             }
             JsonNode newResources = newTemplate.path("Resources");
             boolean createType = "CREATE".equalsIgnoreCase(cs.getChangeSetType())
@@ -1481,6 +1482,22 @@ public class CloudFormationService implements ResourceProvider {
      * {@code AWS::SSM::Parameter::Value<List<String>>} and {@code AWS::SSM::Parameter::Name} are
      * not resolved and pass through verbatim.
      */
+    /**
+     * The parameter values the SAM transform sees: the given ones over each {@code Default}, with
+     * {@code AWS::SSM::Parameter::Value<String>} parameters already read from Parameter Store, as
+     * CloudFormation resolves them before it runs the transform. A parameter that cannot be fetched
+     * leaves the values unresolved here; the execution path reports that failure with its own error.
+     */
+    private Map<String, String> samTransformParameters(JsonNode template, Map<String, String> params, String region) {
+        Map<String, String> given = resolveDefaultParameters(template, params);
+        try {
+            return resolveSsmParameters(template, given, region);
+        } catch (AwsException e) {
+            LOG.debugv("SAM transform sees unresolved parameters: {0}", e.getMessage());
+            return given;
+        }
+    }
+
     private Map<String, String> resolveSsmParameters(JsonNode template, Map<String, String> params, String region) {
         JsonNode paramDefs = template.path("Parameters");
         if (!paramDefs.isObject()) {
@@ -1539,7 +1556,7 @@ public class CloudFormationService implements ResourceProvider {
             boolean hasSamTransform = samTransformProcessor.hasSamTransform(template);
             if (hasSamTransform) {
                 LOG.infov("Applying SAM transform for stack {0}", stack.getStackName());
-                template = samTransformProcessor.expandSamTemplate(template, params != null ? params : Map.of());
+                template = samTransformProcessor.expandSamTemplate(template, samTransformParameters(template, params, region));
             }
 
             // Persist the merged/expanded tree, not the raw submitted body, whenever either
