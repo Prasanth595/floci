@@ -1821,10 +1821,8 @@ public class DynamoDbService {
             List<TransactionCanceledException.CancellationReason> cancellationReasons = new ArrayList<>();
             boolean hasFailed = false;
             for (JsonNode transactItem : transactItems) {
-                var failReason = transactUpdateValueTooDeep(transactItem);
-                if (failReason == null) {
-                    failReason = evaluateTransactCondition(transactItem, region, staged);
-                }
+                TransactionCanceledException.CancellationReason failReason =
+                        evaluateTransactCondition(transactItem, region, staged);
                 if (failReason != null) {
                     hasFailed = true;
                     cancellationReasons.add(failReason);
@@ -1972,17 +1970,6 @@ public class DynamoDbService {
         TableDefinition table = requireActiveTable(storageKey);
         String itemKey = buildItemKey(table, keyOrItem);
         return new TransactParticipant(storageKey, itemKey, tableName);
-    }
-
-    // AWS checks the depth of a transact Update's values as part of that member, so a too
-    // deep value cancels the transaction instead of failing the request up front.
-    private TransactionCanceledException.CancellationReason transactUpdateValueTooDeep(JsonNode transactItem) {
-        var values = transactItem.path("Update").get("ExpressionAttributeValues");
-        if (DynamoDbAttributeValueValidator.nestingWithinLimit(values)) {
-            return null;
-        }
-        return new TransactionCanceledException.CancellationReason("ValidationError", null,
-                "Nesting Levels have exceeded supported limits");
     }
 
     // AWS checks every member's key against the table schema, in order, before it looks for
