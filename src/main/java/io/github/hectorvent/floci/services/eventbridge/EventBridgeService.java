@@ -790,10 +790,10 @@ public class EventBridgeService implements ResourceProvider {
             // inconsistent observable.
             Map<String, Object> entry = new HashMap<>(originalEntry);
 
-            if(!entry.containsKey("Detail") || entry.get("Detail") == null) {
+            if (!entry.containsKey("Detail") || entry.get("Detail") == null) {
                 Map<String, String> errorEntry = new HashMap<>();
                 errorEntry.put("ErrorCode", "InvalidArgument");
-                errorEntry.put("ErrorMessage", "Missing parameter: Detail");
+                errorEntry.put("ErrorMessage", "Parameter Detail is not valid. Reason: Detail is a required argument.");
                 resultEntries.add(errorEntry);
                 failed++;
                 continue;
