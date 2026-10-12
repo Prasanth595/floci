@@ -62,6 +62,13 @@ public class UiController {
     private static String redirectUrl(String host, int port) {
         String hostname = (host == null || host.isBlank()) ? "localhost" : host;
         int colon = hostname.indexOf(':');
+        if (hostname.startsWith("[")) {
+            int closingBracket = hostname.indexOf(']');
+            if (closingBracket == hostname.length() - 1
+                    || (closingBracket >= 0 && hostname.charAt(closingBracket + 1) == ':')) {
+                colon = hostname.indexOf(':', closingBracket + 1);
+            }
+        }
         if (colon >= 0) {
             hostname = hostname.substring(0, colon);
         }
