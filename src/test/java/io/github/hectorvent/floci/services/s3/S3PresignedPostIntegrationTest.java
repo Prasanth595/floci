@@ -273,7 +273,9 @@ class S3PresignedPostIntegrationTest {
             .contentType("application/xml")
             .body(hasXPath("/Error/Code", equalTo("EntityTooLarge")))
             .body(hasXPath("/Error/Message", equalTo(
-                    "Your proposed upload exceeds the maximum allowed size.")));
+                    "Your proposed upload exceeds the maximum allowed size")))
+            .body(hasXPath("/Error/ProposedSize", equalTo(String.valueOf(fileContent.length()))))
+            .body(hasXPath("/Error/MaxSizeAllowed", equalTo("10")));
     }
 
     @Test
@@ -302,7 +304,9 @@ class S3PresignedPostIntegrationTest {
             .contentType("application/xml")
             .body(hasXPath("/Error/Code", equalTo("EntityTooSmall")))
             .body(hasXPath("/Error/Message", equalTo(
-                    "Your proposed upload is smaller than the minimum allowed size")));
+                    "Your proposed upload is smaller than the minimum allowed size")))
+            .body(hasXPath("/Error/ProposedSize", equalTo("5")))
+            .body(hasXPath("/Error/MinSizeAllowed", equalTo("10")));
 
         given()
         .when()

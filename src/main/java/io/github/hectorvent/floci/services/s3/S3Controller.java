@@ -3435,10 +3435,10 @@ public class S3Controller {
             xmlBuilder.elem("Condition", condition);
         }
         // S3 InvalidArgument responses carry ArgumentName and ArgumentValue so the SDK can
-        // surface which input was rejected, and EntityTooLarge the proposed and allowed sizes.
-        // They travel through AwsException.extendedData.
+        // surface which input was rejected, and EntityTooSmall and EntityTooLarge the proposed and
+        // allowed sizes. They travel through AwsException.extendedData.
         if (e.getExtendedData() != null) {
-            for (String sizeField : List.of("ProposedSize", "MaxSizeAllowed")) {
+            for (String sizeField : List.of("ProposedSize", "MinSizeAllowed", "MaxSizeAllowed")) {
                 Object size = e.getExtendedData().get(sizeField);
                 if (size != null) {
                     xmlBuilder.elem(sizeField, size.toString());
@@ -3872,12 +3872,10 @@ public class S3Controller {
             long min = condition.get(1).asLong();
             long max = condition.get(2).asLong();
             if (contentLength < min) {
-                throw new AwsException("EntityTooSmall",
-                        "Your proposed upload is smaller than the minimum allowed size", 400);
+                throw S3Service.entityTooSmall(contentLength, min);
             }
             if (contentLength > max) {
-                throw new AwsException("EntityTooLarge",
-                        "Your proposed upload exceeds the maximum allowed size.", 400);
+                throw S3Service.entityTooLarge(contentLength, max);
             }
         } else if ("eq".equals(operator)) {
             String fieldRef = condition.get(1).asText();
