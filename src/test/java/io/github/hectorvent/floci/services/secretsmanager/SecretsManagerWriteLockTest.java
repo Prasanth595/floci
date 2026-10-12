@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -75,9 +77,15 @@ class SecretsManagerWriteLockTest {
         assertEquals("v1", service.getSecretValue(SECRET_NAME, null, null, REPLICA_REGION).getSecretString());
     }
 
-    @Test
-    void replicationCannotResurrectAReleasedManagedSecret() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void replicationChangesCannotResurrectAReleasedManagedSecret(boolean removeReplica) throws Exception {
         String arn = service.describeSecret(SECRET_NAME, REGION).getArn();
+        if (removeReplica) {
+            service.replicateSecretToRegions(arn,
+                    List.of(new SecretsManagerService.ReplicaRegion(REPLICA_REGION, null)), false, REGION);
+            service.removeRegionsFromReplication(arn, List.of(REPLICA_REGION), REGION);
+        }
         CountDownLatch changing = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         Watched deletion = start("managed-deletion", () -> assertTrue(
@@ -94,8 +102,14 @@ class SecretsManagerWriteLockTest {
         try {
             assertTrue(changing.await(5, TimeUnit.SECONDS));
             replication = start("replication", () -> {
-                AwsException missing = assertThrows(AwsException.class, () -> service.replicateSecretToRegions(arn,
-                        List.of(new SecretsManagerService.ReplicaRegion(REPLICA_REGION, null)), false, REGION));
+                AwsException missing = assertThrows(AwsException.class, () -> {
+                    if (removeReplica) {
+                        service.removeRegionsFromReplication(arn, List.of(REPLICA_REGION), REGION);
+                    } else {
+                        service.replicateSecretToRegions(arn,
+                                List.of(new SecretsManagerService.ReplicaRegion(REPLICA_REGION, null)), false, REGION);
+                    }
+                });
                 assertEquals("ResourceNotFoundException", missing.getErrorCode());
             });
             assertTrue(replication.awaitBlocked());

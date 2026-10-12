@@ -46,7 +46,6 @@ class RdsReplicatedSecretOptOutIntegrationTest {
             DBCluster created = rds.createDBCluster(r -> r.dbClusterIdentifier(id).engine(engine)
                     .engineVersion(version).masterUsername("admin").manageMasterUserPassword(true)).dbCluster();
             String arn = created.masterUserSecret().secretArn();
-            boolean secretRemoved = false;
             try {
                 String password = RequestScopes.callAs(account, region,
                         () -> rdsService.getDbCluster(id, region).getMasterPassword());
@@ -76,22 +75,32 @@ class RdsReplicatedSecretOptOutIntegrationTest {
                 AwsException missing = assertThrows(AwsException.class, () -> RequestScopes.callAs(account, region,
                         () -> secrets.describeSecret(arn, region)));
                 assertEquals("ResourceNotFoundException", missing.getErrorCode());
-                secretRemoved = true;
             } finally {
-                if (!secretRemoved) {
-                    RequestScopes.runAs(account, region,
-                            () -> secrets.removeRegionsFromReplication(arn, List.of("us-west-2"), region));
-                }
-                rds.deleteDBCluster(r -> r.dbClusterIdentifier(id).skipFinalSnapshot(true));
-                RequestScopes.runAs(account, region, () -> {
-                    try {
-                        secrets.deleteSecret(arn, null, true, region);
-                    } catch (AwsException e) {
-                        if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
-                            throw e;
+                try {
+                    RequestScopes.runAs(account, region, () -> {
+                        try {
+                            secrets.removeRegionsFromReplication(arn, List.of("us-west-2"), region);
+                        } catch (AwsException e) {
+                            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                                throw e;
+                            }
                         }
+                    });
+                } finally {
+                    try {
+                        rds.deleteDBCluster(r -> r.dbClusterIdentifier(id).skipFinalSnapshot(true));
+                    } finally {
+                        RequestScopes.runAs(account, region, () -> {
+                            try {
+                                secrets.deleteSecret(arn, null, true, region);
+                            } catch (AwsException e) {
+                                if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                                    throw e;
+                                }
+                            }
+                        });
                     }
-                });
+                }
             }
         }
     }

@@ -996,10 +996,10 @@ public class SecretsManagerService implements ResourceProvider {
                     "RemoveReplicaRegions must contain at least one Region.", 400);
         }
 
-        Secret primary = resolveSecret(secretId, region);
-        throwIfReplica(primary);
-
-        synchronized (lockFor(primary.getArn())) {
+        Secret resolved = resolveSecret(secretId, region);
+        synchronized (lockFor(resolved.getArn())) {
+            Secret primary = resolveSecret(resolved.getArn(), region);
+            throwIfReplica(primary);
             List<Secret.ReplicaStatus> statuses = primary.getReplicationStatus() != null
                     ? new ArrayList<>(primary.getReplicationStatus()) : new ArrayList<>();
 
