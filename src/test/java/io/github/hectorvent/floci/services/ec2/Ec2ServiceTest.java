@@ -894,14 +894,14 @@ class Ec2ServiceTest {
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
         String vpcId = service.createVpc("us-east-1", "10.0.0.0/16", false).getVpcId();
-        String associationId = service.associateVpcCidrBlock("us-east-1", vpcId, "192.168.0.0/16").getAssociationId();
+        String associationId = service.associateVpcCidrBlock("us-east-1", vpcId, "10.1.0.0/16").getAssociationId();
         assertEquals("10.0.255.0/24",
                 service.createSubnet("us-east-1", vpcId, "10.0.255.9/24", "us-east-1a").getCidrBlock());
-        assertEquals("192.168.1.0/24",
-                service.createSubnet("us-east-1", vpcId, "192.168.1.9/24", "us-east-1a").getCidrBlock());
+        assertEquals("10.1.1.0/24",
+                service.createSubnet("us-east-1", vpcId, "10.1.1.9/24", "us-east-1a").getCidrBlock());
         service.disassociateVpcCidrBlock("us-east-1", associationId);
         assertEquals("InvalidSubnet.Range", assertThrows(AwsException.class,
-                () -> service.createSubnet("us-east-1", vpcId, "192.168.2.0/24", "us-east-1a")).getErrorCode());
+                () -> service.createSubnet("us-east-1", vpcId, "10.1.2.0/24", "us-east-1a")).getErrorCode());
     }
 
     @Test
@@ -911,7 +911,7 @@ class Ec2ServiceTest {
                     mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
                     new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
             Vpc vpc = service.createVpc("us-east-1", "10.0.0.0/16", false);
-            String associationId = service.associateVpcCidrBlock("us-east-1", vpc.getVpcId(), "192.168.0.0/16")
+            String associationId = service.associateVpcCidrBlock("us-east-1", vpc.getVpcId(), "10.1.0.0/16")
                     .getAssociationId();
             CountDownLatch scanning = new CountDownLatch(1);
             CountDownLatch resume = new CountDownLatch(1);
@@ -926,7 +926,7 @@ class Ec2ServiceTest {
             ExecutorService workers = Executors.newFixedThreadPool(2);
             try {
                 Future<Subnet> creating = workers.submit(() ->
-                        service.createSubnet("us-east-1", vpc.getVpcId(), "192.168.1.0/24", "us-east-1a"));
+                        service.createSubnet("us-east-1", vpc.getVpcId(), "10.1.1.0/24", "us-east-1a"));
                 assertTrue(scanning.await(5, TimeUnit.SECONDS));
                 Future<?> editing = workers.submit(() -> {
                     editor.set(Thread.currentThread());
@@ -940,7 +940,7 @@ class Ec2ServiceTest {
                         || (editor.get() != null && editor.get().getState() == Thread.State.BLOCKED));
                 assertFalse(editing.isDone(), "CIDR edits must not mutate the list while subnet validation scans it");
                 resume.countDown();
-                assertEquals("192.168.1.0/24", creating.get(5, TimeUnit.SECONDS).getCidrBlock());
+                assertEquals("10.1.1.0/24", creating.get(5, TimeUnit.SECONDS).getCidrBlock());
                 editing.get(5, TimeUnit.SECONDS);
             } finally {
                 resume.countDown();
