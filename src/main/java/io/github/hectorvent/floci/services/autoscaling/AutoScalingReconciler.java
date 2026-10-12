@@ -132,9 +132,9 @@ public class AutoScalingReconciler {
         long activeCapacity = activeCapacity(asg);
         int desired = asg.getDesiredCapacity();
 
-        if (activeCapacity < desired) {
+        if (activeCapacity < desired && !asg.getSuspendedProcesses().contains("Launch")) {
             scaleOut(asg, (int) (desired - activeCapacity));
-        } else if (activeCapacity > desired) {
+        } else if (activeCapacity > desired && !asg.getSuspendedProcesses().contains("Terminate")) {
             scaleIn(asg, (int) (activeCapacity - desired));
         }
         if (asgService.saveAutoScalingGroupIfPresent(asg)) {

@@ -544,13 +544,9 @@ public class AutoScalingService {
         return requireGroup(region, resourceId);
     }
 
-    // Real AWS suspends the named scaling processes ("Launch", "Terminate", "HealthCheck", ...)
-    // so they stop running until resumed; an empty list suspends all of them. Floci has no
-    // scaling loop for these processes to pause, so this only needs to record which processes
-    // are suspended for DescribeAutoScalingGroups to report back - the same "accept and
-    // remember" shape as terminationPolicies. The AWS provider calls this unconditionally
-    // around ASG creation whenever wait_for_capacity_timeout is non-zero (the default), so an
-    // unimplemented SuspendProcesses fails ASG creation outright, not just a feature gap.
+    // An empty list suspends all processes. The reconciler honors Launch and Terminate
+    // for desired-capacity adjustments; other names remain stored state. Refresh selection
+    // and cleanup are separate paths and do not yet honor suspended processes.
     private static final List<String> ALL_SCALING_PROCESSES = List.of(
             "Launch", "Terminate", "AddToLoadBalancer", "AlarmNotification", "AZRebalance",
             "HealthCheck", "InstanceRefresh", "ReplaceUnhealthy", "ScheduledActions");
