@@ -282,7 +282,16 @@ accepts, not only by name:
 - `MixedInstancesPolicy` → `LaunchTemplate` → `LaunchTemplateSpecification`, including
   `Overrides[].InstanceType` and `InstancesDistribution` (`OnDemandBaseCapacity`,
   `OnDemandPercentageAboveBaseCapacity`, `SpotAllocationStrategy`). A non-integer where AWS expects
-  a number fails the stack rather than being dropped.
+  a number fails the stack rather than being dropped. `Overrides[].WeightedCapacity` is carried
+  through as well.
+
+The group also passes `ServiceLinkedRoleARN`, `InstanceMaintenancePolicy`,
+`AvailabilityZoneDistribution` and `CapacityReservationSpecification` through to the group, with
+the same validation the Auto Scaling API applies. The resource schema requires
+`CapacityReservationPreference` on `CapacityReservationSpecification` and `Granularity` on each
+`MetricsCollection` entry. `MetricsCollection` enables the listed metrics (an entry naming none
+enables all of them), and on `UpdateStack` the group's enabled metrics are
+set to exactly what the template lists. Removing the property leaves collection as it was.
 
 ## Lambda Stack Updates
 
