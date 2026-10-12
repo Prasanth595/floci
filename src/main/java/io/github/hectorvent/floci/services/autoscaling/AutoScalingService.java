@@ -92,11 +92,11 @@ public class AutoScalingService {
             "WarmPoolDesiredCapacity", "WarmPoolWarmedCapacity", "WarmPoolPendingCapacity",
             "WarmPoolTerminatingCapacity", "WarmPoolTotalCapacity",
             "GroupAndWarmPoolDesiredCapacity", "GroupAndWarmPoolTotalCapacity");
-    static final String METRICS_GRANULARITY = "1Minute";
+    public static final String METRICS_GRANULARITY = "1Minute";
     static final String MISSING_GRANULARITY_MESSAGE =
             "1 validation error detected: Value null at 'granularity' failed to satisfy constraint: "
                     + "Member must not be null";
-    static final String INVALID_GRANULARITY_MESSAGE =
+    public static final String INVALID_GRANULARITY_MESSAGE =
             "Granularity must be 1Minute. 1Minute is the only valid value.";
     static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
             "An active instance refresh with a desired configuration exists. All configuration options derived from the desired configuration are not available for update while the instance refresh is active.";
@@ -393,26 +393,32 @@ public class AutoScalingService {
             throw new AwsException("ValidationError", INVALID_GRANULARITY_MESSAGE, 400);
         }
         validateMetricNames(metrics);
-        AutoScalingGroup asg = requireGroup(region, name);
-        List<String> requested = metrics == null || metrics.isEmpty() ? GROUP_METRICS : metrics;
-        LinkedHashSet<String> enabled = new LinkedHashSet<>(asg.getEnabledMetrics());
-        enabled.addAll(requested);
-        asg.setEnabledMetrics(new ArrayList<>(enabled));
-        groups.put(asgKey(region, name), asg);
+        String key = asgKey(region, name);
+        synchronized (lockFor(key)) {
+            AutoScalingGroup asg = requireGroup(region, name);
+            List<String> requested = metrics == null || metrics.isEmpty() ? GROUP_METRICS : metrics;
+            LinkedHashSet<String> enabled = new LinkedHashSet<>(asg.getEnabledMetrics());
+            enabled.addAll(requested);
+            asg.setEnabledMetrics(new ArrayList<>(enabled));
+            groups.put(key, asg);
+        }
     }
 
     /** DisableMetricsCollection: naming no metrics disables all of them. */
     public void disableMetricsCollection(String region, String name, List<String> metrics) {
         validateMetricNames(metrics);
-        AutoScalingGroup asg = requireGroup(region, name);
-        if (metrics == null || metrics.isEmpty()) {
-            asg.setEnabledMetrics(new ArrayList<>());
-        } else {
-            List<String> remaining = new ArrayList<>(asg.getEnabledMetrics());
-            remaining.removeAll(metrics);
-            asg.setEnabledMetrics(remaining);
+        String key = asgKey(region, name);
+        synchronized (lockFor(key)) {
+            AutoScalingGroup asg = requireGroup(region, name);
+            if (metrics == null || metrics.isEmpty()) {
+                asg.setEnabledMetrics(new ArrayList<>());
+            } else {
+                List<String> remaining = new ArrayList<>(asg.getEnabledMetrics());
+                remaining.removeAll(metrics);
+                asg.setEnabledMetrics(remaining);
+            }
+            groups.put(key, asg);
         }
-        groups.put(asgKey(region, name), asg);
     }
 
     public static void validateMetricNames(List<String> metrics) {

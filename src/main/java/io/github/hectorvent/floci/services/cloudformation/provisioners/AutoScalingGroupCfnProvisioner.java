@@ -48,7 +48,6 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(AutoScalingGroupCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String METRICS_GRANULARITY = "1Minute";
 
     private final AutoScalingService autoScalingService;
 
@@ -91,7 +90,7 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
                     // snapshot member with its API default instead; -1 removes DefaultInstanceWarmup.
                     // InstanceMaintenancePolicy clears with -1 on both percentages. The service-linked
                     // role, AZ distribution and capacity reservation members have no clearing value
-                    // on UpdateAutoScalingGroup, so an unset snapshot member leaves them as they are.
+                    // on UpdateAutoScalingGroup, so an unset snapshot member is cleared afterwards.
                     AsgOptionalFields optionalFields = new AsgOptionalFields(
                             snapshot.desiredCapacityType() != null ? snapshot.desiredCapacityType() : "units",
                             snapshot.capacityRebalance() != null ? snapshot.capacityRebalance() : false,
@@ -126,6 +125,7 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
                             snapshot.terminationPolicies(),
                             optionalFields
                     );
+                    clearUnsetSnapshotMembers(snapshot);
                     if (snapshot.enabledMetrics() != null) {
                         reconcileMetricsCollection(snapshot.region(), snapshot.name(), snapshot.enabledMetrics());
                     }
@@ -313,7 +313,8 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
                     resolveAsgTagPropagation(props, engine),
                     optionalFields);
             if (metricsCollection != null && !metricsCollection.isEmpty()) {
-                autoScalingService.enableMetricsCollection(region, name, metricsCollection, METRICS_GRANULARITY);
+                autoScalingService.enableMetricsCollection(region, name, metricsCollection,
+                        AutoScalingService.METRICS_GRANULARITY);
             }
             deleteRenamedResource(ctx, name, n -> autoScalingService.deleteAutoScalingGroup(region, n, true),
                     "Auto Scaling group");
@@ -325,6 +326,25 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
         // read that name, and dropping it would break them for no gain.
         r.getAttributes().put("AutoScalingGroupARN", asg.getAutoScalingGroupArn());
         r.getAttributes().put("Arn", asg.getAutoScalingGroupArn());
+    }
+
+    private void clearUnsetSnapshotMembers(AsgSnapshot snapshot) {
+        if (snapshot.serviceLinkedRoleArn() != null
+                && snapshot.availabilityZoneDistribution() != null
+                && snapshot.capacityReservationSpecification() != null) {
+            return;
+        }
+        AutoScalingGroup group = requireAutoScalingGroup(snapshot.region(), snapshot.name());
+        if (snapshot.serviceLinkedRoleArn() == null) {
+            group.setServiceLinkedRoleArn(null);
+        }
+        if (snapshot.availabilityZoneDistribution() == null) {
+            group.setAvailabilityZoneDistribution(null);
+        }
+        if (snapshot.capacityReservationSpecification() == null) {
+            group.setCapacityReservationSpecification(null);
+        }
+        autoScalingService.saveAutoScalingGroupIfPresent(group);
     }
 
     private AutoScalingGroup requireAutoScalingGroup(String region, String name) {
@@ -350,7 +370,7 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
                         : Boolean.parseBoolean(capacityRebalance),
                 parseOptionalInt("MaxInstanceLifetime", ctx.resolveOptional(props, "MaxInstanceLifetime")),
                 parseOptionalInt("DefaultInstanceWarmup", ctx.resolveOptional(props, "DefaultInstanceWarmup")),
-                blankToNull(ctx.resolveOptional(props, "ServiceLinkedRoleARN")),
+                ctx.resolveOptional(props, "ServiceLinkedRoleARN"),
                 resolveInstanceMaintenancePolicy(props, ctx),
                 resolveAvailabilityZoneDistribution(props, ctx),
                 resolveCapacityReservationSpecification(props, ctx));
@@ -414,9 +434,8 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
             if (granularity == null) {
                 throw new AwsException("ValidationError", "MetricsCollection requires Granularity.", 400);
             }
-            if (!METRICS_GRANULARITY.equals(granularity)) {
-                throw new AwsException("ValidationError",
-                        "Granularity must be 1Minute. 1Minute is the only valid value.", 400);
+            if (!AutoScalingService.METRICS_GRANULARITY.equals(granularity)) {
+                throw new AwsException("ValidationError", AutoScalingService.INVALID_GRANULARITY_MESSAGE, 400);
             }
             List<String> named = ctx.resolveStringList(entry, "Metrics");
             AutoScalingService.validateMetricNames(named);
@@ -437,7 +456,8 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
     private void reconcileMetricsCollection(String region, String name, List<String> desired) {
         autoScalingService.disableMetricsCollection(region, name, List.of());
         if (!desired.isEmpty()) {
-            autoScalingService.enableMetricsCollection(region, name, desired, METRICS_GRANULARITY);
+            autoScalingService.enableMetricsCollection(region, name, desired,
+                    AutoScalingService.METRICS_GRANULARITY);
         }
     }
 
@@ -480,7 +500,9 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
                     MixedInstancesPolicy.LaunchTemplateOverride override =
                             new MixedInstancesPolicy.LaunchTemplateOverride();
                     override.setInstanceType(instanceType);
-                    override.setWeightedCapacity(blankToNull(engine.resolve(overrideNode.path("WeightedCapacity"))));
+                    override.setWeightedCapacity(overrideNode.hasNonNull("WeightedCapacity")
+                            ? engine.resolve(overrideNode.get("WeightedCapacity"))
+                            : null);
                     launchTemplate.getOverrides().add(override);
                 }
             }

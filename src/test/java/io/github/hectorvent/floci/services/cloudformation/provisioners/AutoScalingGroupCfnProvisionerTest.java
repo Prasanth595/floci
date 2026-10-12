@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
+import io.github.hectorvent.floci.services.autoscaling.model.AvailabilityZoneDistribution;
+import io.github.hectorvent.floci.services.autoscaling.model.CapacityReservationSpecification;
 import io.github.hectorvent.floci.services.autoscaling.model.InstanceMaintenancePolicy;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
@@ -463,6 +465,65 @@ class AutoScalingGroupCfnProvisionerTest {
 
         // Subsequent rollback should return false since snapshot is spent
         assertFalse(provisioner.rollbackUpdate(r));
+    }
+
+    @Test
+    void rollbackUpdateClearsMembersTheGroupDidNotHaveBeforeTheUpdate() {
+        // UpdateAutoScalingGroup has no clearing value for these three, so passing the snapshot's
+        // null through it would leave what the failed update added.
+        AutoScalingGroup existing = group("my-asg");
+        existing.setMinSize(1);
+        existing.setMaxSize(5);
+        when(autoScaling.describeAutoScalingGroups(eq(REGION), eq(List.of("my-asg"))))
+                .thenReturn(List.of(existing));
+        StackResource r = resource(GROUP, "Asg", "my-asg");
+        ObjectNode props = mapper.createObjectNode()
+                .put("AutoScalingGroupName", "my-asg")
+                .put("ServiceLinkedRoleARN", "role-arn");
+        props.putObject("AvailabilityZoneDistribution").put("CapacityDistributionStrategy", "balanced-only");
+        props.putObject("CapacityReservationSpecification").put("CapacityReservationPreference", "none");
+        provisioner.provision(r, props, ctx("my-asg"));
+        existing.setServiceLinkedRoleArn("role-arn");
+        existing.setAvailabilityZoneDistribution(new AvailabilityZoneDistribution("balanced-only"));
+        CapacityReservationSpecification reservation = new CapacityReservationSpecification();
+        reservation.setCapacityReservationPreference("none");
+        existing.setCapacityReservationSpecification(reservation);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertNull(existing.getServiceLinkedRoleArn());
+        assertNull(existing.getAvailabilityZoneDistribution());
+        assertNull(existing.getCapacityReservationSpecification());
+        verify(autoScaling).saveAutoScalingGroupIfPresent(existing);
+    }
+
+    @Test
+    void groupCreatePassesBlankRoleAndWeightToTheServiceForValidation() {
+        // The service rejects an empty ServiceLinkedRoleARN or WeightedCapacity. Turning either
+        // into null here would read as "not set" and let the stack through.
+        when(autoScaling.createAutoScalingGroup(eq(REGION), eq("my-asg"), any(), any(), any(), any(),
+                any(), anyInt(), anyInt(), anyInt(), anyInt(), anyList(), anyList(), anyList(), anyList(),
+                any(), anyInt(), anyList(), anyMap(), anyMap(), any()))
+                .thenReturn(group("my-asg"));
+        StackResource r = resource(GROUP, "Asg", null);
+        ObjectNode props = mapper.createObjectNode()
+                .put("AutoScalingGroupName", "my-asg")
+                .put("ServiceLinkedRoleARN", "");
+        ObjectNode launchTemplate = props.putObject("MixedInstancesPolicy").putObject("LaunchTemplate");
+        launchTemplate.putObject("LaunchTemplateSpecification").put("LaunchTemplateId", "lt-123");
+        launchTemplate.putArray("Overrides").addObject()
+                .put("InstanceType", "t3.micro")
+                .put("WeightedCapacity", "");
+
+        provisioner.provision(r, props, ctx());
+
+        ArgumentCaptor<MixedInstancesPolicy> policyCaptor = ArgumentCaptor.forClass(MixedInstancesPolicy.class);
+        ArgumentCaptor<AsgOptionalFields> captor = ArgumentCaptor.forClass(AsgOptionalFields.class);
+        verify(autoScaling).createAutoScalingGroup(eq(REGION), eq("my-asg"), any(), any(), any(), any(),
+                policyCaptor.capture(), anyInt(), anyInt(), anyInt(), anyInt(), anyList(), anyList(), anyList(),
+                anyList(), any(), anyInt(), anyList(), anyMap(), anyMap(), captor.capture());
+        assertEquals("", captor.getValue().serviceLinkedRoleArn());
+        assertEquals("", policyCaptor.getValue().getLaunchTemplate().getOverrides().getFirst().getWeightedCapacity());
     }
 
     @Test
