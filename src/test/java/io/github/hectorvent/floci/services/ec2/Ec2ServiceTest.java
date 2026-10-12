@@ -905,6 +905,47 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void createVpcAndAssociateVpcCidrBlockRejectIpv4PrefixOutsideSlash16ToSlash28() {
+        // VPC User Guide: "The allowed block size is between a /28 netmask and /16 netmask."
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        long vpcsBefore = service.describeVpcs("us-east-1", List.of(), Map.of()).size();
+        String vpcId = service.createVpc("us-east-1", "10.0.0.0/16", false).getVpcId();
+
+        for (String cidr : List.of("0.0.0.0/0", "10.0.0.0/8", "10.0.0.0/15", "10.0.0.0/29", "10.0.0.0/32")) {
+            AwsException createError = assertThrows(AwsException.class,
+                    () -> service.createVpc("us-east-1", cidr, false));
+            assertEquals("InvalidVpc.Range", createError.getErrorCode());
+            assertEquals("The CIDR '" + cidr + "' is invalid.", createError.getMessage());
+            assertEquals(400, createError.getHttpStatus());
+
+            AwsException associateError = assertThrows(AwsException.class,
+                    () -> service.associateVpcCidrBlock("us-east-1", vpcId, cidr));
+            assertEquals("InvalidVpc.Range", associateError.getErrorCode());
+            assertEquals(400, associateError.getHttpStatus());
+        }
+        assertEquals(vpcsBefore + 1, service.describeVpcs("us-east-1", List.of(), Map.of()).size());
+        assertEquals(1, service.describeVpcs("us-east-1", List.of(vpcId), Map.of()).getFirst()
+                .getCidrBlockAssociationSet().size());
+    }
+
+    @Test
+    void createVpcAndAssociateVpcCidrBlockAcceptTheSlash16AndSlash28PrefixBounds() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+
+        assertEquals("10.1.0.0/16", service.createVpc("us-east-1", "10.1.0.0/16", false).getCidrBlock());
+        Vpc smallest = service.createVpc("us-east-1", "10.2.0.0/28", false);
+        assertEquals("10.2.0.0/28", smallest.getCidrBlock());
+        assertEquals("192.168.0.0/16", service.associateVpcCidrBlock("us-east-1", smallest.getVpcId(),
+                "192.168.0.0/16").getCidrBlock());
+        assertEquals("172.16.0.0/28", service.associateVpcCidrBlock("us-east-1", smallest.getVpcId(),
+                "172.16.0.0/28").getCidrBlock());
+    }
+
+    @Test
     void cidrAssociationEditsWaitForSubnetContainmentValidation() throws Exception {
         for (boolean remove : List.of(false, true)) {
             Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
