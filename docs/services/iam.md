@@ -1234,12 +1234,14 @@ floci populates:
   An allow conditioned on it denies the delete of a correctly tagged object, and a create cannot
   be gated on tags an object does not have yet.
 - `s3:RequestObjectTag/<key>`: a tag the request asks to attach. `s3:PutObject` reads these
-  from the `x-amz-tagging` header and `s3:PutObjectTagging` from the `<Tagging>` body. Any pair
+  from the `x-amz-tagging` header, or its query parameter when the header is absent,
+  and `s3:PutObjectTagging` from the `<Tagging>` body. Any pair
   that does not decode is dropped, so a policy conditioned on the key denies such a request. Where
   enforcement lets it through, the handler still answers a malformed header with
   `400 InvalidTag`.
 - `s3:RequestObjectTagKeys`: the case-sensitive requested object tag keys from the same
-  `PutObject` header or `PutObjectTagging` body. Header keys are URL-decoded before matching.
+  `PutObject` header/query source or `PutObjectTagging` body. Header and query tag keys
+  are URL-decoded before matching; a present header takes precedence over the query.
   `ForAllValues:StringEquals` can limit all requested keys without a `Null` guard; an
   omitted or empty tag set still follows the absent-key rules above. Existing object tags
   do not contribute to this requested set. See the [AWS object-tag policy guidance](https://docs.aws.amazon.com/AmazonS3/latest/userguide/tagging-and-policies.html).

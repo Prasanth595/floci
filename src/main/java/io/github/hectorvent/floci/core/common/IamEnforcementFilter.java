@@ -769,7 +769,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             Map<String, List<String>> copy = new HashMap<>(targetContext);
             copy.keySet().removeIf(key ->
                     key.startsWith(IamConditionContextResolver.EXISTING_OBJECT_TAG_PREFIX)
-                            || key.startsWith(IamConditionContextResolver.REQUEST_OBJECT_TAG_PREFIX));
+                            || key.startsWith(IamConditionContextResolver.REQUEST_OBJECT_TAG_PREFIX)
+                            || key.equals(IamConditionContextResolver.REQUEST_OBJECT_TAG_KEYS));
             stripped.add(copy.isEmpty() ? null : copy);
         }
         return stripped;

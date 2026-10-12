@@ -94,6 +94,7 @@ class IamConditionContextResolverTest {
         UriInfo uriInfo = mock(UriInfo.class);
         when(containerRequest.getUriInfo()).thenReturn(uriInfo);
         when(uriInfo.getPath()).thenReturn(path);
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
         when(containerRequest.getEntityStream())
                 .thenReturn(new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
         return containerRequest;
@@ -160,6 +161,20 @@ class IamConditionContextResolverTest {
         assertEquals(List.of("Team", "team", "Cost Center"), conditions.get("s3:RequestObjectTagKeys"));
         assertEquals(List.of("two"), conditions.get("s3:RequestObjectTag/Team"));
         assertFalse(conditions.containsKey("s3:RequestObjectTag/bad"));
+    }
+
+    @Test
+    void queryObjectTagKeysUseHeaderPrecedenceIncludingAnEmptyHeader() {
+        ContainerRequestContext request = s3Request("/bucket/object", "");
+        request.getUriInfo().getQueryParameters().putSingle("x-amz-tagging", "%54eam=payments");
+        Map<String, List<String>> query = resolver.resolve("s3", "s3:PutObject", request);
+        assertEquals(List.of("Team"), query.get("s3:RequestObjectTagKeys"));
+        assertEquals(List.of("payments"), query.get("s3:RequestObjectTag/Team"));
+        when(request.getHeaderString("x-amz-tagging")).thenReturn("Other=value");
+        assertEquals(List.of("Other"), resolver.resolve("s3", "s3:PutObject", request)
+                .get("s3:RequestObjectTagKeys"));
+        when(request.getHeaderString("x-amz-tagging")).thenReturn("");
+        assertNull(resolver.resolve("s3", "s3:PutObject", request));
     }
 
     @Test

@@ -56,7 +56,7 @@ public class IamConditionContextResolver {
     private static final String RESOURCE_TAG_PREFIX = "aws:ResourceTag/";
     public static final String EXISTING_OBJECT_TAG_PREFIX = "s3:ExistingObjectTag/";
     public static final String REQUEST_OBJECT_TAG_PREFIX = "s3:RequestObjectTag/";
-    private static final String REQUEST_OBJECT_TAG_KEYS = "s3:RequestObjectTagKeys";
+    public static final String REQUEST_OBJECT_TAG_KEYS = "s3:RequestObjectTagKeys";
 
     private final Instance<DynamoDbFacade> dynamoDbFacade;
     private final Instance<Ec2Service> ec2Service;
@@ -187,11 +187,15 @@ public class IamConditionContextResolver {
     }
 
     /**
-     * {@code s3:RequestObjectTag/<key>} from a PutObject's {@code x-amz-tagging} header, which the
-     * S3 model documents as a URL query parameter encoding of the tag-set.
+     * {@code s3:RequestObjectTag/<key>} from a PutObject's {@code x-amz-tagging} header, or the
+     * query parameter where a presigner may place it. The header takes precedence, including
+     * an empty header, matching the source the S3 controller applies to the object.
      */
     private Map<String, List<String>> s3RequestObjectTagConditionContext(ContainerRequestContext ctx) {
         String header = ctx.getHeaderString("x-amz-tagging");
+        if (header == null && ctx.getUriInfo() != null) {
+            header = ctx.getUriInfo().getQueryParameters().getFirst("x-amz-tagging");
+        }
         if (header == null || header.isBlank()) {
             return null;
         }

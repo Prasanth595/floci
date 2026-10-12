@@ -113,6 +113,66 @@ class IamTagKeysEnforcementIntegrationTest {
                 .then().statusCode(200).body(not(containsString("<Key>Team</Key>")));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"Admin", "team"})
+    void s3QueryTagKeysAreCheckedBeforeAnUpload(String forbiddenKey) {
+        String bucket = bucket();
+        String key = scopedUser("s3:PutObject", "s3:RequestObjectTagKeys");
+        String path = "/" + bucket + "/object";
+        given().header("Authorization", auth(key, "s3")).queryParam("x-amz-tagging", "%54eam=payments")
+                .body("original").put(path).then().statusCode(200);
+        given().header("Authorization", auth(key, "s3"))
+                .queryParam("x-amz-tagging", "Team=payments&" + forbiddenKey + "=true")
+                .body("forbidden").put(path).then().statusCode(403);
+        given().header("Authorization", auth("test", "s3")).get(path)
+                .then().statusCode(200).body(equalTo("original"));
+        given().header("Authorization", auth("test", "s3")).queryParam("tagging", "").get(path)
+                .then().statusCode(200).body(containsString("<Key>Team</Key>"))
+                .body(not(containsString("<Key>" + forbiddenKey + "</Key>")));
+    }
+
+    @Test
+    void s3TagHeaderTakesPrecedenceOverTheQuery() {
+        String bucket = bucket();
+        String key = scopedUser("s3:PutObject", "s3:RequestObjectTagKeys");
+        String path = "/" + bucket + "/object";
+        given().header("Authorization", auth(key, "s3")).header("x-amz-tagging", "Team=payments")
+                .queryParam("x-amz-tagging", "Admin=true").body("original").put(path).then().statusCode(200);
+        given().header("Authorization", auth(key, "s3")).header("x-amz-tagging", "Admin=true")
+                .queryParam("x-amz-tagging", "Team=payments").body("forbidden").put(path).then().statusCode(403);
+        given().header("Authorization", auth("test", "s3")).get(path)
+                .then().statusCode(200).body(equalTo("original"));
+        given().header("Authorization", auth("test", "s3")).queryParam("tagging", "").get(path)
+                .then().statusCode(200).body(containsString("<Key>Team</Key>"))
+                .body(not(containsString("<Key>Admin</Key>")));
+    }
+
+    @Test
+    void conditionalUploadCannotUseRequestedKeysToGrantReadAccess() {
+        String bucket = bucket();
+        String path = "/" + bucket + "/object";
+        String etag = given().header("Authorization", auth("test", "s3")).body("original")
+                .put(path).then().statusCode(200).extract().header("ETag");
+        String key = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"*"},
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"*",
+                   "Condition":{"ForAnyValue:StringEquals":{"s3:RequestObjectTagKeys":["Team"]}}}]}
+                """);
+        given().header("Authorization", auth(key, "s3")).header("x-amz-tagging", "Team=payments")
+                .header("If-Match", etag).body("forbidden").put(path).then().statusCode(403);
+        given().header("Authorization", auth("test", "s3")).get(path)
+                .then().statusCode(200).body(equalTo("original"));
+        String allowedKey = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Action":["s3:PutObject","s3:GetObject"],"Resource":"*"}]}
+                """);
+        given().header("Authorization", auth(allowedKey, "s3")).header("x-amz-tagging", "Team=payments")
+                .header("If-Match", etag).body("allowed").put(path).then().statusCode(200);
+        given().header("Authorization", auth("test", "s3")).get(path)
+                .then().statusCode(200).body(equalTo("allowed"));
+    }
+
     private String bucket() {
         String bucket = "tagkeys-" + UUID.randomUUID();
         int port = endpoint.getPort();
@@ -122,15 +182,18 @@ class IamTagKeysEnforcementIntegrationTest {
     }
 
     private String scopedUser(String action, String conditionKey) {
+        return userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"%s",
+                 "Resource":"*","Condition":{"ForAllValues:StringEquals":{"%s":["Team"]}}}]}
+                """.formatted(action, conditionKey));
+    }
+
+    private String userWithPolicy(String policy) {
         String user = "tagkeys-" + UUID.randomUUID();
         String accessKey = createUser(cleanup, endpoint.getPort(), auth("test", "iam"), user).accessKeyId();
         given().header("Authorization", auth("test", "iam"))
                 .formParam("Action", "PutUserPolicy").formParam("UserName", user).formParam("PolicyName", "tags")
-                .formParam("PolicyDocument", """
-                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"%s",
-                         "Resource":"*","Condition":{"ForAllValues:StringEquals":{"%s":["Team"]}}}]}
-                        """.formatted(action, conditionKey))
-                .post("/").then().statusCode(200);
+                .formParam("PolicyDocument", policy).post("/").then().statusCode(200);
         return accessKey;
     }
 }
