@@ -336,7 +336,7 @@ class RedshiftDataServiceTest {
         String id = service.executeStatement(req("select id from cf"), REGION).get("Id").asText();
         AwsException rejected = assertThrows(AwsException.class, () -> service.cancelStatement(idOf(id)));
         assertEquals("ValidationException", rejected.getErrorCode());
-        assertEquals("Could not cancel a query that is already in FINISHED state.", rejected.getMessage());
+        assertEquals("Could not cancel a query that is already in FINISHED state with ID: " + id, rejected.getMessage());
         assertEquals("FINISHED", service.describeStatement(idOf(id)).get("Status").asText());
     }
 
@@ -429,7 +429,7 @@ class RedshiftDataServiceTest {
         String id = service.executeStatement(req("select * from missing_table"), REGION).get("Id").asText();
         assertEquals("FAILED", service.describeStatement(idOf(id)).get("Status").asText());
         AwsException rejected = assertThrows(AwsException.class, () -> service.cancelStatement(idOf(id)));
-        assertEquals("Could not cancel a query that is already in FAILED state.", rejected.getMessage());
+        assertEquals("Could not cancel a query that is already in FAILED state with ID: " + id, rejected.getMessage());
         assertEquals("FAILED", service.describeStatement(idOf(id)).get("Status").asText());
     }
 

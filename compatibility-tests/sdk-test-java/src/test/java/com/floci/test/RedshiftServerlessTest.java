@@ -81,7 +81,7 @@ class RedshiftServerlessTest {
     }
 
     @Test
-    void workgroupLifecycleUsesAwsSdk() throws InterruptedException {
+    void workgroupLifecycleUsesAwsSdk() {
         assumeFalse(TestFixtures.isRealAws(), "Creates a workgroup and asserts emulator-local defaults");
 
         try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient();
