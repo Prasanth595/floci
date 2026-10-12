@@ -125,8 +125,7 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
 
     @Test
     void anOlderVersionIsAuthorizedAgainstItsOwnTags() {
-        Fixture f = new Fixture("version");
-        f.versioning();
+        Fixture f = new Fixture("version", true);
         // Two versions of one key with different tags. The current version carries the tag the
         // policy allows; the one under it does not.
         String denied = f.seedVersion("a/rolled", "env=b");
@@ -161,10 +160,14 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
         final String accessKeyId;
 
         Fixture(String name) {
+            this(name, false);
+        }
+
+        Fixture(String name, boolean versioned) {
             String suffix = Long.toString(System.nanoTime(), 36);
             bucket = "objtag-" + name + "-" + suffix;
             user = "objtag-" + name + "-" + suffix;
-            if (!"version".equals(name)) {
+            if (!versioned) {
                 cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(),
                         auth(ADMIN, "s3"), bucket));
             }
@@ -176,6 +179,9 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
             seed("b/theirs-2", "env=b");
             accessKeyId = EnforcementFixtures.createUser(cleanup, baseUri.getPort(),
                     auth(ADMIN, "iam"), user).accessKeyId();
+            if (versioned) {
+                versioning();
+            }
         }
 
         String objects() {
