@@ -97,21 +97,32 @@ public class BedrockAgentCoreMemoryService {
                         "Memory not found: " + id, 404));
     }
 
+    /** UpdateMemory on the API: a null field is left as it is, as on AWS. */
     public Memory update(String id, String description, Integer eventExpiryDuration,
                          String memoryExecutionRoleArn, String region) {
+        return update(id, description, eventExpiryDuration, memoryExecutionRoleArn, false, region);
+    }
+
+    /**
+     * Updates a memory from arguments that are its whole declared configuration when
+     * {@code replaceOmitted} is true: a null description or execution role then clears the stored
+     * one, which the API call leaves alone.
+     */
+    public Memory update(String id, String description, Integer eventExpiryDuration,
+                         String memoryExecutionRoleArn, boolean replaceOmitted, String region) {
         // Validate all inputs before mutating: get() returns the live stored object,
         // so a throw after the first setter would leave a partially applied update.
         if (eventExpiryDuration != null) {
             validateExpiry(eventExpiryDuration);
         }
         Memory memory = get(id, region);
-        if (description != null) {
+        if (description != null || replaceOmitted) {
             memory.setDescription(description);
         }
         if (eventExpiryDuration != null) {
             memory.setEventExpiryDuration(eventExpiryDuration);
         }
-        if (memoryExecutionRoleArn != null) {
+        if (memoryExecutionRoleArn != null || replaceOmitted) {
             memory.setMemoryExecutionRoleArn(memoryExecutionRoleArn);
         }
         memory.setUpdatedAt(Instant.now());

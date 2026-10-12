@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -38,9 +40,12 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p>An update whose create-only properties are unchanged (the runtime's name; the endpoint's
  * runtime id and name; the memory's name and encryption key) is applied in place through the
- * service's update call and a tag diff, so the physical id survives as it does on AWS. Any
- * create-only change creates the replacement and leaves the displaced entity to the
- * {@link ReplacementCleanup} record, deleted once the stack update commits.
+ * service's update call and a tag diff, so the physical id survives as it does on AWS. The
+ * template is the whole declared configuration: a property it no longer carries is cleared on the
+ * entity, not left over from the previous update. What the in-place update changes is snapshotted
+ * first (see {@link #IN_PLACE_PRIOR_ATTR}) so a stack rollback, or this provision failing after
+ * the change, puts the entity back. Any create-only change creates the replacement and leaves the
+ * displaced entity to the {@link ReplacementCleanup} record, deleted once the stack update commits.
  *
  * <p>Template properties the emulated service has no model for are accepted and logged once at
  * warn, by name, rather than failing the stack; the template is still valid CloudFormation.
@@ -73,6 +78,15 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
      * (https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_NetworkConfiguration.html).
      */
     private static final String DEFAULT_NETWORK_MODE = "PUBLIC";
+
+    /**
+     * What an in-place update changed on a reused entity, recorded before the change so a stack
+     * rollback can put it back: the runtime's configuration and tags, the endpoint's target version
+     * and description, the memory's mutable properties and tags. Internal, like the other
+     * {@code __Floci} attributes.
+     */
+    static final String IN_PLACE_PRIOR_ATTR = "__FlociBedrockAgentCorePrior";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final BedrockAgentCoreControlService runtimeService;
     private final BedrockAgentCoreMemoryService memoryService;
@@ -116,42 +130,64 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
         if (network == null) {
             network = JsonNodeFactory.instance.objectNode().put("networkMode", DEFAULT_NETWORK_MODE);
         }
-        String description = ctx.resolveOptional(props, "Description");
+        String description = ctx.resolveOrDefault(props, "Description", null);
         Map<String, String> environment = resolveStringMap(props, "EnvironmentVariables", ctx);
         JsonNode authorizer = apiShape(props, "AuthorizerConfiguration", ctx);
         // The template's ProtocolConfiguration is the bare protocol enum; the API wraps it.
-        String protocol = ctx.resolveOptional(props, "ProtocolConfiguration");
-        JsonNode protocolConfiguration = protocol == null || protocol.isBlank() ? null
+        String protocol = ctx.resolveOrDefault(props, "ProtocolConfiguration", null);
+        JsonNode protocolConfiguration = protocol == null ? null
                 : JsonNodeFactory.instance.objectNode().put("serverProtocol", protocol);
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         warnNotStored(RUNTIME, props, RUNTIME_NOT_STORED);
 
         AgentRuntime prior = ctx.isUpdate() ? findRuntime(ctx.priorPhysicalId(), region) : null;
-        AgentRuntime runtime;
         if (prior != null && name.equals(prior.getAgentRuntimeName())) {
             // Every UpdateAgentRuntime publishes a new version, as on AWS, so an UpdateStack that
             // left this runtime alone must not call it and bump the version for nothing.
-            boolean unchanged = Objects.equals(roleArn, prior.getRoleArn())
+            boolean configurationChanged = !(Objects.equals(roleArn, prior.getRoleArn())
                     && Objects.equals(description, prior.getDescription())
                     && artifact.equals(prior.getAgentRuntimeArtifact())
                     && network.equals(prior.getNetworkConfiguration())
-                    && (authorizer == null || authorizer.equals(prior.getAuthorizerConfiguration()))
-                    && (protocolConfiguration == null
-                            || protocolConfiguration.equals(prior.getProtocolConfiguration()))
-                    && environment.equals(prior.getEnvironmentVariables());
-            runtime = unchanged ? prior : runtimeService.updateAgentRuntime(prior.getAgentRuntimeId(), artifact,
-                    network, roleArn, description, environment, authorizer, protocolConfiguration, region);
-            String arn = runtimeService.arn(runtime, String.valueOf(runtime.getLatestVersion()), region);
-            reconcileRuntimeTags(arn, tags, region);
-        } else {
-            runtime = runtimeService.createAgentRuntime(name, artifact, network, roleArn, description,
-                    environment, authorizer, protocolConfiguration, null, region);
-            if (!tags.isEmpty()) {
-                runtimeService.tagByArn(region,
-                        runtimeService.arn(runtime, String.valueOf(runtime.getLatestVersion()), region), tags);
+                    && Objects.equals(authorizer, prior.getAuthorizerConfiguration())
+                    && Objects.equals(protocolConfiguration, prior.getProtocolConfiguration())
+                    && environment.equals(prior.getEnvironmentVariables()));
+            String arn = runtimeService.arn(prior, String.valueOf(prior.getLatestVersion()), region);
+            Map<String, String> priorTags = runtimeService.getTagsByArn(region, arn);
+            if (configurationChanged || !priorTags.equals(tags)) {
+                ObjectNode snapshot = inPlacePrior(prior.getAgentRuntimeId(), region);
+                if (configurationChanged) {
+                    ObjectNode configuration = snapshot.putObject("runtime");
+                    configuration.put("roleArn", prior.getRoleArn());
+                    configuration.put("description", prior.getDescription());
+                    configuration.set("artifact", prior.getAgentRuntimeArtifact());
+                    configuration.set("network", prior.getNetworkConfiguration());
+                    configuration.set("authorizer", prior.getAuthorizerConfiguration());
+                    configuration.set("protocol", prior.getProtocolConfiguration());
+                    configuration.set("environment", MAPPER.valueToTree(prior.getEnvironmentVariables()));
+                }
+                snapshot.set("tags", MAPPER.valueToTree(priorTags));
+                writeInPlacePrior(r, snapshot);
             }
+            JsonNode finalNetwork = network;
+            guarded(r, ctx, false, () -> { }, () -> {
+                AgentRuntime runtime = configurationChanged
+                        ? runtimeService.updateAgentRuntime(prior.getAgentRuntimeId(), artifact, finalNetwork, roleArn,
+                                description, environment, authorizer, protocolConfiguration, region)
+                        : prior;
+                reconcileRuntimeTags(arn, tags, region);
+                publishRuntime(r, runtime, region);
+            });
+        } else {
+            AgentRuntime runtime = runtimeService.createAgentRuntime(name, artifact, network, roleArn, description,
+                    environment, authorizer, protocolConfiguration, null, region);
+            publishRuntime(r, runtime, region);
+            guarded(r, ctx, true, () -> runtimeService.deleteAgentRuntime(runtime.getAgentRuntimeId(), null, region),
+                    () -> {
+                        if (!tags.isEmpty()) {
+                            runtimeService.tagByArn(region, r.getAttributes().get("AgentRuntimeArn"), tags);
+                        }
+                    });
         }
-        publishRuntime(r, runtime, region);
     }
 
     private void reconcileRuntimeTags(String arn, Map<String, String> desired, String region) {
@@ -197,27 +233,37 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
         String runtimeId = required(props, "AgentRuntimeId", ctx, RUNTIME_ENDPOINT);
         String name = required(props, "Name", ctx, RUNTIME_ENDPOINT);
         String version = ctx.resolveOrDefault(props, "AgentRuntimeVersion", null);
-        String description = ctx.resolveOptional(props, "Description");
+        String description = ctx.resolveOrDefault(props, "Description", null);
         warnNotStored(RUNTIME_ENDPOINT, props, RUNTIME_ENDPOINT_NOT_STORED);
 
         EndpointLocation prior = ctx.isUpdate()
                 ? runtimeService.findEndpointByArn(region, ctx.priorPhysicalId()).orElse(null)
                 : null;
-        AgentRuntime runtime;
-        AgentRuntimeEndpoint endpoint;
         if (prior != null && runtimeId.equals(prior.runtime().getAgentRuntimeId())
                 && name.equals(prior.endpoint().getName())) {
-            runtime = prior.runtime();
+            AgentRuntimeEndpoint existing = prior.endpoint();
             // An omitted version leaves the endpoint on the version it serves, as UpdateAgentRuntimeEndpoint does.
-            boolean unchanged = (version == null || version.equals(prior.endpoint().getTargetVersion()))
-                    && Objects.equals(description, prior.endpoint().getDescription());
-            endpoint = unchanged ? prior.endpoint()
-                    : runtimeService.updateEndpoint(runtimeId, name, version, description, region);
+            boolean unchanged = (version == null || version.equals(existing.getTargetVersion()))
+                    && Objects.equals(description, existing.getDescription());
+            if (unchanged) {
+                publishRuntimeEndpoint(r, prior.runtime(), existing, region);
+                return;
+            }
+            ObjectNode snapshot = inPlacePrior(runtimeId, region);
+            ObjectNode endpointPrior = snapshot.putObject("endpoint");
+            endpointPrior.put("name", name);
+            endpointPrior.put("targetVersion", existing.getTargetVersion());
+            endpointPrior.put("description", existing.getDescription());
+            writeInPlacePrior(r, snapshot);
+            guarded(r, ctx, false, () -> { }, () -> publishRuntimeEndpoint(r, prior.runtime(),
+                    runtimeService.updateEndpoint(runtimeId, name, version, description, true, region), region));
         } else {
-            endpoint = runtimeService.createEndpoint(runtimeId, name, version, description, null, region);
-            runtime = runtimeService.getAgentRuntime(runtimeId, region);
+            AgentRuntimeEndpoint endpoint = runtimeService.createEndpoint(runtimeId, name, version, description,
+                    null, region);
+            r.setPhysicalId(runtimeService.endpointArn(endpoint, region));
+            guarded(r, ctx, true, () -> runtimeService.deleteEndpoint(runtimeId, name, null, region),
+                    () -> publishRuntimeEndpoint(r, runtimeService.getAgentRuntime(runtimeId, region), endpoint, region));
         }
-        publishRuntimeEndpoint(r, runtime, endpoint, region);
     }
 
     private void publishRuntimeEndpoint(StackResource r, AgentRuntime runtime, AgentRuntimeEndpoint endpoint,
@@ -242,31 +288,54 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
         String region = ctx.region();
         String name = required(props, "Name", ctx, MEMORY);
         Integer eventExpiryDuration = eventExpiryDuration(props, ctx);
-        String description = ctx.resolveOptional(props, "Description");
+        String description = ctx.resolveOrDefault(props, "Description", null);
         String encryptionKeyArn = ctx.resolveOrDefault(props, "EncryptionKeyArn", null);
-        String executionRoleArn = ctx.resolveOptional(props, "MemoryExecutionRoleArn");
+        String executionRoleArn = ctx.resolveOrDefault(props, "MemoryExecutionRoleArn", null);
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         warnNotStored(MEMORY, props, MEMORY_NOT_STORED);
 
         Memory prior = ctx.isUpdate() ? findMemory(ctx.priorPhysicalId(), region) : null;
-        Memory memory;
         if (prior != null && name.equals(prior.getName())
                 && Objects.equals(encryptionKeyArn, prior.getEncryptionKeyArn())) {
-            memory = memoryService.update(prior.getMemoryId(), description, eventExpiryDuration,
-                    executionRoleArn, region);
-            String arn = memoryService.arn(memory, region);
-            List<String> stale = ProvisionContext.staleTagKeys(memoryService.getTagsByArn(region, arn), tags);
-            if (!stale.isEmpty()) {
-                memoryService.untagByArn(region, arn, stale);
+            boolean configurationChanged = !(Objects.equals(description, prior.getDescription())
+                    && eventExpiryDuration.equals(prior.getEventExpiryDuration())
+                    && Objects.equals(executionRoleArn, prior.getMemoryExecutionRoleArn()));
+            String arn = memoryService.arn(prior, region);
+            Map<String, String> priorTags = memoryService.getTagsByArn(region, arn);
+            if (configurationChanged || !priorTags.equals(tags)) {
+                ObjectNode snapshot = inPlacePrior(prior.getMemoryId(), region);
+                if (configurationChanged) {
+                    ObjectNode configuration = snapshot.putObject("memory");
+                    configuration.put("description", prior.getDescription());
+                    configuration.put("eventExpiryDuration", prior.getEventExpiryDuration());
+                    configuration.put("memoryExecutionRoleArn", prior.getMemoryExecutionRoleArn());
+                }
+                snapshot.set("tags", MAPPER.valueToTree(priorTags));
+                writeInPlacePrior(r, snapshot);
             }
-            if (!tags.isEmpty()) {
-                memoryService.tagByArn(region, arn, tags);
-            }
+            guarded(r, ctx, false, () -> { }, () -> {
+                Memory memory = configurationChanged
+                        ? memoryService.update(prior.getMemoryId(), description, eventExpiryDuration,
+                                executionRoleArn, true, region)
+                        : prior;
+                reconcileMemoryTags(arn, tags, region);
+                publishMemory(r, memory, region);
+            });
         } else {
-            memory = memoryService.create(name, eventExpiryDuration, description, encryptionKeyArn,
-                    executionRoleArn, tags, null, region);
+            // CreateMemory stores the tags with the memory, so there is no step after it to undo.
+            publishMemory(r, memoryService.create(name, eventExpiryDuration, description, encryptionKeyArn,
+                    executionRoleArn, tags, null, region), region);
         }
-        publishMemory(r, memory, region);
+    }
+
+    private void reconcileMemoryTags(String arn, Map<String, String> desired, String region) {
+        List<String> stale = ProvisionContext.staleTagKeys(memoryService.getTagsByArn(region, arn), desired);
+        if (!stale.isEmpty()) {
+            memoryService.untagByArn(region, arn, stale);
+        }
+        if (!desired.isEmpty()) {
+            memoryService.tagByArn(region, arn, desired);
+        }
     }
 
     private void publishMemory(StackResource r, Memory memory, String region) {
@@ -339,7 +408,7 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    // ──────────────────────────── Replacement lifecycle ────────────────────────────
+    // ──────────────────────────── Update lifecycle ────────────────────────────
 
     @Override
     public boolean hasReplacementUpdate(StackResource resource) {
@@ -353,17 +422,165 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
+    /**
+     * A replacement is undone through the cleanup record: the displaced entity was never touched.
+     * A reused entity the update changed in place is put back from the snapshot taken before the
+     * change, which is spent only once the restore succeeded so a restore that throws is reported
+     * rather than claimed. Without either, the update changed nothing about the entity. A provision
+     * that fails mid-way restores its own snapshot before the failure propagates (see
+     * {@link #guarded}), because the engine discards the attempted resource, snapshot included.
+     */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        return ReplacementCleanup.rollback(resource, this::delete);
+        if (ReplacementCleanup.rollback(resource, this::delete)) {
+            resource.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
+            return true;
+        }
+        String snapshot = resource.getAttributes().get(IN_PLACE_PRIOR_ATTR);
+        if (snapshot != null) {
+            restoreInPlace(resource, snapshot);
+            resource.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
+        }
+        return true;
+    }
+
+    /**
+     * Puts the entity back the way the snapshot recorded it, through the same service calls the
+     * update used, and republishes the resource's attributes from the entity as it now stands: a
+     * restored runtime is a new version, as it would be on AWS.
+     */
+    private void restoreInPlace(StackResource resource, String snapshot) {
+        ObjectNode prior = readSnapshot(resource, snapshot);
+        String region = prior.path("region").asText();
+        String entityId = prior.path("entityId").asText();
+        switch (resource.getResourceType()) {
+            case RUNTIME -> {
+                AgentRuntime runtime = runtimeService.getAgentRuntime(entityId, region);
+                if (prior.has("runtime")) {
+                    ObjectNode configuration = (ObjectNode) prior.get("runtime");
+                    runtime = runtimeService.updateAgentRuntime(entityId, configuration.get("artifact"),
+                            configuration.get("network"), text(configuration, "roleArn"),
+                            text(configuration, "description"), stringMap(configuration.get("environment")),
+                            node(configuration, "authorizer"), node(configuration, "protocol"), region);
+                }
+                if (prior.has("tags")) {
+                    reconcileRuntimeTags(runtimeService.arn(runtime, String.valueOf(runtime.getLatestVersion()), region),
+                            stringMap(prior.get("tags")), region);
+                }
+                publishRuntime(resource, runtime, region);
+            }
+            case RUNTIME_ENDPOINT -> {
+                ObjectNode endpointPrior = (ObjectNode) prior.get("endpoint");
+                AgentRuntimeEndpoint endpoint = runtimeService.updateEndpoint(entityId, text(endpointPrior, "name"),
+                        text(endpointPrior, "targetVersion"), text(endpointPrior, "description"), true, region);
+                publishRuntimeEndpoint(resource, runtimeService.getAgentRuntime(entityId, region), endpoint, region);
+            }
+            case MEMORY -> {
+                Memory memory = memoryService.get(entityId, region);
+                if (prior.has("memory")) {
+                    ObjectNode configuration = (ObjectNode) prior.get("memory");
+                    memory = memoryService.update(entityId, text(configuration, "description"),
+                            configuration.get("eventExpiryDuration").asInt(),
+                            text(configuration, "memoryExecutionRoleArn"), true, region);
+                }
+                if (prior.has("tags")) {
+                    reconcileMemoryTags(memoryService.arn(memory, region), stringMap(prior.get("tags")), region);
+                }
+                publishMemory(resource, memory, region);
+            }
+            default -> throw new IllegalStateException("No in-place restore for " + resource.getResourceType());
+        }
+    }
+
+    /**
+     * A fresh snapshot for this resource. Each provision changes one entity in one go, so the
+     * snapshot is written once, before the change, with the entity's state as it stands now.
+     */
+    private static ObjectNode inPlacePrior(String entityId, String region) {
+        ObjectNode node = MAPPER.createObjectNode();
+        node.put("region", region);
+        node.put("entityId", entityId);
+        return node;
+    }
+
+    private static void writeInPlacePrior(StackResource r, ObjectNode node) {
+        r.getAttributes().put(IN_PLACE_PRIOR_ATTR, node.toString());
+    }
+
+    private static ObjectNode readSnapshot(StackResource r, String snapshot) {
+        try {
+            return (ObjectNode) MAPPER.readTree(snapshot);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Unreadable in-place snapshot on " + r.getLogicalId(), e);
+        }
+    }
+
+    /**
+     * Runs the steps after the entity exists or was found, undoing them when one fails: a created
+     * entity is deleted again, a reused one is put back from its snapshot. The engine only removes
+     * a failed create it can see, and on a failed update it restores the previous resource metadata
+     * and discards the attempted one, snapshot included, so the undo has to happen here.
+     *
+     * <p>A compensation that fails is reported, never hidden. A created entity carries
+     * {@link CfnRollback#ROLLBACK_OWNED_ATTR} while the steps run, so the engine's create rollback
+     * deletes it (and reports that failing) if the undo here could not, and during an update the
+     * entity is also listed in the cleanup record, which the engine carries onto the restored
+     * resource and runs before the next committed update or the stack delete; a reused entity keeps
+     * its snapshot and the reason lands in {@link CfnRollback#UPDATE_ROLLBACK_FAILURE_ATTR}, which
+     * the engine copies onto the committed resource so the rollback walker reports
+     * UPDATE_ROLLBACK_FAILED instead of claiming the prior state is live.
+     */
+    private void guarded(StackResource r, ProvisionContext ctx, boolean created, Runnable undoCreate, Runnable steps) {
+        if (created) {
+            r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+        }
+        try {
+            steps.run();
+            r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
+        } catch (RuntimeException e) {
+            if (created) {
+                try {
+                    undoCreate.run();
+                    r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
+                } catch (RuntimeException undo) {
+                    e.addSuppressed(undo);
+                    String reason = "Could not remove " + r.getPhysicalId() + ", created for " + r.getLogicalId()
+                            + " by a failed update: " + undo.getMessage();
+                    LOG.warn(reason);
+                    r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
+                    if (ctx.isUpdate()) {
+                        // The engine restores the previous resource and keeps only what the cleanup
+                        // record carries, so the replacement is listed there for the next cleanup.
+                        ReplacementCleanup.recordOrphan(r, r.getPhysicalId(), r.getResourceType(), ctx.region());
+                    }
+                }
+            } else {
+                String snapshot = r.getAttributes().get(IN_PLACE_PRIOR_ATTR);
+                if (snapshot != null) {
+                    try {
+                        restoreInPlace(r, snapshot);
+                        r.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
+                    } catch (RuntimeException undo) {
+                        e.addSuppressed(undo);
+                        String reason = "Could not restore " + r.getPhysicalId() + " for " + r.getLogicalId()
+                                + " after a failed update: " + undo.getMessage();
+                        LOG.warn(reason);
+                        r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
+                    }
+                }
+            }
+            throw e;
+        }
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
@@ -376,12 +593,16 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
         return value;
     }
 
-    /** A resolved object property in the API's camelCase, or null when absent. */
+    /**
+     * A resolved object property in the API's camelCase, or null when absent. A member whose
+     * {@code Fn::If} selects {@code AWS::NoValue} is omitted, as CloudFormation omits it, rather
+     * than resolved to an empty string.
+     */
     private static JsonNode apiShape(JsonNode props, String name, ProvisionContext ctx) {
         if (props == null || !props.has(name) || props.get(name).isNull()) {
             return null;
         }
-        JsonNode resolved = ctx.engine().resolveNode(props.get(name));
+        JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(props.get(name));
         return resolved == null || resolved.isNull() || !resolved.isObject() ? null : toApiShape(resolved);
     }
 
@@ -414,7 +635,7 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
         if (props == null || !props.has(name)) {
             return values;
         }
-        JsonNode resolved = ctx.engine().resolveNode(props.get(name));
+        JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(props.get(name));
         if (resolved != null && resolved.isObject()) {
             resolved.fields().forEachRemaining(field -> {
                 String value = ctx.engine().resolve(field.getValue());
@@ -422,6 +643,23 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
             });
         }
         return values;
+    }
+
+    /** A snapshot's string map member, as a mutable map. */
+    private static Map<String, String> stringMap(JsonNode node) {
+        Map<String, String> values = new LinkedHashMap<>();
+        if (node != null && node.isObject()) {
+            node.fields().forEachRemaining(field -> values.put(field.getKey(), field.getValue().asText()));
+        }
+        return values;
+    }
+
+    private static String text(ObjectNode node, String field) {
+        return node.hasNonNull(field) ? node.get(field).asText() : null;
+    }
+
+    private static JsonNode node(ObjectNode node, String field) {
+        return node.hasNonNull(field) ? node.get(field) : null;
     }
 
     /** Logs, once per property per type, a template property the emulated service cannot store. */

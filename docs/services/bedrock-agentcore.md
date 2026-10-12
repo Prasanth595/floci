@@ -165,9 +165,15 @@ block is ever produced even when a request supplies `tools`.
 - `agentRuntimeName` must match `[a-zA-Z][a-zA-Z0-9_]{0,47}` (no hyphens); invalid
   names return `ValidationException`.
 - Each `UpdateAgentRuntime` increments the version and preserves prior versions for
-  `GetAgentRuntime?version=` and `ListAgentRuntimeVersions`.
+  `GetAgentRuntime?version=` and `ListAgentRuntimeVersions`. As on AWS, the new version holds
+  exactly the configuration the request carries: an omitted `description`,
+  `authorizerConfiguration`, `protocolConfiguration` or `environmentVariables` is cleared on
+  it rather than carried over from the previous version.
+- `networkConfiguration.networkMode` must be `PUBLIC` or `VPC` and
+  `protocolConfiguration.serverProtocol` must be `HTTP`, `MCP` or `A2A`; anything else returns
+  the API's `ValidationException`.
 - Timestamps (`createdAt`, `lastUpdatedAt`) are ISO-8601 strings.
-- Config blobs (`agentRuntimeArtifact`, `networkConfiguration`, …) are stored opaquely
+- Config blobs (`agentRuntimeArtifact`, `networkConfiguration`, …) are otherwise stored opaquely
   and echoed back; they are not deeply validated.
 - `CreateMemory` persists `tags`, `encryptionKeyArn`, and `memoryExecutionRoleArn`;
   `UpdateMemory` applies `description`, `eventExpiryDuration`, and
@@ -194,9 +200,15 @@ string `ProtocolConfiguration` becomes the API's `{"serverProtocol": …}`, and 
 
 An update that keeps the create-only properties (the runtime's `AgentRuntimeName`, the endpoint's
 `AgentRuntimeId` and `Name`, the memory's `Name` and `EncryptionKeyArn`) is applied in place with a
-tag diff; a runtime whose declared configuration did not change keeps its version. Changing a
-create-only property creates a replacement and deletes the displaced resource once the stack
-update commits, as on AWS. Deleting the stack deletes the resources.
+tag diff; a runtime whose declared configuration did not change keeps its version. The template is
+the whole declared configuration: an optional property it no longer carries (a `Description`, the
+runtime's `AuthorizerConfiguration`, `ProtocolConfiguration` or `EnvironmentVariables`, the
+memory's `MemoryExecutionRoleArn`) is cleared on the resource. A member whose `Fn::If` selects
+`AWS::NoValue` inside a nested configuration object is omitted. When a later resource fails the
+stack update, an in-place change is rolled back onto the resource (a runtime as a further
+version, as on AWS), and a provision that fails after its own change undoes it before the failure
+propagates. Changing a create-only property creates a replacement and deletes the displaced
+resource once the stack update commits, as on AWS. Deleting the stack deletes the resources.
 
 Properties the emulated control plane has no model for are accepted and logged once at `WARN`
 rather than failing the stack: the runtime's `CapacityProviderConfiguration`,
