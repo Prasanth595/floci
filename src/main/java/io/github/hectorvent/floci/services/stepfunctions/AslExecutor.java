@@ -22,7 +22,6 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
@@ -1308,7 +1307,8 @@ public class AslExecutor {
 
         // AWS SDK service integration: EC2 DescribeRegions
         if (integration.isSdk("ec2", "describeRegions")) {
-            return invokeAwsSdkEc2DescribeRegions();
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeAwsSdkEc2DescribeRegions(region);
         }
 
         // S3 PutObject — optimized and aws-sdk integrations
@@ -1415,11 +1415,10 @@ public class AslExecutor {
         }
     }
 
-    private JsonNode invokeAwsSdkEc2DescribeRegions() {
+    private JsonNode invokeAwsSdkEc2DescribeRegions(String executionRegion) {
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode regions = objectMapper.createArrayNode();
-        AwsPartition partition = AwsPartitions.byId(
-                RegionResolver.effectivePartition(config.defaultRegion(), config.partitions().id()));
+        AwsPartition partition = AwsPartitions.forRegionOrCommercial(executionRegion);
         for (AwsPartition.Region name : ec2Service.describeRegions(partition, false)) {
             ObjectNode region = objectMapper.createObjectNode();
             region.put("RegionName", name.id());

@@ -2,12 +2,15 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.testing.PartitionMatrix;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -39,6 +42,64 @@ class StepFunctionsAwsSdkQueryIntegrationTest {
         assertTrue(result.path("Regions").isArray(), "Regions should be an array");
         assertFalse(result.path("Regions").isEmpty(), "Regions should be non-empty");
         assertFalse(result.path("Regions").get(0).path("RegionName").asText().isBlank());
+    }
+
+    @Test
+    void ec2DescribeRegions_listsTheRegionsOfTheExecutionsPartition() throws Exception {
+        String auth = PartitionMatrix.sigV4Auth("cn-north-1", "states");
+        String definition = """
+                {"StartAt":"Action","States":{"Action":{"Type":"Task",
+                 "Resource":"arn:aws-cn:states:::aws-sdk:ec2:describeRegions","Parameters":{},"End":true}}}
+                """;
+        String smArn = given().header("Authorization", auth)
+                .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
+                .contentType(SFN_CONTENT_TYPE)
+                .body("""
+                        {"name": "ec2-regions-cn-%d", "definition": %s, "roleArn": "%s"}
+                        """.formatted(System.currentTimeMillis(), quote(definition),
+                        "arn:aws-cn:iam::000000000000:role/test-role"))
+                .when().post("/").then().statusCode(200)
+                .extract().jsonPath().getString("stateMachineArn");
+        try {
+            String execArn = given().header("Authorization", auth)
+                    .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
+                    .contentType(SFN_CONTENT_TYPE)
+                    .body("""
+                            {"stateMachineArn": "%s", "input": "{}"}
+                            """.formatted(smArn))
+                    .when().post("/").then().statusCode(200)
+                    .extract().jsonPath().getString("executionArn");
+            String output = null;
+            for (int i = 0; i < 50 && output == null; i++) {
+                Response described = given().header("Authorization", auth)
+                        .header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
+                        .contentType(SFN_CONTENT_TYPE)
+                        .body("""
+                                {"executionArn": "%s"}
+                                """.formatted(execArn))
+                        .when().post("/");
+                String status = described.jsonPath().getString("status");
+                if ("SUCCEEDED".equals(status)) {
+                    output = described.jsonPath().getString("output");
+                } else if (!"RUNNING".equals(status)) {
+                    fail("Execution " + status + ": " + described.body().asString());
+                } else {
+                    Thread.sleep(100);
+                }
+            }
+            List<String> names = mapper.readTree(output).path("Regions").findValuesAsText("RegionName");
+            assertEquals(List.of("cn-north-1", "cn-northwest-1"), names.stream().sorted().toList());
+            assertEquals("ec2.cn-north-1.amazonaws.com.cn",
+                    mapper.readTree(output).path("Regions").get(names.indexOf("cn-north-1")).path("Endpoint").asText());
+        } finally {
+            given().header("Authorization", auth)
+                    .header("X-Amz-Target", "AWSStepFunctions.DeleteStateMachine")
+                    .contentType(SFN_CONTENT_TYPE)
+                    .body("""
+                            {"stateMachineArn": "%s"}
+                            """.formatted(smArn))
+                    .when().post("/");
+        }
     }
 
     @Test
