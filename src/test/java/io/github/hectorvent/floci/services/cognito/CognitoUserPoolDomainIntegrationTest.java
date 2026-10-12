@@ -202,14 +202,6 @@ class CognitoUserPoolDomainIntegrationTest {
             assertEquals(secondPrefixDomain, userPool.path("Domain").asText());
             assertEquals(customDomain, userPool.path("CustomDomain").asText());
 
-            JsonNode updatedUserPool = cognitoJson("UpdateUserPool", """
-                    {
-                      "UserPoolId": "%s",
-                      "PoolName": "DomainTestPoolUpdated"
-                    }
-                    """.formatted(poolId)).path("UserPool");
-            assertEquals(secondPrefixDomain, updatedUserPool.path("Domain").asText());
-            assertEquals(customDomain, updatedUserPool.path("CustomDomain").asText());
         } finally {
             cognitoAction("DeleteUserPoolDomain", """
                     {

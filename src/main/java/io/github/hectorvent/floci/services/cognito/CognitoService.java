@@ -1818,9 +1818,7 @@ public class CognitoService implements ResourceProvider {
         if (!userPoolDomain.getUserPoolId().equals(userPoolId)) {
             throw new AwsException("ResourceNotFoundException", "Domain does not exist", 400);
         }
-        synchronized (domainLock) {
-            domainStore.delete(domain);
-        }
+        domainStore.delete(domain);
         if (userPoolDomain.isCustomDomain()) {
             acmService.removeInUseBy(userPoolDomain.getCertificateArn(),
                     cloudFrontDistributionArn(regionResolver.getPartition(), userPoolDomain), CERTIFICATE_REGION);
