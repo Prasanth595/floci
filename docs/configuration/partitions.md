@@ -107,6 +107,11 @@ back to `aws` for a label no partition publishes.
   (`IllegalLocationConstraintException` otherwise). A China or GovCloud client must send the
   constraint, which the AWS SDKs do; `GetBucketLocation` still answers an empty constraint only
   for `us-east-1`, in every partition.
+- **AWS Sign-In**: the cross-device login redirect is accepted on the Sign-In host of the
+  deployment's partition (`<region>.signin.amazonaws.cn` in China,
+  `<region>.signin.amazonaws-us-gov.com` in GovCloud), read from botocore's `signin` endpoint
+  ruleset into `aws/partitions.json`, and on Floci's own endpoint. The device-authorization client
+  ids are the same literal in every partition, as the Sign-In model spells them.
 - **Hosted zones and console URLs**: load balancer and S3 website hosted zone ids come from a
   per-region table (`aws/region-facts.json`, generated from the Terraform provider and the CDK,
   which transcribe the AWS General Reference); Network load balancers have their own zone,
@@ -227,10 +232,6 @@ These values have no published source Floci can cite, so it does not guess them;
 the commercial value or Floci's own base host until sourced:
 
 - the China CloudFront distribution domain suffix (only the API host is published);
-- the console cross-device sign-in redirect host outside the commercial partition: besides the
-  endpoint the authorize request arrived on, the only AWS host Floci accepts is
-  `<region>.signin.aws.amazon.com` (the device-authorization client ids themselves,
-  `arn:aws:signin:::devtools/...`, are the same in every partition);
 - the STS web-identity audience outside the commercial partition;
 - the EKS Pod Identity token audience (`pods.eks.amazonaws.com`) outside the commercial partition;
 - the Lambda function-URL host outside the commercial partition;

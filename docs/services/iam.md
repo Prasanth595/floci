@@ -29,7 +29,7 @@ aws login --remote --endpoint-url http://localhost:4566 --region us-east-1
 The CLI prints the authorize URL and waits for a code. After the consent page, Floci lands on
 `/v1/sessions/confirmation` on the same endpoint, the path AWS Sign-In uses, and shows the
 verification code to paste back. The redirect must point at the endpoint the request arrived on
-or at an AWS Sign-In host; any other origin is refused.
+or at the AWS Sign-In host of a region in the deployment's partition; any other origin is refused.
 
 ## Supported Actions
 
