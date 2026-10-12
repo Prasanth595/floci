@@ -1283,6 +1283,25 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void scanReportsTheMissingProjectionBeforeTheSegmentPairing() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Select": "SPECIFIC_ATTRIBUTES", "Segment": 5, "TotalSegments": 5}
+                """));
+        assertEquals("1 validation error detected: Must specify the AttributesToGet or ProjectionExpression "
+                + "when choosing to get SPECIFIC_ATTRIBUTES", ex.getMessage());
+    }
+
+    @Test
+    void scanReportsAnUnknownSelectBeforeAMissingTotalSegments() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Select": "BOGUS", "Segment": 1}
+                """));
+        assertEquals("1 validation error detected: Value 'BOGUS' at 'select' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: "
+                + "[SPECIFIC_ATTRIBUTES, COUNT, ALL_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES]", ex.getMessage());
+    }
+
+    @Test
     void scanAcceptsSegmentsAtTheBounds() throws Exception {
         createUsersTable("eu-west-1");
 

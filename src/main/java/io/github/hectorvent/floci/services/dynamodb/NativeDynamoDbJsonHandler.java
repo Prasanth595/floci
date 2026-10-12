@@ -1257,19 +1257,6 @@ public class NativeDynamoDbJsonHandler {
                 List.of("AttributesToGet", "ScanFilter", "ConditionalOperator"),
                 List.of("ProjectionExpression", "FilterExpression"));
 
-        if (segment != null && totalSegments == null) {
-            throw new AwsException("ValidationException",
-                    "The TotalSegments parameter is required but was not present in the request when Segment parameter is present", 400);
-        }
-        if (totalSegments != null && segment == null) {
-            throw new AwsException("ValidationException",
-                    "The Segment parameter is required but was not present in the request when parameter TotalSegments is present", 400);
-        }
-        if (segment != null && totalSegments != null && segment >= totalSegments) {
-            throw new AwsException("ValidationException",
-                    "The Segment parameter is zero-based and must be less than parameter TotalSegments", 400);
-        }
-
         DynamoDbExpressionSize.checkReadWithSize(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpressionScan, "ProjectionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
@@ -1294,6 +1281,18 @@ public class NativeDynamoDbJsonHandler {
                 && projectionExpressionScan == null && !hasAttributesToGetScan) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: " + SELECT_NEEDS_PROJECTION, 400);
+        }
+        if (segment != null && totalSegments == null) {
+            throw new AwsException("ValidationException",
+                    "The TotalSegments parameter is required but was not present in the request when Segment parameter is present", 400);
+        }
+        if (totalSegments != null && segment == null) {
+            throw new AwsException("ValidationException",
+                    "The Segment parameter is required but was not present in the request when parameter TotalSegments is present", 400);
+        }
+        if (segment != null && totalSegments != null && segment >= totalSegments) {
+            throw new AwsException("ValidationException",
+                    "The Segment parameter is zero-based and must be less than parameter TotalSegments", 400);
         }
 
         TableDefinition scanTable = dynamoDbService.requireTableForItemCall(tableName, region);
