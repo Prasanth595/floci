@@ -3930,7 +3930,11 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeVolumesResponse.volumeSet.item.volumeType", equalTo("gp2"));
+            // Earlier tests launch from gp2-rooted catalog AMIs, so the result holds their root
+            // volumes too: assert the filter, not a count.
+            .body("DescribeVolumesResponse.volumeSet.item.findAll { it.volumeType != 'gp2' }.size()", equalTo(0))
+            .body("DescribeVolumesResponse.volumeSet.item.findAll { it.volumeId == '" + volumeId + "' }.size()",
+                    equalTo(1));
     }
 
     @Test
