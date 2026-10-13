@@ -3,16 +3,14 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.containsString;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * An Aurora MySQL cluster created without EngineVersion must get a version that
@@ -25,7 +23,7 @@ class RdsAuroraDefaultVersionOrderableIntegrationTest {
 
     private static final String ID = "aurora-default-version-cluster";
 
-    private static io.restassured.specification.RequestSpecification rds(String action) {
+    private static RequestSpecification rds(String action) {
         return given().header("Authorization",
                         "AWS4-HMAC-SHA256 Credential=test/20260615/us-east-1/rds/aws4_request, "
                         + "SignedHeaders=content-type;host, Signature=test")
@@ -49,14 +47,14 @@ class RdsAuroraDefaultVersionOrderableIntegrationTest {
                 .formParam("MasterUserPassword", "secret99password")
                 .when().post("/").then().statusCode(200);
 
-        String described = rds("DescribeDBClusters").formParam("DBClusterIdentifier", ID)
-                .when().post("/").then().statusCode(200).extract().asString();
-        Matcher version = Pattern.compile("<EngineVersion>([^<]+)</EngineVersion>").matcher(described);
-        assertTrue(version.find(), described);
+        String version = rds("DescribeDBClusters").formParam("DBClusterIdentifier", ID)
+                .when().post("/").then().statusCode(200).extract().xmlPath()
+                .getString("DescribeDBClustersResponse.DescribeDBClustersResult.DBClusters.DBCluster.EngineVersion");
+        assertFalse(version.isEmpty(), "cluster has no EngineVersion");
 
         rds("DescribeOrderableDBInstanceOptions")
                 .formParam("Engine", "aurora-mysql")
-                .formParam("EngineVersion", version.group(1))
+                .formParam("EngineVersion", version)
                 .when().post("/").then().statusCode(200)
                 .body(containsString("<OrderableDBInstanceOption>"));
     }
