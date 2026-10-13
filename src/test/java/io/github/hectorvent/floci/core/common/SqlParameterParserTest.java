@@ -154,6 +154,18 @@ class SqlParameterParserTest {
     }
 
     @Test
+    void nestedBlockCommentsFollowTheSqlDialect() {
+        String sql = "select 1; /* outer /* inner */ select 2; */";
+        assertFalse(SqlParameterParser.isMultiStatement(sql, Options.REDSHIFT));
+        assertTrue(SqlParameterParser.isMultiStatement(sql, Options.RDS_MYSQL));
+        assertTrue(SqlParameterParser.isMultiStatement(sql + " select 3", Options.REDSHIFT));
+
+        ParsedSql parsed = SqlParameterParser.parse("select 1 /* outer /* inner */ :ignored */ + :value",
+                Options.REDSHIFT);
+        assertEquals(List.of("value"), parsed.parameterOrder());
+    }
+
+    @Test
     void escapeStringWithAnEscapedQuoteIsNotSeenAsMultiStatement() {
         assertFalse(SqlParameterParser.isMultiStatement("select E'a\\';b' as v", Options.REDSHIFT));
     }

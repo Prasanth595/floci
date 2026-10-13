@@ -77,8 +77,7 @@ public final class SqlParameterParser {
             }
 
             if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                int end = sql.indexOf("*/", i + 2);
-                end = end < 0 ? len : end + 2;
+                int end = skipBlockComment(sql, i, !options.backslashEscapes());
                 out.append(sql, i, end);
                 i = end;
                 continue;
@@ -203,8 +202,7 @@ public final class SqlParameterParser {
             }
 
             if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                int end = sql.indexOf("*/", i + 2);
-                i = end < 0 ? len : end + 2;
+                i = skipBlockComment(sql, i, !options.backslashEscapes());
                 continue;
             }
 
@@ -230,6 +228,26 @@ public final class SqlParameterParser {
             i++;
         }
         return false;
+    }
+
+    private static int skipBlockComment(String sql, int start, boolean nested) {
+        int depth = 1;
+        int i = start + 2;
+        while (i + 1 < sql.length()) {
+            if (nested && sql.charAt(i) == '/' && sql.charAt(i + 1) == '*') {
+                depth++;
+                i += 2;
+            } else if (sql.charAt(i) == '*' && sql.charAt(i + 1) == '/') {
+                depth--;
+                i += 2;
+                if (depth == 0) {
+                    return i;
+                }
+            } else {
+                i++;
+            }
+        }
+        return sql.length();
     }
 
     private static int skipQuoted(String sql, int start, char quote, Options options) {
