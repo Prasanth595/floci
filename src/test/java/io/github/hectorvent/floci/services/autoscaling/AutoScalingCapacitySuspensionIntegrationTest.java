@@ -3,20 +3,22 @@ package io.github.hectorvent.floci.services.autoscaling;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.time.Duration;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 class AutoScalingCapacitySuspensionIntegrationTest {
     private static final String GROUP_PATH = "DescribeAutoScalingGroupsResponse."
             + "DescribeAutoScalingGroupsResult.AutoScalingGroups.member";
+
+    @Inject
+    AutoScalingReconciler reconciler;
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -37,7 +39,9 @@ class AutoScalingCapacitySuspensionIntegrationTest {
                 setDesired(name, 1);
                 assertPaused(name, 1, 0);
                 process("ResumeProcesses", name, allProcesses, "Launch");
-                await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> assertCapacity(name, 1, 1));
+                reconciler.reconcileAll();
+                reconciler.reconcileAll();
+                assertCapacity(name, 1, 1);
                 String instanceId = describe(name).xmlPath().getString(GROUP_PATH + ".Instances.member.InstanceId");
 
                 process("SuspendProcesses", name, allProcesses, "Terminate");
@@ -45,10 +49,10 @@ class AutoScalingCapacitySuspensionIntegrationTest {
                 assertPaused(name, 0, 1);
                 assertEquals("running", instanceState(instanceId));
                 process("ResumeProcesses", name, allProcesses, "Terminate");
-                await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
-                    assertCapacity(name, 0, 0);
-                    assertEquals("terminated", instanceState(instanceId));
-                });
+                reconciler.reconcileAll();
+                reconciler.reconcileAll();
+                assertCapacity(name, 0, 0);
+                assertEquals("terminated", instanceState(instanceId));
             } finally {
                 request("DeleteAutoScalingGroup").formParam("AutoScalingGroupName", name)
                         .formParam("ForceDelete", true).post("/").then().statusCode(200);
@@ -59,10 +63,10 @@ class AutoScalingCapacitySuspensionIntegrationTest {
         }
     }
 
-    private static void assertPaused(String name, int desired, int instances) {
-        // Observe longer than the ten-second reconciliation interval, without driving an internal test hook.
-        await().during(Duration.ofSeconds(12)).atMost(Duration.ofSeconds(20))
-                .untilAsserted(() -> assertCapacity(name, desired, instances));
+    private void assertPaused(String name, int desired, int instances) {
+        reconciler.reconcileAll();
+        reconciler.reconcileAll();
+        assertCapacity(name, desired, instances);
     }
 
     private static void assertCapacity(String name, int desired, int instances) {
