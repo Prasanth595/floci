@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -54,15 +53,18 @@ public class RedshiftServerlessJsonHandler {
     private final ObjectMapper objectMapper;
     private final RedshiftIamDbUserResolver iamDbUserResolver;
     private final RedshiftServerlessUsageLimitService usageLimits;
+    private final RedshiftServerlessAdminJsonHandler admin;
 
     @Inject
     public RedshiftServerlessJsonHandler(RedshiftServerlessService service, ObjectMapper objectMapper,
                                          RedshiftIamDbUserResolver iamDbUserResolver,
-                                         RedshiftServerlessUsageLimitService usageLimits) {
+                                         RedshiftServerlessUsageLimitService usageLimits,
+                                         RedshiftServerlessAdminJsonHandler admin) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.iamDbUserResolver = iamDbUserResolver;
         this.usageLimits = usageLimits;
+        this.admin = admin;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -97,10 +99,7 @@ public class RedshiftServerlessJsonHandler {
                 case "ListTagsForResource" -> handleListTagsForResource(request, region);
                 case "TagResource" -> handleTagResource(request, region);
                 case "UntagResource" -> handleUntagResource(request, region);
-                default -> Response.status(400)
-                        .entity(new AwsErrorResponse("UnknownOperationException",
-                                "Operation " + action + " is not supported."))
-                        .build();
+                default -> admin.handle(action, request, region);
             };
         } catch (AwsException e) {
             return JsonErrorResponseUtils.createErrorResponse(e);

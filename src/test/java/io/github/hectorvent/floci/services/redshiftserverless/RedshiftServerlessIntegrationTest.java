@@ -473,6 +473,62 @@ class RedshiftServerlessIntegrationTest {
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 
+    @Test
+    void administrationActionsRoundTripOverTheWire() {
+        call("CreateNamespace", "{\"namespaceName\":\"admin-ns\",\"adminUsername\":\"admin\"}").statusCode(200);
+        call("CreateWorkgroup", "{\"workgroupName\":\"admin-wg\",\"namespaceName\":\"admin-ns\"}").statusCode(200);
+        String snapshotArn = call("CreateSnapshot", "{\"snapshotName\":\"admin-snap\",\"namespaceName\":\"admin-ns\"}")
+                .statusCode(200).extract().path("snapshot.snapshotArn");
+
+        call("PutResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\",\"policy\":\"{\\\"Version\\\":\\\"2012-10-17\\\"}\"}")
+                .statusCode(200)
+                .body("resourcePolicy.resourceArn", equalTo(snapshotArn));
+        call("GetResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}")
+                .statusCode(200)
+                .body("resourcePolicy.policy", equalTo("{\"Version\":\"2012-10-17\"}"));
+        call("DeleteResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}").statusCode(200);
+        call("GetResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+
+        call("CreateEndpointAccess", "{\"endpointName\":\"admin-ep\",\"workgroupName\":\"admin-wg\","
+                + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}")
+                .statusCode(200)
+                .body("endpoint.endpointName", equalTo("admin-ep"))
+                .body("endpoint.endpointStatus", equalTo("ACTIVE"))
+                .body("endpoint.endpointCreateTime", matchesPattern("\\d{4}-\\d{2}-\\d{2}T.*Z"))
+                .body("endpoint.vpcEndpoint.networkInterfaces[0].subnetId", equalTo("subnet-a"));
+        call("ListEndpointAccess", "{\"workgroupName\":\"admin-wg\"}")
+                .statusCode(200)
+                .body("endpoints.endpointName", hasItem("admin-ep"));
+        call("DeleteEndpointAccess", "{\"endpointName\":\"admin-ep\"}")
+                .statusCode(200)
+                .body("endpoint.endpointStatus", equalTo("DELETING"));
+
+        String copyId = call("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"admin-ns\",\"destinationRegion\":\"us-west-2\",\"snapshotRetentionPeriod\":10}")
+                .statusCode(200)
+                .body("snapshotCopyConfiguration.destinationRegion", equalTo("us-west-2"))
+                .extract().path("snapshotCopyConfiguration.snapshotCopyConfigurationId");
+        call("DeleteSnapshotCopyConfiguration", "{\"snapshotCopyConfigurationId\":\"" + copyId + "\"}").statusCode(200);
+
+        call("CreateScheduledAction", "{\"scheduledActionName\":\"admin-sched\",\"namespaceName\":\"admin-ns\","
+                + "\"roleArn\":\"arn:aws:iam::000000000000:role/r\",\"schedule\":{\"cron\":\"cron(0 3 * * ? *)\"},"
+                + "\"targetAction\":{\"createSnapshot\":{\"namespaceName\":\"admin-ns\",\"snapshotNamePrefix\":\"p\"}}}")
+                .statusCode(200)
+                .body("scheduledAction.state", equalTo("ACTIVE"))
+                .body("scheduledAction.schedule.cron", equalTo("cron(0 3 * * ? *)"));
+        call("DeleteScheduledAction", "{\"scheduledActionName\":\"admin-sched\"}").statusCode(200);
+
+        String certificate = "arn:aws:acm:us-east-1:000000000000:certificate/11111111-2222-3333-4444-555555555555";
+        call("CreateCustomDomainAssociation", "{\"workgroupName\":\"admin-wg\",\"customDomainName\":\"db.example.com\","
+                + "\"customDomainCertificateArn\":\"" + certificate + "\"}")
+                .statusCode(200)
+                .body("customDomainName", equalTo("db.example.com"));
+        call("DeleteCustomDomainAssociation",
+                "{\"workgroupName\":\"admin-wg\",\"customDomainName\":\"db.example.com\"}").statusCode(200);
+    }
+
     private static io.restassured.response.ValidatableResponse call(String action, String body) {
         return given()
                 .header("X-Amz-Target", TARGET_PREFIX + action)

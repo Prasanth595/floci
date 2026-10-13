@@ -9,12 +9,17 @@ import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementRespon
 import software.amazon.awssdk.services.redshiftdata.model.StatusString;
 import software.amazon.awssdk.services.redshiftserverless.RedshiftServerlessClient;
 import software.amazon.awssdk.services.redshiftserverless.model.ConflictException;
+import software.amazon.awssdk.services.redshiftserverless.model.CreateSnapshotScheduleActionParameters;
+import software.amazon.awssdk.services.redshiftserverless.model.EndpointAccess;
 import software.amazon.awssdk.services.redshiftserverless.model.GetCredentialsResponse;
 import software.amazon.awssdk.services.redshiftserverless.model.Namespace;
 import software.amazon.awssdk.services.redshiftserverless.model.NamespaceStatus;
 import software.amazon.awssdk.services.redshiftserverless.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.redshiftserverless.model.Schedule;
+import software.amazon.awssdk.services.redshiftserverless.model.ScheduledActionResponse;
 import software.amazon.awssdk.services.redshiftserverless.model.Snapshot;
 import software.amazon.awssdk.services.redshiftserverless.model.Tag;
+import software.amazon.awssdk.services.redshiftserverless.model.TargetAction;
 import software.amazon.awssdk.services.redshiftserverless.model.UsageLimit;
 import software.amazon.awssdk.services.redshiftserverless.model.UsageLimitBreachAction;
 import software.amazon.awssdk.services.redshiftserverless.model.UsageLimitPeriod;
@@ -255,6 +260,68 @@ class RedshiftServerlessTest {
                 assertThatThrownBy(() -> client.getUsageLimit(request -> request.usageLimitId(created.usageLimitId())))
                         .isInstanceOf(ResourceNotFoundException.class);
             } finally {
+                deleteWorkgroupBestEffort(client, workgroupName);
+                deleteBestEffort(client, namespaceName);
+            }
+        }
+    }
+
+    @Test
+    void metadataResourcesUseAwsSdk() {
+        assumeFalse(TestFixtures.isRealAws(), "Creates resources and asserts emulator-local behavior");
+
+        try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient()) {
+            String namespaceName = "floci-compat-meta-ns";
+            String workgroupName = "floci-compat-meta-wg";
+            String snapshotName = "floci-compat-meta-snap";
+            String certificate = "arn:aws:acm:us-east-1:000000000000:certificate/11111111-2222-3333-4444-555555555555";
+            try {
+                client.createNamespace(request -> request.namespaceName(namespaceName).adminUsername("admin")
+                        .adminUserPassword("Secret123!"));
+                client.createWorkgroup(request -> request.workgroupName(workgroupName).namespaceName(namespaceName));
+                String snapshotArn = client.createSnapshot(request -> request
+                        .snapshotName(snapshotName).namespaceName(namespaceName)).snapshot().snapshotArn();
+
+                client.putResourcePolicy(request -> request.resourceArn(snapshotArn).policy("{\"Version\":\"2012-10-17\"}"));
+                assertThat(client.getResourcePolicy(request -> request.resourceArn(snapshotArn))
+                        .resourcePolicy().policy()).contains("2012-10-17");
+                client.deleteResourcePolicy(request -> request.resourceArn(snapshotArn));
+
+                EndpointAccess endpoint = client.createEndpointAccess(request -> request
+                        .endpointName("floci-compat-meta-ep").workgroupName(workgroupName)
+                        .subnetIds("subnet-a").vpcSecurityGroupIds("sg-1")).endpoint();
+                assertThat(endpoint.endpointStatus()).isEqualTo("ACTIVE");
+                assertThat(endpoint.endpointCreateTime()).isNotNull();
+                assertThat(client.listEndpointAccess(request -> request.workgroupName(workgroupName)).endpoints())
+                        .extracting(EndpointAccess::endpointName).containsExactly("floci-compat-meta-ep");
+                client.deleteEndpointAccess(request -> request.endpointName("floci-compat-meta-ep"));
+
+                String copyId = client.createSnapshotCopyConfiguration(request -> request
+                        .namespaceName(namespaceName).destinationRegion("us-west-2").snapshotRetentionPeriod(10))
+                        .snapshotCopyConfiguration().snapshotCopyConfigurationId();
+                assertThat(client.listSnapshotCopyConfigurations(request -> request.namespaceName(namespaceName))
+                        .snapshotCopyConfigurations()).hasSize(1);
+                client.deleteSnapshotCopyConfiguration(request -> request.snapshotCopyConfigurationId(copyId));
+
+                ScheduledActionResponse action = client.createScheduledAction(request -> request
+                        .scheduledActionName("floci-compat-meta-sched").namespaceName(namespaceName)
+                        .roleArn("arn:aws:iam::000000000000:role/r")
+                        .schedule(Schedule.builder().cron("cron(0 3 * * ? *)").build())
+                        .targetAction(TargetAction.builder().createSnapshot(CreateSnapshotScheduleActionParameters
+                                .builder().namespaceName(namespaceName).snapshotNamePrefix("nightly").build())
+                                .build())).scheduledAction();
+                assertThat(action.state().toString()).isEqualTo("ACTIVE");
+                assertThat(action.schedule().cron()).isEqualTo("cron(0 3 * * ? *)");
+                client.deleteScheduledAction(request -> request.scheduledActionName("floci-compat-meta-sched"));
+
+                client.createCustomDomainAssociation(request -> request.workgroupName(workgroupName)
+                        .customDomainName("db.example.com").customDomainCertificateArn(certificate));
+                assertThat(client.listCustomDomainAssociations(request -> request.customDomainName("db.example.com"))
+                        .associations()).hasSize(1);
+                client.deleteCustomDomainAssociation(request -> request.workgroupName(workgroupName)
+                        .customDomainName("db.example.com"));
+            } finally {
+                deleteSnapshotBestEffort(client, snapshotName);
                 deleteWorkgroupBestEffort(client, workgroupName);
                 deleteBestEffort(client, namespaceName);
             }

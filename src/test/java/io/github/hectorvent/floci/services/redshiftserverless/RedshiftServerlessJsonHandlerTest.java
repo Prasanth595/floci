@@ -82,8 +82,25 @@ class RedshiftServerlessJsonHandlerTest {
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
         RedshiftServerlessService service =
                 new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config);
+        stubAdministrationStores(storageFactory);
         handler = new RedshiftServerlessJsonHandler(service, mapper, iamDbUserResolver,
-                new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, service));
+                new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, service),
+                new RedshiftServerlessAdminJsonHandler(mapper,
+                        new RedshiftServerlessResourcePolicyService(storageFactory, service, mapper),
+                        new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, service),
+                        new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, service),
+                        new RedshiftServerlessScheduledActionService(storageFactory, service),
+                        new RedshiftServerlessCustomDomainService(storageFactory, service)));
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static void stubAdministrationStores(StorageFactory storageFactory) {
+        for (String file : List.of("snapshots", "resourcepolicies", "endpointaccess",
+                "snapshotcopyconfigurations", "scheduledactions", "customdomains")) {
+            when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-" + file + ".json"),
+                    any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
+                    AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        }
     }
 
     @Test
@@ -378,7 +395,7 @@ class RedshiftServerlessJsonHandlerTest {
 
     @Test
     void anUnknownActionIsReportedAsUnknownOperation() {
-        Response response = handler.handle("CreateScheduledAction", mapper.createObjectNode(), REGION);
+        Response response = handler.handle("ListTracks", mapper.createObjectNode(), REGION);
 
         assertEquals(400, response.getStatus());
         assertEquals("UnknownOperationException", errorType(response));
