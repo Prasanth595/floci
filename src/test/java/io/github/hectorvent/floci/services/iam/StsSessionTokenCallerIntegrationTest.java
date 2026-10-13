@@ -6,6 +6,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -101,6 +102,40 @@ class StsSessionTokenCallerIntegrationTest {
         assertTrue(issued.key().startsWith("ASIA"));
         request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200)
                 .body("GetCallerIdentityResponse.GetCallerIdentityResult.Account", equalTo(ACCOUNT));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "absent"})
+    void blankAuthorizationDoesNotHideTemporaryQueryCredentials(String authorization) throws Exception {
+        Credentials user = createUser();
+        Credentials issued = credentials(request(user, "sts", "GetSessionToken", Map.of()), "GetSessionToken");
+        Response result = querySessionRequest(authorization, issued).post("/");
+        remember(result, "GetSessionToken");
+        result.then().statusCode(403).body("ErrorResponse.Error.Code", equalTo("AccessDenied"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " "})
+    void blankAuthorizationRetainsLongTermQueryIssuerIdentity(String authorization) throws Exception {
+        Credentials user = createUser();
+        String expected = request(user, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200)
+                .extract().path("GetCallerIdentityResponse.GetCallerIdentityResult.Arn");
+        Credentials issued = credentials(querySessionRequest(authorization, user).post("/"), "GetSessionToken");
+        request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200)
+                .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn", equalTo(expected));
+    }
+
+    private RequestSpecification querySessionRequest(String authorization, Credentials caller) {
+        RequestSpecification request = given().queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+                .queryParam("X-Amz-Credential", caller.key() + "/20261013/us-east-1/sts/aws4_request")
+                .contentType("application/x-www-form-urlencoded").body("Action=GetSessionToken");
+        if (caller.token() != null) {
+            request.queryParam("X-Amz-Security-Token", caller.token());
+        }
+        if (!"absent".equals(authorization)) {
+            request.header("Authorization", authorization);
+        }
+        return request;
     }
 
     private Credentials createUser() throws Exception {

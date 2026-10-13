@@ -527,8 +527,9 @@ public class StsQueryHandler {
 
     /** The access key that signed this request, in the header or presigned in the query. */
     private String callerAccessKeyId() {
+        String authorization = headers == null ? null : headers.getHeaderString("Authorization");
         String auth = IamEnforcementFilter.requestAuthorization(
-                headers == null ? null : headers.getHeaderString("Authorization"),
+                authorization == null || authorization.isBlank() ? null : authorization,
                 uriInfo == null ? null : uriInfo.getQueryParameters());
         return auth == null ? null : accountResolver.extractAccessKeyId(auth);
     }

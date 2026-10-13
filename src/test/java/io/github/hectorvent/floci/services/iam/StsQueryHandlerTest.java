@@ -103,7 +103,8 @@ class StsQueryHandlerTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"ASIAtemporary, AKIAlongterm", "-, ASIAtemporary", "ASIAtemporary, -"})
+    @CsvSource({"ASIAtemporary, AKIAlongterm", "-, ASIAtemporary", "ASIAtemporary, -",
+            "blank, ASIAtemporary", "space, ASIAtemporary"})
     void temporaryHeaderOrQueryCallerIsRejectedBeforeSessionRegistration(String headerKey, String queryKey) {
         IamService service = mock(IamService.class);
         StsQueryHandler handler = newHandler(service, new RegionResolver(REGION, "000000000000"));
@@ -115,7 +116,8 @@ class StsQueryHandlerTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"AKIAlongterm, ASIAtemporary", "-, AKIAlongterm", "-, -"})
+    @CsvSource({"AKIAlongterm, ASIAtemporary", "-, AKIAlongterm", "-, -",
+            "blank, AKIAlongterm", "space, AKIAlongterm", "blank, -", "space, -"})
     void longTermAndAnonymousCompatibilityCallsKeepExistingIssuance(String headerKey, String queryKey) {
         StsQueryHandler handler = newHandler();
         setCaller(handler, headerKey, queryKey);
@@ -126,8 +128,12 @@ class StsQueryHandlerTest {
     private static void setCaller(StsQueryHandler handler, String headerKey, String queryKey) {
         handler.headers = mock(HttpHeaders.class);
         if (!"-".equals(headerKey)) {
-            when(handler.headers.getHeaderString("Authorization")).thenReturn(
-                    "AWS4-HMAC-SHA256 Credential=" + headerKey + "/20261013/us-east-1/sts/aws4_request");
+            String authorization = switch (headerKey) {
+                case "blank" -> "";
+                case "space" -> " ";
+                default -> "AWS4-HMAC-SHA256 Credential=" + headerKey + "/20261013/us-east-1/sts/aws4_request";
+            };
+            when(handler.headers.getHeaderString("Authorization")).thenReturn(authorization);
         }
         handler.uriInfo = mock(UriInfo.class);
         MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
