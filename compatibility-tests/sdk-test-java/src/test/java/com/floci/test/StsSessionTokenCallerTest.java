@@ -66,6 +66,8 @@ class StsSessionTokenCallerTest {
                                 .isInstanceOfSatisfying(StsException.class, error -> {
                                     assertThat(error.statusCode()).isEqualTo(403);
                                     assertThat(error.awsErrorDetails().errorCode()).isEqualTo("AccessDenied");
+                                    assertThat(error.awsErrorDetails().errorMessage())
+                                            .isEqualTo("Cannot call GetFederationToken with session credentials");
                                 });
                         assertThat(temporary.getCallerIdentity().arn()).isEqualTo(identity);
                     }
