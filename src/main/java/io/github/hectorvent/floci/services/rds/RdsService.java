@@ -9421,9 +9421,9 @@ public class RdsService implements Resettable, ResourceProvider {
     // ── IAM role associations ─────────────────────────────────────────────────
 
     /**
-     * Associates an IAM role with a DB cluster. A cluster names each role once, and each feature
-     * once: a second role for a feature that already has one is refused, as is the same role
-     * twice. The role is {@code ACTIVE} at once and is not looked up in IAM.
+     * Associates an IAM role with a DB cluster. A cluster names each role once, so the same role
+     * twice is refused ({@code DBClusterRoleAlreadyExists} covers the role ARN only). The role is
+     * {@code ACTIVE} at once and is not looked up in IAM.
      */
     public synchronized DbCluster addRoleToDbCluster(String region, String clusterId, String roleArn,
                                                      String featureName) {
@@ -9432,22 +9432,41 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
         requireAvailableCluster(cluster, clusterId);
-        String feature = blankToNull(featureName);
+        requireRoleNotAssociated(cluster, clusterId, roleArn);
+        cluster.getAssociatedRoles().add(new DbRoleAssociation(roleArn, blankToNull(featureName)));
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        LOG.infov("Role {0} associated with DB cluster {1}", roleArn, clusterId);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    /**
+     * Gives a cluster {@code CreateDBCluster} just made the roles the request named, all in one
+     * step: either every role is associated or none is. The handler deletes the new cluster when
+     * this refuses, so a failed create leaves nothing behind.
+     */
+    public synchronized DbCluster addRolesToNewDbCluster(String region, String clusterId,
+                                                         List<DbRoleAssociation> roles) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        requireAvailableCluster(cluster, clusterId);
+        for (DbRoleAssociation role : roles) {
+            requireRoleNotAssociated(cluster, clusterId, role.getRoleArn());
+        }
+        for (DbRoleAssociation role : roles) {
+            cluster.getAssociatedRoles().add(new DbRoleAssociation(role.getRoleArn(),
+                    blankToNull(role.getFeatureName())));
+        }
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    private static void requireRoleNotAssociated(DbCluster cluster, String clusterId, String roleArn) {
         for (DbRoleAssociation existing : cluster.getAssociatedRoles()) {
             if (existing.getRoleArn().equals(roleArn)) {
                 throw new AwsException("DBClusterRoleAlreadyExists", "Role ARN " + roleArn
                         + " is already associated with DB cluster " + clusterId + ".", 400);
             }
-            if (feature != null && feature.equals(existing.getFeatureName())) {
-                throw new AwsException("DBClusterRoleAlreadyExists", "Feature " + feature
-                        + " is already associated with role " + existing.getRoleArn() + " on DB cluster "
-                        + clusterId + ".", 400);
-            }
         }
-        cluster.getAssociatedRoles().add(new DbRoleAssociation(roleArn, feature));
-        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
-        LOG.infov("Role {0} associated with DB cluster {1}", roleArn, clusterId);
-        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 
     /**
@@ -9526,16 +9545,10 @@ public class RdsService implements Resettable, ResourceProvider {
      */
     public void validateClusterRoleAssociations(String clusterId, List<DbRoleAssociation> roles) {
         Set<String> roleArns = new HashSet<>();
-        Set<String> features = new HashSet<>();
         for (DbRoleAssociation role : roles) {
             requireParameter(role.getRoleArn(), "AssociatedRoles.RoleArn");
             if (!roleArns.add(role.getRoleArn())) {
                 throw new AwsException("DBClusterRoleAlreadyExists", "Role ARN " + role.getRoleArn()
-                        + " is named more than once for DB cluster " + clusterId + ".", 400);
-            }
-            String feature = blankToNull(role.getFeatureName());
-            if (feature != null && !features.add(feature)) {
-                throw new AwsException("DBClusterRoleAlreadyExists", "Feature " + feature
                         + " is named more than once for DB cluster " + clusterId + ".", 400);
             }
         }

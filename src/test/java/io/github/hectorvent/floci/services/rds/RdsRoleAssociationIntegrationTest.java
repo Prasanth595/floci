@@ -9,6 +9,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
@@ -93,13 +94,16 @@ class RdsRoleAssociationIntegrationTest {
 
     @Test
     @Order(3)
-    void refusesAClusterRoleOrFeatureAlreadyAssociated() {
+    void refusesAClusterRoleAlreadyAssociated() {
         clusterRole("AddRoleToDBCluster", S3_ROLE).formParam("FeatureName", "s3Export")
         .when().post("/").then().statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("DBClusterRoleAlreadyExists"));
-        clusterRole("AddRoleToDBCluster", "arn:aws:iam::000000000000:role/other").formParam("FeatureName", "s3Import")
-        .when().post("/").then().statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("DBClusterRoleAlreadyExists"));
+        // DBClusterRoleAlreadyExists covers the role ARN only, so another role for the same feature is taken.
+        String other = "arn:aws:iam::000000000000:role/other";
+        clusterRole("AddRoleToDBCluster", other).formParam("FeatureName", "s3Import")
+        .when().post("/").then().statusCode(200);
+        clusterRole("RemoveRoleFromDBCluster", other)
+        .when().post("/").then().statusCode(200);
     }
 
     @Test
@@ -234,5 +238,35 @@ class RdsRoleAssociationIntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("DBClusterRoleAlreadyExists"));
         query("DescribeDBClusters").formParam("DBClusterIdentifier", "roles-duplicate")
         .when().post("/").then().statusCode(404);
+    }
+
+    @Test
+    @Order(11)
+    void createDbClusterRefusesAnEntryWithoutARoleArn() {
+        query("CreateDBCluster")
+                .formParam("DBClusterIdentifier", "roles-no-arn")
+                .formParam("Engine", "aurora-postgresql")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "password123")
+                .formParam("AssociatedRoles.DBClusterAssociatedRole.1.FeatureName", "s3Import")
+        .when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("MissingParameter"));
+        query("DescribeDBClusters").formParam("DBClusterIdentifier", "roles-no-arn")
+        .when().post("/").then().statusCode(404);
+    }
+
+    @Test
+    @Order(12)
+    void createDbClusterReadsEveryEntryPastAGap() {
+        query("CreateDBCluster")
+                .formParam("DBClusterIdentifier", "roles-gap")
+                .formParam("Engine", "aurora-postgresql")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "password123")
+                .formParam("AssociatedRoles.DBClusterAssociatedRole.1.RoleArn", S3_ROLE)
+                .formParam("AssociatedRoles.DBClusterAssociatedRole.3.RoleArn", LAMBDA_ROLE)
+        .when().post("/").then().statusCode(200)
+                .body("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.AssociatedRoles.DBClusterRole.RoleArn",
+                        contains(S3_ROLE, LAMBDA_ROLE));
     }
 }

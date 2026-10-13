@@ -390,12 +390,21 @@ public class RdsQueryHandler {
     private static List<DbRoleAssociation> parseAssociatedRoles(MultivaluedMap<String, String> params) {
         List<DbRoleAssociation> roles = new ArrayList<>();
         for (String prefix : List.of("AssociatedRoles.DBClusterAssociatedRole", "AssociatedRoles.member")) {
-            for (int i = 1; ; i++) {
-                String roleArn = params.getFirst(prefix + "." + i + ".RoleArn");
-                if (roleArn == null) {
-                    break;
+            // Every index the request names, in order, whichever field it carries: an entry with a
+            // FeatureName and no RoleArn reaches validation and is refused there, and a gap in the
+            // numbering does not hide the entries after it.
+            java.util.regex.Pattern field = java.util.regex.Pattern.compile(
+                    java.util.regex.Pattern.quote(prefix) + "\\.(\\d+)\\.(RoleArn|FeatureName)");
+            java.util.SortedSet<Integer> indexes = new java.util.TreeSet<>();
+            for (String key : params.keySet()) {
+                java.util.regex.Matcher matcher = field.matcher(key);
+                if (matcher.matches()) {
+                    indexes.add(Integer.parseInt(matcher.group(1)));
                 }
-                roles.add(new DbRoleAssociation(roleArn, params.getFirst(prefix + "." + i + ".FeatureName")));
+            }
+            for (int i : indexes) {
+                roles.add(new DbRoleAssociation(params.getFirst(prefix + "." + i + ".RoleArn"),
+                        params.getFirst(prefix + "." + i + ".FeatureName")));
             }
         }
         return roles;
@@ -1090,8 +1099,13 @@ public class RdsQueryHandler {
                             manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
                             requestedPort);
             }
-            for (DbRoleAssociation role : associatedRoles) {
-                cluster = service.addRoleToDbCluster(region, id, role.getRoleArn(), role.getFeatureName());
+            if (!associatedRoles.isEmpty()) {
+                try {
+                    cluster = service.addRolesToNewDbCluster(region, id, associatedRoles);
+                } catch (AwsException e) {
+                    service.deleteDbCluster(id, region);
+                    throw e;
+                }
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();

@@ -589,12 +589,15 @@ spread across the chosen members.
 
 `AddRoleToDBCluster` and `AddRoleToDBInstance` associate an IAM role with an available cluster or
 instance, and `DescribeDBClusters` / `DescribeDBInstances` report it in `AssociatedRoles` with status
-`ACTIVE` straight away. `CreateDBCluster` accepts `AssociatedRoles` too, and a list that names a role or
-a feature twice refuses the create before any cluster exists.
+`ACTIVE` straight away. `CreateDBCluster` accepts `AssociatedRoles` too: a list that names a role twice,
+or has an entry without a `RoleArn`, refuses the create before any cluster exists, and the roles are
+associated in one step, so a create that fails leaves no cluster behind.
 
 `FeatureName` (such as `s3Import`, `s3Export` or `Lambda`) is optional for a cluster and required for an
-instance. A role or a feature is associated at most once per cluster or instance
-(`DBClusterRoleAlreadyExists` / `DBInstanceRoleAlreadyExists`). `RemoveRoleFromDBCluster` removes the
+instance. A role is associated at most once per cluster (`DBClusterRoleAlreadyExists`, which covers
+the role ARN only, so two roles may share a feature), and a role or a feature at most once per instance
+(`DBInstanceRoleAlreadyExists`, documented as "The specified RoleArn or FeatureName value is already
+associated"). `RemoveRoleFromDBCluster` removes the
 role, matching the feature name when one is given, and `RemoveRoleFromDBInstance` removes the role for
 the feature named; an association that does not exist is `DBClusterRoleNotFound` /
 `DBInstanceRoleNotFound`. A stopped cluster or instance refuses both (`InvalidDBClusterStateFault` /
