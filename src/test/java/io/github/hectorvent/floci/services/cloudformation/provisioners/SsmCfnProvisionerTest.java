@@ -13,6 +13,8 @@ import org.junit.jupiter.api.Test;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -171,6 +173,34 @@ class SsmCfnProvisionerTest {
         doNothing().when(ssm).deleteParameter(replacement, REGION);
         provisioner.delete(resource, REGION);
         verify(ssm).deleteParameter(NAME, REGION);
+    }
+
+    /** A rename never writes the prior parameter, so one deleted outside the stack does not fail it. */
+    @Test
+    void aRenameDoesNotNeedThePriorParameterToStillExist() {
+        when(ssm.getParameter(NAME, REGION)).thenThrow(new AwsException("ParameterNotFound", "gone", 400));
+        StackResource r = parameter(NAME, null);
+        ProvisionContext create = ctx();
+
+        provisioner.provision(r, props().put("Name", NAME + "-new"), new ProvisionContext(create.engine(),
+                create.region(), create.accountId(), create.stackName(), NAME));
+
+        assertEquals(NAME + "-new", r.getPhysicalId());
+        verify(ssm).putParameter(NAME + "-new", "v", "String", null, false, REGION);
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(NAME, provisioner.updateCleanupPhysicalId(r));
+    }
+
+    /** The rollback snapshot carries the prior value, so it lives under a key Fn::GetAtt cannot name. */
+    @Test
+    void theRollbackSnapshotIsPrivateState() {
+        StackResource r = parameter(NAME, null);
+
+        provisioner.provision(r, props(), updateCtx());
+
+        assertTrue(provisioner.retainsFailedUpdateState(r));
+        assertEquals(Set.of("Name", "Type", "Value", "Arn"), r.getAttributes().keySet().stream()
+                .filter(key -> !key.startsWith("__Floci")).collect(Collectors.toSet()));
     }
 
     @Test

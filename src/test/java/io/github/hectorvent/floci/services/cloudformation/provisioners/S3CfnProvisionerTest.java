@@ -534,6 +534,47 @@ class S3CfnProvisionerTest {
         assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
     }
 
+    /** A later resource failing the update deletes the bucket the rename created, and keeps the old one. */
+    @Test
+    void rollingBackARenameDeletesTheBucketItCreated() {
+        StackResource r = resource("Bucket", "AWS::S3::Bucket");
+        r.setPhysicalId("old");
+        r.getAttributes().put("BucketName", "old");
+        provisioner.provision(r, props("{\"BucketName\": \"new\"}"), renameContext());
+        assertEquals("new", r.getPhysicalId());
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals("old", r.getPhysicalId());
+        verify(s3).deleteBucket("new");
+        verify(s3, never()).deleteBucket("old");
+    }
+
+    /**
+     * In us-east-1 CreateBucket also answers for a bucket the account already owns, so a rename would
+     * adopt it, rewrite its configuration and later delete it as the stack's. It fails first instead,
+     * as CreateBucket does in every other region.
+     */
+    @Test
+    void aRenameOntoABucketTheAccountAlreadyOwnsChangesNothing() {
+        when(s3.ownsBucket("new")).thenReturn(true);
+        StackResource r = resource("Bucket", "AWS::S3::Bucket");
+        r.setPhysicalId("old");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                props("{\"BucketName\": \"new\"}"), renameContext()));
+
+        assertEquals("BucketAlreadyOwnedByYou", failure.getErrorCode());
+        verify(s3, never()).createBucket(anyString(), anyString());
+        verify(s3, never()).deleteBucketCors(anyString());
+        verify(s3, never()).deleteBucket(anyString());
+    }
+
+    private ProvisionContext renameContext() {
+        return new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", "old", event -> { },
+                props("{\"BucketName\": \"old\"}"));
+    }
+
     /** A CreateBucket that is itself rejected created nothing, so there is nothing to delete. */
     @Test
     void aRejectedCreateBucketLeavesNothingToUndo() {

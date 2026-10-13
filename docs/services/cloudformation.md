@@ -53,7 +53,9 @@ history. Tags unrelated to the template are preserved. Changing `Name` creates a
 keeps the prior parameter until the update commits. `UpdateReplacePolicy: Retain` preserves that
 prior parameter. A name already occupied by an unmanaged parameter is rejected without overwriting
 or adopting it. When the displaced parameter cannot be deleted after three attempts, the update still
-completes, reports `DELETE_FAILED` for it and leaves it in place, as AWS does.
+completes, reports `DELETE_FAILED` for it and leaves it in place, as AWS does. An update in place
+needs the parameter to still exist: one deleted outside the stack fails it with `ParameterNotFound`.
+A rename does not read the prior parameter, so it succeeds either way.
 
 ## StackSets compatibility
 
@@ -442,7 +444,8 @@ the template when neither the prior nor the new template declares them.
 Changing `BucketName` replaces the bucket. The old bucket is deleted once the update commits,
 unless `UpdateReplacePolicy` is `Retain`; like AWS, a bucket that still holds objects cannot be
 deleted, and the update reports `DELETE_FAILED` for it. A failed update deletes the replacement
-and restores the original bucket.
+and restores the original bucket. A new name the account already owns fails the update with
+`BucketAlreadyOwnedByYou` in every region, rather than adopting that bucket.
 
 ## SAM published aliases
 

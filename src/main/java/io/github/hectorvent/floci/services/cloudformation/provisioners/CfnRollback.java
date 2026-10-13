@@ -203,6 +203,19 @@ public final class CfnRollback {
     public static final String SQS_UPDATE_SNAPSHOT_ATTR = "__FlociSqsUpdateSnapshot";
 
     /**
+     * Holds what an SSM parameter update needs to be undone: for an update in place, the value,
+     * settings, tags and resource attributes the parameter carried before; for a rename, the prior
+     * name and attributes and the replacement the rename created. A failed stack update puts the
+     * parameter back from it and a committed rename deletes the one it displaced. Written by
+     * {@code SsmCfnProvisioner} before its put and spent by its {@code rollbackUpdate},
+     * {@code completeUpdate} or {@code clearUpdate}.
+     */
+    public static final String SSM_UPDATE_SNAPSHOT_ATTR = "__FlociSsmUpdateSnapshot";
+
+    /** How many times the committed rename's delete of the displaced SSM parameter has failed. */
+    public static final String SSM_CLEANUP_ATTEMPTS_ATTR = "__FlociSsmCleanupAttempts";
+
+    /**
      * Holds the settings a Cognito user pool or user pool client had before an in-place update
      * changed them, so a failed stack update can put them back. Written by
      * {@code CognitoCfnProvisioner} before its update call and spent by its {@code rollbackUpdate}.

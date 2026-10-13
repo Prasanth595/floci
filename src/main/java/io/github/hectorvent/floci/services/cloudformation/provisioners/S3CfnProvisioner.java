@@ -106,6 +106,13 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
                 // In us-east-1 CreateBucket also answers for a bucket the account already owns,
                 // which this resource must never delete.
                 boolean owned = s3Service.ownsBucket(bucketName);
+                if (owned && ctx.isUpdate()) {
+                    // A rename would adopt that bucket, rewrite its configuration and later delete it
+                    // as the stack's own. CreateBucket refuses it in every other region; so does the rename.
+                    throw new AwsException("BucketAlreadyOwnedByYou",
+                            "Your previous request to create the named bucket succeeded and you already own it.",
+                            409);
+                }
                 s3Service.createBucket(bucketName, ctx.region());
                 unwind.created = !owned;
             }
@@ -619,6 +626,10 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         ReplacementCleanup.clear(resource);
     }
 
+    /**
+     * Points the resource back at the bucket the failed update displaced and deletes the replacement,
+     * which that update created: a rename never adopts a bucket the account already owned.
+     */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
         return ReplacementCleanup.rollback(resource, this::delete);
