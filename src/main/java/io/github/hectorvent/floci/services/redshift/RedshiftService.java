@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -1368,6 +1369,10 @@ public class RedshiftService {
             throw new AwsException("SnapshotCopyAlreadyEnabledFault",
                     "Snapshot copy is already enabled on cluster " + clusterIdentifier + ".", 400);
         }
+        if (!AwsRegions.isRegionId(destinationRegion)) {
+            throw new AwsException("UnknownSnapshotCopyRegionFault",
+                    "Unknown destination region: " + destinationRegion, 404);
+        }
         int retention = retentionPeriod == null ? DEFAULT_SNAPSHOT_COPY_RETENTION_DAYS : retentionPeriod;
         int manualRetention = manualRetentionPeriod == null
                 ? RETAIN_MANUAL_SNAPSHOTS_INDEFINITELY : manualRetentionPeriod;
@@ -1430,12 +1435,14 @@ public class RedshiftService {
             Pattern.compile("rate\\(\\s*(\\d+)\\s+(hours?|days?)\\s*\\)");
     private static final Pattern CRON_DEFINITION =
             Pattern.compile("cron\\(\\s*([A-Za-z0-9,\\-*/?#]+(?:\\s+[A-Za-z0-9,\\-*/?#]+){2,5})\\s*\\)");
+    // The API reference allows only alphanumerics; the management guide's own example uses a hyphen.
+    private static final Pattern SCHEDULE_IDENTIFIER = Pattern.compile("[A-Za-z0-9-]+");
 
     /**
      * Shape check against the Redshift snapshot-schedule documentation: {@code rate(<n> hours|days)}
      * with a frequency between once an hour and once a day, or {@code cron(...)} with three to six
      * whitespace-separated fields drawn from the documented cron alphabet. Per-field value ranges
-     * are not checked (ponytail: add if a client depends on the fault for e.g. minute 75).
+     * are not checked.
      */
     private static boolean isValidScheduleDefinition(String definition) {
         if (definition == null) {
@@ -1470,6 +1477,10 @@ public class RedshiftService {
         String id = (scheduleIdentifier == null || scheduleIdentifier.isBlank())
                 ? UUID.randomUUID().toString().replace("-", "")
                 : scheduleIdentifier;
+        if (!SCHEDULE_IDENTIFIER.matcher(id).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "ScheduleIdentifier may contain only letters, digits and hyphens: " + id, 400);
+        }
         if (snapshotSchedules.get(id).isPresent()) {
             throw new AwsException("SnapshotScheduleAlreadyExists", "Snapshot schedule " + id + " already exists", 400);
         }

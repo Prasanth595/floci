@@ -999,6 +999,12 @@ public class RedshiftOperationsTest {
         assertFault(redshift("EnableSnapshotCopy", "ClusterIdentifier", "cluster-copy",
                 "DestinationRegion", "us-west-2", "SnapshotCopyGrantName", "no-such-grant"),
                 400, "SnapshotCopyGrantNotFoundFault");
+        for (String bad : List.of("us-nowhere-1", "not a region")) {
+            assertFault(redshift("EnableSnapshotCopy", "ClusterIdentifier", "cluster-copy",
+                    "DestinationRegion", bad), 404, "UnknownSnapshotCopyRegionFault");
+        }
+        assertFalse(redshift("DescribeClusters", "ClusterIdentifier", "cluster-copy").asString()
+                .contains("ClusterSnapshotCopyStatus"));
 
         Response enabled = redshift("EnableSnapshotCopy",
                 "ClusterIdentifier", "cluster-copy", "DestinationRegion", "us-west-2");
@@ -1075,6 +1081,18 @@ public class RedshiftOperationsTest {
                 "cron(not-a-cron-expression)", "cron(0 12)")) {
             assertFault(redshift("CreateSnapshotSchedule", "ScheduleIdentifier", "sched-bad",
                     "ScheduleDefinitions.ScheduleDefinition.1", bad), 400, "InvalidSchedule");
+        }
+        for (String badId : List.of("sched bad", "sched_bad", "sched!")) {
+            assertFault(redshift("CreateSnapshotSchedule", "ScheduleIdentifier", badId,
+                    "ScheduleDefinitions.ScheduleDefinition.1", "rate(1 day)"), 400, "InvalidParameterValue");
+            assertEquals(0, describeSchedules("ScheduleIdentifier", badId).getList("SnapshotSchedule").size());
+        }
+        for (String goodId : List.of("tf-redshift-snapshot-schedule", "Sched2")) {
+            assertEquals(200, redshift("CreateSnapshotSchedule", "ScheduleIdentifier", goodId,
+                    "ScheduleDefinitions.ScheduleDefinition.1", "rate(1 day)").statusCode());
+            assertEquals(List.of(goodId), describeSchedules("ScheduleIdentifier", goodId)
+                    .getList("SnapshotSchedule.ScheduleIdentifier"));
+            assertEquals(200, redshift("DeleteSnapshotSchedule", "ScheduleIdentifier", goodId).statusCode());
         }
 
         XmlPath schedules = describeSchedules("ScheduleIdentifier", "sched-1");
