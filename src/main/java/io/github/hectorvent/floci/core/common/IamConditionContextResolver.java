@@ -595,9 +595,9 @@ public class IamConditionContextResolver {
                 if (!keys.attributes().isEmpty()) {
                     context.put("dynamodb:Attributes", keys.attributes());
                 }
-                if (!read) {
+                if (!read && request.hasNonNull("ReturnValuesOnConditionCheckFailure")) {
                     context.put("dynamodb:ReturnValues",
-                            List.of(request.path("ReturnValuesOnConditionCheckFailure").asText("NONE")));
+                            List.of(request.path("ReturnValuesOnConditionCheckFailure").asText()));
                 }
                 checks.add(new DynamoDbTransactionItem(itemAction,
                         ResourceArnBuilder.toDynamoDbTableArn(executionTable, region, accountId), context));

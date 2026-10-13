@@ -145,6 +145,69 @@ class DynamoDbTransactionAuthorizationIntegrationTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"Put", "Update", "Delete", "ConditionCheck"})
+    void strictReturnValuesConditionRequiresAnExplicitValue(String operation) {
+        String table = table();
+        String user = user(policy("dynamodb:" + operation + "Item",
+                ",\"Condition\":{\"StringEquals\":{\"dynamodb:ReturnValues\":\"NONE\"}}"));
+        transaction(user, operation, table).statusCode(400).body(containsString("AccessDeniedException"));
+        for (String value : new String[]{"null", "\"\"", "\"ALL_OLD\""}) {
+            request(user, enclosing(operation), transactionWithReturnValues(operation, table, value))
+                    .statusCode(400).body(containsString("AccessDeniedException"));
+        }
+        request("test", "GetItem", keyBody(table)).statusCode(200).body("Item.value.S", equalTo("original"));
+        request(user, enclosing(operation), transactionWithReturnValues(operation, table, "\"NONE\""))
+                .statusCode(200);
+        assertResult(operation, table);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Put", "Update", "Delete", "ConditionCheck"})
+    void nullReturnValuesConditionDistinguishesMissingFromExplicitNone(String operation) {
+        String table = table();
+        String user = user(policy("dynamodb:" + operation + "Item",
+                ",\"Condition\":{\"Null\":{\"dynamodb:ReturnValues\":\"true\"}}"));
+        request(user, enclosing(operation), transactionWithReturnValues(operation, table, "\"NONE\""))
+                .statusCode(400).body(containsString("AccessDeniedException"));
+        request("test", "GetItem", keyBody(table)).statusCode(200).body("Item.value.S", equalTo("original"));
+        transaction(user, operation, table).statusCode(200);
+        assertResult(operation, table);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Put", "Update", "Delete", "ConditionCheck"})
+    void explicitFailureImageValueCanBeAuthorized(String operation) {
+        String table = table();
+        String user = user(policy("dynamodb:" + operation + "Item",
+                ",\"Condition\":{\"StringEquals\":{\"dynamodb:ReturnValues\":\"ALL_OLD\"}}"));
+        request(user, enclosing(operation), transactionWithReturnValues(operation, table, "\"ALL_OLD\""))
+                .statusCode(200);
+        assertResult(operation, table);
+    }
+
+    @Test
+    void explicitReturnValuesOnOneItemCannotAuthorizeAnotherItem() {
+        String first = table();
+        String second = table();
+        String user = user(policy("dynamodb:PutItem",
+                ",\"Condition\":{\"StringEquals\":{\"dynamodb:ReturnValues\":\"NONE\"}}"));
+        String firstItem = itemBody("Put", first);
+        firstItem = firstItem.substring(0, firstItem.length() - 1)
+                + ",\"ReturnValuesOnConditionCheckFailure\":\"NONE\"}";
+        request(user, "TransactWriteItems", "{\"TransactItems\":[{\"Put\":" + firstItem
+                + "},{\"Put\":" + itemBody("Put", second) + "}]}")
+                .statusCode(400).body(containsString("AccessDeniedException"));
+        request("test", "GetItem", keyBody(first)).statusCode(200).body("Item.value.S", equalTo("original"));
+        request("test", "GetItem", keyBody(second)).statusCode(200).body("Item.value.S", equalTo("original"));
+    }
+
+    private static String transactionWithReturnValues(String operation, String table, String value) {
+        String item = itemBody(operation, table);
+        item = item.substring(0, item.length() - 1) + ",\"ReturnValuesOnConditionCheckFailure\":" + value + "}";
+        return "{\"TransactItems\":[{\"" + operation + "\":" + item + "}]}";
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"Get", "Update", "ConditionCheck"})
     void itemAttributesAreEnforcedWithoutNullGuard(String operation) {
         String table = table();
