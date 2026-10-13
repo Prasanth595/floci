@@ -28,6 +28,7 @@ import static io.github.hectorvent.floci.testing.EnforcementFixtures.removeRole;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertAll;
 
 @QuarkusTest
 @TestProfile(ScpEnforcementLeaveOrganizationIntegrationTest.ScpEnforcementProfile.class)
@@ -69,6 +70,41 @@ class DynamoDbTransactionPolicyBoundaryIntegrationTest {
                 .body(containsString("AccessDeniedException"));
         read(otherAccount, "item").body("Item.value.S", equalTo("original"));
         read(otherRegion, "item").body("Item.value.S", equalTo("original"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"Put,us-east-1", "Update,us-east-1", "Delete,us-east-1", "ConditionCheck,us-east-1",
+            "Get,us-east-1", "Put,cn-north-1", "Update,cn-north-1", "Delete,cn-north-1",
+            "ConditionCheck,cn-north-1", "Get,cn-north-1"})
+    void foreignArnPermissionCannotAuthorizeTheLocalExecutionTarget(String operation, String region) {
+        String name = "tx-foreign-" + UUID.randomUUID();
+        Table local = table("757575757575", region, name);
+        Table foreign = table("767676767676", region, name);
+        Table earlier = table(local.account(), region, name + "-earlier");
+        String document = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"dynamodb:*",
+                 "Resource":["%s","%s"]}]}
+                """.formatted(earlier.arn(), foreign.arn());
+        String caller = user(local.account(), document);
+        Map<String, Object> key = Map.of("PK", Map.of("S", "item"));
+        Map<String, Object> request = switch (operation) {
+            case "Put" -> Map.of("TableName", foreign.arn(), "Item", item("item", "changed"));
+            case "Update" -> Map.of("TableName", foreign.arn(), "Key", key,
+                    "UpdateExpression", "SET #v = :v", "ExpressionAttributeNames", Map.of("#v", "value"),
+                    "ExpressionAttributeValues", Map.of(":v", Map.of("S", "changed")));
+            case "ConditionCheck" -> Map.of("TableName", foreign.arn(), "Key", key,
+                    "ConditionExpression", "attribute_exists(PK)");
+            default -> Map.of("TableName", foreign.arn(), "Key", key);
+        };
+        ValidatableResponse response = operation.equals("Get")
+                ? json(caller, region, "dynamodb", "DynamoDB_20120810.TransactGetItems",
+                        encode(Map.of("TransactItems", List.of(Map.of(operation, request)))))
+                : transact(caller, region, put(earlier, "item", true), Map.of(operation, request));
+        assertAll(
+                () -> response.statusCode(400).body(containsString("AccessDeniedException")),
+                () -> read(earlier, "item").body("Item.value.S", equalTo("original")),
+                () -> read(local, "item").body("Item.value.S", equalTo("original")),
+                () -> read(foreign, "item").body("Item.value.S", equalTo("original")));
     }
 
     @Test

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbConditionKeys;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbTableNames;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
@@ -581,9 +582,11 @@ public class IamConditionContextResolver {
                 if (tableName == null) {
                     continue;
                 }
+                // Execution resolves ARN inputs within the request account; authorize that same table.
+                String executionTable = DynamoDbTableNames.resolveWithRegion(tableName, region).name();
                 String itemAction = "dynamodb:" + operation + "Item";
                 DynamoDbConditionKeys.Result keys = DynamoDbConditionKeys.extract(
-                        itemAction, request, describeTargetTable(tableName));
+                        itemAction, request, describeTargetTable(executionTable));
                 Map<String, List<String>> context = new LinkedHashMap<>();
                 context.put("dynamodb:EnclosingOperation", List.of(read ? "TransactGetItems" : "TransactWriteItems"));
                 if (!keys.leadingKeys().isEmpty()) {
@@ -597,7 +600,7 @@ public class IamConditionContextResolver {
                             List.of(request.path("ReturnValuesOnConditionCheckFailure").asText("NONE")));
                 }
                 checks.add(new DynamoDbTransactionItem(itemAction,
-                        ResourceArnBuilder.toDynamoDbTableArn(tableName, region, accountId), context));
+                        ResourceArnBuilder.toDynamoDbTableArn(executionTable, region, accountId), context));
             }
         }
         return checks;
