@@ -47,7 +47,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [CloudWatch RUM](rum.md) | `/appmonitor`, `/appmonitor/{name}`, `/appmonitors` | REST JSON | 5 |
 | [GuardDuty](guardduty.md) | `/detector`, `/detector/{detectorId}`, `/detector/{detectorId}/admin`, `/admin/*`, `/tags/*` | REST JSON | 13 |
 | [AWS Account Management](account.md) | `/putAlternateContact`, `/getAlternateContact` | REST JSON | 2 |
-| [IAM Access Analyzer](access-analyzer.md) | `/analyzer`, `/analyzer/{name}` | REST JSON | 3 |
+| [IAM Access Analyzer](access-analyzer.md) | `/analyzer`, `/analyzer/{name}` | REST JSON | 4 |
 | [IAM Identity Center (SSO Admin)](ssoadmin.md) | `POST /` + `X-Amz-Target: SWBExternalService.*` | JSON 1.1 | 79 |
 | [IAM Identity Center OIDC](ssooidc.md) | `/client/register`, `/device_authorization`, `/token`, `/token?aws_iam=t`, `/authorize`, `/device` | REST JSON | 4 |
 | [IAM Identity Center Access Portal](ssoportal.md) | `/assignment/accounts`, `/assignment/roles`, `/federation/credentials`, `/logout` | REST JSON | 4 |

@@ -108,6 +108,4 @@ public class AccessAnalyzerController {
             throw new WebApplicationException(JsonErrorResponseUtils.createSerializationErrorResponse());
         }
     }
-
-
 }
