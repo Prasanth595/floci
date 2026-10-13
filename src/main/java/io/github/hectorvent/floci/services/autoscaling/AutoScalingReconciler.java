@@ -133,17 +133,16 @@ public class AutoScalingReconciler {
     }
 
     public void reconcile(AutoScalingGroup asg) {
-        removeTerminatingInstances(asg);
-        removeStaleInstances(asg);
-        removeOrphanedTargetRegistrations(asg);
-        promoteReadyInstances(asg);
+        asgService.reconcileIfPresent(asg, () -> {
+            removeTerminatingInstances(asg);
+            removeStaleInstances(asg);
+            removeOrphanedTargetRegistrations(asg);
+            promoteReadyInstances(asg);
+            reconcileRefreshReplacements(asg);
 
-        reconcileRefreshReplacements(asg);
-        asgService.adjustCapacityIfPresent(asg, () -> {
             long activeCapacity = activeCapacity(asg);
             long reservedCapacity = reservedRefreshCapacity(asg);
             int desired = asg.getDesiredCapacity();
-
             if (activeCapacity + reservedCapacity < desired && !asg.getSuspendedProcesses().contains("Launch")) {
                 if (!scaleOut(asg, (int) (desired - activeCapacity - reservedCapacity))) {
                     return;

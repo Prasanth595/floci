@@ -24,11 +24,18 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -602,6 +609,62 @@ class AutoScalingRefreshStorageTest {
         assertEquals("i-original", otherRefresh.getReplacements().getFirst().getOriginalInstanceId());
         assertEquals(1, restoredOther.getInstances().size());
         verify(ec2, never()).terminateInstances(eq(otherRegion), anyList());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    @SuppressWarnings("unchecked")
+    void pausedSelectionCannotBeTerminatedBeforeOwnershipPublication(String mode) throws Exception {
+        setUp(mode);
+        service.suspendProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        service.createAutoScalingGroup(REGION, "unrelated-group", null, "lt-original", null, "1", null,
+                0, 3, 0, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(), "EC2", 0,
+                List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
+        AutoScalingGroup unrelated = service.describeAutoScalingGroups(REGION, List.of("unrelated-group")).getFirst();
+        Field field = AutoScalingService.class.getDeclaredField("instanceRefreshes");
+        field.setAccessible(true);
+        Map<String, InstanceRefresh> original = (Map<String, InstanceRefresh>) field.get(service);
+        Map<String, InstanceRefresh> intercepted = spy(original);
+        CountDownLatch selected = new CountDownLatch(1);
+        CountDownLatch publish = new CountDownLatch(1);
+        CountDownLatch reconciling = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            selected.countDown();
+            assertTrue(publish.await(5, TimeUnit.SECONDS));
+            return original.put(invocation.getArgument(0), invocation.getArgument(1));
+        }).when(intercepted).put(anyString(), any(InstanceRefresh.class));
+        field.set(service, intercepted);
+        ExecutorService executor = Executors.newFixedThreadPool(3);
+        Future<?> starting = executor.submit(() ->
+                service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh()));
+        Future<?> reconcilingFuture = null;
+        try {
+            assertTrue(selected.await(5, TimeUnit.SECONDS));
+            reconcilingFuture = executor.submit(() -> {
+                reconciling.countDown();
+                reconciler.reconcile(group);
+            });
+            assertTrue(reconciling.await(5, TimeUnit.SECONDS));
+            try {
+                reconcilingFuture.get(250, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException expected) {
+                // Correct group coordination waits for ownership publication before reconciliation.
+            }
+            executor.submit(() -> reconciler.reconcile(unrelated)).get(5, TimeUnit.SECONDS);
+            verify(ec2, never()).terminateInstances(anyString(), anyList());
+        } finally {
+            publish.countDown();
+            try {
+                starting.get(5, TimeUnit.SECONDS);
+                if (reconcilingFuture != null) {
+                    reconcilingFuture.get(5, TimeUnit.SECONDS);
+                }
+            } finally {
+                field.set(service, original);
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+            }
+        }
     }
 
     private static Reservation reservation(String id) {

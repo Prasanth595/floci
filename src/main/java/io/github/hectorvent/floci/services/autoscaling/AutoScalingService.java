@@ -502,11 +502,11 @@ public class AutoScalingService {
         }
     }
 
-    void adjustCapacityIfPresent(AutoScalingGroup asg, Runnable adjustment) {
+    void reconcileIfPresent(AutoScalingGroup asg, Runnable reconciliation) {
         String key = asgKey(asg.getRegion(), asg.getAutoScalingGroupName());
         synchronized (lockFor(key)) {
             if (groups.get(key) == asg) {
-                adjustment.run();
+                reconciliation.run();
             }
         }
     }
@@ -563,8 +563,8 @@ public class AutoScalingService {
     }
 
     // An empty list suspends all processes. The reconciler honors Launch and Terminate
-    // for desired-capacity adjustments; other names remain stored state. Refresh selection
-    // and cleanup are separate paths and do not yet honor suspended processes.
+    // for desired-capacity adjustments and owned refresh replacements. Other names remain
+    // stored state; InstanceRefresh also pauses its owned replacement work.
     private static final List<String> ALL_SCALING_PROCESSES = List.of(
             "Launch", "Terminate", "AddToLoadBalancer", "AlarmNotification", "AZRebalance",
             "HealthCheck", "InstanceRefresh", "ReplaceUnhealthy", "ScheduledActions");
@@ -728,61 +728,63 @@ public class AutoScalingService {
     // ── Instance refreshes ────────────────────────────────────────────────────
 
     public InstanceRefresh startInstanceRefresh(String region, String asgName, InstanceRefresh requestedRefresh) {
-        AutoScalingGroup asg = requireGroup(region, asgName);
-        boolean activeRefresh = instanceRefreshes.values().stream()
-                .filter(r -> region.equals(r.getRegion()))
-                .filter(r -> asgName.equals(r.getAutoScalingGroupName()))
-                .anyMatch(r -> isActiveRefreshStatus(r.getStatus()));
-        if (activeRefresh) {
-            throw new AwsException("InstanceRefreshInProgress",
-                    "An active instance refresh already exists for Auto Scaling group '" + asgName + "'.", 400);
-        }
+        synchronized (lockFor(asgKey(region, asgName))) {
+            AutoScalingGroup asg = requireGroup(region, asgName);
+            boolean activeRefresh = instanceRefreshes.values().stream()
+                    .filter(r -> region.equals(r.getRegion()))
+                    .filter(r -> asgName.equals(r.getAutoScalingGroupName()))
+                    .anyMatch(r -> isActiveRefreshStatus(r.getStatus()));
+            if (activeRefresh) {
+                throw new AwsException("InstanceRefreshInProgress",
+                        "An active instance refresh already exists for Auto Scaling group '" + asgName + "'.", 400);
+            }
 
-        Instant now = Instant.now();
-        InstanceRefresh refresh = new InstanceRefresh();
-        refresh.setInstanceRefreshId(UUID.randomUUID().toString());
-        refresh.setAutoScalingGroupName(asgName);
-        refresh.setStrategy(normalizeRefreshStrategy(requestedRefresh.getStrategy()));
-        refresh.setStartTime(now);
-        refresh.setRegion(region);
-        copyDesiredConfiguration(requestedRefresh, refresh);
-        copyPreferences(requestedRefresh, refresh);
+            Instant now = Instant.now();
+            InstanceRefresh refresh = new InstanceRefresh();
+            refresh.setInstanceRefreshId(UUID.randomUUID().toString());
+            refresh.setAutoScalingGroupName(asgName);
+            refresh.setStrategy(normalizeRefreshStrategy(requestedRefresh.getStrategy()));
+            refresh.setStartTime(now);
+            refresh.setRegion(region);
+            copyDesiredConfiguration(requestedRefresh, refresh);
+            copyPreferences(requestedRefresh, refresh);
 
-        applyDesiredConfiguration(asg, refresh);
-        List<String> instanceIds = markInstancesForRefresh(asg, refresh);
-        List<InstanceRefreshReplacement> replacements = new ArrayList<>();
-        for (String instanceId : instanceIds) {
-            InstanceRefreshReplacement replacement = new InstanceRefreshReplacement();
-            replacement.setOriginalInstanceId(instanceId);
-            replacement.setLaunchClientToken(UUID.randomUUID().toString());
-            replacements.add(replacement);
-        }
-        refresh.setReplacements(replacements);
-        if (instanceIds.isEmpty()) {
-            refresh.setStatus("Successful");
-            refresh.setStatusReason("Instance refresh completed.");
-            refresh.setPercentageComplete(100);
-            refresh.setInstancesToUpdate(0);
-            refresh.setEndTime(now);
-        } else {
-            refresh.setStatus("InProgress");
-            refresh.setStatusReason("Instance refresh in progress.");
-            refresh.setPercentageComplete(0);
-            refresh.setInstancesToUpdate(instanceIds.size());
-        }
-        instanceRefreshes.put(instanceRefreshKey(region, asgName, refresh.getInstanceRefreshId()), refresh);
-        groups.put(asgKey(region, asgName), asg);
-        if (!instanceIds.isEmpty()) {
+            applyDesiredConfiguration(asg, refresh);
+            List<String> instanceIds = markInstancesForRefresh(asg, refresh);
+            List<InstanceRefreshReplacement> replacements = new ArrayList<>();
+            for (String instanceId : instanceIds) {
+                InstanceRefreshReplacement replacement = new InstanceRefreshReplacement();
+                replacement.setOriginalInstanceId(instanceId);
+                replacement.setLaunchClientToken(UUID.randomUUID().toString());
+                replacements.add(replacement);
+            }
+            refresh.setReplacements(replacements);
+            if (instanceIds.isEmpty()) {
+                refresh.setStatus("Successful");
+                refresh.setStatusReason("Instance refresh completed.");
+                refresh.setPercentageComplete(100);
+                refresh.setInstancesToUpdate(0);
+                refresh.setEndTime(now);
+            } else {
+                refresh.setStatus("InProgress");
+                refresh.setStatusReason("Instance refresh in progress.");
+                refresh.setPercentageComplete(0);
+                refresh.setInstancesToUpdate(instanceIds.size());
+            }
+            instanceRefreshes.put(instanceRefreshKey(region, asgName, refresh.getInstanceRefreshId()), refresh);
+            groups.put(asgKey(region, asgName), asg);
+            if (!instanceIds.isEmpty()) {
+                recordActivity(region, asgName,
+                        "Marked EC2 instance(s) for refresh: " + instanceIds,
+                        "At " + now + " an instance refresh selected active instances for replacement.",
+                        "Successful");
+            }
             recordActivity(region, asgName,
-                    "Marked EC2 instance(s) for refresh: " + instanceIds,
-                    "At " + now + " an instance refresh selected active instances for replacement.",
+                    "Started instance refresh " + refresh.getInstanceRefreshId() + ".",
+                    "At " + now + " an instance refresh was started.",
                     "Successful");
+            return refresh;
         }
-        recordActivity(region, asgName,
-                "Started instance refresh " + refresh.getInstanceRefreshId() + ".",
-                "At " + now + " an instance refresh was started.",
-                "Successful");
-        return refresh;
     }
 
     InstanceRefresh activeInstanceRefresh(AutoScalingGroup asg) {
