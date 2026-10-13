@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.testing;
 
+import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 
@@ -7,7 +8,8 @@ import static io.restassured.RestAssured.given;
 
 /**
  * Takes an IAM user or an S3 bucket that an enforcement test created back out of the shared
- * application. A {@code @QuarkusTest} shares one application with every other test class, so a
+ * application, and makes the users such a test signs as ({@link #createUser}, {@link #auth}),
+ * registering each one's removal as it goes. A {@code @QuarkusTest} shares one application with every other test class, so a
  * fixture left behind outlives the class that made it and is visible to the next class that lists
  * users or buckets unscoped. Registered with {@link PartitionCleanup} as each fixture is made.
  *
@@ -72,14 +74,39 @@ public final class EnforcementFixtures {
         iam(port, authorization, "DeleteUser", "UserName", userName).statusCode(200);
     }
 
+    /** The access key {@link #createUser} issued, with the secret a request signer needs. */
+    public record UserCredentials(String accessKeyId, String secretAccessKey) {
+    }
+
     /**
-     * Deletes an S3 bucket, and first whatever it still holds: "All objects (including all object
-     * versions and delete markers) in the bucket must be deleted before the bucket itself can be
-     * deleted" (S3 API reference, {@code DeleteBucket}), which Floci answers
-     * {@code BucketNotEmpty} for.
+     * Creates an IAM user holding one access key, registering its {@link #removeUser} with
+     * {@code cleanup} before the create runs, so the user and its key go after the test whatever
+     * the test does with them.
      *
-     * @param authorization an S3-scoped header for an identity allowed to read and delete here
+     * @param authorization an IAM-scoped header for the account the user belongs to, as for
+     *                      {@link #removeUser}, which is handed the same one
      */
+    public static UserCredentials createUser(PartitionCleanup cleanup, int port, String authorization,
+                                             String userName) {
+        cleanup.register(() -> removeUser(port, authorization, userName));
+        iam(port, authorization, "CreateUser", "UserName", userName).statusCode(200);
+        XmlPath key = iam(port, authorization, "CreateAccessKey", "UserName", userName)
+                .statusCode(200).extract().xmlPath();
+        return new UserCredentials(
+                key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId"),
+                key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.SecretAccessKey"));
+    }
+
+    /**
+     * A SigV4 {@code Authorization} header naming {@code accessKeyId}, scoped to {@code service} in
+     * {@code us-east-1}. The signature is a placeholder, so under a profile that verifies signatures
+     * the request has to be signed for real instead.
+     */
+    public static String auth(String accessKeyId, String service) {
+        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260629/us-east-1/" + service
+                + "/aws4_request, SignedHeaders=host, Signature=abc";
+    }
+
     /**
      * Deletes a managed policy, and first the versions and attachments IAM wants gone before it
      * will. Returns quietly when the policy is already absent, so a caller can register the
@@ -172,6 +199,13 @@ public final class EnforcementFixtures {
         iam(port, authorization, action, parameter, arn);
     }
 
+    /**
+     * Deletes an unversioned S3 bucket after its current objects. This helper lists one page of
+     * objects and does not remove old versions or delete markers, so callers must use it only for
+     * unversioned buckets with at most one page of objects.
+     *
+     * @param authorization an S3-scoped header for an identity allowed to read and delete here
+     */
     public static void removeBucket(int port, String authorization, String bucket) {
         if (s3(port, authorization).when().head("/" + bucket)
                 .then().extract().statusCode() == 404) {

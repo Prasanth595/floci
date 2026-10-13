@@ -318,7 +318,7 @@ public class RdsQueryHandler {
                 params.getFirst("SourceType"),
                 memberList(params, "SourceIds"),
                 memberList(params, "EventCategories"),
-                optionalBoolean(params.getFirst("Enabled")),
+                parseOptionalBoolean(params, "Enabled"),
                 parseTags(params));
         return Response.ok(AwsQueryResponse.envelope("CreateEventSubscription", AwsNamespaces.RDS,
                 new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
@@ -330,7 +330,7 @@ public class RdsQueryHandler {
                 params.getFirst("SnsTopicArn"),
                 params.getFirst("SourceType"),
                 memberList(params, "EventCategories"),
-                optionalBoolean(params.getFirst("Enabled")));
+                parseOptionalBoolean(params, "Enabled"));
         return Response.ok(AwsQueryResponse.envelope("ModifyEventSubscription", AwsNamespaces.RDS,
                 new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
     }
@@ -1750,8 +1750,7 @@ public class RdsQueryHandler {
         }
         String dbInstanceClass = params.getFirst("DBInstanceClass");
         String availabilityZone = params.getFirst("AvailabilityZone");
-        String multiAzStr = params.getFirst("MultiAZ");
-        boolean multiAz = multiAzStr != null && Boolean.parseBoolean(multiAzStr);
+        boolean multiAz = Boolean.TRUE.equals(parseOptionalBoolean(params, "MultiAZ"));
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
 
         List<String> vpcSecurityGroupIds = new ArrayList<>();
@@ -1765,13 +1764,10 @@ public class RdsQueryHandler {
 
         try {
             Integer requestedPort = parseIntegerParam(params, "Port");
-            DbInstance instance = requestedPort == null
-                    ? service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
-                            dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
-                            vpcSecurityGroupIds, tags, region)
-                    : service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
-                            dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
-                            vpcSecurityGroupIds, tags, region, requestedPort);
+            DbInstance instance = service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
+                    dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
+                    vpcSecurityGroupIds, tags, region, requestedPort,
+                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"));
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBInstanceFromDBSnapshot", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -2353,7 +2349,7 @@ public class RdsQueryHandler {
         if (missing != null) {
             return missing;
         }
-        boolean copyTags = "true".equalsIgnoreCase(params.getFirst("CopyTags"));
+        boolean copyTags = Boolean.TRUE.equals(parseOptionalBoolean(params, "CopyTags"));
         DbClusterSnapshot copy = service.copyDbClusterSnapshot(sourceId, targetId, copyTags, parseTags(params), region);
         return Response.ok(AwsQueryResponse.envelope("CopyDBClusterSnapshot", AwsNamespaces.RDS,
                 dbClusterSnapshotXml(copy))).build();
@@ -2407,7 +2403,7 @@ public class RdsQueryHandler {
                     parseOptionalBoolean(params, "UseLatestRestorableTime"),
                     optionalInt(params.getFirst("Port")), params.getFirst("DBSubnetGroupName"),
                     params.getFirst("DBClusterParameterGroupName"),
-                    optionalBoolean(params.getFirst("EnableIAMDatabaseAuthentication")),
+                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
                     params.getFirst("EngineMode"), parseTags(params), region);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterToPointInTime", AwsNamespaces.RDS,
                     dbClusterXml(cluster))).build();
@@ -2432,7 +2428,7 @@ public class RdsQueryHandler {
                 params.getFirst("DatabaseName"), params.getFirst("DBSubnetGroupName"),
                 params.getFirst("DBClusterParameterGroupName"),
                 params.getFirst("AvailabilityZones.member.1"),
-                optionalBoolean(params.getFirst("EnableIAMDatabaseAuthentication")),
+                parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
                 params.getFirst("EngineMode"), parseTags(params), region);
         return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterFromSnapshot", AwsNamespaces.RDS,
                 dbClusterXml(cluster))).build();

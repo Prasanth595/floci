@@ -20,6 +20,17 @@ follows the AWS Sign-In `AuthorizeOAuth2Access` and `CreateOAuth2Token` wire sha
 one-time codes, PKCE verification, refresh-token expiry, and the `aws_sigv4` temporary credential
 type.
 
+The cross-device flow works too, for a CLI that cannot open a browser on the same machine:
+
+```bash
+aws login --remote --endpoint-url http://localhost:4566 --region us-east-1
+```
+
+The CLI prints the authorize URL and waits for a code. After the consent page, Floci lands on
+`/v1/sessions/confirmation` on the same endpoint, the path AWS Sign-In uses, and shows the
+verification code to paste back. The redirect must point at the endpoint the request arrived on
+or at an AWS Sign-In host; any other origin is refused.
+
 ## Supported Actions
 
 ### Users
@@ -55,7 +66,7 @@ type.
 | CreateRole | Creates an IAM role with an assume-role policy. |
 | GetRole | Returns a stored IAM role. |
 | DeleteRole | Deletes an IAM role from the local IAM store. |
-| ListRoles | Lists IAM roles in the local account. |
+| ListRoles | Lists IAM roles in the local account, with `Marker` and `MaxItems` paging. |
 | UpdateRole | Updates mutable IAM role fields. |
 | CreateServiceLinkedRole | Creates a role under /aws-service-role/ for a service principal. |
 | DeleteServiceLinkedRole | Deletes a service-linked role and returns a deletion task id. |
@@ -74,7 +85,7 @@ type.
 | CreatePolicy | Creates a customer-managed IAM policy. |
 | GetPolicy | Returns metadata for a managed IAM policy. |
 | DeletePolicy | Deletes a managed IAM policy. |
-| ListPolicies | Lists managed IAM policies, including seeded AWS managed policies. |
+| ListPolicies | Lists managed IAM policies, including seeded AWS managed policies, with `Marker` and `MaxItems` paging. |
 | ListEntitiesForPolicy | Lists roles, users, and groups with a direct managed-policy attachment. |
 | CreatePolicyVersion | Creates a new version of a managed policy. |
 | GetPolicyVersion | Returns a managed policy version document. |
@@ -88,6 +99,11 @@ type.
 `ListEntitiesForPolicy` currently returns direct permissions-policy attachments. `EntityFilter`,
 `PathPrefix`, `PolicyUsageFilter`, and pagination are not yet applied; responses return
 `IsTruncated=false`.
+
+`ListRoles` and `ListPolicies` return 100 items when `MaxItems` is omitted and reject a value
+outside 1 to 1000. `PathPrefix` and `Scope` filter before paging, and roles and customer managed
+policies are listed in name order so a `Marker` resumes where the previous page stopped.
+`ListPolicies` does not yet apply `OnlyAttached` or `PolicyUsageFilter`.
 
 ### Permission Boundaries
 
@@ -289,6 +305,7 @@ validation.
 | GetLoginProfile | Returns a user's login profile. |
 | UpdateLoginProfile | Updates a user's login profile password and/or reset-required flag. |
 | DeleteLoginProfile | Deletes a user's login profile. |
+| ChangePassword | Changes the console password of the user who is calling. |
 
 `UserName` is optional on `CreateLoginProfile`, `GetLoginProfile` and `DeleteLoginProfile`: it
 defaults to the user resolved from the signing access key, the same fallback `GetUser` uses. It is
@@ -304,6 +321,37 @@ class, and when the account has an [account password policy](#account-password-p
 also checked against that policy's length and character-class requirements, with
 `PasswordPolicyViolation` returned on either action if it doesn't comply. The password itself is never
 echoed back by any of these actions, matching AWS.
+
+`ChangePassword` is the self-service half of `UpdateLoginProfile`. It takes no `UserName` and acts
+only on the user whose access key signed the request, which is what the API reference means by "the
+IAM user who is calling this operation", and the account root password is not affected by it. A
+caller with no IAM user behind its key, which is Floci's stand-in for account root credentials, is
+refused with `InvalidUserType`, the error the CLI reference documents for that case. `OldPassword`
+must match the stored password, and the reference publishes no error for a mismatch, so Floci
+answers `InvalidParameterValue`, the common error type for a parameter value the service cannot
+accept. It is checked before the new password is held to the account policy, so a caller who cannot
+prove the current password learns nothing about what the policy requires. A successful change
+clears `PasswordResetRequired`, which is what lets a user whose password an administrator reset
+restore their own console access programmatically, and it updates the `password_last_changed` the
+credential report reads.
+
+`PasswordReusePrevention` is enforced on `ChangePassword` and on `UpdateLoginProfile`, which share
+one history per login profile, so an administrator reset cannot put back a password a user has just
+been refused. The reference defines the value as "the number of previous passwords that IAM users
+are prevented from reusing", and says that with no value set users "are not prevented from reusing
+previous passwords". The password the profile currently holds is refused alongside the superseded
+ones, which the reference does not spell out: read the other way, the smallest window the policy
+accepts would still allow setting a password to the value it already has, and would not refuse the
+change away and straight back that the setting exists for. History is recorded whether or not a
+window is set, so switching the policy on has something to compare against, bounded at the 24 the
+policy can ask for, and it goes with the profile when `DeleteLoginProfile` removes it.
+
+`AllowUsersToChangePassword` is accepted and reported but grants nothing. The user
+guide says the option gives all users in the account "access to the iam:ChangePassword action for
+only their user and to the iam:GetAccountPasswordPolicy action", applied at the account level
+rather than by attaching a policy to each user. Floci authorizes both actions from identity
+policies alone, so under [enforcement](#iam-enforcement-mode) a caller needs a policy naming their
+own user however the flag is set.
 
 `DeleteUser` returns `DeleteConflict`, as on AWS, while the user still has a login profile, access
 keys, inline policies, attached managed policies, group memberships, an
@@ -350,6 +398,8 @@ read; the comparison is driven entirely by the policy's own condition operator (
 | GetServiceLastAccessedDetails | Returns the job's status and its service-access report. |
 | GetServiceLastAccessedDetailsWithEntities | Returns the job's status and the entities that used a given service. |
 | ListPoliciesGrantingServiceAccess | Lists the policies that let an IAM identity access each requested service. |
+| GenerateOrganizationsAccessReport | Starts a report of the services the SCPs along an Organizations entity path leave reachable, and returns its job ID. |
+| GetOrganizationsAccessReport | Returns the job's status and its report. |
 
 Floci does not record service access. Nothing populates a principal's usage history, and
 `GetAccessKeyLastUsed` already answers with AWS's documented "never used" shape rather than
@@ -419,6 +469,73 @@ not carve out. Permissions boundaries are excluded, as the operation's documenta
 resource-based policies, ACLs, Organizations policies and trust policies are not consulted.
 Resources and conditions are not evaluated either: the question is which policies could grant the
 service at all, not whether one specific call would be authorized.
+
+The Organizations access report is the same job shape over a different question. Instead of one
+entity's permissions policies it reports the services the service control policies along an
+Organizations entity path leave reachable, and it is answered from Floci's own Organizations tree:
+the entity path names the organization, its root and the OUs or account below, and the SCPs attached
+to each of those are read and evaluated. Only SCP logic applies, which the reference is explicit
+about, so identity policies, resource policies, ACLs, permissions boundaries and trust policies play
+no part. The entity path has to be a path the organization actually has: the segments below the root
+name a chain of parent and child, so the path is held to the one Organizations reports for its last
+node, and a path assembled from two branches, or one that skips an OU, fails the job rather than
+reporting the policies of a chain that does not exist.
+
+Attached SCPs are a union within one level and the levels are intersected, so a service survives only
+where every level allows it. That question cannot be answered a namespace at a time, because a
+service is reachable only while some action in it survives the whole chain: two levels allowing
+single disjoint actions, `s3:GetObject` under `s3:PutObject`, leave no S3 action at all, and a `Deny`
+on the one action a level allows leaves none either. What a namespace-wide reading got right stays
+right: an SCP denying `s3:DeleteBucket` alone keeps S3 on the list, because every other S3 action is
+still reachable, and a `Deny` that carries a `Condition` or names particular resources closes nothing
+at all, since the region-restricting deny on `*` that most organizations carry, and a deny scoped to
+one bucket, both leave the service reachable by every request they do not cover. The survivors are
+found by probing the chain with the actions the policies themselves name plus one stand-in action per
+wildcard, which is exact for the patterns policies are written with; a wildcard that is not a
+trailing one, as in `s3:*Object`, cannot be probed that way and leaves the service on the list rather
+than off it.
+
+The management account is not limited by SCPs, so its report lists every service and an
+`OrganizationsPolicyId` passed with it is ignored, as the reference says. Passing that ID otherwise
+narrows the report to the one SCP named, and it has to name one: Organizations keeps tag, backup,
+chatbot and opt-out policies in the same ID space, none of them carries statements, and evaluating
+one as a ceiling would read as a level that constrains nothing and report every service there is.
+
+Every service in the report is one principals are allowed but never reached, since Floci records no
+access, and that is the shape the reference's own example gives such a service: a namespace and a
+zero count, with no region, entity path or last-authenticated time. `NumberOfServicesNotAccessed`
+therefore equals `NumberOfServicesAccessible`. `ServiceName` carries a display name
+("Amazon S3") that Floci has no mapping for, so the namespace stands in for it, as on the
+last-accessed reader. `SortKey` is validated against its four values; the namespace keys sort the
+list and the two time keys leave it in namespace order, because ordering on a timestamp no entry
+carries would be ordering on nothing.
+
+A caller who is not the management account gets `AccessDenied` 403. Neither operation models a code
+for that, but a per-action error list is additive: the reference's common error types "that this AWS
+service may return" apply to every action and include the 403 permission denial, and the IAM user
+guide names the code for a denied IAM action outright, in the `AddRoleToInstanceProfile`
+troubleshooting entry. The common error page spells it `AccessDeniedException` while the user guide
+and the rest of Floci's IAM and STS surface spell it `AccessDenied`; the latter is used here, for
+consistency with the surface a caller is already on.
+
+Three things about this pair are inferences, and they are the same inference three times. The
+generator models no error for an entity path that is well-formed but resolves to nothing, so a path
+naming another organization, an entity outside this one, or a chain the organization does not have,
+produces a `FAILED` job carrying `ErrorDetails` instead. Nor does it model one for the prerequisite
+the reference states, that SCPs be enabled for the organization root, so an organization without them
+produces a `FAILED` job too, carrying `PolicyTypeNotEnabled`. Nor one for an `OrganizationsPolicyId`
+that names a policy of some other type, which fails the job carrying Organizations'
+`InvalidInputException`. All three are read off the shape of the API rather than off a sentence: AWS
+publishes both `FAILED` and `ErrorDetails` on this reader, for failures the generator does not
+report synchronously, and the alternatives are all worse. Letting Organizations' own error escape
+unchanged would put another service's code on an IAM operation, a `COMPLETED` job with an empty list
+cannot be told apart from an organization that reaches no services, and `ValidationError` is for a
+shape violation, which a resolvable-looking path, a disabled policy type and an existing policy of
+the wrong type are not.
+
+The generator's only modeled error, `ReportGenerationLimitExceeded`, reports concurrent generations
+for the account and stays unreachable here: a job is complete the moment it is created, so two can
+never overlap.
 
 ### Multi-Factor Authentication
 
@@ -989,6 +1106,7 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries regi
 - An explicit **Deny** in a resource policy overrides any allows.
 - In cross-account scenarios or resource-controlled access, an explicit **Allow** in a resource policy grants access to the principal.
 - For detailed S3 bucket policy behavior and configuration, see [S3 Bucket Policy Enforcement](s3.md#bucket-policy-enforcement).
+- Lambda function policies, the statements `AddPermission` adds, take part the same way. An invoke of another account's function by ARN runs it in that account, so its function policy has to allow the caller as well; see [Function policies under IAM enforcement](lambda.md#function-policies-under-iam-enforcement).
 
 ### Service control policies (SCPs)
 
@@ -1064,9 +1182,13 @@ format of each type. `make iam-action-resources-check` gates its shape offline o
 request and `make iam-action-resources-verify` checks every claim in it against AWS weekly, so a
 type that drifts from what AWS publishes fails in CI rather than authorizing against the wrong
 resource. What stays in Java is the half that is Floci's: the request parameter each type's name
-arrives in, the creates, the actions whose request carries an ARN, and the resource types that
-belong only to actions Floci does not dispatch. `IamActionResourcesTest` checks the one against
-the other, so a regeneration that introduces a resource type nothing resolves fails a test naming
+arrives in, the creates, the actions whose request carries an ARN, the four whose request names
+the resource some other way, and the resource types that belong only to actions Floci does not
+dispatch. `GenerateOrganizationsAccessReport` is one of the four: the reference spells its type as
+`access-report/${EntityPath}`, so the Organizations entity path goes into the ARN whole, its
+slashes being the organization's tree rather than an IAM path. `IamActionResourcesTest` checks the
+one against the other, so a regeneration that introduces a resource type nothing resolves fails a
+test naming
 it rather than quietly putting that action back on `*`.
 
 The nineteen user actions whose `UserName` the model marks optional, `GetUser`, `ListAccessKeys` and
@@ -1125,11 +1247,13 @@ account key carries no identity policies of its own.
 - `NumericEquals`, `NumericNotEquals`, `NumericLessThan`, `NumericGreaterThan` (and Equals variants)
 - `DateEquals`, `DateNotEquals`, `DateLessThan`, `DateGreaterThan` (and Equals variants)
 - `Bool`, `IpAddress`, `NotIpAddress`, `Null`
-- Supports `...IfExists` variants for all operators.
+- Supports `...IfExists` variants for all operators except `Null`.
 - Set operators `ForAllValues:` and `ForAnyValue:` over multi-valued condition keys, in AWS's
   own spelling (the prefix match is case-sensitive). They compose with `IfExists`
-  (`ForAnyValue:StringEqualsIfExists`). `ForAllValues:` over an empty set matches vacuously
-  and `ForAnyValue:` over an empty set does not match, so pair `ForAllValues:` with
+  (`ForAnyValue:StringEqualsIfExists`). `ForAllValues:` matches when the context key is absent
+  or its value set is empty; `ForAnyValue:` does not match either case. This follows the
+  [AWS set-operator rules](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-single-vs-multi-valued-context-keys.html).
+  Pair `ForAllValues:` with
   `"Null":{"<key>":"false"}` as you would on AWS: `Null` treats a present-but-empty set as
   absent, so the guard fires either way.
 - When a condition lists several values, a positive operator matches if the request value
@@ -1158,11 +1282,17 @@ floci populates:
   An allow conditioned on it denies the delete of a correctly tagged object, and a create cannot
   be gated on tags an object does not have yet.
 - `s3:RequestObjectTag/<key>`: a tag the request asks to attach. `s3:PutObject` reads these
-  from the `x-amz-tagging` header and `s3:PutObjectTagging` from the `<Tagging>` body. Any pair
+  from the `x-amz-tagging` header, or its query parameter when the header is absent,
+  and `s3:PutObjectTagging` from the `<Tagging>` body. Any pair
   that does not decode is dropped, so a policy conditioned on the key denies such a request. Where
   enforcement lets it through, the handler still answers a malformed header with
-  `400 InvalidTag`. `s3:RequestObjectTagKeys` is **not** populated, so a condition on it never
-  matches.
+  `400 InvalidTag`.
+- `s3:RequestObjectTagKeys`: the case-sensitive requested object tag keys from the same
+  `PutObject` header/query source or `PutObjectTagging` body. Header and query tag keys
+  are URL-decoded before matching; a present header takes precedence over the query.
+  `ForAllValues:StringEquals` can limit all requested keys without a `Null` guard; an
+  omitted or empty tag set still follows the absent-key rules above. Existing object tags
+  do not contribute to this requested set. See the [AWS object-tag policy guidance](https://docs.aws.amazon.com/AmazonS3/latest/userguide/tagging-and-policies.html).
 - A `PutObject` carrying `If-Match` is authorized as `s3:GetObject` as well, and that second
   check is made without the object's tags in the context, as measured on AWS. `If-None-Match`
   needs no such permission.
@@ -1173,6 +1303,9 @@ floci populates:
   `assumed-role` session ARN, as AWS reports it ("For IAM roles, the request context returns the
   ARN of the role"); a condition naming the session ARN does not match. It is **absent** only for
   unknown keys, where nothing about the caller can be resolved.
+- `aws:TagKeys`: the case-sensitive requested tag keys for EC2 `RunInstances` and
+  `CreateTags`, and S3 `PutBucketTagging`. `ForAllValues:StringEquals` can restrict the
+  complete requested set without a `Null` guard; no tags still means absent context.
 - `dynamodb:LeadingKeys`, `dynamodb:Attributes`, `dynamodb:Select`: from the DynamoDB request
   body, for `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `BatchGetItem` and
   `BatchWriteItem` (`dynamodb:Select` for `Query` and `Scan`). `LeadingKeys` holds the
@@ -1182,18 +1315,16 @@ floci populates:
   projection / update / filter / condition / key-condition expressions, and
   `ExpressionAttributeNames`); a request with no projection returns every attribute while
   reporting only the names it mentions, exactly as on AWS, which is why AWS pairs `Attributes`
-  with `dynamodb:Select`. Each key is **omitted** when it cannot be determined (unknown table,
-  a `Key` that omits the partition attribute, an unparseable `KeyConditionExpression`, a
-  multi-table batch), so a policy scoping access through it denies the request rather than
-  allowing an unproven one.
+  with `dynamodb:Select`. Query equality supports the attribute on either side, including aliases.
+  Each batch entry uses its own table schema; authorization evaluates each table's requested
+  keys separately, combining name and ARN entries for the same table. Each key is **omitted**
+  when it cannot be determined, such as an unknown table, a missing partition attribute, or
+  an unparseable expression. A `ForAllValues` condition matches absent context; add
+  `Null:false` when the policy must require a resolved key. Malformed requests that pass
+  authorization are still checked by the DynamoDB handler.
 
-  **Consequence:** with enforcement on and access scoped purely through `dynamodb:LeadingKeys`,
-  a malformed request (such as a `GetItem` whose `Key` omits the partition attribute) is answered with
-  `AccessDeniedException` instead of the `ValidationException` DynamoDB would return. Failing
-  closed is the correct direction for a security boundary.
-
-**Any other condition key is absent from the request context.** A plain (non-`IfExists`)
-operator on an absent key makes the whole statement *not apply*: it neither matches nor
+**Any other condition key is absent from the request context.** A positive scalar operator
+without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor
 blocks. A `DenyRootUser`-style guardrail keyed on `aws:PrincipalArn` therefore fires against
 the account root the same way it does on real AWS, consistent with the account root already
 being bounded by SCPs (below): both forms of root enforcement now agree. A negated operator
@@ -1201,9 +1332,8 @@ being bounded by SCPs (below): both forms of root enforcement now agree. A negat
 absent key cannot equal what the policy names, so the condition holds, and a `Deny` written
 that way applies when the key is missing.
 
-**Not yet supported**: `NotPrincipal`, resource-based policies (S3 bucket policy, Lambda resource
-policy), and `dynamodb:LeadingKeys` for `Scan`, `TransactWriteItems` / `TransactGetItems` and the
-PartiQL operations.
+**Not yet supported**: `dynamodb:LeadingKeys` for `Scan`, `TransactWriteItems` / `TransactGetItems`
+and the PartiQL operations.
 
 ### Assumed roles
 
