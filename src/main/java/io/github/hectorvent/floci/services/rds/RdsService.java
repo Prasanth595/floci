@@ -4499,9 +4499,12 @@ public class RdsService implements Resettable, ResourceProvider {
                 && cluster.getMasterUserSecretArn() != null;
         boolean credentialsChanged = true;
         if (releasesManagedSecret) {
-            credentialsChanged = secretsManagerService != null
-                    && secretsManagerService.deleteManagedSecretAfter(
-                            cluster.getMasterUserSecretArn(), effectiveRegion, changeCredentials);
+            if (secretsManagerService == null) {
+                throw new AwsException("InvalidParameterCombination",
+                        "ManageMasterUserPassword requires Secrets Manager support.", 400);
+            }
+            credentialsChanged = secretsManagerService.deleteManagedSecretAfter(
+                    cluster.getMasterUserSecretArn(), effectiveRegion, changeCredentials);
         } else {
             changeCredentials.run();
         }

@@ -1546,6 +1546,59 @@ class RdsServiceTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"aurora-postgresql,16.3,true", "aurora-mysql,8.0,true",
+            "aurora-postgresql,16.3,false", "aurora-mysql,8.0,false"})
+    void clusterOptOutWithoutSecretsManagerFailsBeforeChangingState(String engine, String version, boolean mockMode) {
+        when(rdsConfig.mock()).thenReturn(mockMode);
+        DbCluster cluster = rdsService.createDbCluster("missing-secrets", engine, version,
+                "admin", "original-password", "dbname", false, null, null, null, false, "us-east-1");
+        String arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!missing-secrets";
+        cluster.setMasterUserSecretArn(arn);
+        cluster.setMasterUserSecretStatus("active");
+        cluster.setMasterUserSecretKmsKeyId("managed-key");
+        DbInstance member = rdsService.createDbInstance("missing-secrets-member", engine, version,
+                "admin", "original-password", "dbname", "db.r5.large", 20, false, null, null, "missing-secrets");
+        clearInvocations(containerManager, proxyManager);
+
+        AwsException error = assertThrows(AwsException.class, () -> rdsService.modifyDbCluster(
+                "missing-secrets", "replacement-password", true, 0.5, 8.0, null,
+                false, null, "us-east-1"));
+
+        assertAll(
+                () -> assertEquals("InvalidParameterCombination", error.getErrorCode()),
+                () -> assertEquals(400, error.getHttpStatus()),
+                () -> assertEquals("original-password", cluster.getMasterPassword()),
+                () -> assertEquals("original-password", member.getMasterPassword()),
+                () -> assertEquals(arn, cluster.getMasterUserSecretArn()),
+                () -> assertEquals("active", cluster.getMasterUserSecretStatus()),
+                () -> assertEquals("managed-key", cluster.getMasterUserSecretKmsKeyId()),
+                () -> assertFalse(cluster.isIamDatabaseAuthenticationEnabled()),
+                () -> assertNull(cluster.getServerlessV2MinCapacity()),
+                () -> assertNull(cluster.getServerlessV2MaxCapacity()),
+                () -> assertSame(cluster, rdsService.getDbCluster("missing-secrets", "us-east-1")),
+                () -> verifyNoInteractions(containerManager, proxyManager));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"aurora-postgresql,16.3,true", "aurora-mysql,8.0,true",
+            "aurora-postgresql,16.3,false", "aurora-mysql,8.0,false"})
+    void unmanagedClusterPasswordChangeDoesNotRequireSecretsManager(String engine, String version, boolean mockMode) {
+        when(rdsConfig.mock()).thenReturn(mockMode);
+        DbCluster cluster = rdsService.createDbCluster("unmanaged-optout", engine, version,
+                "admin", "original-password", "dbname", false, null, null, null, false, "us-east-1");
+        clearInvocations(containerManager, proxyManager);
+
+        rdsService.modifyDbCluster("unmanaged-optout", "replacement-password", true,
+                null, null, null, false, null, "us-east-1");
+
+        assertEquals("replacement-password", cluster.getMasterPassword());
+        assertTrue(cluster.isIamDatabaseAuthenticationEnabled());
+        assertNull(cluster.getMasterUserSecretArn());
+        verify(containerManager, times(mockMode ? 0 : 1))
+                .rotateMasterPassword(any(), any(), any(), any(), eq("original-password"), eq("replacement-password"));
+    }
+
     private SecretsManagerService realSecretsForOptOut() {
         StorageFactory factory = mock(StorageFactory.class);
         when(factory.<Secret>create(eq("secretsmanager"), any(), any()))

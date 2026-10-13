@@ -590,6 +590,7 @@ release password management. Other requested cluster settings still apply.
 
 Floci coordinates the replication check and credential change with Secrets Manager deletion.
 A failed backend password rotation retains the managed secret and stored credentials.
+If Secrets Manager support is unavailable, opt-out fails before changing cluster state.
 This does not provide a transaction across database backends and persistent storage.
 
 ## Point in time restore
