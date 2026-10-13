@@ -11,7 +11,6 @@ import java.util.List;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
-import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -126,12 +125,5 @@ class ExportPlanTest {
     @Test
     void pathCharactersRdsReplacesBecomeUnderscores() {
         assertThat(ExportLayout.pathComponent("my table`\"\\x"), equalTo("my_table___x"));
-    }
-
-    @Test
-    void stagedRowsStayOutsideTheTablePrefixes() {
-        ExportLayout layout = new ExportLayout("p", "task-1");
-
-        assertThat(layout.stagingKey(), startsWith("p/task-1/staging-"));
     }
 }

@@ -80,6 +80,17 @@ public class ExportTask {
     @JsonProperty("AccountId")
     private String accountId;
 
+    /**
+     * The task's ARN as Floci names its restore container's runtime, so the container carries the
+     * task's account and region. RDS gives export tasks no ARN, so this is never reported.
+     */
+    @JsonProperty("RuntimeArn")
+    private String runtimeArn;
+
+    /** The name the restore container and its volume are created under, unique to this task. */
+    @JsonProperty("RuntimeVolumeId")
+    private String runtimeVolumeId;
+
     public ExportTask() {}
 
     @JsonIgnore
@@ -144,4 +155,10 @@ public class ExportTask {
 
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }
+
+    public String getRuntimeArn() { return runtimeArn; }
+    public void setRuntimeArn(String runtimeArn) { this.runtimeArn = runtimeArn; }
+
+    public String getRuntimeVolumeId() { return runtimeVolumeId; }
+    public void setRuntimeVolumeId(String runtimeVolumeId) { this.runtimeVolumeId = runtimeVolumeId; }
 }

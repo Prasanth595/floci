@@ -16,17 +16,21 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -64,6 +68,10 @@ class RdsExportTaskServiceTest {
                 regionResolver, false, CLOCK, workers::add);
     }
 
+    private static SnapshotExporter.Outcome outcome(long bytes, List<String> warnings) {
+        return new SnapshotExporter.Outcome(bytes, warnings, CLOCK.instant());
+    }
+
     private ExportTask start(RdsExportTaskService service, String id, List<String> exportOnly) {
         return service.startExportTask(id, SNAPSHOT_ARN, "exports", "prefix", "arn:aws:iam::000000000000:role/export",
                 "alias/export", exportOnly, REGION);
@@ -81,7 +89,7 @@ class RdsExportTaskServiceTest {
 
     @Test
     void startExportTask_isStartingWithTheSnapshotAndRequestRecorded() {
-        RdsExportTaskService service = service((task, source, progress) -> new SnapshotExporter.Outcome(0, List.of()));
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
 
         ExportTask task = start(service, "appdb-export", List.of("appdb.public.items"));
 
@@ -104,7 +112,7 @@ class RdsExportTaskServiceTest {
             progress.extracting(50);
             seen.add(describe(holder[0], task.getExportTaskIdentifier()).getStatus()
                     + "@" + describe(holder[0], task.getExportTaskIdentifier()).getPercentProgress());
-            return new SnapshotExporter.Outcome(2_147_483_648L, List.of());
+            return outcome(2_147_483_648L, List.of());
         });
         start(holder[0], "appdb-export", List.of());
 
@@ -137,7 +145,7 @@ class RdsExportTaskServiceTest {
     @Test
     void skippedTablesBecomeTheWarningMessage() {
         RdsExportTaskService service = service((task, source, progress) ->
-                new SnapshotExporter.Outcome(10, List.of("The table appdb.public.odd was skipped.")));
+                outcome(10, List.of("The table appdb.public.odd was skipped.")));
         start(service, "appdb-export", List.of());
 
         runWorkers();
@@ -156,7 +164,7 @@ class RdsExportTaskServiceTest {
             assertThat(describe(holder[0], task.getExportTaskIdentifier()).getStatus(), equalTo("CANCELING"));
             progress.extracting(60);
             canceledSeen.add(progress.canceled());
-            return new SnapshotExporter.Outcome(0, List.of());
+            return outcome(0, List.of());
         });
         start(holder[0], "appdb-export", List.of());
 
@@ -170,7 +178,7 @@ class RdsExportTaskServiceTest {
 
     @Test
     void aFinishedTaskCannotBeCanceled() {
-        RdsExportTaskService service = service((task, source, progress) -> new SnapshotExporter.Outcome(0, List.of()));
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
         start(service, "appdb-export", List.of());
         runWorkers();
 
@@ -182,7 +190,7 @@ class RdsExportTaskServiceTest {
 
     @Test
     void anIdentifierCanOnlyBeUsedOnce() {
-        RdsExportTaskService service = service((task, source, progress) -> new SnapshotExporter.Outcome(0, List.of()));
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
         start(service, "appdb-export", List.of());
 
         AwsException error = assertThrows(AwsException.class, () -> start(service, "appdb-export", List.of()));
@@ -193,7 +201,7 @@ class RdsExportTaskServiceTest {
     @Test
     void aMissingBucketIsRefusedBeforeAnythingRuns() {
         when(s3Service.bucketExists("exports")).thenReturn(false);
-        RdsExportTaskService service = service((task, source, progress) -> new SnapshotExporter.Outcome(0, List.of()));
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
 
         AwsException error = assertThrows(AwsException.class, () -> start(service, "appdb-export", List.of()));
 
@@ -203,7 +211,7 @@ class RdsExportTaskServiceTest {
 
     @Test
     void identifiersFollowTheRdsRules() {
-        RdsExportTaskService service = service((task, source, progress) -> new SnapshotExporter.Outcome(0, List.of()));
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
 
         for (String invalid : List.of("1export", "export--task", "export-", "export_task", "e".repeat(61))) {
             AwsException error = assertThrows(AwsException.class, () -> start(service, invalid, List.of()));
@@ -214,7 +222,7 @@ class RdsExportTaskServiceTest {
 
     @Test
     void anUnknownTaskIsNotFound() {
-        RdsExportTaskService service = service((task, source, progress) -> new SnapshotExporter.Outcome(0, List.of()));
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
 
         AwsException describe = assertThrows(AwsException.class,
                 () -> service.describeExportTasks("missing", null, null, Map.of(), REGION));
@@ -227,7 +235,7 @@ class RdsExportTaskServiceTest {
 
     @Test
     void describeFiltersByStatusBucketAndSource() {
-        RdsExportTaskService service = service((task, source, progress) -> new SnapshotExporter.Outcome(0, List.of()));
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
         start(service, "first", List.of());
         runWorkers();
         start(service, "second", List.of());
@@ -275,6 +283,102 @@ class RdsExportTaskServiceTest {
         ExportTask recovered = describe(service, "appdb-export");
         assertThat(recovered.getStatus(), equalTo("FAILED"));
         assertThat(recovered.getFailureCause(), equalTo(RdsExportTaskService.RESTART_FAILURE_CAUSE));
-        verify(exporter).discard("appdb-export");
+        verify(exporter).discard(argThat(task -> "appdb-export".equals(task.getExportTaskIdentifier())));
+    }
+
+    @Test
+    void aTaskCanceledBeforeItsWorkerStartsNeverExports() {
+        SnapshotExporter exporter = mock(SnapshotExporter.class);
+        RdsExportTaskService service = service(exporter);
+        start(service, "appdb-export", List.of());
+
+        String answered = service.cancelExportTask("appdb-export", REGION).getStatus();
+        runWorkers();
+
+        assertThat(answered, equalTo("CANCELING"));
+        assertThat(describe(service, "appdb-export").getStatus(), equalTo("CANCELED"));
+        verify(exporter, never()).export(any(), any(), any());
+    }
+
+    @Test
+    void theSameIdentifierInTwoRegionsGetsItsOwnRuntime() {
+        String otherArn = "arn:aws:rds:eu-west-1:000000000000:snapshot:appdb-snap";
+        when(rdsService.snapshotExportSource(otherArn, "eu-west-1")).thenReturn(new SnapshotExportSource(
+                otherArn, "postgres:16-alpine", "master", "secret", SNAPSHOT_TIME, "-- dump"));
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
+
+        ExportTask east = start(service, "appdb-export", List.of());
+        ExportTask west = service.startExportTask("appdb-export", otherArn, "exports", null,
+                "arn:aws:iam::000000000000:role/export", "alias/export", List.of(), "eu-west-1");
+
+        assertThat(east.getRuntimeArn(), equalTo("arn:aws:rds:us-east-1:000000000000:export-task:appdb-export"));
+        assertThat(west.getRuntimeArn(), equalTo("arn:aws:rds:eu-west-1:000000000000:export-task:appdb-export"));
+        assertThat(east.getRuntimeVolumeId(), not(equalTo(west.getRuntimeVolumeId())));
+        assertThat(service.describeExportTasks(null, null, null, Map.of(), "eu-west-1"), hasSize(1));
+    }
+
+    @Test
+    void aStartDuringAResetWaitsForItToFinish() throws Exception {
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
+        service.beforeReset();
+        List<ExportTask> admitted = new CopyOnWriteArrayList<>();
+        Thread caller = Thread.ofVirtual().start(() -> admitted.add(start(service, "appdb-export", List.of())));
+
+        caller.join(300);
+        assertThat("the start waits while the reset runs", admitted, empty());
+        service.clear();
+        service.afterReset();
+        caller.join(5_000);
+
+        assertThat(admitted, hasSize(1));
+        assertThat(describe(service, "appdb-export").getStatus(), equalTo("STARTING"));
+    }
+
+    @Test
+    void aWorkerQueuedBeforeAResetDoesNotExport() {
+        SnapshotExporter exporter = mock(SnapshotExporter.class);
+        RdsExportTaskService service = service(exporter);
+        start(service, "appdb-export", List.of());
+
+        service.beforeReset();
+        service.afterReset();
+        runWorkers();
+
+        verify(exporter, never()).export(any(), any(), any());
+    }
+
+    @Test
+    void theTaskEndsAtTheTimeItsExportRecorded() {
+        Instant finished = Instant.parse("2026-10-13T09:05:00Z");
+        RdsExportTaskService service = service((task, source, progress) ->
+                new SnapshotExporter.Outcome(0, List.of(), finished));
+        start(service, "appdb-export", List.of());
+
+        runWorkers();
+
+        assertThat(describe(service, "appdb-export").getTaskEndTime(), equalTo(finished));
+    }
+
+    @Test
+    void aFailingCleanupAtStartupDoesNotStopRecovery() {
+        AccountAwareStorageBackend<ExportTask> persisted =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT);
+        for (String id : List.of("first", "second")) {
+            ExportTask running = new ExportTask();
+            running.setExportTaskIdentifier(id);
+            running.setStatus(ExportTask.STATUS_STARTING);
+            running.setTaskStartTime(SNAPSHOT_TIME);
+            persisted.putForAccount(ACCOUNT, "export-task::us-east-1::" + id, running);
+        }
+        SnapshotExporter exporter = mock(SnapshotExporter.class);
+        doThrow(new IllegalStateException("Docker is not reachable")).when(exporter)
+                .discard(argThat(task -> "first".equals(task.getExportTaskIdentifier())));
+
+        RdsExportTaskService service = new RdsExportTaskService(persisted, rdsService, s3Service, exporter,
+                regionResolver, false, CLOCK, workers::add);
+
+        assertThat(describe(service, "first").getStatus(), equalTo("FAILED"));
+        assertThat(describe(service, "second").getStatus(), equalTo("FAILED"));
+        verify(exporter).discard(argThat(task -> "second".equals(task.getExportTaskIdentifier())));
     }
 }

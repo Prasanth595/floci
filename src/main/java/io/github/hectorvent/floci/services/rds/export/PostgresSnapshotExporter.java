@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
@@ -13,9 +15,16 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -27,6 +36,11 @@ import java.util.Map;
  * own, here a container started from the snapshot's image and removed afterwards, and each table
  * is then read out and written as Parquet by the floci-duck sidecar. PostgreSQL renders every value
  * the export stores as a string, so the strings are PostgreSQL's own text output.
+ *
+ * <p>As in {@code FirehoseParquetConverter}, a table's rows and its Parquet are staged in a bucket
+ * of Floci's own, and only a finished Parquet object is written to the export's bucket, so nothing
+ * partial or temporary ever appears there. A table's rows are streamed from psql to a temporary
+ * file and staged in bounded chunks, so its size never has to fit in memory.
  */
 @ApplicationScoped
 public class PostgresSnapshotExporter implements SnapshotExporter {
@@ -50,19 +64,29 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
 
     private static final String NDJSON = "application/x-ndjson";
     private static final String JSON = "application/json";
+    private static final String PARQUET = "application/octet-stream";
+
+    // How long one table may take to read out of the restored database.
+    static final int TABLE_READ_TIMEOUT_SECONDS = 3600;
+    static final int STAGING_CHUNK_BYTES = 32 * 1024 * 1024;
 
     private final RdsContainerManager containerManager;
     private final FlociDuckClient duckClient;
     private final S3Service s3Service;
     private final ObjectMapper mapper;
+    private final Clock clock;
+    private final String stagingBucket;
 
     @Inject
     public PostgresSnapshotExporter(RdsContainerManager containerManager, FlociDuckClient duckClient,
-                                    S3Service s3Service, ObjectMapper mapper) {
+                                    S3Service s3Service, ObjectMapper mapper, Clock clock,
+                                    EmulatorConfig config) {
         this.containerManager = containerManager;
         this.duckClient = duckClient;
         this.s3Service = s3Service;
         this.mapper = mapper;
+        this.clock = clock;
+        this.stagingBucket = config.services().rds().exportStagingBucket();
     }
 
     record Table(String database, String schema, String name, List<ExportColumn> columns) {
@@ -74,16 +98,16 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
 
     @Override
     public Outcome export(ExportTask task, SnapshotExportSource source, Progress progress) {
-        String runtimeId = runtimeId(task.getExportTaskIdentifier());
-        RdsContainerHandle handle = containerManager.startForExport(runtimeId, source.image(),
-                source.masterUsername(), source.masterPassword());
+        RdsContainerHandle handle = null;
         try {
+            handle = containerManager.startForExport(task.getRuntimeArn(), task.getExportTaskIdentifier(),
+                    task.getRuntimeVolumeId(), source.image(), source.masterUsername(), source.masterPassword());
             containerManager.restorePostgresSnapshot(handle.getContainerId(), source.masterUsername(),
                     source.sqlDump());
             progress.extracting(0);
             return exportTables(task, source, handle.getContainerId(), progress);
         } finally {
-            removeContainer(handle, runtimeId);
+            removeContainer(handle, task.getRuntimeVolumeId());
         }
     }
 
@@ -110,6 +134,9 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
             }
         }
 
+        if (!tables.isEmpty()) {
+            ensureStagingBucket(task.getRegion());
+        }
         long bytes = 0;
         ArrayNode perTableStatus = mapper.createArrayNode();
         for (int i = 0; i < tables.size(); i++) {
@@ -117,15 +144,16 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
                 break;
             }
             Table table = tables.get(i);
-            long written = exportTable(task, source, containerId, layout, table);
+            long written = exportTable(task, source, containerId, layout, table, i + 1);
             bytes += written;
             perTableStatus.add(tableStatus(table, written));
             progress.extracting((i + 1) * 100 / tables.size());
         }
+        Instant finishedAt = Instant.now(clock);
         if (!progress.canceled()) {
-            writeInfo(task, layout, perTableStatus, tables.size(), bytes);
+            writeInfo(task, layout, perTableStatus, tables.size(), bytes, finishedAt);
         }
-        return new Outcome(bytes, warnings);
+        return new Outcome(bytes, warnings, finishedAt);
     }
 
     private List<Table> tables(String containerId, SnapshotExportSource source, String database) {
@@ -150,7 +178,7 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
      * RDS writes none for an empty partition.
      */
     private long exportTable(ExportTask task, SnapshotExportSource source, String containerId,
-                             ExportLayout layout, Table table) {
+                             ExportLayout layout, Table table, int tableNumber) {
         List<String> extract = new ArrayList<>();
         List<String> write = new ArrayList<>();
         List<String> types = new ArrayList<>();
@@ -162,36 +190,98 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
         String select = "SELECT row_to_json(r) FROM (SELECT " + String.join(", ", extract) + " FROM "
                 + ExportColumn.quoteIdentifier(table.schema()) + "." + ExportColumn.quoteIdentifier(table.name())
                 + ") r";
-        String output = query(containerId, source, table.database(), select);
-        if (output.isBlank()) {
-            return 0;
-        }
-        byte[] rows = output.getBytes(StandardCharsets.UTF_8);
 
-        String bucket = task.getS3Bucket();
-        String stagingKey = layout.stagingKey();
-        String dataKey = layout.dataFileKey(table.database(), table.schema(), table.name());
-        s3Service.putObject(bucket, stagingKey, rows, NDJSON, Map.of());
+        Path rows = null;
+        List<String> staged = new ArrayList<>();
         try {
+            rows = Files.createTempFile("floci-rds-export-", ".ndjson");
+            try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(rows))) {
+                containerManager.queryPostgres(containerId, source.masterUsername(), table.database(), select,
+                        out, TABLE_READ_TIMEOUT_SECONDS);
+            }
+            long size = Files.size(rows);
+            if (size == 0) {
+                return 0;
+            }
+            String stagingRoot = "rds-export/" + task.getRuntimeVolumeId() + "/" + tableNumber + "/";
+            staged.addAll(stageChunks(rows, stagingRoot));
+            String stagedParquet = stagingRoot + "data.gz.parquet";
+            staged.add(stagedParquet);
             // floci-duck's /execute wraps its sql field in a CSV export, so the Parquet COPY goes
             // in setup_sql and no output path is given, as FirehoseParquetConverter does.
             String copy = "COPY (SELECT " + String.join(", ", write) + " FROM read_json('"
-                    + escapeLiteral("s3://" + bucket + "/" + stagingKey)
+                    + escapeLiteral("s3://" + stagingBucket + "/" + stagingRoot + "part-*.ndjson")
                     + "', format='newline_delimited', columns={" + String.join(", ", types) + "})) TO '"
-                    + escapeLiteral("s3://" + bucket + "/" + dataKey)
+                    + escapeLiteral("s3://" + stagingBucket + "/" + stagedParquet)
                     + "' (FORMAT PARQUET, COMPRESSION GZIP)";
             duckClient.execute("SELECT 1 AS ok", copy, null, task.getAccountId());
+            byte[] parquet = s3Service.getObject(stagingBucket, stagedParquet).getData();
+            s3Service.putObject(task.getS3Bucket(), layout.dataFileKey(table.database(), table.schema(), table.name()),
+                    parquet, PARQUET, Map.of());
+            return size;
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         } finally {
-            deleteQuietly(bucket, stagingKey);
+            for (String key : staged) {
+                deleteQuietly(stagingBucket, key);
+            }
+            deleteQuietly(rows);
         }
-        return rows.length;
+    }
+
+    /** Stages the rows as NDJSON objects of about {@link #STAGING_CHUNK_BYTES}, split between rows. */
+    private List<String> stageChunks(Path rows, String stagingRoot) throws IOException {
+        List<String> keys = new ArrayList<>();
+        ByteArrayOutputStream chunk = new ByteArrayOutputStream();
+        try (BufferedReader reader = Files.newBufferedReader(rows, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                chunk.write(line.getBytes(StandardCharsets.UTF_8));
+                chunk.write('\n');
+                if (chunk.size() >= STAGING_CHUNK_BYTES) {
+                    keys.add(putChunk(stagingRoot, keys.size(), chunk));
+                }
+            }
+        }
+        if (chunk.size() > 0) {
+            keys.add(putChunk(stagingRoot, keys.size(), chunk));
+        }
+        return keys;
+    }
+
+    private String putChunk(String stagingRoot, int index, ByteArrayOutputStream chunk) {
+        String key = stagingRoot + "part-" + index + ".ndjson";
+        s3Service.putObject(stagingBucket, key, chunk.toByteArray(), NDJSON, Map.of());
+        chunk.reset();
+        return key;
+    }
+
+    /**
+     * Two workers can reach an empty region together, and outside us-east-1 the second
+     * {@code createBucket} answers {@code BucketAlreadyOwnedByYou}.
+     */
+    private void ensureStagingBucket(String region) {
+        if (s3Service.bucketExists(stagingBucket)) {
+            return;
+        }
+        try {
+            s3Service.createBucket(stagingBucket, region);
+        } catch (AwsException e) {
+            if (!"BucketAlreadyOwnedByYou".equals(e.getErrorCode())
+                    && !"BucketAlreadyExists".equals(e.getErrorCode())) {
+                throw e;
+            }
+        }
     }
 
     private ObjectNode tableStatus(Table table, long bytes) {
         ObjectNode status = mapper.createObjectNode();
         status.put("target", table.target());
         status.put("status", ExportTask.STATUS_COMPLETE);
-        status.put("sizeGB", bytes / 1_073_741_824.0);
+        status.put("sizeGB", (double) bytes / RdsExportTaskService.GIB);
         ArrayNode mappings = status.putObject("schemaMetadata").putArray("originalTypeMappings");
         for (ExportColumn column : table.columns()) {
             mappings.addObject()
@@ -208,14 +298,14 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
      * see these, as they sit above the tables.
      */
     private void writeInfo(ExportTask task, ExportLayout layout, ArrayNode perTableStatus, int tableCount,
-                           long bytes) {
+                           long bytes, Instant finishedAt) {
         ObjectNode info = mapper.createObjectNode();
         info.put("exportTaskIdentifier", task.getExportTaskIdentifier());
         info.put("sourceArn", task.getSourceArn());
         info.set("exportOnly", mapper.valueToTree(task.getExportOnly()));
         info.put("snapshotTime", String.valueOf(task.getSnapshotTime()));
         info.put("taskStartTime", String.valueOf(task.getTaskStartTime()));
-        info.put("taskEndTime", Instant.now().toString());
+        info.put("taskEndTime", finishedAt.toString());
         info.put("s3Bucket", task.getS3Bucket());
         info.put("s3Prefix", task.getS3Prefix() == null ? "" : task.getS3Prefix());
         info.put("exportedFilesPath", layout.taskRoot());
@@ -223,7 +313,7 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
         info.put("kmsKeyId", task.getKmsKeyId());
         info.put("status", ExportTask.STATUS_COMPLETE);
         info.put("percentProgress", 100);
-        info.put("totalExportedDataInGB", bytes / 1_073_741_824.0);
+        info.put("totalExportedDataInGB", (double) bytes / RdsExportTaskService.GIB);
         putJson(task.getS3Bucket(), layout.exportInfoKey(), info);
 
         ObjectNode tablesInfo = mapper.createObjectNode();
@@ -262,28 +352,47 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
     }
 
     @Override
-    public void discard(String exportTaskIdentifier) {
-        containerManager.discardExport(runtimeId(exportTaskIdentifier));
-    }
-
-    private void removeContainer(RdsContainerHandle handle, String runtimeId) {
-        try {
-            containerManager.stop(handle);
-            containerManager.discardExport(runtimeId);
-        } catch (RuntimeException e) {
-            LOG.warnv(e, "Could not remove the export container {0}", runtimeId);
+    public void discard(ExportTask task) {
+        if (task.getRuntimeVolumeId() != null) {
+            containerManager.discardExport(task.getRuntimeVolumeId());
         }
     }
 
-    private static String runtimeId(String exportTaskIdentifier) {
-        return "export-" + exportTaskIdentifier;
+    /**
+     * Stops the container, then removes it and its volume whether or not the stop succeeded: a
+     * volume left behind holds a whole copy of the database.
+     */
+    private void removeContainer(RdsContainerHandle handle, String volumeId) {
+        if (handle != null) {
+            try {
+                containerManager.stop(handle);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not stop the export container {0}", volumeId);
+            }
+        }
+        try {
+            containerManager.discardExport(volumeId);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the export container and volume {0}", volumeId);
+        }
     }
 
     private void deleteQuietly(String bucket, String key) {
         try {
             s3Service.deleteObject(bucket, key);
         } catch (RuntimeException e) {
-            LOG.warnv(e, "Could not remove the staged export rows s3://{0}/{1}", bucket, key);
+            LOG.warnv(e, "Could not remove the staged export object s3://{0}/{1}", bucket, key);
+        }
+    }
+
+    private static void deleteQuietly(Path file) {
+        if (file == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not remove the temporary export file {0}", file);
         }
     }
 

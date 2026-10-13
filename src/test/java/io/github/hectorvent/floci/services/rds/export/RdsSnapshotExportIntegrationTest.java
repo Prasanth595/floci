@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.rds.export;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectVolumeResponse;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -131,7 +132,12 @@ class RdsSnapshotExportIntegrationTest {
                 assertThat(finished.sourceTypeAsString(), equalTo("SNAPSHOT"));
                 assertThat("the container the snapshot was restored into is removed",
                         dockerClient.listContainersCmd().withShowAll(true)
-                                .withNameFilter(List.of("rds-export-" + taskId)).exec(), empty());
+                                .withLabelFilter(Map.of("io.floci.resource-id", taskId)).exec(), empty());
+                assertThat("its volume is removed", dockerClient.listVolumesCmd().exec().getVolumes().stream()
+                        .map(InspectVolumeResponse::getName)
+                        .filter(name -> name.contains("rds-export-")).toList(), empty());
+                assertThat("nothing is left in the staging bucket",
+                        s3Service.listObjects("floci-rds-export-staging", "rds-export/", null, 1000), empty());
 
                 List<String> keys = s3Service.listObjects(bucket, "exports/rds/" + taskId + "/", null, 1000)
                         .stream().map(S3Object::getKey).toList();

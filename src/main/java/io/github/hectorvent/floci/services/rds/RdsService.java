@@ -2227,13 +2227,15 @@ public class RdsService implements Resettable, ResourceProvider {
         boolean ours = effectiveRegion.equals(arn.region()) && accountId.equals(arn.accountId());
         String snapshotId = resource.substring(resource.indexOf(':') + 1);
         if (clusterSnapshot) {
-            DbClusterSnapshot snapshot = ours ? findClusterSnapshotForScope(accountId, effectiveRegion, snapshotId) : null;
-            if (snapshot == null) {
+            if (!ours) {
                 throw new AwsException("DBClusterSnapshotNotFoundFault",
                         "DBClusterSnapshot " + snapshotId + " not found.", 404);
             }
+            DbClusterSnapshot snapshot = requireClusterSnapshot(accountId, effectiveRegion, snapshotId);
             requireExportable(snapshot.getStatus(), snapshot.getEngine(), sourceArn);
-            String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, snapshotId)).orElse("");
+            String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, snapshotId))
+                    .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
+                            "DB cluster snapshot data for " + snapshotId + " not found.", 404));
             return new SnapshotExportSource(snapshot.getDbClusterSnapshotArn(),
                     imageForEngine(snapshot.getEngine(), snapshot.getEngineVersion()),
                     snapshot.getMasterUsername(), snapshot.getMasterPassword(),
@@ -2244,7 +2246,9 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404);
         }
         requireExportable(snapshot.getStatus(), snapshot.getEngine(), sourceArn);
-        String sqlDump = getSnapshotDataForScope(accountId, effectiveRegion, snapshotId).orElse("");
+        String sqlDump = getSnapshotDataForScope(accountId, effectiveRegion, snapshotId)
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
+                        "DBSnapshot data for " + snapshotId + " not found.", 404));
         return new SnapshotExportSource(snapshot.getDbSnapshotArn(),
                 imageForEngine(snapshot.getEngine(), snapshot.getEngineVersion()),
                 snapshot.getMasterUsername(), snapshot.getMasterPassword(),
@@ -2252,7 +2256,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private static void requireExportable(String status, DatabaseEngine engine, String sourceArn) {
-        if (!"available".equalsIgnoreCase(status)) {
+        if (!"available".equals(status)) {
             throw new AwsException("InvalidExportSourceState",
                     "The snapshot " + sourceArn + " is not available for export.", 400);
         }

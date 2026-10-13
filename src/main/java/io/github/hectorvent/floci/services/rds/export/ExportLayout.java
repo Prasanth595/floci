@@ -31,10 +31,6 @@ final class ExportLayout {
                 + "/1/part-00000-" + UUID.randomUUID() + ".gz.parquet";
     }
 
-    String stagingKey() {
-        return taskRoot + "staging-" + UUID.randomUUID() + ".ndjson";
-    }
-
     String exportInfoKey() {
         return taskRoot + "export_info_" + taskId + ".json";
     }

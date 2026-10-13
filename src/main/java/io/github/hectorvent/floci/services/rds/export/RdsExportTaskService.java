@@ -12,7 +12,9 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.model.ExportTask;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -23,6 +25,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
@@ -46,7 +49,8 @@ public class RdsExportTaskService implements Resettable {
 
     static final String RESTART_FAILURE_CAUSE = "The emulator restarted before the export finished";
     static final long RESET_DRAIN_TIMEOUT_MILLIS = 5_000L;
-    private static final long GIB = 1_073_741_824L;
+    private static final long RESET_ADMISSION_WAIT_MILLIS = 30_000L;
+    static final long GIB = 1_073_741_824L;
     private static final String KEY_PREFIX = "export-task::";
 
     // Letters, digits and single hyphens, starting with a letter and not ending with a hyphen.
@@ -63,8 +67,10 @@ public class RdsExportTaskService implements Resettable {
     private final Executor workers;
     private final Object lock = new Object();
     // Reset support, following SesExportJobService: beforeReset bumps the generation so a running
-    // worker stops writing, then waits for the workers already running, for a bounded time.
+    // worker stops writing, then waits for the workers already running, for a bounded time. A
+    // StartExportTask arriving meanwhile waits for afterReset rather than being wiped by it.
     private final AtomicInteger generation = new AtomicInteger();
+    private boolean resetting;
     private final Object workerMonitor = new Object();
     private int activeWorkers;
 
@@ -124,8 +130,12 @@ public class RdsExportTaskService implements Resettable {
         task.setStatus(ExportTask.STATUS_STARTING);
         task.setRegion(effectiveRegion);
         task.setAccountId(accountId);
+        task.setRuntimeArn(regionResolver.buildArn("rds", effectiveRegion, accountId,
+                "export-task:" + exportTaskIdentifier));
+        task.setRuntimeVolumeId("export-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
 
         synchronized (lock) {
+            awaitResetFinished();
             if (tasks.get(key(effectiveRegion, exportTaskIdentifier)).isPresent()) {
                 throw new AwsException("ExportTaskAlreadyExists",
                         "The export task with the ID " + exportTaskIdentifier + " already exists.", 400);
@@ -170,6 +180,28 @@ public class RdsExportTaskService implements Resettable {
         }
     }
 
+    // Holds lock. A start arriving while a reset drains would capture the already-bumped generation,
+    // so its task would be wiped by clear() after it was admitted. It waits for afterReset.
+    private void awaitResetFinished() {
+        long deadline = System.currentTimeMillis() + RESET_ADMISSION_WAIT_MILLIS;
+        while (resetting) {
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0) {
+                throw resettingNow();
+            }
+            try {
+                lock.wait(remaining);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw resettingNow();
+            }
+        }
+    }
+
+    private static AwsException resettingNow() {
+        return new AwsException("Throttling", "Export tasks are not accepted while the emulator is resetting.", 429);
+    }
+
     private void run(String region, String taskId, SnapshotExportSource source, int startedIn) {
         synchronized (workerMonitor) {
             activeWorkers++;
@@ -186,11 +218,17 @@ public class RdsExportTaskService implements Resettable {
 
     private void runTask(String region, String taskId, SnapshotExportSource source, int startedIn) {
         Optional<ExportTask> current = tasks.get(key(region, taskId));
-        if (current.isEmpty() || current.get().isTerminal()) {
+        if (current.isEmpty() || current.get().isTerminal() || generation.get() != startedIn) {
+            return;
+        }
+        if (ExportTask.STATUS_CANCELING.equals(current.get().getStatus())) {
+            // Canceled before its worker started: nothing to restore, nothing to stop.
+            finish(region, taskId, ExportTask.STATUS_CANCELED, null, null);
             return;
         }
         if (mock) {
-            finish(region, taskId, ExportTask.STATUS_COMPLETE, null, new SnapshotExporter.Outcome(0, List.of()));
+            finish(region, taskId, ExportTask.STATUS_COMPLETE, null,
+                    new SnapshotExporter.Outcome(0, List.of(), Instant.now(clock)));
             return;
         }
         SnapshotExporter.Progress progress = new SnapshotExporter.Progress() {
@@ -251,7 +289,8 @@ public class RdsExportTaskService implements Resettable {
                     task.setWarningMessage(String.join(" ", outcome.warnings()));
                 }
             }
-            task.setTaskEndTime(Instant.now(clock));
+            task.setTaskEndTime(outcome != null && outcome.finishedAt() != null
+                    ? outcome.finishedAt() : Instant.now(clock));
             tasks.put(key(region, taskId), task);
         }
     }
@@ -318,7 +357,7 @@ public class RdsExportTaskService implements Resettable {
                     task.getExportTaskIdentifier());
             if (!mock) {
                 try {
-                    exporter.discard(task.getExportTaskIdentifier());
+                    exporter.discard(task);
                 } catch (RuntimeException e) {
                     LOG.warnv(e, "Could not remove what RDS export task {0} left behind",
                             task.getExportTaskIdentifier());
@@ -327,9 +366,21 @@ public class RdsExportTaskService implements Resettable {
         }
     }
 
+    /**
+     * Forces the bean, which is otherwise created on first use, at startup, so a task a restart
+     * interrupted is failed and its restore container and volume removed straight away rather than
+     * when a client first calls an export action.
+     */
+    void onStart(@Observes StartupEvent ignored) {
+        LOG.debugv("RDS export task service ready");
+    }
+
     @Override
     public void beforeReset() {
-        generation.incrementAndGet();
+        synchronized (lock) {
+            resetting = true;
+            generation.incrementAndGet();
+        }
         boolean interrupted = false;
         long deadline = System.currentTimeMillis() + RESET_DRAIN_TIMEOUT_MILLIS;
         synchronized (workerMonitor) {
@@ -350,6 +401,14 @@ public class RdsExportTaskService implements Resettable {
         }
         if (interrupted) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    @Override
+    public void afterReset() {
+        synchronized (lock) {
+            resetting = false;
+            lock.notifyAll();
         }
     }
 

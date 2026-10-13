@@ -226,6 +226,7 @@ they belong to, as the model requires. An omitted `Enabled` activates the subscr
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `true` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; set `false` to accept such tokens. MySQL and MariaDB always refuse them |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
+| `FLOCI_SERVICES_RDS_EXPORT_STAGING_BUCKET` | `floci-rds-export-staging` | S3 bucket where snapshot exports stage rows and Parquet; see [Exporting snapshots to Amazon S3](#exporting-snapshots-to-amazon-s3) |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Docker image for MySQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Docker image for MariaDB instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_SQL_SERVER_IMAGE` | `mcr.microsoft.com/mssql/server:2022-latest` | Docker image for SQL Server instances |
@@ -623,12 +624,19 @@ A task reports `STARTING` while the snapshot is restored, `IN_PROGRESS` with a `
 while its tables are written, then `COMPLETE` or `FAILED` with a `FailureCause`. `CancelExportTask`
 moves a running task to `CANCELING`; it stops before its next table and becomes `CANCELED`, and the
 data it already wrote stays in the bucket, as on RDS. A table the export skips is named in
-`WarningMessage`. A task still running when Floci stops is `FAILED` when it starts again, and the
-container and volume it was using are removed.
+`WarningMessage`. A task still running when Floci stops is `FAILED` as soon as Floci starts again,
+and the container and volume it was using are removed then. A `StartExportTask` that arrives while
+Floci is resetting waits for the reset to finish, and is refused with `Throttling` if it lasts more
+than 30 seconds.
 
 The snapshot is restored into a PostgreSQL container started from the snapshot's image, with a
-Docker volume of its own in every storage mode, and both are removed once the export ends, and each table is written by the floci-duck sidecar, the one Athena uses, so
-both need Docker. In [mock mode](#mock-mode-ci-tests) a task completes without writing anything.
+Docker volume of its own in every storage mode, and both are removed once the export ends, whether it
+completed, failed or was canceled. Each table's rows are streamed out of the restored database
+(for up to an hour per table) and staged, with the Parquet written from them, in the bucket named by
+`FLOCI_SERVICES_RDS_EXPORT_STAGING_BUCKET` (`floci-rds-export-staging`, created on first use); only
+the finished Parquet object is written to the export's bucket, so a failed table leaves nothing
+there. The Parquet is written by the floci-duck sidecar, the one Athena uses, so an export needs
+Docker for both. In [mock mode](#mock-mode-ci-tests) a task completes without writing anything.
 
 Each table goes under `<S3Prefix>/<ExportTaskIdentifier>/<database>/<schema>.<table>/1/` as
 `part-00000-<uuid>.gz.parquet`, compressed with GZIP. Floci reads a table in one batch and one
