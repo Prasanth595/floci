@@ -207,7 +207,8 @@ class AutoScalingServiceTest {
         assertEquals("m7g.large", launchConfiguration.getInstanceType());
         assertEquals("source-key", launchConfiguration.getKeyName());
         assertEquals(List.of("sg-source"), launchConfiguration.getSecurityGroups());
-        assertEquals("source-user-data", launchConfiguration.getUserData());
+        assertEquals("c291cmNlLXVzZXItZGF0YQ==", launchConfiguration.getUserData());
+        assertEquals(Boolean.TRUE, launchConfiguration.getUserDataBase64Encoded());
         assertEquals("arn:aws:iam::000000000000:instance-profile/source",
                 launchConfiguration.getIamInstanceProfile());
         assertEquals(launchConfiguration,

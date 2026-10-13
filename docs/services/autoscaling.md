@@ -144,6 +144,13 @@ associated activities.
 
 ## Launch Source Compatibility
 
+New launch configurations preserve their original base64 user data when launching instances, including
+binary and gzip payloads. Configurations derived from an instance retain its original encoding when
+available. Existing stored configurations retain their previous interpretation because older records
+mixed encoded input and decoded text; recreate a configuration to use byte-preserving launches.
+When deriving a configuration from an instance, omitted and blank user-data overrides continue to
+inherit the source instance's data.
+
 Auto Scaling groups preserve either a launch configuration, a top-level launch template, or a `MixedInstancesPolicy`. These launch sources are mutually exclusive in create/update requests. When a mixed instances policy is supplied, Floci stores and returns:
 
 - `LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId`

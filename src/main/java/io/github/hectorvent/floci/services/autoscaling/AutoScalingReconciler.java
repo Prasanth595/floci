@@ -25,7 +25,9 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -365,7 +367,9 @@ public class AutoScalingReconciler {
                     propagatedInstanceTags(asg, launchSource),
                     launchSource.userData(),
                     launchSource.iamInstanceProfile(),
-                    launchSource.associatePublicIpAddress());
+                    launchSource.associatePublicIpAddress(), null, 0, null, null, null,
+                    launchSource.encodedUserData() != null ? launchSource.encodedUserData()
+                            : encodeLegacyUserData(launchSource.userData()));
 
             List<String> launchedInstanceIds = new ArrayList<>();
             for (Instance ec2Inst : reservation.getInstances()) {
@@ -566,7 +570,9 @@ public class AutoScalingReconciler {
                     lc.getKeyName(),
                     lc.getSecurityGroups(),
                     List.of(),
-                    lc.getUserData(),
+                    Boolean.TRUE.equals(lc.getUserDataBase64Encoded())
+                            ? Ec2UserDataDecoder.decode(lc.getUserData()) : lc.getUserData(),
+                    Boolean.TRUE.equals(lc.getUserDataBase64Encoded()) ? lc.getUserData() : null,
                     lc.getIamInstanceProfile(),
                     null,
                     null,
@@ -597,6 +603,7 @@ public class AutoScalingReconciler {
                     version.getData().getInstanceTags(),
                     Ec2UserDataDecoder.decodeIfMissing(
                             version.getData().getUserData(), version.getData().getEncodedUserData()),
+                    null,
                     ec2Service.iamInstanceProfileArn(version.getData()),
                     asg.getLaunchTemplateId(),
                     asg.getLaunchTemplateName(),
@@ -628,6 +635,7 @@ public class AutoScalingReconciler {
                         version.getData().getInstanceTags(),
                         Ec2UserDataDecoder.decodeIfMissing(
                                 version.getData().getUserData(), version.getData().getEncodedUserData()),
+                        null,
                         ec2Service.iamInstanceProfileArn(version.getData()),
                         specification.getLaunchTemplateId() == null
                                 ? mixedLaunchTemplate.getLaunchTemplateId()
@@ -639,6 +647,10 @@ public class AutoScalingReconciler {
         }
 
         return null;
+    }
+
+    private static String encodeLegacyUserData(String userData) {
+        return userData == null ? null : Base64.getEncoder().encodeToString(userData.getBytes(StandardCharsets.UTF_8));
     }
 
     private LaunchConfiguration resolveLaunchConfiguration(AutoScalingGroup asg) {
@@ -736,6 +748,7 @@ public class AutoScalingReconciler {
             List<String> securityGroupIds,
             List<io.github.hectorvent.floci.services.ec2.model.Tag> instanceTags,
             String userData,
+            String encodedUserData,
             String iamInstanceProfile,
             String launchTemplateId,
             String launchTemplateName,
