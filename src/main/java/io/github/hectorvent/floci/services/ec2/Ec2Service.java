@@ -7560,7 +7560,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return resolveIamInstanceProfileArn(name, arn);
     }
 
-    private static void validateLaunchProfileSelectors(String name, String arn) {
+    public static void validateLaunchProfileSelectors(String name, String arn) {
         if (isSet(name) && isSet(arn)) {
             throw new AwsException("InvalidParameterCombination",
                     "The parameter iamInstanceProfile.name may not be used with iamInstanceProfile.arn.", 400);
@@ -9462,6 +9462,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (addr.getAssociationId() != null) {
             disassociateAddress(region, addr.getAssociationId());
         }
+        // "If you associate an Elastic IP address with an instance that has an existing Elastic IP
+        // address, the existing address is disassociated from the instance" (AssociateAddress).
+        if (instanceId != null) {
+            for (Address existing : addresses.scan(k -> k.startsWith(region + "::"))) {
+                if (instanceId.equals(existing.getInstanceId()) && existing.getAssociationId() != null
+                        && !allocationId.equals(existing.getAllocationId())) {
+                    disassociateAddress(region, existing.getAssociationId());
+                }
+            }
+        }
         addr.setInstanceId(instanceId);
         addr.setAssociationId("eipassoc-" + randomHex(17));
         pointAddressAtInstance(addr, region, instanceId);
@@ -9509,10 +9519,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             inst.setPublicDnsName("127.0.0.1".equals(reachable) ? "localhost" : reachable);
             instances.put(key(region, instanceId), inst);
         } else if (config.services().ec2().mock()) {
-            // With no container to reach, the allocated address replaces any automatic one.
-            inst.setPublicIpAddress(addr.getPublicIp());
-            inst.setPublicDnsName(addr.getPublicIp());
-            instances.put(key(region, instanceId), inst);
+            // With no container to reach, the allocated address replaces any automatic one. A
+            // terminated instance keeps none, and an unchanged address is not written again.
+            boolean changed = false;
+            synchronized (inst) {
+                String state = inst.getState() == null ? null : inst.getState().getName();
+                if (!"terminated".equals(state) && !"shutting-down".equals(state)
+                        && !Objects.equals(addr.getPublicIp(), inst.getPublicIpAddress())) {
+                    inst.setPublicIpAddress(addr.getPublicIp());
+                    inst.setPublicDnsName(addr.getPublicIp());
+                    changed = true;
+                }
+            }
+            if (changed) {
+                instances.put(key(region, instanceId), inst);
+            }
         }
         addr.setPrivateIpAddress(inst.getPrivateIpAddress());
         if (inst.getNetworkInterfaces() != null && !inst.getNetworkInterfaces().isEmpty()) {

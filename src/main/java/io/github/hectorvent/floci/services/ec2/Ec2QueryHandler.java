@@ -1109,12 +1109,15 @@ public class Ec2QueryHandler {
         for (Tag tag : fleetInstanceTags) {
             tags.put(tag.getKey(), tag);
         }
-        String templateSubnetId = template.getNetworkInterfaces().stream()
-                .map(networkInterface -> networkInterface.getSubnetId())
-                .filter(Objects::nonNull)
-                .filter(value -> !value.isBlank())
-                .findFirst()
-                .orElse(null);
+        // The primary interface's subnet, as RunInstances reads it, before any other interface's.
+        LaunchTemplateData.NetworkInterface primary = template.primaryNetworkInterface();
+        String templateSubnetId = primary != null && isSet(primary.getSubnetId()) ? primary.getSubnetId()
+                : template.getNetworkInterfaces().stream()
+                        .map(networkInterface -> networkInterface.getSubnetId())
+                        .filter(Objects::nonNull)
+                        .filter(value -> !value.isBlank())
+                        .findFirst()
+                        .orElse(null);
         String subnetId = firstNonBlank(overrideSubnetId, templateSubnetId);
         String templateAvailabilityZone = template.getPlacement() != null
                 ? template.getPlacement().getAvailabilityZone() : null;

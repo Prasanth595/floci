@@ -627,6 +627,10 @@ fixed socket/core/vCPU shape rather than one derived from the instance family.
 In a nondefault VPC it returns `InvalidIPAddress.InUse` without changing the association;
 call `DisassociateAddress` first, as specified by the
 [EC2 API reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ReleaseAddress.html).
+Associating an Elastic IP with an instance that already has one disassociates the earlier
+address, which stays allocated, as the
+[AssociateAddress reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_AssociateAddress.html)
+describes.
 
 Deleting an interface, including deletion on instance termination, disassociates its
 Elastic IP without releasing the allocation. A retained interface keeps its association
@@ -772,12 +776,12 @@ prefix lists, `EnaSrdSpecification`, `PrimaryIpv6` and `EnaQueueCount` are likew
 
 Launches and association changes resolve both names and ARNs against IAM in the
 caller's account. Unknown profiles and foreign-account ARNs fail with
-`InvalidParameterValue` before allocation or association changes. A launch that names
-both a profile name and an ARN, directly or through its launch template, fails with
-`InvalidParameterCombination`; association replacement uses the ARN when both are
-provided. Launch templates reject malformed profile ARNs at creation with
-`InvalidIamInstanceProfileArn.Malformed` but, as on AWS, store a name and ARN pair as
-given, so the pair fails when an instance launches from the template.
+`InvalidParameterValue` before allocation or association changes. A RunInstances or
+CreateFleet launch that names both a profile name and an ARN, directly or through its
+launch template, fails with `InvalidParameterCombination`; association replacement uses
+the ARN when both are provided. Launch templates reject malformed profile ARNs at
+creation with `InvalidIamInstanceProfileArn.Malformed` but, as on AWS, store a name and
+ARN pair as given, so the pair only fails once something launches from the template.
 EC2 stores and returns IAM's profile ID, including for launch-template, EC2 Fleet and
 Auto Scaling instances. Persisted instances from older versions omit the unknown ID until the
 profile is reassociated; looking up the ARN could misidentify a deleted and recreated

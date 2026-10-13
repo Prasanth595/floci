@@ -12,6 +12,7 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.startsWith;
 
 @QuarkusTest
 class AutoScalingLaunchConfigurationIdentityIntegrationTest {
@@ -143,6 +144,36 @@ class AutoScalingLaunchConfigurationIdentityIntegrationTest {
                     .body(prefix + ".LaunchConfigurationName", equalTo(name))
                     .body(prefix + ".MetadataOptions.size()", equalTo(0));
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void groupRefusesALaunchTemplateNamingBothProfileSelectors(boolean mixedInstances) {
+        String name = "pair-template-" + UUID.randomUUID();
+        String arn = given().header("Authorization", AUTH.replace("/autoscaling/", "/iam/"))
+                .formParam("Action", "CreateInstanceProfile").formParam("InstanceProfileName", name)
+                .post("/").then().statusCode(200).extract().path(
+                        "CreateInstanceProfileResponse.CreateInstanceProfileResult.InstanceProfile.Arn");
+        String template = given().header("Authorization", AUTH.replace("/autoscaling/", "/ec2/"))
+                .formParam("Action", "CreateLaunchTemplate").formParam("LaunchTemplateName", name)
+                .formParam("LaunchTemplateData.ImageId", "ami-amazonlinux2023")
+                .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+                .formParam("LaunchTemplateData.IamInstanceProfile.Name", name)
+                .formParam("LaunchTemplateData.IamInstanceProfile.Arn", arn)
+                .post("/").then().statusCode(200)
+                .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+        String prefix = mixedInstances ? "MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification." : "LaunchTemplate.";
+        given().header("Authorization", AUTH).formParam("Action", "CreateAutoScalingGroup")
+                .formParam("AutoScalingGroupName", name).formParam(prefix + "LaunchTemplateId", template)
+                .formParam(prefix + "Version", "1")
+                .formParam("MinSize", "0").formParam("MaxSize", "1").formParam("DesiredCapacity", "1")
+                .formParam("AvailabilityZones.member.1", "us-east-1a").post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", startsWith("You must use a valid fully-formed launch template."));
+        given().header("Authorization", AUTH).formParam("Action", "DescribeAutoScalingGroups")
+                .formParam("AutoScalingGroupNames.member.1", name).post("/").then().statusCode(200)
+                .body("DescribeAutoScalingGroupsResponse.DescribeAutoScalingGroupsResult"
+                        + ".AutoScalingGroups.member.size()", equalTo(0));
     }
 
     @Test

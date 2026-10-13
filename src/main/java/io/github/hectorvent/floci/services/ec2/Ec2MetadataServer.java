@@ -311,7 +311,8 @@ public class Ec2MetadataServer {
         if (resolved.isPresent()) {
             profileArn = resolved.get().getArn();
             profileId = resolved.get().getInstanceProfileId();
-        } else if (synthesizedProfiles.contains(inst) && inst.getIamInstanceProfileArn() != null) {
+        } else if (synthesizedProfiles.contains(inst) && inst.getIamInstanceProfileArn() != null
+                && !credentials.holdsProfile(inst)) {
             profileArn = inst.getIamInstanceProfileArn();
             profileId = inst.getIamInstanceProfileId();
         } else {

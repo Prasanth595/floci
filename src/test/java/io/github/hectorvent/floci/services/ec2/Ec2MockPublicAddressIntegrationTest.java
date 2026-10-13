@@ -231,11 +231,69 @@ class Ec2MockPublicAddressIntegrationTest {
 
         request("AssociateAddress", owner).formParam("AllocationId", allocation)
                 .formParam("InstanceId", instance).post("/").then().statusCode(200);
+        // A second address associated with the same instance replaces the first, which stays
+        // allocated, so a later DescribeAddresses cannot flip the instance back to it.
+        ValidatableResponse second = request("AllocateAddress", owner).formParam("Domain", "vpc")
+                .post("/").then().statusCode(200);
+        String secondAllocation = second.extract().path("AllocateAddressResponse.allocationId");
+        String secondElastic = second.extract().path("AllocateAddressResponse.publicIp");
+        request("AssociateAddress", owner).formParam("AllocationId", secondAllocation)
+                .formParam("InstanceId", instance).post("/").then().statusCode(200);
+        request("DescribeAddresses", owner).formParam("AllocationId.1", allocation).post("/").then()
+                .statusCode(200)
+                .body("DescribeAddressesResponse.addressesSet.item.associationId.size()", equalTo(0));
+        assertEquals(secondElastic, publicIp(owner, instance));
+
         request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
         assertEquals("", publicIp(owner, instance));
+        // Whatever the association answers, a terminated instance takes no public address.
+        String lateAssociation = request("AssociateAddress", owner).formParam("AllocationId", allocation)
+                .formParam("InstanceId", instance).post("/").then()
+                .extract().path("AssociateAddressResponse.associationId");
+        assertEquals("", publicIp(owner, instance));
+        if (lateAssociation != null) {
+            request("DisassociateAddress", owner).formParam("AssociationId", lateAssociation).post("/").then()
+                    .statusCode(200);
+        }
         request("ReleaseAddress", owner).formParam("AllocationId", allocation).post("/").then().statusCode(200);
+        request("ReleaseAddress", owner).formParam("AllocationId", secondAllocation).post("/").then().statusCode(200);
         request("DeleteSubnet", owner).formParam("SubnetId", subnet).post("/").then().statusCode(200);
         request("DeleteVpc", owner).formParam("VpcId", vpc).post("/").then().statusCode(200);
+    }
+
+    @Test
+    void fleetLaunchesIntoThePrimaryInterfaceSubnetWhateverTheInterfaceOrder() {
+        String owner = Long.toString(ACCOUNTS.incrementAndGet());
+        String vpc = request("CreateVpc", owner).formParam("CidrBlock", "10.88.0.0/16")
+                .post("/").then().statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
+        String secondary = request("CreateSubnet", owner).formParam("VpcId", vpc)
+                .formParam("CidrBlock", "10.88.1.0/24").formParam("AvailabilityZone", REGION + "a")
+                .post("/").then().statusCode(200).extract().path("CreateSubnetResponse.subnet.subnetId");
+        String primary = request("CreateSubnet", owner).formParam("VpcId", vpc)
+                .formParam("CidrBlock", "10.88.2.0/24").formParam("AvailabilityZone", REGION + "a")
+                .post("/").then().statusCode(200).extract().path("CreateSubnetResponse.subnet.subnetId");
+        String template = request("CreateLaunchTemplate", owner).formParam("LaunchTemplateName", "fleet-primary")
+                .formParam("LaunchTemplateData.ImageId", "ami-amazonlinux2023")
+                .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+                .formParam("LaunchTemplateData.NetworkInterface.1.DeviceIndex", 1)
+                .formParam("LaunchTemplateData.NetworkInterface.1.SubnetId", secondary)
+                .formParam("LaunchTemplateData.NetworkInterface.2.DeviceIndex", 0)
+                .formParam("LaunchTemplateData.NetworkInterface.2.SubnetId", primary)
+                .formParam("LaunchTemplateData.NetworkInterface.2.AssociatePublicIpAddress", true)
+                .post("/").then().statusCode(200)
+                .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+        String instance = request("CreateFleet", owner).formParam("Type", "instant")
+                .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", template)
+                .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
+                .formParam("TargetCapacitySpecification.TotalTargetCapacity", 1)
+                .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
+                .post("/").then().statusCode(200)
+                .extract().path("CreateFleetResponse.fleetInstanceSet.item.instanceIds.item");
+
+        describe(owner, instance).body(INSTANCE + "subnetId", equalTo(primary));
+        assertTrue(publicIp(owner, instance).matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"));
+        request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        request("DeleteLaunchTemplate", owner).formParam("LaunchTemplateId", template).post("/").then().statusCode(200);
     }
 
     private String publicIp(String owner, String instance) {

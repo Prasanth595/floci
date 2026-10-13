@@ -141,7 +141,8 @@ class Ec2MetadataProfileIntegrationTest {
         node.setIamInstanceProfileId("AIPA0FEDCBA9876543210");
         String endpoint = "http://127.0.0.1:" + port;
         boolean roleCreated = false;
-        boolean profileAttached = false;
+        boolean profileCreated = false;
+        boolean roleAttached = false;
         try (HttpClient client = HttpClient.newHttpClient()) {
             server.start().get(10, TimeUnit.SECONDS);
             server.registerContainer("127.0.0.1", node.getInstanceId(), node);
@@ -166,20 +167,25 @@ class Ec2MetadataProfileIntegrationTest {
                     .formParam("InstanceProfileName", profileName).post("/").then().statusCode(200)
                     .extract().path("CreateInstanceProfileResponse.CreateInstanceProfileResult"
                             + ".InstanceProfile.InstanceProfileId");
+            profileCreated = true;
+            // Once IAM holds the profile its answer wins: no role yet is the empty-profile 404.
+            assertEquals(404, getInfo(client, endpoint, token(client, endpoint)).statusCode());
             iamRequest(authorization, "AddRoleToInstanceProfile")
                     .formParam("InstanceProfileName", profileName).formParam("RoleName", roleName)
                     .post("/").then().statusCode(200);
-            profileAttached = true;
+            roleAttached = true;
             HttpResponse<String> backed = getInfo(client, endpoint, token(client, endpoint));
             assertEquals(200, backed.statusCode());
             assertEquals(iamProfileId, new JsonObject(backed.body()).getString("InstanceProfileId"));
         } finally {
             server.stop();
             vertx.close().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
-            if (profileAttached) {
+            if (roleAttached) {
                 iamRequest(authorization, "RemoveRoleFromInstanceProfile")
                         .formParam("InstanceProfileName", profileName).formParam("RoleName", roleName)
                         .post("/").then().statusCode(200);
+            }
+            if (profileCreated) {
                 iamRequest(authorization, "DeleteInstanceProfile")
                         .formParam("InstanceProfileName", profileName).post("/").then().statusCode(200);
             }
