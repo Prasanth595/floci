@@ -98,6 +98,30 @@ class Ec2VolumeBlockDeviceManagerTest {
     }
 
     @Test
+    void stopManagedContainersFailsTheReleaseScriptWhenALoopDeviceWillNotDetach() {
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID, 1,
+                "could not detach /dev/loop3 from /volumes/vol-1.raw", "");
+
+        assertDoesNotThrow(() -> manager.stopManagedContainers());
+
+        String script = commands.getFirst().get(2);
+        assertTrue(script.contains("|| { echo \"could not detach $loop from $f\"; failed=1; }"));
+        assertTrue(script.endsWith("exit $failed"));
+        verify(lifecycleManager).stopAndRemove(HELPER_ID, null, 0);
+    }
+
+    @Test
+    void clearDeletesTheBackingFilesAndRemovesTheHelper() {
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID, 0, "", "");
+
+        manager.clear();
+
+        assertEquals(1, commands.size());
+        assertTrue(commands.getFirst().get(2).contains("rm -f \"$f\""));
+        verify(lifecycleManager).stopAndRemove(HELPER_ID, null, 0);
+    }
+
+    @Test
     void stopManagedContainersDoesNothingWhenBlockDevicesAreDisabled() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ec2().volumeBlockDevices()).thenReturn(false);

@@ -487,13 +487,16 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
         if (Boolean.TRUE.equals(helper.getState().getRunning())) {
             // One pass per file: a loop device still held open by an instance container is
             // detached lazily and stays listed, so retrying it until it disappears would spin.
+            // Every loop is tried, and one that would not detach fails the script so it is reported.
             String script = SHELL_LOOP_FINDER
+                    + "failed=0\n"
                     + "for f in /volumes/*.raw; do\n"
                     + "  [ -f \"$f\" ] || continue\n"
                     + "  for loop in $(find_loops \"$f\"); do\n"
-                    + "    losetup -d \"$loop\" 2>/dev/null || true\n"
+                    + "    losetup -d \"$loop\" 2>/dev/null || { echo \"could not detach $loop from $f\"; failed=1; }\n"
                     + "  done\n"
-                    + "done";
+                    + "done\n"
+                    + "exit $failed";
             ContainerExec.Result released = execInContainer(helper.getId(),
                     new String[]{"sh", "-c", script}, DEFAULT_TIMEOUT_SECONDS);
             if (released.exitCode() != 0) {
@@ -533,6 +536,9 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
                     + "  rm -f \"$f\"\n"
                     + "done";
             execInContainer(helperId, new String[]{"sh", "-c", script}, DEFAULT_TIMEOUT_SECONDS);
+            // The helper was only needed to delete the files, so a reset ends as a shutdown does:
+            // without one.
+            lifecycleManager.stopAndRemove(helperId, null, 0);
         }
         activeLoopDevices.clear();
     }

@@ -501,6 +501,24 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
     }
 
     @Test
+    void clearDeletesBackingFilesAndLeavesNoHelper() {
+        Volume volume = ec2Service.createVolume("us-east-1", "us-east-1a", "gp3", 1, false, 3000, 125, null, null);
+        volumesToClean.add(volume.getVolumeId());
+        String helperName = ContainerStorageHelper.resourceName(config, "ec2", null, "volume-helper");
+
+        volumeBlockDeviceManager.stopManagedContainers();
+        volumeBlockDeviceManager.clear();
+
+        assertTrue(lifecycleManager.findByName(helperName).isEmpty(),
+                "A reset should end without a helper container");
+        // The next volume operation recreates the helper, which shows the old file is gone.
+        Volume next = ec2Service.createVolume("us-east-1", "us-east-1a", "gp3", 1, false, 3000, 125, null, null);
+        volumesToClean.add(next.getVolumeId());
+        ContainerExec.Result wiped = execIn(helperName, "test -e /volumes/" + volume.getVolumeId() + ".raw");
+        assertEquals(1, wiped.exitCode(), "The reset should have deleted the backing file");
+    }
+
+    @Test
     void modifyVolumeUnattachedGrowsBackingFile() {
         Volume volume = ec2Service.createVolume("us-east-1", "us-east-1a", "gp3", 1, false, 3000, 125, null, null);
         volumesToClean.add(volume.getVolumeId());
