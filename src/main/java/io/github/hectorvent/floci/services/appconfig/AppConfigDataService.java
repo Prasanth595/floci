@@ -130,7 +130,9 @@ public class AppConfigDataService {
         byte[] content = new byte[0];
         String contentType = "application/octet-stream";
         if (version != null) {
-            ResolvedContent resolved = resolveContent(session, version, accept);
+            ConfigurationProfile profile = appConfigService.getConfigurationProfile(
+                    session.getApplicationId(), session.getConfigurationProfileId());
+            ResolvedContent resolved = resolveContent(profile, version, accept);
             content = resolved.bytes();
             contentType = resolved.contentType();
         }
@@ -140,10 +142,54 @@ public class AppConfigDataService {
                 pollInterval);
     }
 
-    private ResolvedContent resolveContent(ConfigurationSession session, HostedConfigurationVersion version,
+    public LegacyConfiguration getConfiguration(String application, String environment, String configuration,
+                                                 String clientId, String clientVersion, String accept) {
+        for (String identifier : new String[]{application, environment, configuration, clientId}) {
+            requireIdentifier(identifier, "Configuration identifier or client_id");
+            if (identifier.length() > 64) {
+                throw new AwsException("BadRequestException", "Identifiers must not exceed 64 characters", 400);
+            }
+        }
+        if (clientVersion != null && (clientVersion.isEmpty() || clientVersion.length() > 1024)) {
+            throw new AwsException("BadRequestException", "Invalid client_configuration_version", 400);
+        }
+        Application app;
+        Environment env;
+        ConfigurationProfile profile;
+        try {
+            app = appConfigService.resolveApplication(application);
+            env = appConfigService.resolveEnvironment(app.getId(), environment);
+            profile = appConfigService.resolveConfigurationProfile(app.getId(), configuration);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+        String active = appConfigService.getActiveVersion(env.getId(), profile.getId());
+        if (active == null) {
+            throw new AwsException("BadRequestException", "No configuration is deployed", 400);
+        }
+        HostedConfigurationVersion version = appConfigService.getHostedConfigurationVersion(
+                app.getId(), profile.getId(), hostedVersionNumber(active));
+        if (active.equals(clientVersion)) {
+            return new LegacyConfiguration(new byte[0], version.getContentType(), active);
+        }
+        ResolvedContent content = resolveContent(profile, version, accept);
+        return new LegacyConfiguration(content.bytes(), content.contentType(), active);
+    }
+
+    /** A deployed version that is not a version number names no hosted configuration version. */
+    private static int hostedVersionNumber(String deployedVersion) {
+        try {
+            return Integer.parseInt(deployedVersion);
+        } catch (NumberFormatException e) {
+            throw new AwsException("ResourceNotFoundException", "Hosted configuration version not found", 404);
+        }
+    }
+
+    private ResolvedContent resolveContent(ConfigurationProfile profile, HostedConfigurationVersion version,
                                            String accept) {
-        ConfigurationProfile profile = appConfigService.getConfigurationProfile(
-                session.getApplicationId(), session.getConfigurationProfileId());
         if (!"AWS.AppConfig.FeatureFlags".equals(profile.getType())) {
             return new ResolvedContent(version.getContent(), version.getContentType());
         }
@@ -250,6 +296,8 @@ public class AppConfigDataService {
     }
 
     private record ResolvedContent(byte[] bytes, String contentType) {}
+
+    public record LegacyConfiguration(byte[] content, String contentType, String configurationVersion) {}
 
     public record ConfigurationData(byte[] content, String contentType, String configurationVersion,
                                     String nextPollConfigurationToken, int nextPollIntervalInSeconds) {}
