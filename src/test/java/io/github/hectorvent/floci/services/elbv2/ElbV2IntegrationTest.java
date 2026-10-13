@@ -261,7 +261,7 @@ class ElbV2IntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(17)
     void createAndSetSubnetMappingsDriveSubnetsAndVpcId() {
         // The AWS Load Balancer Controller sends SubnetMappings rather than Subnets; both actions
         // must treat the mappings' SubnetId values as the subnet list (address pinning is not modelled).
@@ -311,7 +311,7 @@ class ElbV2IntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(18)
     void createLoadBalancerRejectsBothSubnetsAndSubnetMappings() {
         given()
                 .formParam("Action", "CreateLoadBalancer")
@@ -326,6 +326,23 @@ class ElbV2IntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
                 .body("ErrorResponse.Error.Message",
                         equalTo("You can specify either subnets or subnet mappings, not both"));
+    }
+
+    @Test
+    @Order(19)
+    void createLoadBalancerRejectsMappingWithoutSubnetId() {
+        given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "mapping-without-subnet-id")
+                .formParam("SubnetMappings.member.1.AllocationId", "eipalloc-12345678")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message",
+                        equalTo("You must specify a subnet ID for each subnet mapping."));
     }
 
     // ── Target Groups ─────────────────────────────────────────────────────────

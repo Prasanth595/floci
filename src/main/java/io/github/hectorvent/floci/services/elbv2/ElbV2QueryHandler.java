@@ -1075,11 +1075,17 @@ public class ElbV2QueryHandler {
     // ── Parsing helpers ───────────────────────────────────────────────────────
 
     private List<String> memberList(MultivaluedMap<String, String> p, String prefix) {
+        return memberList(p, prefix, "");
+    }
+
+    private List<String> memberList(MultivaluedMap<String, String> p, String prefix, String suffix) {
         List<String> result = new ArrayList<>();
         int i = 1;
         while (true) {
-            String val = p.getFirst(prefix + ".member." + i);
-            if (val == null) break;
+            String val = p.getFirst(prefix + ".member." + i + suffix);
+            if (val == null) {
+                break;
+            }
             result.add(val);
             i++;
         }
@@ -1090,9 +1096,22 @@ public class ElbV2QueryHandler {
         List<String> result = new ArrayList<>();
         int i = 1;
         while (true) {
-            String val = p.getFirst("SubnetMappings.member." + i + ".SubnetId");
-            if (val == null) break;
-            result.add(val);
+            boolean memberPresent = false;
+            for (String key : p.keySet()) {
+                if (key.startsWith("SubnetMappings.member." + i + ".")) {
+                    memberPresent = true;
+                    break;
+                }
+            }
+            if (!memberPresent) {
+                break;
+            }
+            String subnetId = p.getFirst("SubnetMappings.member." + i + ".SubnetId");
+            if (subnetId == null) {
+                throw new AwsException("ValidationError",
+                        "You must specify a subnet ID for each subnet mapping.", 400);
+            }
+            result.add(subnetId);
             i++;
         }
         return result;
