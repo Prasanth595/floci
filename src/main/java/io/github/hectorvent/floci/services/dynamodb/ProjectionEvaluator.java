@@ -7,8 +7,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -65,14 +66,14 @@ final class ProjectionEvaluator {
     }
 
     static Set<String> topLevelAttributes(String projectionExpression, JsonNode exprAttrNames) {
-        HashSet<String> attributes = new HashSet<>();
+        Set<String> attributes = new LinkedHashSet<>();
         for (String rawPath : splitProjectionPaths(projectionExpression)) {
             List<PathSegment> segments = resolvePath(rawPath.trim(), exprAttrNames);
             if (!segments.isEmpty()) {
                 attributes.add(segments.getFirst().name());
             }
         }
-        return Set.copyOf(attributes);
+        return Collections.unmodifiableSet(attributes);
     }
 
     static void validateSyntax(String expression, String expressionType) {

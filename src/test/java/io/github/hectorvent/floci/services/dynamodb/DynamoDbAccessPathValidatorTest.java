@@ -336,11 +336,27 @@ class DynamoDbAccessPathValidatorTest {
                         table, gsiPath, "SPECIFIC_ATTRIBUTES", "zeta, details",
                         null, null));
         assertEquals("One or more parameter values were invalid: Global secondary index "
-                + "status-index does not project details, zeta", projectionError.getMessage());
-        assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateGsiProjection(
-                table, gsiPath, "ALL_ATTRIBUTES", null, null, null));
+                + "status-index does not project [zeta, details]", projectionError.getMessage());
+        AwsException allAttributes = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateGsiProjection(
+                        table, gsiPath, "ALL_ATTRIBUTES", null, null, null));
+        assertEquals("One or more parameter values were invalid: Select type ALL_ATTRIBUTES is not supported "
+                + "for global secondary index status-index because its projection type is not ALL",
+                allAttributes.getMessage());
         assertDoesNotThrow(() -> DynamoDbAccessPathValidator.validateGsiProjection(
                 table, lsiPath, "ALL_ATTRIBUTES", null, null, null));
+    }
+
+    @Test
+    void listsTheUnprojectedGsiAttributesOnceInRequestOrder() {
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#q", "qq");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateGsiProjection(
+                        table, gsiPath, null, "zz.a, #q, zz.b, aa[0], pk", null, names));
+        assertEquals("One or more parameter values were invalid: Global secondary index "
+                + "status-index does not project [zz, qq, aa]", error.getMessage());
     }
 
     @Test

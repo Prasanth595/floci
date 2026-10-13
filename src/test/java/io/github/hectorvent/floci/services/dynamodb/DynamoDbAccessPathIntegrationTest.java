@@ -223,17 +223,34 @@ class DynamoDbAccessPathIntegrationTest {
                 """.formatted(TABLE);
         request("DynamoDB_20120810.Query", query)
             .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("One or more parameter values were invalid: "
+                    + "Global secondary index status-index does not project [details]"));
 
         request("DynamoDB_20120810.Scan", """
                 {
                   "TableName":"%s",
                   "IndexName":"status-index",
-                  "ProjectionExpression":"details"
+                  "ProjectionExpression":"zeta.a, details, zeta.b"
                 }
                 """.formatted(TABLE))
             .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("One or more parameter values were invalid: "
+                    + "Global secondary index status-index does not project [zeta, details]"));
+
+        request("DynamoDB_20120810.Scan", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"status-index",
+                  "Select":"ALL_ATTRIBUTES"
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("One or more parameter values were invalid: "
+                    + "Select type ALL_ATTRIBUTES is not supported for global secondary index status-index "
+                    + "because its projection type is not ALL"));
     }
 
     @Test
