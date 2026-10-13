@@ -99,7 +99,8 @@ class Route53ResolverIntegrationTest {
         return "{\"Name\":\"ep\",\"Direction\":\"INBOUND\","
              + "\"CreatorRequestId\":\"" + creatorRequestId + "\","
              + "\"SecurityGroupIds\":[\"sg-abc123\"],"
-             + "\"" + ipMember + "\":[{\"SubnetId\":\"subnet-abc\",\"Ip\":\"10.0.0.10\"}]}";
+             + "\"" + ipMember + "\":[{\"SubnetId\":\"subnet-abc\",\"Ip\":\"10.0.0.10\"},"
+             + "{\"SubnetId\":\"subnet-def\",\"Ip\":\"10.0.0.11\"}]}";
     }
 
     @Test
@@ -115,7 +116,7 @@ class Route53ResolverIntegrationTest {
             .statusCode(200)
             .body("ResolverEndpoint.Id", startsWith("rslvr-in-"))
             .body("ResolverEndpoint.Direction", equalTo("INBOUND"))
-            .body("ResolverEndpoint.IpAddressCount", equalTo(1));
+            .body("ResolverEndpoint.IpAddressCount", equalTo(2));
     }
 
     @Test
@@ -129,7 +130,7 @@ class Route53ResolverIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ResolverEndpoint.IpAddressCount", equalTo(1));
+            .body("ResolverEndpoint.IpAddressCount", equalTo(2));
     }
 
     @Test
@@ -153,7 +154,7 @@ class Route53ResolverIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ResolverEndpoint.IpAddressCount", equalTo(1));
+            .body("ResolverEndpoint.IpAddressCount", equalTo(2));
     }
 
     @Test
@@ -171,5 +172,96 @@ class Route53ResolverIntegrationTest {
         .then()
             .statusCode(400)
             .body("message", equalTo("IpAddresses is required"));
+    }
+
+    // ── CreateResolverEndpoint: IpAddresses is min 2 / max 20 ──────────────────
+    //
+    // The request shape only says min 1, but AWS documents that a resolver endpoint
+    // needs at least two IP addresses and rejects more than twenty. The emulator used
+    // to accept a single address and create the endpoint, which a real SDK would never
+    // be allowed to do.
+
+    @Test
+    void createResolverEndpoint_singleAddress_returnsInvalidParameters() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+            .header("Authorization", AUTH_HEADER)
+            .body(endpointBody("single-address", 1))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"))
+            .body("message", equalTo("IpAddresses must contain at least two IP addresses."));
+    }
+
+    @Test
+    void createResolverEndpoint_twentyOneAddresses_returnsInvalidParameters() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+            .header("Authorization", AUTH_HEADER)
+            .body(endpointBody("too-many-addresses", 21))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"))
+            .body("message", equalTo("IpAddresses must contain at most twenty IP addresses."));
+    }
+
+    @Test
+    void createResolverEndpoint_twoAddresses_succeeds() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+            .header("Authorization", AUTH_HEADER)
+            .body(endpointBody("two-addresses", 2))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoint.IpAddressCount", equalTo(2));
+    }
+
+    @Test
+    void createResolverEndpoint_singleAddress_createsNoEndpoint() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+            .header("Authorization", AUTH_HEADER)
+            .body(endpointBody("rejected-endpoint", 1))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.ListResolverEndpoints")
+            .header("Authorization", AUTH_HEADER)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoints.findAll { it.Name == 'ep-rejected-endpoint' }.size()",
+                    equalTo(0));
+    }
+
+    private static String endpointBody(String creatorRequestId, int ipCount) {
+        StringBuilder addresses = new StringBuilder();
+        for (int i = 0; i < ipCount; i++) {
+            if (i > 0) {
+                addresses.append(",");
+            }
+            addresses.append("{\"SubnetId\":\"subnet-").append(i)
+                    .append("\",\"Ip\":\"10.0.0.").append(i + 1).append("\"}");
+        }
+        return "{\"Name\":\"ep-" + creatorRequestId + "\",\"Direction\":\"INBOUND\","
+             + "\"CreatorRequestId\":\"" + creatorRequestId + "\","
+             + "\"SecurityGroupIds\":[\"sg-abc123\"],"
+             + "\"IpAddresses\":[" + addresses + "]}";
     }
 }

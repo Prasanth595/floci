@@ -185,6 +185,18 @@ public class Route53ResolverService {
         if (!ipAddresses.isArray() || ipAddresses.isEmpty()) {
             throw new AwsException(INVALID_PARAMETER, "IpAddresses is required", 400);
         }
+        // IpAddresses is modeled list min 2 / max 20: AWS documents that a resolver
+        // endpoint needs at least two addresses for redundancy, unlike the min 1 its
+        // request shape suggests.
+        int ipAddressCount = ipAddresses.size();
+        if (ipAddressCount < 2) {
+            throw new AwsException(INVALID_PARAMETER,
+                    "IpAddresses must contain at least two IP addresses.", 400);
+        }
+        if (ipAddressCount > 20) {
+            throw new AwsException(INVALID_PARAMETER,
+                    "IpAddresses must contain at most twenty IP addresses.", 400);
+        }
         Optional<ObjectNode> replay = replayOf(endpointStore, request, region);
         if (replay.isPresent()) {
             ObjectNode existing = replay.get();
