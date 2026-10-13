@@ -88,7 +88,7 @@ import java.util.function.UnaryOperator;
  * are AWS's: {@code IncompleteSignature} for a header that cannot be checked,
  * {@code InvalidClientTokenId} / {@code UnrecognizedClientException} for an access key Floci does
  * not know, and {@code SignatureDoesNotMatch} / {@code InvalidSignatureException} for a signature
- * that does not verify or falls outside the fifteen-minute clock-skew window.
+ * that does not verify, exceeds its query expiry or falls outside the header clock-skew window.
  *
  * <p>Nothing here runs with the flag off: the filter returns before reading a single header.
  */
@@ -200,7 +200,7 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
             }
         }
         String token = ctx.getHeaderString("X-Amz-Security-Token");
-        boolean scopeMatches = true;
+        ServiceDescriptor queryService = null;
         if (presigned) {
             try {
                 if (token == null) {
@@ -209,7 +209,7 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
                         token = query.getFirst("X-Amz-Security-Token");
                     }
                 }
-                scopeMatches = queryScopeMatchesResource(ctx, resource, scope.service());
+                queryService = queryService(ctx, resource);
             } catch (IllegalArgumentException error) {
                 incompleteSignature(ctx, resource, "Cannot read presigned request form parameters.");
                 return;
@@ -225,8 +225,12 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
 
         String amzDate = AMZ_DATE.format(requestTime);
         Instant now = Instant.now();
+        if (presigned && !now.isBefore(requestTime.plusSeconds(expires))) {
+            signatureDoesNotMatch(ctx, resource, "Signature expired: " + amzDate + " is now earlier than "
+                    + AMZ_DATE.format(now.minusSeconds(expires)));
+            return;
+        }
         if (presigned ? requestTime.isAfter(now.plus(MAX_CLOCK_SKEW))
-                || !now.isBefore(requestTime.plusSeconds(expires))
                 : Duration.between(requestTime, now).abs().compareTo(MAX_CLOCK_SKEW) > 0) {
             signatureDoesNotMatch(ctx, resource, "Signature expired: " + amzDate + " is outside the "
                     + MAX_CLOCK_SKEW.toMinutes() + " minute window around the server time "
@@ -240,8 +244,13 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
             return;
         }
 
-        if (!scopeMatches) {
-            signatureDoesNotMatch(ctx, resource, "Credential should be scoped to the service receiving the request.");
+        if (queryService != null && !queryService.credentialScopes().contains(scope.service())) {
+            // Multiple accepted scopes can include endpoint aliases, not canonical signing names.
+            String expectedService = queryService.credentialScopes().size() == 1
+                    ? queryService.credentialScopes().iterator().next() : null;
+            signatureDoesNotMatch(ctx, resource, expectedService == null
+                    ? "Credential should be scoped to the service receiving the request."
+                    : "Credential should be scoped to correct service: '" + expectedService + "'");
             return;
         }
 
@@ -287,7 +296,7 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
                 amzDate, scope, secretKey, signature);
     }
 
-    private boolean queryScopeMatchesResource(ContainerRequestContext ctx, Class<?> resource, String service) {
+    private ServiceDescriptor queryService(ContainerRequestContext ctx, Class<?> resource) {
         ServiceDescriptor descriptor;
         if (resource == AwsQueryController.class) {
             String action = AwsQueryServiceResolver.action(RequestBodyReader.formField(ctx, "Action"),
@@ -301,7 +310,7 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
         } else {
             descriptor = resource == null ? null : catalog.byResourceClass(resource).orElse(null);
         }
-        return descriptor == null || descriptor.credentialScopes().contains(service);
+        return descriptor;
     }
 
     private static Instant parseAmzDate(String value) {
