@@ -11,6 +11,7 @@ import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
@@ -27,6 +28,7 @@ import java.util.stream.Collectors;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 @QuarkusTest
 @TestProfile(StsPresignedSignatureIntegrationTest.SignaturesAndEnforcement.class)
@@ -113,7 +115,7 @@ class StsPresignedSignatureIntegrationTest {
                 response.then().statusCode(200).body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn", equalTo(arn))
                         .body("GetCallerIdentityResponse.GetCallerIdentityResult.UserId", equalTo(id));
             } else {
-                boolean malformed = Set.of("missing", "scope", "date", "expiry", "algorithm", "host").contains(mode);
+                boolean malformed = Set.of("missing", "expiry", "algorithm", "host").contains(mode);
                 String code = Set.of("unknown", "inactive").contains(mode) ? "InvalidClientTokenId"
                         : malformed ? "IncompleteSignature" : "SignatureDoesNotMatch";
                 response.then().statusCode(malformed ? 400 : 403).body("ErrorResponse.Error.Code", equalTo(code));
@@ -189,15 +191,15 @@ class StsPresignedSignatureIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"GetSessionToken", "GetFederationToken"})
+    @ValueSource(strings = {"GetSessionToken", "GetFederationToken", "AssumeRole"})
     void urlIdentityDoesNotChangeOtherBodyOperations(String action) {
-        // These existing query-authentication paths are outside the identity repair.
+        // Query credentials must be authenticated for the operation that actually executes.
         Response result = given().queryParam("Action", "GetCallerIdentity").queryParam("X-Amz-Credential", "test/20261013/us-east-1/sts/aws4_request")
                 .contentType("application/x-www-form-urlencoded").body("Action=" + action + "&Name=outside")
                 .post("/");
         String key = result.xmlPath().getString(action + "Response." + action + "Result.Credentials.AccessKeyId");
         try {
-            result.then().statusCode(200);
+            result.then().statusCode(400).body("ErrorResponse.Error.Code", equalTo("IncompleteSignature"));
         } finally {
             if (key != null) {
                 iam.unregisterSession("000000000000", key);
@@ -205,19 +207,122 @@ class StsPresignedSignatureIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void signedPayloadMarkerIsHonored(boolean signedMarker) throws Exception {
+        String body = "Action=GetCallerIdentity";
+        Map<String, String> headers = Map.of("x-amz-content-sha256", "UNSIGNED-PAYLOAD");
+        URI uri = presign("test", "test", body, new TreeMap<>(), signedMarker);
+        Response response = given().headers(headers).urlEncodingEnabled(false)
+                .contentType("application/x-www-form-urlencoded").body(body).post(uri);
+        response.then().statusCode(signedMarker ? 200 : 403);
+        if (!signedMarker) {
+            response.then().body("ErrorResponse.Error.Code", equalTo("SignatureDoesNotMatch"));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"GetSessionToken", "GetFederationToken", "AssumeRole"})
+    void querySignaturesProtectCredentialIssuance(String action) throws Exception {
+        String roleName = "presigned-issuance-" + UUID.randomUUID();
+        String body = "Action=" + action + "&Name=presigned&DurationSeconds=900";
+        if ("AssumeRole".equals(action)) {
+            Response role = root("CreateRole", "RoleName=" + roleName + "&AssumeRolePolicyDocument="
+                    + encode("{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                    + "\"Principal\":\"*\",\"Action\":\"sts:AssumeRole\"}]}"));
+            role.then().statusCode(200);
+            body += "&RoleArn=" + encode(role.xmlPath().getString("CreateRoleResponse.CreateRoleResult.Role.Arn"))
+                    + "&RoleSessionName=presigned";
+        }
+        String issuedKey = null;
+        try {
+            URI valid = presign("test", "test", body, new TreeMap<>());
+            URI forged = URI.create(valid.toString().replaceAll("X-Amz-Signature=[^&]*", "X-Amz-Signature=forged"));
+            given().urlEncodingEnabled(false).contentType("application/x-www-form-urlencoded").body(body).post(forged)
+                    .then().statusCode(403).body("ErrorResponse.Error.Code", equalTo("SignatureDoesNotMatch"));
+            Response issued = given().urlEncodingEnabled(false).contentType("application/x-www-form-urlencoded")
+                    .body(body).post(valid);
+            issuedKey = issued.xmlPath().getString(action + "Response." + action + "Result.Credentials.AccessKeyId");
+            issued.then().statusCode(200);
+            assertNotNull(issuedKey);
+        } finally {
+            if (issuedKey != null) {
+                iam.unregisterSession("000000000000", issuedKey);
+            }
+            if ("AssumeRole".equals(action)) {
+                root("DeleteRole", "RoleName=" + roleName).then().statusCode(200);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"json, false", "json, true", "rest, false", "rest, true", "query, false", "query, true"})
+    void sharedVerifierCoversOtherProtocols(String protocol, boolean forged) throws Exception {
+        String method = "rest".equals(protocol) ? "GET" : "POST";
+        String path = "rest".equals(protocol) ? "/schedule-groups" : "/";
+        String service = "rest".equals(protocol) ? "scheduler" : "query".equals(protocol) ? "iam" : "sqs";
+        String body = "rest".equals(protocol) ? "" : "query".equals(protocol) ? "Action=ListUsers&Version=2010-05-08" : "{}";
+        URI uri = presignRequest("test", forged ? "wrong" : "test", method, path, service, body,
+                new TreeMap<>(), null);
+        RequestSpecification request = given().urlEncodingEnabled(false);
+        if ("json".equals(protocol)) {
+            request.contentType("application/x-amz-json-1.0").header("X-Amz-Target", "AmazonSQS.ListQueues");
+        } else if ("query".equals(protocol)) {
+            request.contentType("application/x-www-form-urlencoded");
+        }
+        if (!"GET".equals(method)) {
+            if ("query".equals(protocol)) {
+                request.body(body);
+            } else {
+                request.body(body.getBytes(StandardCharsets.UTF_8));
+            }
+        }
+        Response response = request.request(method, uri);
+        response.then().statusCode(forged ? 403 : 200);
+        if (forged) {
+            if ("query".equals(protocol)) {
+                response.then().body("ErrorResponse.Error.Code", equalTo("SignatureDoesNotMatch"));
+            } else {
+                response.then().header("X-Amzn-Errortype", equalTo("InvalidSignatureException"));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bad%ZZ=x&Action=ListUsers", "Action=ListUsers&X-Amz-Security-Token=%"})
+    void malformedFormCannotEscapeAsServerError(String body) throws Exception {
+        URI uri = presignRequest("test", "test", "POST", "/", "iam", body, new TreeMap<>(), null);
+        given().urlEncodingEnabled(false).contentType("application/x-www-form-urlencoded").body(body).post(uri)
+                .then().statusCode(400);
+    }
+
     private static URI presign(String key, String secret, String body, TreeMap<String, String> query) throws Exception {
-        URI endpoint = URI.create("http://localhost:" + RestAssured.port + "/");
+        return presign(key, secret, body, query, null);
+    }
+
+    private static URI presign(String key, String secret, String body, TreeMap<String, String> query,
+                               Boolean signedMarker) throws Exception {
+        return presignRequest(key, secret, "POST", "/", "sts", body, query, signedMarker);
+    }
+
+    private static URI presignRequest(String key, String secret, String method, String path, String service,
+                                     String body, TreeMap<String, String> query, Boolean signedMarker) throws Exception {
+        URI endpoint = URI.create("http://localhost:" + RestAssured.port + path);
         String date = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC).format(Instant.now());
-        String scope = date.substring(0, 8) + "/us-east-1/sts/aws4_request";
+        String scope = date.substring(0, 8) + "/us-east-1/" + service + "/aws4_request";
         query.putAll(Map.of("X-Amz-Algorithm", "AWS4-HMAC-SHA256", "X-Amz-Credential", key + "/" + scope,
-                "X-Amz-Date", date, "X-Amz-Expires", "60", "X-Amz-SignedHeaders", "host"));
+                "X-Amz-Date", date, "X-Amz-Expires", "60", "X-Amz-SignedHeaders", Boolean.TRUE.equals(signedMarker)
+                        ? "host;x-amz-content-sha256" : "host"));
         String encoded = query.entrySet().stream().map(e -> encode(e.getKey()) + "=" + encode(e.getValue()))
                 .collect(Collectors.joining("&"));
-        String canonical = "POST\n/\n" + encoded + "\nhost:" + endpoint.getAuthority() + "\n\nhost\n"
-                + Digests.sha256Hex(body.getBytes(StandardCharsets.UTF_8));
+        String signedHeaders = query.get("X-Amz-SignedHeaders");
+        String canonical = method + "\n" + path + "\n" + encoded + "\nhost:" + endpoint.getAuthority() + "\n"
+                + (Boolean.TRUE.equals(signedMarker) ? "x-amz-content-sha256:UNSIGNED-PAYLOAD\n" : "")
+                + "\n" + signedHeaders + "\n"
+                + (signedMarker != null ? "UNSIGNED-PAYLOAD" : Digests.sha256Hex(body.getBytes(StandardCharsets.UTF_8)));
         String toSign = "AWS4-HMAC-SHA256\n" + date + "\n" + scope + "\n" + Digests.sha256Hex(canonical);
         String signature = SigV4RequestValidator.hexEncode(SigV4RequestValidator.hmacSha256(
-                SigV4RequestValidator.deriveSigningKey(secret, date.substring(0, 8), "us-east-1", "sts"), toSign));
+                SigV4RequestValidator.deriveSigningKey(secret, date.substring(0, 8), "us-east-1", service), toSign));
         return URI.create(endpoint + "?" + encoded + "&X-Amz-Signature=" + signature);
     }
 

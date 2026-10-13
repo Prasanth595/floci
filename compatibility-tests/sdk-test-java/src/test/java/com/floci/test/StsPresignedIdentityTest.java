@@ -103,14 +103,14 @@ class StsPresignedIdentityTest {
                         .signingName("sts").expirationTime(Instant.now().plusSeconds(60)).build());
         HttpResponse<byte[]> response = send(signed, signed.getUri(), body, version);
         assertThat(response.statusCode()).as(new String(response.body(), StandardCharsets.UTF_8)).isEqualTo(200);
-        URI forged = URI.create(signed.getUri().toString().replaceAll("X-Amz-Signature=[^&]*",
-                "X-Amz-Signature=" + "0".repeat(64)));
-        HttpResponse<byte[]> refused = send(signed, forged, body, version);
         boolean signaturesEnabled = Boolean.parseBoolean(System.getenv("FLOCI_AUTH_VALIDATE_SIGNATURES"));
-        assertSignatureOutcome(refused, signaturesEnabled);
-        HttpResponse<byte[]> changed = send(signed, signed.getUri(),
-                (new String(body, StandardCharsets.UTF_8) + "&Extra=changed").getBytes(StandardCharsets.UTF_8), version);
-        assertSignatureOutcome(changed, signaturesEnabled);
+        if (signaturesEnabled) {
+            URI forged = URI.create(signed.getUri().toString().replaceAll("X-Amz-Signature=[^&]*",
+                    "X-Amz-Signature=" + "0".repeat(64)));
+            assertSignatureRefused(send(signed, forged, body, version));
+            assertSignatureRefused(send(signed, signed.getUri(),
+                    (new String(body, StandardCharsets.UTF_8) + "&Extra=changed").getBytes(StandardCharsets.UTF_8), version));
+        }
         if (signaturesEnabled && credentials instanceof AwsSessionCredentials) {
             for (String replacement : new String[]{"", "X-Amz-Security-Token=wrong"}) {
                 URI wrongToken = URI.create(signed.getUri().toString()
@@ -131,12 +131,9 @@ class StsPresignedIdentityTest {
         return factory.newDocumentBuilder().parse(new ByteArrayInputStream(response.body()));
     }
 
-    private static void assertSignatureOutcome(HttpResponse<byte[]> response, boolean signaturesEnabled) {
-        assertThat(response.statusCode()).as(new String(response.body(), StandardCharsets.UTF_8))
-                .isEqualTo(signaturesEnabled ? 403 : 200);
-        if (signaturesEnabled) {
-            assertThat(new String(response.body(), StandardCharsets.UTF_8)).contains("SignatureDoesNotMatch");
-        }
+    private static void assertSignatureRefused(HttpResponse<byte[]> response) {
+        assertThat(response.statusCode()).as(new String(response.body(), StandardCharsets.UTF_8)).isEqualTo(403);
+        assertThat(new String(response.body(), StandardCharsets.UTF_8)).contains("SignatureDoesNotMatch");
     }
 
     private static HttpResponse<byte[]> send(SdkHttpFullRequest signed, URI uri, byte[] body,

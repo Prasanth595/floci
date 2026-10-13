@@ -65,8 +65,8 @@ explicit region keep that region.
 ## STS presigned identity checks
 
 `StsPresignedIdentityTest` checks user and role identity over HTTP/1.1 and HTTP/2.
-Its default expectations match Floci's disabled signature-checking setting, including
-acceptance of altered signatures and bodies. To check signature refusal, start Floci
+Valid identity requests run in both modes. Forged signatures and changed bodies are
+sent only when signature checking is enabled. To check signature refusal, start Floci
 with `FLOCI_AUTH_VALIDATE_SIGNATURES=true` and pass the same setting to this test:
 
 ```bash
