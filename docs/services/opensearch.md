@@ -57,7 +57,7 @@ services:
 
 ### Legacy Elasticsearch Service API
 
-The `2015-01-01` API used by `aws es` and Terraform's `aws_elasticsearch_domain` is served over the same domains. It differs only in member names: `ElasticsearchVersion` (bare, e.g. `7.10`, stored as `Elasticsearch_7.10`) for `EngineVersion`, and `ElasticsearchClusterConfig` for `ClusterConfig`. A domain created without `ElasticsearchVersion` gets `7.10`.
+The `2015-01-01` API used by `aws es` and Terraform's `aws_elasticsearch_domain` is served over the same domains. It differs only in spelling: `ElasticsearchVersion` (bare, e.g. `7.10`, stored as `Elasticsearch_7.10`; `OS_2.11` and `OpenSearch_2.11` both store and report as `OpenSearch_2.11`) for `EngineVersion`, `ElasticsearchClusterConfig` for `ClusterConfig`, and instance types ending in `.elasticsearch` (`t3.small.elasticsearch` is stored, and reported by the 2021 API, as `t3.small.search`). A domain created without `ElasticsearchVersion` gets `7.10`.
 
 | Operation | Method + Path |
 |---|---|

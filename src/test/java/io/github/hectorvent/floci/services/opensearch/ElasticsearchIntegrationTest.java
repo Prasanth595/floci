@@ -53,6 +53,7 @@ class ElasticsearchIntegrationTest {
         .then()
             .statusCode(200)
             .body("DomainStatus.EngineVersion", equalTo("Elasticsearch_7.10"))
+            .body("DomainStatus.ClusterConfig.InstanceType", equalTo("t3.small.search"))
             .body("DomainStatus.ClusterConfig.InstanceCount", equalTo(2));
     }
 
@@ -140,6 +141,14 @@ class ElasticsearchIntegrationTest {
             .body("DomainStatus.ElasticsearchClusterConfig.InstanceType", equalTo("m5.large.elasticsearch"))
             .body("DomainStatus.ElasticsearchClusterConfig.InstanceCount", equalTo(3))
             .body("DomainStatus.ElasticsearchVersion", equalTo("7.10"));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/2021-01-01/opensearch/domain/" + DOMAIN_NAME)
+        .then()
+            .statusCode(200)
+            .body("DomainStatus.ClusterConfig.InstanceType", equalTo("m5.large.search"));
     }
 
     @Test
@@ -233,6 +242,48 @@ class ElasticsearchIntegrationTest {
 
     @Test
     @Order(10)
+    void shortOpenSearchVersion() {
+        // ElasticsearchVersionString accepts ^OS_[0-9]{1,2}\.[0-9]{1,2}$ alongside OpenSearch_X.Y.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"DomainName\":\"legacy-es-os\",\"ElasticsearchVersion\":\"OS_2.11\","
+                    + "\"ElasticsearchClusterConfig\":{\"InstanceType\":\"r6g.large.elasticsearch\"}}")
+        .when()
+            .post("/2015-01-01/es/domain")
+        .then()
+            .statusCode(200)
+            .body("DomainStatus.ElasticsearchVersion", equalTo("OpenSearch_2.11"))
+            .body("DomainStatus.ElasticsearchClusterConfig.InstanceType", equalTo("r6g.large.elasticsearch"));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/2021-01-01/opensearch/domain/legacy-es-os")
+        .then()
+            .statusCode(200)
+            .body("DomainStatus.EngineVersion", equalTo("OpenSearch_2.11"))
+            .body("DomainStatus.ClusterConfig.InstanceType", equalTo("r6g.large.search"));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+            .queryParam("engineType", "OpenSearch")
+        .when()
+            .get("/2015-01-01/domain")
+        .then()
+            .statusCode(200)
+            .body("DomainNames.DomainName", hasItem("legacy-es-os"));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .delete("/2015-01-01/es/domain/legacy-es-os")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(11)
     void blankVersionIsRejected() {
         // ElasticsearchVersionString: ^[0-9]{1}\\.[0-9]{1,2}$|^OpenSearch_...$|^OS_...$ -- "" matches none.
         given()
@@ -254,7 +305,7 @@ class ElasticsearchIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void emptyBodiesAreValidationErrors() {
         given()
             .contentType("application/json")
@@ -276,7 +327,7 @@ class ElasticsearchIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     void deleteElasticsearchDomain() {
         given()
             .header("Authorization", AUTH_HEADER)

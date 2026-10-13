@@ -6,7 +6,14 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import jakarta.inject.Inject;
-import jakarta.ws.rs.*;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -21,7 +28,8 @@ import java.io.IOException;
  * {@link OpenSearchController} and only renames the members the legacy model
  * spells differently: {@code ElasticsearchVersion} / {@code EngineVersion} and
  * {@code ElasticsearchClusterConfig} / {@code ClusterConfig}. The legacy version
- * is bare ({@code 7.10}) where the store holds {@code Elasticsearch_7.10}.
+ * is bare ({@code 7.10}) where the store holds {@code Elasticsearch_7.10}, and
+ * legacy instance types end in {@code .elasticsearch} where the store holds {@code .search}.
  */
 @Path("/2015-01-01")
 @Produces(MediaType.APPLICATION_JSON)
@@ -29,6 +37,9 @@ import java.io.IOException;
 public class ElasticsearchController {
 
     private static final String ES_PREFIX = "Elasticsearch_";
+    private static final String OS_PREFIX = "OpenSearch_";
+    private static final String LEGACY_SUFFIX = ".elasticsearch";
+    private static final String SEARCH_SUFFIX = ".search";
     /** The legacy API always creates an Elasticsearch domain; 7.10 is the newest Floci serves. */
     private static final String DEFAULT_VERSION = ES_PREFIX + "7.10";
 
@@ -121,6 +132,7 @@ public class ElasticsearchController {
             return body;
         }
         rename(req, "ElasticsearchClusterConfig", "ClusterConfig");
+        swapInstanceTypeSuffix(req.path("ClusterConfig"), LEGACY_SUFFIX, SEARCH_SUFFIX);
         JsonNode version = req.remove("ElasticsearchVersion");
         if (version != null && !version.isNull()) {
             // ElasticsearchVersionString is a pattern no blank or non-string value matches.
@@ -145,7 +157,8 @@ public class ElasticsearchController {
         body.path("DomainStatusList").forEach(s -> toLegacyStatus((ObjectNode) s));
         if (body.get("DomainConfig") instanceof ObjectNode config) {
             rename(config, "ClusterConfig", "ElasticsearchClusterConfig");
-            toLegacyInstanceType(config.path("ElasticsearchClusterConfig").path("Options"));
+            swapInstanceTypeSuffix(config.path("ElasticsearchClusterConfig").path("Options"),
+                    SEARCH_SUFFIX, LEGACY_SUFFIX);
             if (config.remove("EngineVersion") instanceof ObjectNode version) {
                 version.put("Options", toLegacyVersion(version.path("Options").asText(null)));
                 config.set("ElasticsearchVersion", version);
@@ -156,7 +169,7 @@ public class ElasticsearchController {
 
     private static void toLegacyStatus(ObjectNode status) {
         rename(status, "ClusterConfig", "ElasticsearchClusterConfig");
-        toLegacyInstanceType(status.path("ElasticsearchClusterConfig"));
+        swapInstanceTypeSuffix(status.path("ElasticsearchClusterConfig"), SEARCH_SUFFIX, LEGACY_SUFFIX);
         JsonNode version = status.remove("EngineVersion");
         if (version != null) {
             status.put("ElasticsearchVersion", toLegacyVersion(version.asText(null)));
@@ -164,15 +177,15 @@ public class ElasticsearchController {
     }
 
     /**
-     * ESPartitionInstanceType lists only {@code *.elasticsearch} types, so the
-     * OpenSearch spelling ({@code m5.large.search}, the store's default) is reported
-     * with the legacy suffix.
+     * ESPartitionInstanceType lists only {@code *.elasticsearch} types while the store
+     * (and the 2021 API) uses {@code *.search}, so instance types are respelled on the
+     * way in and out.
      */
-    private static void toLegacyInstanceType(JsonNode cluster) {
-        if (cluster instanceof ObjectNode node
-                && node.path("InstanceType").asText("").endsWith(".search")) {
-            String type = node.get("InstanceType").asText();
-            node.put("InstanceType", type.substring(0, type.length() - ".search".length()) + ".elasticsearch");
+    private static void swapInstanceTypeSuffix(JsonNode cluster, String from, String to) {
+        // Only InstanceType: the store keeps no DedicatedMasterType or WarmType to respell.
+        String type = cluster.path("InstanceType").asText("");
+        if (cluster instanceof ObjectNode node && type.endsWith(from)) {
+            node.put("InstanceType", type.substring(0, type.length() - from.length()) + to);
         }
     }
 
@@ -185,8 +198,12 @@ public class ElasticsearchController {
 
     static String toEngineVersion(String legacy) {
         if (legacy == null || legacy.isBlank()
-                || legacy.startsWith(ES_PREFIX) || legacy.startsWith("OpenSearch_")) {
+                || legacy.startsWith(ES_PREFIX) || legacy.startsWith(OS_PREFIX)) {
             return legacy;
+        }
+        // ElasticsearchVersionString also accepts the short OS_X.Y spelling of OpenSearch_X.Y.
+        if (legacy.startsWith("OS_")) {
+            return OS_PREFIX + legacy.substring("OS_".length());
         }
         return ES_PREFIX + legacy;
     }
