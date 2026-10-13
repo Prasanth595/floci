@@ -1,9 +1,10 @@
 package io.github.hectorvent.floci.services.redshiftserverless;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -12,6 +13,7 @@ import io.github.hectorvent.floci.services.redshiftserverless.model.ResourcePoli
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.io.IOException;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -28,7 +30,7 @@ public class RedshiftServerlessResourcePolicyService implements Resettable {
 
     private final AccountAwareStorageBackend<ResourcePolicy> policies;
     private final RedshiftServerlessService serverless;
-    private final ObjectMapper objectMapper;
+    private final ObjectReader strictPolicyReader;
 
     @Inject
     public RedshiftServerlessResourcePolicyService(StorageFactory storageFactory,
@@ -37,7 +39,7 @@ public class RedshiftServerlessResourcePolicyService implements Resettable {
         this.policies = storageFactory.create("redshiftserverless", "redshiftserverless-resourcepolicies.json",
                 new TypeReference<Map<String, ResourcePolicy>>() {});
         this.serverless = serverless;
-        this.objectMapper = objectMapper;
+        this.strictPolicyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     }
 
     /** Replaces the policy on the snapshot {@code resourceArn} names. */
@@ -98,11 +100,11 @@ public class RedshiftServerlessResourcePolicyService implements Resettable {
 
     private void requireJsonObject(String policy) {
         try {
-            JsonNode parsed = objectMapper.readTree(policy);
+            JsonNode parsed = strictPolicyReader.readTree(policy);
             if (parsed == null || !parsed.isObject()) {
                 throw ServerlessSupport.validation("policy must be a JSON policy document.");
             }
-        } catch (JsonProcessingException e) {
+        } catch (IOException e) {
             throw ServerlessSupport.validation("policy must be a JSON policy document.");
         }
     }

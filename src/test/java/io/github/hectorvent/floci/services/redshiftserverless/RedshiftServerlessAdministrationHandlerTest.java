@@ -38,6 +38,7 @@ class RedshiftServerlessAdministrationHandlerTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private RedshiftServerlessJsonHandler handler;
+    private RedshiftServerlessService serverlessService;
 
     @BeforeEach
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -46,8 +47,8 @@ class RedshiftServerlessAdministrationHandlerTest {
         for (String file : List.of("namespaces", "workgroups", "snapshots", "usagelimits", "resourcepolicies",
                 "endpointaccess", "snapshotcopyconfigurations", "scheduledactions", "customdomains")) {
             when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-" + file + ".json"),
-                    any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
-                    AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+                any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
         }
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
@@ -64,16 +65,16 @@ class RedshiftServerlessAdministrationHandlerTest {
                 .thenReturn(new RedshiftServerlessRuntime.Backend("127.0.0.1", 55432));
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.storage().persistentPath()).thenReturn(System.getProperty("java.io.tmpdir"));
-        RedshiftServerlessService service =
+        serverlessService =
                 new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config);
-        handler = new RedshiftServerlessJsonHandler(service, mapper, mock(RedshiftIamDbUserResolver.class),
-                new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, service),
+        handler = new RedshiftServerlessJsonHandler(serverlessService, mapper, mock(RedshiftIamDbUserResolver.class),
+                new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, serverlessService),
                 new RedshiftServerlessAdminJsonHandler(mapper,
-                        new RedshiftServerlessResourcePolicyService(storageFactory, service, mapper),
-                        new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, service),
-                        new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, service),
-                        new RedshiftServerlessScheduledActionService(storageFactory, service),
-                        new RedshiftServerlessCustomDomainService(storageFactory, service)));
+                        new RedshiftServerlessResourcePolicyService(storageFactory, serverlessService, mapper),
+                        new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, serverlessService),
+                        new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, serverlessService),
+                        new RedshiftServerlessScheduledActionService(storageFactory, serverlessService),
+                        new RedshiftServerlessCustomDomainService(storageFactory, serverlessService)));
     }
 
     @Test
@@ -90,6 +91,10 @@ class RedshiftServerlessAdministrationHandlerTest {
 
         assertEquals("ValidationException", errorType("PutResourcePolicy",
                 "{\"resourceArn\":\"" + snapshotArn + "\",\"policy\":\"not json\"}"));
+        assertEquals("ValidationException", errorType("PutResourcePolicy",
+                "{\"resourceArn\":\"" + snapshotArn + "\",\"policy\":\"{}\\ngarbage\"}"));
+        assertEquals("ValidationException", errorType("PutResourcePolicy",
+                "{\"resourceArn\":\"" + snapshotArn + "\",\"policy\":\"{}{}\"}"));
         assertEquals("ResourceNotFoundException", errorType("PutResourcePolicy",
                 "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID
                         + ":snapshot/missing\",\"policy\":" + mapper.valueToTree(policy) + "}"));
@@ -128,11 +133,18 @@ class RedshiftServerlessAdministrationHandlerTest {
         assertEquals("active", created.get("vpcSecurityGroups").get(0).get("status").textValue());
 
         assertEquals("ConflictException", errorType("CreateEndpointAccess",
-                "{\"endpointName\":\"ep-one\",\"workgroupName\":\"ep-wg\",\"subnetIds\":[\"subnet-a\"]}"));
+                "{\"endpointName\":\"ep-one\",\"workgroupName\":\"ep-wg\",\"subnetIds\":[\"subnet-a\"],"
+                        + "\"vpcSecurityGroupIds\":[\"sg-1\"]}"));
         assertEquals("ValidationException", errorType("CreateEndpointAccess",
                 "{\"endpointName\":\"ep-two\",\"workgroupName\":\"ep-wg\"}"));
+        assertEquals("ValidationException", errorType("CreateEndpointAccess",
+                "{\"endpointName\":\"ep-two\",\"workgroupName\":\"ep-wg\",\"subnetIds\":[\"subnet-a\"]}"));
+        assertEquals("ValidationException", errorType("CreateEndpointAccess",
+                "{\"endpointName\":\"ep-two\",\"workgroupName\":\"ep-wg\",\"subnetIds\":[\"subnet-a\"],"
+                        + "\"vpcSecurityGroupIds\":[]}"));
         assertEquals("ResourceNotFoundException", errorType("CreateEndpointAccess",
-                "{\"endpointName\":\"ep-two\",\"workgroupName\":\"nope\",\"subnetIds\":[\"subnet-a\"]}"));
+                "{\"endpointName\":\"ep-two\",\"workgroupName\":\"nope\",\"subnetIds\":[\"subnet-a\"],"
+                        + "\"vpcSecurityGroupIds\":[\"sg-1\"]}"));
 
         JsonNode updated = ok("UpdateEndpointAccess",
                 "{\"endpointName\":\"ep-one\",\"vpcSecurityGroupIds\":[\"sg-2\",\"sg-3\"]}").get("endpoint");
@@ -146,7 +158,16 @@ class RedshiftServerlessAdministrationHandlerTest {
         assertEquals("ResourceNotFoundException", errorType("GetEndpointAccess", "{\"endpointName\":\"ep-one\"}"));
 
         ok("CreateEndpointAccess", "{\"endpointName\":\"ep-gone\",\"workgroupName\":\"ep-wg\","
-                + "\"subnetIds\":[\"subnet-a\"]}");
+                + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}");
+        serverlessService.findWorkgroup("ep-wg", REGION).orElseThrow()
+                .setEndpoint(new Endpoint("192.168.1.10", 8200));
+        JsonNode refreshed = ok("GetEndpointAccess", "{\"endpointName\":\"ep-gone\"}").get("endpoint");
+        assertEquals("192.168.1.10", refreshed.get("address").textValue());
+        assertEquals(8200, refreshed.get("port").intValue());
+        JsonNode refreshedList = ok("ListEndpointAccess", "{\"workgroupName\":\"ep-wg\"}").get("endpoints");
+        assertEquals("192.168.1.10", refreshedList.get(0).get("address").textValue());
+        assertEquals(8200, refreshedList.get(0).get("port").intValue());
+
         ok("DeleteWorkgroup", "{\"workgroupName\":\"ep-wg\"}");
         assertEquals("ResourceNotFoundException", errorType("GetEndpointAccess", "{\"endpointName\":\"ep-gone\"}"));
     }
@@ -169,6 +190,10 @@ class RedshiftServerlessAdministrationHandlerTest {
                 "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"us-west-2\"}"));
         assertEquals("ValidationException", errorType("CreateSnapshotCopyConfiguration",
                 "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"us-east-1\"}"));
+        assertEquals("ValidationException", errorType("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"US-WEST-2\"}"));
+        assertEquals("ValidationException", errorType("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"invalid_region!\"}"));
         assertEquals("ResourceNotFoundException", errorType("CreateSnapshotCopyConfiguration",
                 "{\"namespaceName\":\"nope-ns\",\"destinationRegion\":\"us-west-2\"}"));
 
@@ -300,7 +325,11 @@ class RedshiftServerlessAdministrationHandlerTest {
         assertEquals(0, ok("ListReservations", "{}").get("reservationsList").size());
         assertEquals(0, ok("ListReservationOfferings", "{}").get("reservationOfferingsList").size());
         assertEquals("ResourceNotFoundException", errorType("GetReservation", "{\"reservationId\":\"r-1\"}"));
+        assertEquals("ValidationException", errorType("GetReservation", "{}"));
+        assertEquals("ValidationException", errorType("GetReservation", "{\"reservationId\":\"\"}"));
         assertEquals("ResourceNotFoundException", errorType("GetReservationOffering", "{\"offeringId\":\"o-1\"}"));
+        assertEquals("ValidationException", errorType("GetReservationOffering", "{}"));
+        assertEquals("ValidationException", errorType("GetReservationOffering", "{\"offeringId\":\"\"}"));
         assertEquals("ResourceNotFoundException",
                 errorType("CreateReservation", "{\"capacity\":128,\"offeringId\":\"o-1\"}"));
         assertEquals("ValidationException", errorType("CreateReservation", "{\"offeringId\":\"o-1\"}"));
@@ -310,7 +339,7 @@ class RedshiftServerlessAdministrationHandlerTest {
     void aWorkgroupRecreatedUnderTheSameNameDoesNotInheritEndpointsOrDomains() {
         workgroup("recreate-wg-ns", "recreate-wg");
         ok("CreateEndpointAccess", "{\"endpointName\":\"old-ep\",\"workgroupName\":\"recreate-wg\","
-                + "\"subnetIds\":[\"subnet-a\"]}");
+                + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}");
         ok("CreateCustomDomainAssociation", "{\"workgroupName\":\"recreate-wg\",\"customDomainName\":\"old.example.com\","
                 + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}");
 
@@ -322,7 +351,7 @@ class RedshiftServerlessAdministrationHandlerTest {
                 "{\"workgroupName\":\"recreate-wg\",\"customDomainName\":\"old.example.com\"}"));
         assertEquals(0, ok("ListEndpointAccess", "{\"workgroupName\":\"recreate-wg\"}").get("endpoints").size());
         ok("CreateEndpointAccess", "{\"endpointName\":\"old-ep\",\"workgroupName\":\"recreate-wg\","
-                + "\"subnetIds\":[\"subnet-a\"]}");
+                + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}");
         ok("CreateCustomDomainAssociation", "{\"workgroupName\":\"recreate-wg\",\"customDomainName\":\"old.example.com\","
                 + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}");
     }
@@ -370,8 +399,27 @@ class RedshiftServerlessAdministrationHandlerTest {
         assertEquals("ValidationException", errorType("UpdateScheduledAction",
                 "{\"scheduledActionName\":\"partial-action\",\"targetAction\":{\"createSnapshot\":"
                         + "{\"retentionPeriod\":5}}}"));
+        assertEquals("ValidationException", errorType("UpdateScheduledAction",
+                "{\"scheduledActionName\":\"partial-action\",\"schedule\":{}}"));
+        JsonNode unchanged = ok("UpdateScheduledAction",
+                "{\"scheduledActionName\":\"partial-action\",\"enabled\":false}").get("scheduledAction");
+        assertEquals("x", unchanged.get("schedule").get("cron").textValue());
+        assertEquals("DISABLED", unchanged.get("state").textValue());
+
         assertEquals("ValidationException", errorType("CreateScheduledAction",
                 create.replace("partial-action", "tag-action") + ",\"tags\":[{\"value\":\"v\"}]}}}"));
+        assertEquals("ValidationException", errorType("CreateScheduledAction",
+                create.replace("partial-action", "tag-noval") + ",\"tags\":[{\"key\":\"k\"}]}}}"));
+        assertEquals("ValidationException", errorType("CreateScheduledAction",
+                create.replace("partial-action", "tag-numval") + ",\"tags\":[{\"key\":\"k\",\"value\":123}]}}}"));
+        assertEquals("ValidationException", errorType("CreateScheduledAction",
+                create.replace("partial-action", "tag-boolval") + ",\"tags\":[{\"key\":\"k\",\"value\":true}]}}}"));
+        assertEquals("ResourceNotFoundException", errorType("GetScheduledAction",
+                "{\"scheduledActionName\":\"tag-noval\"}"));
+        assertEquals("ResourceNotFoundException", errorType("GetScheduledAction",
+                "{\"scheduledActionName\":\"tag-numval\"}"));
+        assertEquals("ResourceNotFoundException", errorType("GetScheduledAction",
+                "{\"scheduledActionName\":\"tag-boolval\"}"));
     }
 
     @Test

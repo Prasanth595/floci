@@ -52,6 +52,9 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
             Integer snapshotRetentionPeriod, String region) {
         ServerlessSupport.requireText(namespaceName, "namespaceName");
         ServerlessSupport.requireText(destinationRegion, "destinationRegion");
+        if (!ServerlessSupport.LOWER_NAME.matcher(destinationRegion).matches()) {
+            throw ServerlessSupport.validation("destinationRegion must be lower-case letters, digits and hyphens.");
+        }
         if (destinationRegion.equals(region)) {
             throw ServerlessSupport.validation("destinationRegion must differ from the namespace's Region.");
         }
@@ -143,7 +146,13 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
         return alive;
     }
 
-/** A namespace recreated under the same name has a new id, so it never inherits its predecessor's configurations. */    private boolean isOnSameNamespace(SnapshotCopyConfiguration configuration, String region) {        return serverless.findNamespace(configuration.getNamespaceName(), region)                .map(namespace -> Objects.equals(namespace.getNamespaceId(), configuration.getOwnerId()))                .orElse(false);    }
+    /** A namespace recreated under the same name has a new id, so it never inherits its predecessor's configurations. */
+    private boolean isOnSameNamespace(SnapshotCopyConfiguration configuration, String region) {
+        return serverless.findNamespace(configuration.getNamespaceName(), region)
+                .map(namespace -> Objects.equals(namespace.getNamespaceId(), configuration.getOwnerId()))
+                .orElse(false);
+    }
+
     private static void validateRetention(Integer retentionPeriod) {
         if (retentionPeriod != null && retentionPeriod != -1
                 && (retentionPeriod < 1 || retentionPeriod > MAX_RETENTION_DAYS)) {

@@ -138,10 +138,16 @@ public class RedshiftServerlessAdminJsonHandler {
             case "ListManagedWorkgroups" -> listManagedWorkgroups(request);
             case "ListReservations" -> listWithoutItems(request, "reservationsList");
             case "ListReservationOfferings" -> listWithoutItems(request, "reservationOfferingsList");
-            case "GetReservation" -> throw ServerlessSupport.notFound("The reservation "
-                    + ServerlessSupport.text(request, "reservationId") + " was not found.");
-            case "GetReservationOffering" -> throw ServerlessSupport.notFound("The reservation offering "
-                    + ServerlessSupport.text(request, "offeringId") + " was not found.");
+            case "GetReservation" -> {
+                String reservationId = ServerlessSupport.text(request, "reservationId");
+                ServerlessSupport.requireText(reservationId, "reservationId");
+                throw ServerlessSupport.notFound("The reservation " + reservationId + " was not found.");
+            }
+            case "GetReservationOffering" -> {
+                String offeringId = ServerlessSupport.text(request, "offeringId");
+                ServerlessSupport.requireText(offeringId, "offeringId");
+                throw ServerlessSupport.notFound("The reservation offering " + offeringId + " was not found.");
+            }
             case "CreateReservation" -> createReservation(request);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",
@@ -259,6 +265,7 @@ public class RedshiftServerlessAdminJsonHandler {
         action.setEndTime(ServerlessSupport.epochSeconds(request, "endTime"));
         JsonNode schedule = ServerlessSupport.object(request, "schedule");
         if (schedule != null) {
+            action.setScheduleSpecified(true);
             action.setScheduleAt(ServerlessSupport.epochSeconds(schedule, "at"));
             action.setScheduleCron(ServerlessSupport.text(schedule, "cron"));
         }
@@ -288,7 +295,10 @@ public class RedshiftServerlessAdminJsonHandler {
             if (!tag.path("key").isTextual() || tag.path("key").textValue().isEmpty()) {
                 throw ServerlessSupport.validation("every tag needs a key.");
             }
-            parsed.put(tag.path("key").textValue(), tag.path("value").asText(""));
+            if (!tag.path("value").isTextual()) {
+                throw ServerlessSupport.validation("every tag needs a value.");
+            }
+            parsed.put(tag.path("key").textValue(), tag.path("value").textValue());
         }
         return parsed;
     }

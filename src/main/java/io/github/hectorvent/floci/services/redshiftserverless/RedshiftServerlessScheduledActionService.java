@@ -105,7 +105,7 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
         if (changes.getEndTime() != null) {
             updated.setEndTime(changes.getEndTime());
         }
-        if (changes.getScheduleAt() != null || changes.getScheduleCron() != null) {
+        if (changes.isScheduleSpecified()) {
             validateSchedule(changes);
             updated.setScheduleAt(changes.getScheduleAt());
             updated.setScheduleCron(changes.getScheduleCron());
@@ -161,7 +161,17 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
         return alive;
     }
 
-/** A namespace recreated under the same name has a new id, so it never inherits its predecessor's actions. */    private boolean isOnSameNamespace(ScheduledAction action, String region) {        return serverless.findNamespace(action.getNamespaceName(), region)                .map(namespace -> Objects.equals(namespace.getNamespaceId(), action.getOwnerId()))                .orElse(false);    }    private String namespaceIdOf(String namespaceName, String region) {        return serverless.findNamespace(namespaceName, region).map(Namespace::getNamespaceId).orElse(null);    }
+    /** A namespace recreated under the same name has a new id, so it never inherits its predecessor's actions. */
+    private boolean isOnSameNamespace(ScheduledAction action, String region) {
+        return serverless.findNamespace(action.getNamespaceName(), region)
+                .map(namespace -> Objects.equals(namespace.getNamespaceId(), action.getOwnerId()))
+                .orElse(false);
+    }
+
+    private String namespaceIdOf(String namespaceName, String region) {
+        return serverless.findNamespace(namespaceName, region).map(Namespace::getNamespaceId).orElse(null);
+    }
+
     private static void validateName(String name) {
         ServerlessSupport.requireText(name, "scheduledActionName");
         if (name.length() < 3 || name.length() > 60 || !ServerlessSupport.LOWER_NAME.matcher(name).matches()) {

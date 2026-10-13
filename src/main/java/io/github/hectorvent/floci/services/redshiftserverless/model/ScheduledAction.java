@@ -31,12 +31,14 @@ public class ScheduledAction {
     private Integer retentionPeriod;
     private Map<String, String> snapshotTags;
     private String ownerId;
+    private boolean scheduleSpecified;
 
     public ScheduledAction() {
     }
 
     public ScheduledAction(ScheduledAction other) {
         this.ownerId = other.ownerId;
+        this.scheduleSpecified = other.scheduleSpecified;
         this.scheduledActionName = other.scheduledActionName;
         this.scheduledActionUuid = other.scheduledActionUuid;
         this.namespaceName = other.namespaceName;
@@ -171,5 +173,13 @@ public class ScheduledAction {
 
     public void setOwnerId(String ownerId) {
         this.ownerId = ownerId;
+    }
+
+    public boolean isScheduleSpecified() {
+        return scheduleSpecified;
+    }
+
+    public void setScheduleSpecified(boolean scheduleSpecified) {
+        this.scheduleSpecified = scheduleSpecified;
     }
 }

@@ -143,7 +143,13 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
         return alive;
     }
 
-/** A workgroup recreated under the same name has a new id, so it never inherits its predecessor's domains. */    private boolean isOnSameWorkgroup(CustomDomainAssociation association, String region) {        return serverless.findWorkgroup(association.getWorkgroupName(), region)                .map(workgroup -> Objects.equals(workgroup.getWorkgroupId(), association.getOwnerId()))                .orElse(false);    }
+    /** A workgroup recreated under the same name has a new id, so it never inherits its predecessor's domains. */
+    private boolean isOnSameWorkgroup(CustomDomainAssociation association, String region) {
+        return serverless.findWorkgroup(association.getWorkgroupName(), region)
+                .map(workgroup -> Objects.equals(workgroup.getWorkgroupId(), association.getOwnerId()))
+                .orElse(false);
+    }
+
     private static void validate(String workgroupName, String customDomainName, String certificateArn) {
         ServerlessSupport.requireText(workgroupName, "workgroupName");
         ServerlessSupport.requireText(customDomainName, "customDomainName");

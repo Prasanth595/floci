@@ -57,6 +57,9 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
         if (subnetIds == null || subnetIds.isEmpty()) {
             throw ServerlessSupport.validation("subnetIds is required.");
         }
+        if (vpcSecurityGroupIds == null || vpcSecurityGroupIds.isEmpty()) {
+            throw ServerlessSupport.validation("vpcSecurityGroupIds is required.");
+        }
         if (ownerAccount != null && !ACCOUNT_ID.matcher(ownerAccount).matches()) {
             throw ServerlessSupport.validation("ownerAccount must be a 12-digit account id.");
         }
@@ -154,7 +157,18 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
         return alive;
     }
 
-/** A workgroup recreated under the same name has a new id, so it never inherits its predecessor's endpoints. */    private boolean isOnSameWorkgroup(EndpointAccess endpoint, String region) {        return serverless.findWorkgroup(endpoint.getWorkgroupName(), region)                .map(workgroup -> Objects.equals(workgroup.getWorkgroupId(), endpoint.getOwnerId()))                .orElse(false);    }
+    /** A workgroup recreated under the same name has a new id, so it never inherits its predecessor's endpoints. */
+    private boolean isOnSameWorkgroup(EndpointAccess endpoint, String region) {
+        return serverless.findWorkgroup(endpoint.getWorkgroupName(), region)
+                .filter(workgroup -> Objects.equals(workgroup.getWorkgroupId(), endpoint.getOwnerId()))
+                .map(workgroup -> {
+                    endpoint.setAddress(workgroup.getEndpoint() == null ? null : workgroup.getEndpoint().getAddress());
+                    endpoint.setPort(workgroup.getEndpoint() == null ? workgroup.getPort() : workgroup.getEndpoint().getPort());
+                    return true;
+                })
+                .orElse(false);
+    }
+
     private static List<String> networkInterfaceIdsFor(List<String> subnetIds) {
         List<String> ids = new ArrayList<>();
         for (int i = 0; i < subnetIds.size(); i++) {
