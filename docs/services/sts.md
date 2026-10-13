@@ -114,7 +114,7 @@ the `AssumedRoleUser.Arn` and `AssumedRoleUser.AssumedRoleId` returned when the 
 For `GetSessionToken` credentials they are those of the IAM user that minted them, and for `GetFederationToken`
 credentials the `FederatedUser.Arn` and `FederatedUser.FederatedUserId` (`<account>:<name>`).
 The response resolves both header and query-string credentials, including the query session token,
-so a presigned request reports the same caller identity. A present Authorization header retains
+so a presigned request reports the same caller identity. A nonblank Authorization header retains
 precedence over query credentials.
 
 When `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`, requests signed with the seeded `floci` access key return `arn:aws:iam::000000000000:user/floci-deployer`. Other unknown local credentials continue to return the account root ARN for backward compatibility.
