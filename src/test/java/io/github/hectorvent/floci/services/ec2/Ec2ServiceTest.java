@@ -1161,6 +1161,49 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void catalogImageSnapshotIdsResolveThroughDescribeSnapshots() {
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                new AmiImageResolver(imageCatalog), imageCatalog, new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        Image catalog = service.describeImages("us-east-1", List.of("ami-0abcdef1234567890"), List.of(), Map.of())
+                .getFirst();
+        for (BlockDeviceMapping mapping : catalog.getBlockDeviceMappings()) {
+            String snapshotId = mapping.getEbs().getSnapshotId();
+            if (snapshotId != null) {
+                assertDoesNotThrow(() -> service.describeSnapshots("us-east-1", List.of(snapshotId), null, Map.of()),
+                        "catalog AMI advertises snapshot " + snapshotId + " that DescribeSnapshots cannot find");
+            }
+        }
+
+        // A copy's root is still backed by a real snapshot record.
+        Image copy = service.copyImage("us-east-1", "us-east-1", catalog.getImageId(), "copy", null);
+        String copySnapshot = copy.getBlockDeviceMappings().getFirst().getEbs().getSnapshotId();
+        assertEquals(1, service.describeSnapshots("us-east-1", List.of(copySnapshot), null, Map.of()).size());
+    }
+
+    @Test
+    void runInstancesRootVolumeTakesTheAmiRootVolumeType() {
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                new AmiImageResolver(imageCatalog), imageCatalog, new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        Instance gp2 = service.runInstances("us-east-1", "ami-0abcdef1234567890", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        assertEquals("gp2", service.describeVolumes("us-east-1", List.of(gp2.getRootVolumeId()), Map.of())
+                .getFirst().getVolumeType());
+
+        Instance gp3 = service.runInstances("us-east-1", "ami-ubuntu2404-amd64", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        assertEquals("gp3", service.describeVolumes("us-east-1", List.of(gp3.getRootVolumeId()), Map.of())
+                .getFirst().getVolumeType());
+    }
+
+    @Test
     void describeImagesFiltersRegisteredImagesByBlockDeviceMappingVolumeType() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),

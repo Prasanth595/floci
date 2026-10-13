@@ -3219,7 +3219,9 @@ public class RdsQueryHandler {
         }
         return switch (engine.toLowerCase()) {
             case "postgres", "aurora-postgresql" -> "16.3";
-            case "mysql", "aurora-mysql", "aurora" -> "8.0.36";
+            case "mysql", "aurora" -> "8.0.36";
+            // Aurora's own version string, the one DescribeOrderableDBInstanceOptions lists.
+            case "aurora-mysql" -> "8.0.mysql_aurora.3.05.2";
             case "mariadb" -> "11.2";
             case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web" -> "15.00";
             default -> "1.0";

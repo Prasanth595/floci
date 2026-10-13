@@ -338,7 +338,8 @@ public class Ec2ImageCatalog {
                 // Same value the volume-type filter matches on, so the returned image shows
                 // the mapping it was selected by and a CopyImage keeps that type.
                 EbsBlockDevice ebs = new EbsBlockDevice();
-                ebs.setSnapshotId("snap-" + String.format("%017x", imageId.hashCode() & 0xffffffffL));
+                // No SnapshotId: it is optional in EbsBlockDevice, and an invented one would not
+                // resolve through DescribeSnapshots.
                 ebs.setVolumeSize(8);
                 ebs.setVolumeType(rootVolumeType);
                 ebs.setDeleteOnTermination(true);

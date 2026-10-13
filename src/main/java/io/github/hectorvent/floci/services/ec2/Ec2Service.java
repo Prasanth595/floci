@@ -3339,6 +3339,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         validateArchitectureCompatibility(region, imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
         String architecture = architectureFor(region, imageId, effectiveInstanceType);
+        String rootVolumeType = rootVolumeTypeFor(findImageForCapture(region, imageId));
         List<Instance> launched = new ArrayList<>();
         // Resolving the AMI, building the instances that depend on it and publishing them is one
         // step. A DeregisterImage releases the captured layer only when no live instance resolves
@@ -3472,7 +3473,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         Volume rootVol = new Volume();
                         rootVol.setVolumeId(rootVolId);
                         rootVol.setAvailabilityZone(az);
-                        rootVol.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
+                        rootVol.setVolumeType(rootVolumeType);
                         rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
                         rootVol.setState("in-use");
                         rootVol.setRegion(region);
@@ -6365,7 +6366,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         List<BlockDeviceMapping> declared = sourceImage.getBlockDeviceMappings();
         if (declared != null && !declared.isEmpty()) {
-            return declared.stream().map(this::recapture).toList();
+            return declared.stream()
+                    .map(m -> recapture(m, Objects.equals(m.getDeviceName(), sourceImage.getRootDeviceName())))
+                    .toList();
         }
         String rootDeviceName = sourceImage.getRootDeviceName();
         if (rootDeviceName == null || rootDeviceName.isBlank()) {
@@ -6387,7 +6390,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * would leave two images sharing one snapshot, so deleting either would appear to take the
      * other's backing with it.
      */
-    private BlockDeviceMapping recapture(BlockDeviceMapping source) {
+    private BlockDeviceMapping recapture(BlockDeviceMapping source, boolean root) {
         BlockDeviceMapping mapping = new BlockDeviceMapping();
         mapping.setDeviceName(source.getDeviceName());
         EbsBlockDevice sourceEbs = source.getEbs();
@@ -6395,13 +6398,31 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return mapping;
         }
         EbsBlockDevice ebs = new EbsBlockDevice();
-        ebs.setSnapshotId(sourceEbs.getSnapshotId() != null ? "snap-" + randomHex(17) : null);
+        // A catalog AMI's root mapping carries no SnapshotId (there is no snapshot record behind
+        // it), but the root of a copy or capture is always a snapshot.
+        ebs.setSnapshotId(sourceEbs.getSnapshotId() != null || root ? "snap-" + randomHex(17) : null);
         ebs.setVolumeSize(sourceEbs.getVolumeSize());
         ebs.setVolumeType(sourceEbs.getVolumeType());
         ebs.setDeleteOnTermination(sourceEbs.getDeleteOnTermination());
         ebs.setEncrypted(sourceEbs.getEncrypted());
         mapping.setEbs(ebs);
         return mapping;
+    }
+
+    /**
+     * The root volume takes the type the AMI's root mapping declares, as on AWS. RunInstances does
+     * not accept request BlockDeviceMappings here, so there is no per-launch override to honour.
+     */
+    private static String rootVolumeTypeFor(Image image) {
+        if (image == null || image.getBlockDeviceMappings() == null) {
+            return DEFAULT_ROOT_VOLUME_TYPE;
+        }
+        return image.getBlockDeviceMappings().stream()
+                .filter(m -> m.getEbs() != null && m.getEbs().getVolumeType() != null
+                        && Objects.equals(m.getDeviceName(), image.getRootDeviceName()))
+                .map(m -> m.getEbs().getVolumeType())
+                .findFirst()
+                .orElse(DEFAULT_ROOT_VOLUME_TYPE);
     }
 
     /** The image a CreateImage source was launched from, whether catalog-backed or registered. */
