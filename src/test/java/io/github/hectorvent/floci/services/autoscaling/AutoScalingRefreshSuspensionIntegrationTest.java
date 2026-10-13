@@ -4,9 +4,12 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -69,6 +72,85 @@ class AutoScalingRefreshSuspensionIntegrationTest {
             request("DeleteLaunchConfiguration").formParam("LaunchConfigurationName", name)
                     .post("/").then().statusCode(200);
         }
+    }
+
+    @Test
+    void sameNameRefreshesInDifferentAccountsResumeIndependently() {
+        String name = "refresh-accounts-" + UUID.randomUUID().toString().substring(0, 8);
+        List<String> accounts = List.of("111122223333", "444455556666");
+        List<String> configurations = new ArrayList<>();
+        List<String> groups = new ArrayList<>();
+        List<String> originals = new ArrayList<>();
+        try {
+            for (String account : accounts) {
+                accountRequest(account, "CreateLaunchConfiguration")
+                        .formParam("LaunchConfigurationName", name).formParam("ImageId", "ami-amazonlinux2023")
+                        .formParam("InstanceType", "t3.micro").post("/").then().statusCode(200);
+                configurations.add(account);
+                accountRequest(account, "CreateAutoScalingGroup").formParam("AutoScalingGroupName", name)
+                        .formParam("LaunchConfigurationName", name).formParam("MinSize", 0)
+                        .formParam("MaxSize", 1).formParam("DesiredCapacity", 1)
+                        .formParam("AvailabilityZones.member.1", "us-east-1a").post("/").then().statusCode(200);
+                groups.add(account);
+            }
+            reconcileTwice();
+            for (String account : accounts) {
+                originals.add(accountGroup(account, name).xmlPath().getString(GROUP + ".Instances.member.InstanceId"));
+                accountRequest(account, "SuspendProcesses").formParam("AutoScalingGroupName", name)
+                        .formParam("ScalingProcesses.member.1", "InstanceRefresh").post("/").then().statusCode(200);
+                accountRequest(account, "StartInstanceRefresh").formParam("AutoScalingGroupName", name)
+                        .post("/").then().statusCode(200);
+            }
+            assertNotEquals(originals.getFirst(), originals.getLast());
+            reconcileTwice();
+            for (int index = 0; index < accounts.size(); index++) {
+                assertEquals(originals.get(index), accountGroup(accounts.get(index), name)
+                        .xmlPath().getString(GROUP + ".Instances.member.InstanceId"));
+            }
+            accountRequest(accounts.getFirst(), "ResumeProcesses").formParam("AutoScalingGroupName", name)
+                    .formParam("ScalingProcesses.member.1", "InstanceRefresh").post("/").then().statusCode(200);
+            reconcileTwice();
+            assertNotEquals(originals.getFirst(), accountGroup(accounts.getFirst(), name)
+                    .xmlPath().getString(GROUP + ".Instances.member.InstanceId"));
+            assertEquals("Successful", accountRefreshStatus(accounts.getFirst(), name));
+            assertEquals(originals.getLast(), accountGroup(accounts.getLast(), name)
+                    .xmlPath().getString(GROUP + ".Instances.member.InstanceId"));
+            assertEquals("InProgress", accountRefreshStatus(accounts.getLast(), name));
+            accountRequest(accounts.getLast(), "ResumeProcesses").formParam("AutoScalingGroupName", name)
+                    .formParam("ScalingProcesses.member.1", "InstanceRefresh").post("/").then().statusCode(200);
+            reconcileTwice();
+            assertNotEquals(originals.getLast(), accountGroup(accounts.getLast(), name)
+                    .xmlPath().getString(GROUP + ".Instances.member.InstanceId"));
+            assertEquals("Successful", accountRefreshStatus(accounts.getLast(), name));
+        } finally {
+            try {
+                for (String account : groups) {
+                    accountRequest(account, "DeleteAutoScalingGroup").formParam("AutoScalingGroupName", name)
+                            .formParam("ForceDelete", true).post("/").then().statusCode(200);
+                }
+            } finally {
+                for (String account : configurations) {
+                    accountRequest(account, "DeleteLaunchConfiguration").formParam("LaunchConfigurationName", name)
+                            .post("/").then().statusCode(200);
+                }
+            }
+        }
+    }
+
+    private static String accountRefreshStatus(String account, String name) {
+        return accountRequest(account, "DescribeInstanceRefreshes").formParam("AutoScalingGroupName", name)
+                .post("/").then().statusCode(200).extract().xmlPath().getString(REFRESH + ".Status");
+    }
+
+    private static Response accountGroup(String account, String name) {
+        return accountRequest(account, "DescribeAutoScalingGroups").formParam("AutoScalingGroupNames.member.1", name)
+                .post("/").then().statusCode(200).extract().response();
+    }
+
+    private static RequestSpecification accountRequest(String account, String action) {
+        return given().header("Authorization", "AWS4-HMAC-SHA256 Credential=" + account
+                + "/20260215/us-east-1/autoscaling/aws4_request, SignedHeaders=host, Signature=abc")
+                .formParam("Action", action);
     }
 
     private void reconcileTwice() {

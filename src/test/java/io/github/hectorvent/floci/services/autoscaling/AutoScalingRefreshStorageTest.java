@@ -498,6 +498,112 @@ class AutoScalingRefreshStorageTest {
                 any(), anyList(), any(), any(), any());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void partialMultiInstanceRefreshResumesWithoutRepeatingCompletedLaunch(String mode) throws IOException {
+        setUp(mode);
+        AsgInstance second = new AsgInstance();
+        second.setInstanceId("i-second");
+        second.setLifecycleState("InService");
+        second.setHealthStatus("Healthy");
+        group.getInstances().add(second);
+        group.setDesiredCapacity(2);
+        service.saveAutoScalingGroupIfPresent(group);
+        when(ec2.describeInstances(REGION, List.of(), null)).thenReturn(List.of());
+        when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
+                anyList(), any(), any(), any()))
+                .thenReturn(reservation("i-first-replacement"))
+                .thenThrow(new IllegalStateException("Second launch unavailable"))
+                .thenReturn(reservation("i-second-replacement"));
+        InstanceRefresh started = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        assertEquals(2, started.getReplacements().size());
+        assertNotEquals(started.getReplacements().getFirst().getLaunchClientToken(),
+                started.getReplacements().getLast().getLaunchClientToken());
+        reconciler.reconcile(group);
+        assertEquals(List.of("i-first-replacement"), group.getInstances().stream()
+                .map(AsgInstance::getInstanceId).toList());
+        service.suspendProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        restart(mode);
+        reconciler.reconcile(group);
+        InstanceRefresh restored = service.activeInstanceRefresh(group);
+        assertNotNull(restored);
+        assertEquals(1, restored.getInstancesToUpdate());
+        assertEquals("Complete", restored.getReplacements().getFirst().getPhase());
+        verify(ec2, times(2)).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
+                any(), anyList(), any(), any(), any());
+        service.resumeProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        reconciler.reconcile(group);
+        reconciler.reconcile(group);
+        assertEquals("Successful", restored.getStatus());
+        assertEquals(0, restored.getInstancesToUpdate());
+        assertEquals(List.of("i-first-replacement", "i-second-replacement"), group.getInstances().stream()
+                .map(AsgInstance::getInstanceId).toList());
+        verify(ec2, times(3)).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
+                any(), anyList(), any(), any(), any());
+        verify(ec2).terminateInstances(REGION, List.of("i-original", "i-second"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void legacyNullOwnershipRetainsExistingCleanupAfterRestart(String mode) throws IOException {
+        setUp(mode);
+        InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        refresh.setReplacements(null);
+        service.saveInstanceRefresh(refresh);
+        service.suspendProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        restart(mode);
+        InstanceRefresh restored = service.activeInstanceRefresh(group);
+        assertNotNull(restored);
+        assertNull(restored.getReplacements());
+        reconciler.reconcile(group);
+        reconciler.reconcile(group);
+        verify(ec2).terminateInstances(REGION, List.of("i-original"));
+        assertEquals(List.of("i-replacement"), group.getInstances().stream()
+                .map(AsgInstance::getInstanceId).toList());
+        assertEquals("Successful", restored.getStatus());
+        assertNull(restored.getReplacements(), "Legacy state was heuristically assigned new ownership");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void sameNameOtherRegionRefreshDoesNotOwnLocalInstances(String mode) throws IOException {
+        setUp(mode);
+        String otherRegion = "us-west-2";
+        LaunchTemplate otherTemplate = new LaunchTemplate();
+        otherTemplate.setLaunchTemplateId("lt-other");
+        otherTemplate.getData().setImageId("ami-other");
+        when(ec2.describeLaunchTemplateVersions(eq(otherRegion), eq("lt-other"), isNull(), anyList()))
+                .thenReturn(List.of(otherTemplate));
+        service.createAutoScalingGroup(otherRegion, "suspended-group", null, "lt-other", null, "1", null,
+                0, 3, 1, 300, List.of("us-west-2a"), List.of(), List.of(), List.of(), "EC2", 0,
+                List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
+        AutoScalingGroup other = service.describeAutoScalingGroups(otherRegion, List.of("suspended-group"))
+                .getFirst();
+        AsgInstance otherMember = new AsgInstance();
+        otherMember.setInstanceId("i-original");
+        otherMember.setLifecycleState("InService");
+        otherMember.setHealthStatus("Healthy");
+        other.getInstances().add(otherMember);
+        service.saveAutoScalingGroupIfPresent(other);
+        service.suspendProcesses(otherRegion, "suspended-group", List.of("InstanceRefresh"));
+        service.startInstanceRefresh(otherRegion, "suspended-group", new InstanceRefresh());
+        service.suspendProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        service.terminateInstanceInAutoScalingGroup(REGION, "i-original", true);
+        restart(mode);
+        reconciler.reconcile(group);
+        assertTrue(group.getInstances().isEmpty());
+        verify(ec2).terminateInstances(REGION, List.of("i-original"));
+        AutoScalingGroup restoredOther = service.describeAutoScalingGroups(otherRegion,
+                List.of("suspended-group")).getFirst();
+        InstanceRefresh otherRefresh = service.activeInstanceRefresh(restoredOther);
+        assertNotNull(otherRefresh);
+        assertEquals("InProgress", otherRefresh.getStatus());
+        assertEquals(1, otherRefresh.getReplacements().size());
+        assertEquals("i-original", otherRefresh.getReplacements().getFirst().getOriginalInstanceId());
+        assertEquals(1, restoredOther.getInstances().size());
+        verify(ec2, never()).terminateInstances(eq(otherRegion), anyList());
+    }
+
     private static Reservation reservation(String id) {
         Instance instance = new Instance();
         instance.setInstanceId(id);
