@@ -488,7 +488,7 @@ class RetryingDockerHttpClientTest {
     private static Throwable realClientFailure(Path socketPath) throws IOException {
         Request list = Request.builder().method(Request.Method.GET).path("/containers/json").build();
         try (FlociDockerHttpClient real = new FlociDockerHttpClient.Builder()
-                .dockerHost(URI.create("unix://" + socketPath))
+                .dockerHost(URI.create("unix://" + socketPath.toUri().getRawPath()))
                 .build()) {
             FakeTransport delegate = new FakeTransport(attempt -> real.execute(list));
             RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
