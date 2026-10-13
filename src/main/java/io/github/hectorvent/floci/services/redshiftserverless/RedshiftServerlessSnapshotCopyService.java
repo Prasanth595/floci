@@ -12,7 +12,6 @@ import io.github.hectorvent.floci.services.redshiftserverless.model.SnapshotCopy
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -63,11 +62,10 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
             throw ServerlessSupport.notFound("The namespace " + namespaceName + " was not found.");
         }
         boolean duplicate = live(region).stream().anyMatch(existing ->
-                existing.getNamespaceName().equals(namespaceName)
-                        && existing.getDestinationRegion().equals(destinationRegion));
+                existing.getNamespaceName().equals(namespaceName));
         if (duplicate) {
             throw ServerlessSupport.conflict("The namespace " + namespaceName
-                    + " already copies snapshots to " + destinationRegion + ".");
+                    + " already has a snapshot copy configuration.");
         }
 
         SnapshotCopyConfiguration configuration = new SnapshotCopyConfiguration();
@@ -135,15 +133,9 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
 
     /** The region's configurations whose namespace is still there; any other is deleted as it is found. */
     private List<SnapshotCopyConfiguration> live(String region) {
-        List<SnapshotCopyConfiguration> alive = new ArrayList<>();
-        for (SnapshotCopyConfiguration configuration : configurations.scan(key -> key.startsWith(region + "::"))) {
-            if (isOnSameNamespace(configuration, region)) {
-                alive.add(configuration);
-            } else {
-                configurations.delete(storageKey(region, configuration.getSnapshotCopyConfigurationId()));
-            }
-        }
-        return alive;
+        return ServerlessSupport.live(configurations, region,
+                configuration -> isOnSameNamespace(configuration, region),
+                configuration -> storageKey(region, configuration.getSnapshotCopyConfigurationId()));
     }
 
     /** A namespace recreated under the same name has a new id, so it never inherits its predecessor's configurations. */

@@ -17,6 +17,7 @@ import software.amazon.awssdk.services.redshiftserverless.model.NamespaceStatus;
 import software.amazon.awssdk.services.redshiftserverless.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.redshiftserverless.model.Schedule;
 import software.amazon.awssdk.services.redshiftserverless.model.ScheduledActionResponse;
+import software.amazon.awssdk.services.redshiftserverless.model.ServerlessTrack;
 import software.amazon.awssdk.services.redshiftserverless.model.Snapshot;
 import software.amazon.awssdk.services.redshiftserverless.model.Tag;
 import software.amazon.awssdk.services.redshiftserverless.model.TargetAction;
@@ -24,6 +25,7 @@ import software.amazon.awssdk.services.redshiftserverless.model.UsageLimit;
 import software.amazon.awssdk.services.redshiftserverless.model.UsageLimitBreachAction;
 import software.amazon.awssdk.services.redshiftserverless.model.UsageLimitPeriod;
 import software.amazon.awssdk.services.redshiftserverless.model.UsageLimitUsageType;
+import software.amazon.awssdk.services.redshiftserverless.model.ValidationException;
 import software.amazon.awssdk.services.redshiftserverless.model.Workgroup;
 import software.amazon.awssdk.services.redshiftserverless.model.WorkgroupStatus;
 
@@ -289,9 +291,13 @@ class RedshiftServerlessTest {
 
                 EndpointAccess endpoint = client.createEndpointAccess(request -> request
                         .endpointName("floci-compat-meta-ep").workgroupName(workgroupName)
-                        .subnetIds("subnet-a").vpcSecurityGroupIds("sg-1")).endpoint();
+                        .subnetIds("subnet-a")).endpoint();
                 assertThat(endpoint.endpointStatus()).isEqualTo("ACTIVE");
                 assertThat(endpoint.endpointCreateTime()).isNotNull();
+                assertThat(endpoint.vpcSecurityGroups()).isEmpty();
+                assertThatThrownBy(() -> client.createEndpointAccess(request -> request
+                        .endpointName("invalid--endpoint").workgroupName(workgroupName).subnetIds("subnet-a")))
+                        .isInstanceOf(ValidationException.class);
                 assertThat(client.listEndpointAccess(request -> request.workgroupName(workgroupName)).endpoints())
                         .extracting(EndpointAccess::endpointName).containsExactly("floci-compat-meta-ep");
                 client.deleteEndpointAccess(request -> request.endpointName("floci-compat-meta-ep"));
@@ -301,7 +307,14 @@ class RedshiftServerlessTest {
                         .snapshotCopyConfiguration().snapshotCopyConfigurationId();
                 assertThat(client.listSnapshotCopyConfigurations(request -> request.namespaceName(namespaceName))
                         .snapshotCopyConfigurations()).hasSize(1);
+                assertThatThrownBy(() -> client.createSnapshotCopyConfiguration(request -> request
+                        .namespaceName(namespaceName).destinationRegion("eu-west-1")))
+                        .isInstanceOf(ConflictException.class);
                 client.deleteSnapshotCopyConfiguration(request -> request.snapshotCopyConfigurationId(copyId));
+                String replacementCopyId = client.createSnapshotCopyConfiguration(request -> request
+                        .namespaceName(namespaceName).destinationRegion("eu-west-1"))
+                        .snapshotCopyConfiguration().snapshotCopyConfigurationId();
+                client.deleteSnapshotCopyConfiguration(request -> request.snapshotCopyConfigurationId(replacementCopyId));
 
                 ScheduledActionResponse action = client.createScheduledAction(request -> request
                         .scheduledActionName("floci-compat-meta-sched").namespaceName(namespaceName)
@@ -325,6 +338,44 @@ class RedshiftServerlessTest {
                 deleteWorkgroupBestEffort(client, workgroupName);
                 deleteBestEffort(client, namespaceName);
             }
+        }
+    }
+
+    @Test
+    void snapshotCopyDestinationCanChangeOnlyAfterDeletion() {
+        assumeFalse(TestFixtures.isRealAws(), "Asserts metadata-only snapshot copying");
+        try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient()) {
+            String namespaceName = "floci-compat-copy-ns";
+            try {
+                client.createNamespace(request -> request.namespaceName(namespaceName).adminUsername("admin"));
+                String copyId = client.createSnapshotCopyConfiguration(request -> request
+                        .namespaceName(namespaceName).destinationRegion("us-west-2"))
+                        .snapshotCopyConfiguration().snapshotCopyConfigurationId();
+                assertThatThrownBy(() -> client.createSnapshotCopyConfiguration(request -> request
+                        .namespaceName(namespaceName).destinationRegion("eu-west-1")))
+                        .isInstanceOf(ConflictException.class);
+                client.deleteSnapshotCopyConfiguration(request -> request.snapshotCopyConfigurationId(copyId));
+                String replacementId = client.createSnapshotCopyConfiguration(request -> request
+                        .namespaceName(namespaceName).destinationRegion("eu-west-1"))
+                        .snapshotCopyConfiguration().snapshotCopyConfigurationId();
+                assertThat(client.listSnapshotCopyConfigurations(request -> request.namespaceName(namespaceName))
+                        .snapshotCopyConfigurations()).extracting(configuration -> configuration.destinationRegion())
+                        .containsExactly("eu-west-1");
+                client.deleteSnapshotCopyConfiguration(request -> request.snapshotCopyConfigurationId(replacementId));
+            } finally {
+                deleteBestEffort(client, namespaceName);
+            }
+        }
+    }
+
+    @Test
+    void releaseTracksUseAwsSdk() {
+        assumeFalse(TestFixtures.isRealAws(), "Asserts the emulator's static release tracks");
+        try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient()) {
+            assertThat(client.listTracks(request -> {}).tracks())
+                    .extracting(ServerlessTrack::trackName).containsExactly("current", "trailing");
+            assertThatThrownBy(() -> client.getTrack(request -> request.trackName("preview")))
+                    .isInstanceOf(ResourceNotFoundException.class);
         }
     }
 

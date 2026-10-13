@@ -11,7 +11,6 @@ import io.github.hectorvent.floci.services.redshiftserverless.model.ScheduledAct
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -150,15 +149,9 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
 
     /** The region's actions whose namespace is still there; any other is deleted as it is found. */
     private List<ScheduledAction> live(String region) {
-        List<ScheduledAction> alive = new ArrayList<>();
-        for (ScheduledAction action : actions.scan(key -> key.startsWith(region + "::"))) {
-            if (isOnSameNamespace(action, region)) {
-                alive.add(action);
-            } else {
-                actions.delete(storageKey(region, action.getScheduledActionName()));
-            }
-        }
-        return alive;
+        return ServerlessSupport.live(actions, region,
+                action -> isOnSameNamespace(action, region),
+                action -> storageKey(region, action.getScheduledActionName()));
     }
 
     /** A namespace recreated under the same name has a new id, so it never inherits its predecessor's actions. */

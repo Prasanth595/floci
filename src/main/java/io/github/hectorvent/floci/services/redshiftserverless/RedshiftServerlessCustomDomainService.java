@@ -11,7 +11,6 @@ import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -131,16 +130,9 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
 
     /** The region's associations whose workgroup is still there; any other is deleted as it is found. */
     private List<CustomDomainAssociation> live(String region) {
-        List<CustomDomainAssociation> alive = new ArrayList<>();
-        for (CustomDomainAssociation association : associations.scan(key -> key.startsWith(region + "::"))) {
-            if (isOnSameWorkgroup(association, region)) {
-                alive.add(association);
-            } else {
-                associations.delete(storageKey(region, association.getWorkgroupName(),
-                        association.getCustomDomainName()));
-            }
-        }
-        return alive;
+        return ServerlessSupport.live(associations, region,
+                association -> isOnSameWorkgroup(association, region),
+                association -> storageKey(region, association.getWorkgroupName(), association.getCustomDomainName()));
     }
 
     /** A workgroup recreated under the same name has a new id, so it never inherits its predecessor's domains. */

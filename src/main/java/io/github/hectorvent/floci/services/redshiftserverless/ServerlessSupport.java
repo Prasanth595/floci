@@ -2,10 +2,15 @@ package io.github.hectorvent.floci.services.redshiftserverless;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 /**
@@ -17,6 +22,10 @@ final class ServerlessSupport {
 
     /** Resource names such as scheduled actions and namespaces: lower-case letters, digits and hyphens. */
     static final Pattern LOWER_NAME = Pattern.compile("^[a-z0-9-]+$");
+
+    /** Use only for members whose model overrides the epoch-seconds default with ISO 8601. */
+    static final DateTimeFormatter ISO_8601 =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     private ServerlessSupport() {
     }
@@ -115,5 +124,19 @@ final class ServerlessSupport {
 
     static Integer maxResults(JsonNode request) {
         return integer(request, "maxResults");
+    }
+
+    /** Return the Region's surviving records and remove records whose original parent is gone. */
+    static <T> List<T> live(AccountAwareStorageBackend<T> storage, String region,
+                            Predicate<T> hasParent, Function<T, String> storageKey) {
+        List<T> alive = new ArrayList<>();
+        for (T record : storage.scan(key -> key.startsWith(region + "::"))) {
+            if (hasParent.test(record)) {
+                alive.add(record);
+            } else {
+                storage.delete(storageKey.apply(record));
+            }
+        }
+        return alive;
     }
 }

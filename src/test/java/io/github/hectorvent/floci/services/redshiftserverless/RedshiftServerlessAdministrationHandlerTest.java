@@ -137,11 +137,6 @@ class RedshiftServerlessAdministrationHandlerTest {
                         + "\"vpcSecurityGroupIds\":[\"sg-1\"]}"));
         assertEquals("ValidationException", errorType("CreateEndpointAccess",
                 "{\"endpointName\":\"ep-two\",\"workgroupName\":\"ep-wg\"}"));
-        assertEquals("ValidationException", errorType("CreateEndpointAccess",
-                "{\"endpointName\":\"ep-two\",\"workgroupName\":\"ep-wg\",\"subnetIds\":[\"subnet-a\"]}"));
-        assertEquals("ValidationException", errorType("CreateEndpointAccess",
-                "{\"endpointName\":\"ep-two\",\"workgroupName\":\"ep-wg\",\"subnetIds\":[\"subnet-a\"],"
-                        + "\"vpcSecurityGroupIds\":[]}"));
         assertEquals("ResourceNotFoundException", errorType("CreateEndpointAccess",
                 "{\"endpointName\":\"ep-two\",\"workgroupName\":\"nope\",\"subnetIds\":[\"subnet-a\"],"
                         + "\"vpcSecurityGroupIds\":[\"sg-1\"]}"));
@@ -173,7 +168,37 @@ class RedshiftServerlessAdministrationHandlerTest {
     }
 
     @Test
-    void snapshotCopyConfigurationIsPerNamespaceAndDestination() {
+    void endpointSecurityGroupsAreOptional() {
+        workgroup("optional-ns", "optional-wg");
+        JsonNode omitted = ok("CreateEndpointAccess",
+                "{\"endpointName\":\"optional\",\"workgroupName\":\"optional-wg\",\"subnetIds\":[\"subnet-a\"]}")
+                .get("endpoint");
+        assertEquals(0, omitted.get("vpcSecurityGroups").size());
+        JsonNode empty = ok("CreateEndpointAccess",
+                "{\"endpointName\":\"empty\",\"workgroupName\":\"optional-wg\",\"subnetIds\":[\"subnet-a\"],"
+                        + "\"vpcSecurityGroupIds\":[]}").get("endpoint");
+        assertEquals(0, empty.get("vpcSecurityGroups").size());
+    }
+
+    @Test
+    void endpointNamesFollowAwsConstraints() {
+        workgroup("names-ns", "names-wg");
+        for (String name : List.of("", "1endpoint", "-endpoint", "end--point", "endpoint-", "end_point",
+                "a".repeat(31))) {
+            assertEquals("ValidationException", errorType("CreateEndpointAccess",
+                    "{\"endpointName\":\"" + name + "\",\"workgroupName\":\"names-wg\","
+                            + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}"), name);
+        }
+        for (String name : List.of("A", "Endpoint-123", "a".repeat(30))) {
+            assertEquals(name, ok("CreateEndpointAccess",
+                    "{\"endpointName\":\"" + name + "\",\"workgroupName\":\"names-wg\","
+                            + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}")
+                    .get("endpoint").get("endpointName").textValue());
+        }
+    }
+
+    @Test
+    void snapshotCopyConfigurationHasOneDestinationPerNamespace() {
         namespace("copy-ns");
 
         JsonNode created = ok("CreateSnapshotCopyConfiguration", "{\"namespaceName\":\"copy-ns\","
@@ -188,6 +213,8 @@ class RedshiftServerlessAdministrationHandlerTest {
 
         assertEquals("ConflictException", errorType("CreateSnapshotCopyConfiguration",
                 "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"us-west-2\"}"));
+        assertEquals("ConflictException", errorType("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"eu-west-1\"}"));
         assertEquals("ValidationException", errorType("CreateSnapshotCopyConfiguration",
                 "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"us-east-1\"}"));
         assertEquals("ValidationException", errorType("CreateSnapshotCopyConfiguration",
@@ -208,6 +235,9 @@ class RedshiftServerlessAdministrationHandlerTest {
         assertEquals(id, ok("DeleteSnapshotCopyConfiguration", "{\"snapshotCopyConfigurationId\":\"" + id + "\"}")
                 .get("snapshotCopyConfiguration").get("snapshotCopyConfigurationId").textValue());
         assertEquals(0, ok("ListSnapshotCopyConfigurations", "{}").get("snapshotCopyConfigurations").size());
+        assertEquals("eu-west-1", ok("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"eu-west-1\"}")
+                .get("snapshotCopyConfiguration").get("destinationRegion").textValue());
     }
 
     @Test
@@ -300,18 +330,22 @@ class RedshiftServerlessAdministrationHandlerTest {
     }
 
     @Test
-    void tracksAreTheThreeAwsReleaseTracks() {
+    void tracksAreTheTwoAwsReleaseTracks() {
         JsonNode track = ok("GetTrack", "{\"trackName\":\"trailing\"}").get("track");
         assertEquals("trailing", track.get("trackName").textValue());
         assertEquals(0, track.get("updateTargets").size());
         assertEquals("ResourceNotFoundException", errorType("GetTrack", "{\"trackName\":\"nightly\"}"));
         assertEquals("ValidationException", errorType("GetTrack", "{\"trackName\":\"not valid!\"}"));
 
-        JsonNode page = ok("ListTracks", "{\"maxResults\":2}");
-        assertEquals(2, page.get("tracks").size());
+        assertEquals("ResourceNotFoundException", errorType("GetTrack", "{\"trackName\":\"preview\"}"));
+        assertEquals(2, ok("ListTracks", "{}").get("tracks").size());
+        JsonNode page = ok("ListTracks", "{\"maxResults\":1}");
+        assertEquals("current", page.get("tracks").get(0).get("trackName").textValue());
         String next = page.get("nextToken").textValue();
         JsonNode rest = ok("ListTracks", "{\"nextToken\":\"" + next + "\"}");
         assertEquals(1, rest.get("tracks").size());
+        assertEquals("trailing", rest.get("tracks").get(0).get("trackName").textValue());
+        assertTrue(!rest.has("nextToken"));
         assertEquals("ValidationException", errorType("ListTracks", "{\"maxResults\":\"x\"}"));
     }
 

@@ -18,8 +18,6 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,9 +34,7 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class RedshiftServerlessAdminJsonHandler {
 
-    private static final DateTimeFormatter ISO_8601 =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
-    private static final List<String> TRACK_NAMES = List.of("current", "preview", "trailing");
+    private static final List<String> TRACK_NAMES = List.of("current", "trailing");
     private static final Pattern TRACK_NAME = Pattern.compile("^[a-zA-Z0-9_]+$");
     private static final Pattern SOURCE_ARN = Pattern.compile(
             "^arn:" + AwsArnUtils.PARTITION_REGEX
@@ -194,7 +190,7 @@ public class RedshiftServerlessAdminJsonHandler {
             node.put("address", endpoint.getAddress());
         }
         node.put("endpointArn", endpoint.getEndpointArn());
-        node.put("endpointCreateTime", ISO_8601.format(endpoint.getCreateTime()));
+        node.put("endpointCreateTime", ServerlessSupport.ISO_8601.format(endpoint.getCreateTime()));
         node.put("endpointName", endpoint.getEndpointName());
         node.put("endpointStatus", endpoint.getStatus());
         node.put("port", endpoint.getPort());

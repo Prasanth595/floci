@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -492,12 +493,17 @@ class RedshiftServerlessIntegrationTest {
                 .body("__type", equalTo("ResourceNotFoundException"));
 
         call("CreateEndpointAccess", "{\"endpointName\":\"admin-ep\",\"workgroupName\":\"admin-wg\","
-                + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}")
+                + "\"subnetIds\":[\"subnet-a\"]}")
                 .statusCode(200)
                 .body("endpoint.endpointName", equalTo("admin-ep"))
                 .body("endpoint.endpointStatus", equalTo("ACTIVE"))
                 .body("endpoint.endpointCreateTime", matchesPattern("\\d{4}-\\d{2}-\\d{2}T.*Z"))
+                .body("endpoint.vpcSecurityGroups", hasSize(0))
                 .body("endpoint.vpcEndpoint.networkInterfaces[0].subnetId", equalTo("subnet-a"));
+        call("CreateEndpointAccess", "{\"endpointName\":\"admin--ep\",\"workgroupName\":\"admin-wg\","
+                + "\"subnetIds\":[\"subnet-a\"]}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
         call("ListEndpointAccess", "{\"workgroupName\":\"admin-wg\"}")
                 .statusCode(200)
                 .body("endpoints.endpointName", hasItem("admin-ep"));
@@ -510,7 +516,24 @@ class RedshiftServerlessIntegrationTest {
                 .statusCode(200)
                 .body("snapshotCopyConfiguration.destinationRegion", equalTo("us-west-2"))
                 .extract().path("snapshotCopyConfiguration.snapshotCopyConfigurationId");
+        call("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"admin-ns\",\"destinationRegion\":\"eu-west-1\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ConflictException"));
         call("DeleteSnapshotCopyConfiguration", "{\"snapshotCopyConfigurationId\":\"" + copyId + "\"}").statusCode(200);
+        String replacementCopyId = call("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"admin-ns\",\"destinationRegion\":\"eu-west-1\"}")
+                .statusCode(200)
+                .body("snapshotCopyConfiguration.destinationRegion", equalTo("eu-west-1"))
+                .extract().path("snapshotCopyConfiguration.snapshotCopyConfigurationId");
+        call("DeleteSnapshotCopyConfiguration", "{\"snapshotCopyConfigurationId\":\"" + replacementCopyId + "\"}")
+                .statusCode(200);
+        call("ListTracks", "{}")
+                .statusCode(200)
+                .body("tracks.trackName", equalTo(List.of("current", "trailing")));
+        call("GetTrack", "{\"trackName\":\"preview\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
 
         call("CreateScheduledAction", "{\"scheduledActionName\":\"admin-sched\",\"namespaceName\":\"admin-ns\","
                 + "\"roleArn\":\"arn:aws:iam::000000000000:role/r\",\"schedule\":{\"cron\":\"cron(0 3 * * ? *)\"},"

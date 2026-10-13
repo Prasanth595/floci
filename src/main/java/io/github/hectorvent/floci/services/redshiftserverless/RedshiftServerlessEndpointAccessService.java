@@ -32,6 +32,7 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class RedshiftServerlessEndpointAccessService implements Resettable {
 
+    private static final Pattern ENDPOINT_NAME = Pattern.compile("^[A-Za-z][A-Za-z0-9-]{0,29}$");
     private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
     private static final int PAGE_SIZE = 100;
 
@@ -53,12 +54,13 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
                                                             List<String> vpcSecurityGroupIds,
                                                             String ownerAccount, String region) {
         ServerlessSupport.requireText(endpointName, "endpointName");
+        if (!ENDPOINT_NAME.matcher(endpointName).matches() || endpointName.contains("--") || endpointName.endsWith("-")) {
+            throw ServerlessSupport.validation("endpointName must be 1 to 30 letters, digits or hyphens, "
+                    + "start with a letter, and contain no consecutive or trailing hyphens.");
+        }
         ServerlessSupport.requireText(workgroupName, "workgroupName");
         if (subnetIds == null || subnetIds.isEmpty()) {
             throw ServerlessSupport.validation("subnetIds is required.");
-        }
-        if (vpcSecurityGroupIds == null || vpcSecurityGroupIds.isEmpty()) {
-            throw ServerlessSupport.validation("vpcSecurityGroupIds is required.");
         }
         if (ownerAccount != null && !ACCOUNT_ID.matcher(ownerAccount).matches()) {
             throw ServerlessSupport.validation("ownerAccount must be a 12-digit account id.");
@@ -78,8 +80,7 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
         endpoint.setOwnerId(workgroup.getWorkgroupId());
         endpoint.setStatus("ACTIVE");
         endpoint.setCreateTime(Instant.now());
-        endpoint.setAddress(workgroup.getEndpoint() == null ? null : workgroup.getEndpoint().getAddress());
-        endpoint.setPort(workgroup.getEndpoint() == null ? workgroup.getPort() : workgroup.getEndpoint().getPort());
+        refreshConnection(endpoint, workgroup);
         endpoint.setSubnetIds(subnetIds);
         endpoint.setNetworkInterfaceIds(networkInterfaceIdsFor(subnetIds));
         endpoint.setVpcSecurityGroupIds(vpcSecurityGroupIds);
@@ -89,7 +90,7 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
     }
 
     public synchronized EndpointAccess getEndpointAccess(String endpointName, String region) {
-        return new EndpointAccess(require(endpointName, region));
+        return withCurrentConnection(require(endpointName, region), region);
     }
 
     public synchronized PaginatedResult<EndpointAccess> listEndpointAccess(String workgroupName, String vpcId,
@@ -102,7 +103,7 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
                 .filter(endpoint -> !wrongVpc && !wrongOwner)
                 .filter(endpoint -> workgroupName == null || workgroupName.equals(endpoint.getWorkgroupName()))
                 .sorted(Comparator.comparing(EndpointAccess::getEndpointName))
-                .map(EndpointAccess::new)
+                .map(endpoint -> withCurrentConnection(endpoint, region))
                 .toList();
         return Pagination.paginate(matching, EndpointAccess::getEndpointName, maxResults, nextToken,
                 PAGE_SIZE, PAGE_SIZE, "InvalidPaginationException");
@@ -116,11 +117,11 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
             updated.setVpcSecurityGroupIds(vpcSecurityGroupIds);
             endpoints.put(storageKey(region, endpointName), updated);
         }
-        return new EndpointAccess(updated);
+        return withCurrentConnection(updated, region);
     }
 
     public synchronized EndpointAccess deleteEndpointAccess(String endpointName, String region) {
-        EndpointAccess existing = new EndpointAccess(require(endpointName, region));
+        EndpointAccess existing = withCurrentConnection(require(endpointName, region), region);
         endpoints.delete(storageKey(region, endpointName));
         existing.setStatus("DELETING");
         return existing;
@@ -146,27 +147,28 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
 
     /** The region's endpoints whose workgroup is still there; any other is deleted as it is found. */
     private List<EndpointAccess> live(String region) {
-        List<EndpointAccess> alive = new ArrayList<>();
-        for (EndpointAccess endpoint : endpoints.scan(key -> key.startsWith(region + "::"))) {
-            if (isOnSameWorkgroup(endpoint, region)) {
-                alive.add(endpoint);
-            } else {
-                endpoints.delete(storageKey(region, endpoint.getEndpointName()));
-            }
-        }
-        return alive;
+        return ServerlessSupport.live(endpoints, region,
+                endpoint -> isOnSameWorkgroup(endpoint, region),
+                endpoint -> storageKey(region, endpoint.getEndpointName()));
     }
 
     /** A workgroup recreated under the same name has a new id, so it never inherits its predecessor's endpoints. */
     private boolean isOnSameWorkgroup(EndpointAccess endpoint, String region) {
         return serverless.findWorkgroup(endpoint.getWorkgroupName(), region)
-                .filter(workgroup -> Objects.equals(workgroup.getWorkgroupId(), endpoint.getOwnerId()))
-                .map(workgroup -> {
-                    endpoint.setAddress(workgroup.getEndpoint() == null ? null : workgroup.getEndpoint().getAddress());
-                    endpoint.setPort(workgroup.getEndpoint() == null ? workgroup.getPort() : workgroup.getEndpoint().getPort());
-                    return true;
-                })
+                .map(workgroup -> Objects.equals(workgroup.getWorkgroupId(), endpoint.getOwnerId()))
                 .orElse(false);
+    }
+
+    private EndpointAccess withCurrentConnection(EndpointAccess endpoint, String region) {
+        EndpointAccess response = new EndpointAccess(endpoint);
+        serverless.findWorkgroup(endpoint.getWorkgroupName(), region)
+                .ifPresent(workgroup -> refreshConnection(response, workgroup));
+        return response;
+    }
+
+    private static void refreshConnection(EndpointAccess endpoint, Workgroup workgroup) {
+        endpoint.setAddress(workgroup.getEndpoint() == null ? null : workgroup.getEndpoint().getAddress());
+        endpoint.setPort(workgroup.getEndpoint() == null ? workgroup.getPort() : workgroup.getEndpoint().getPort());
     }
 
     private static List<String> networkInterfaceIdsFor(List<String> subnetIds) {
