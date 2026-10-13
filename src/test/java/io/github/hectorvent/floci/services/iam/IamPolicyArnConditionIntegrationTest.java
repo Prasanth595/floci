@@ -12,6 +12,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 import java.util.Map;
@@ -119,6 +120,29 @@ class IamPolicyArnConditionIntegrationTest {
         assertAll(
                 () -> assertEquals(denied ? 403 : 200, result.statusCode(), result.asString()),
                 () -> assertEquals(shouldBeAttached, listed.asString().contains(policyArn), listed.asString()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void sharedGroupCleanupReleasesManagedPolicies(boolean scoped) {
+        account = scoped ? "123456789012" : "000000000000";
+        region = scoped ? "cn-north-1" : "us-east-1";
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String group = "cleanup-group-" + suffix;
+        Response createdPolicy = call(account, "CreatePolicy", Map.of("PolicyName", "cleanup-policy-" + suffix,
+                "PolicyDocument", DOCUMENT));
+        assertEquals(200, createdPolicy.statusCode(), createdPolicy.asString());
+        String arn = createdPolicy.xmlPath().getString("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
+        cleanup.register(() -> EnforcementFixtures.removePolicy(baseUri.getPort(), auth(account), arn));
+        cleanup.register(() -> EnforcementFixtures.removeGroup(baseUri.getPort(), auth(account), group));
+        assertEquals(200, call(account, "CreateGroup", Map.of("GroupName", group)).statusCode());
+        assertEquals(200, call(account, "AttachGroupPolicy", Map.of("GroupName", group, "PolicyArn", arn))
+                .statusCode());
+        EnforcementFixtures.removeGroup(baseUri.getPort(), auth(account), group);
+        assertEquals(404, call(account, "GetGroup", Map.of("GroupName", group)).statusCode());
+        // The policy's attachment count must be released too, otherwise its deletion is refused.
+        assertEquals(200, call(account, "DeletePolicy", Map.of("PolicyArn", arn)).statusCode());
+        assertEquals(404, call(account, "GetPolicy", Map.of("PolicyArn", arn)).statusCode());
     }
 
     private String auth(String key) {
