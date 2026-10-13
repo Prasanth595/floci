@@ -1,7 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.w3c.dom.Document;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.AwsCredentials;
@@ -21,6 +21,7 @@ import software.amazon.awssdk.services.sts.model.GetCallerIdentityResponse;
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.ByteArrayInputStream;
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -32,8 +33,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class StsPresignedIdentityTest {
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void sdkPresignedRequestKeepsUserOrRoleIdentity(boolean role) throws Exception {
+    @CsvSource({"false, HTTP_1_1", "true, HTTP_1_1", "false, HTTP_2", "true, HTTP_2"})
+    void sdkPresignedRequestKeepsUserOrRoleIdentity(boolean role, HttpClient.Version version) throws Exception {
         String name = TestFixtures.uniqueName("sts-presigned");
         try (IamClient iam = TestFixtures.iamClient(); StsClient root = TestFixtures.stsClient()) {
             String expectedArn;
@@ -73,7 +74,7 @@ class StsPresignedIdentityTest {
                 GetCallerIdentityResponse header = caller.getCallerIdentity();
                 assertThat(header.arn()).isEqualTo(expectedArn);
                 assertThat(header.userId()).isEqualTo(expectedId);
-                Document query = presignedIdentity(credentials);
+                Document query = presignedIdentity(credentials, version);
                 assertThat(query.getElementsByTagNameNS("*", "Arn").item(0).getTextContent()).isEqualTo(expectedArn);
                 assertThat(query.getElementsByTagNameNS("*", "UserId").item(0).getTextContent()).isEqualTo(expectedId);
                 assertThat(query.getElementsByTagNameNS("*", "Account").item(0).getTextContent()).isEqualTo(header.account());
@@ -92,7 +93,7 @@ class StsPresignedIdentityTest {
         }
     }
 
-    private static Document presignedIdentity(AwsCredentials credentials) throws Exception {
+    private static Document presignedIdentity(AwsCredentials credentials, HttpClient.Version version) throws Exception {
         byte[] body = "Action=GetCallerIdentity&Version=2011-06-15".getBytes(StandardCharsets.UTF_8);
         SdkHttpFullRequest signed = Aws4Signer.create().presign(SdkHttpFullRequest.builder()
                         .uri(TestFixtures.endpoint()).method(SdkHttpMethod.POST)
@@ -100,15 +101,26 @@ class StsPresignedIdentityTest {
                         .contentStreamProvider(() -> new ByteArrayInputStream(body)).build(),
                 Aws4PresignerParams.builder().awsCredentials(credentials).signingRegion(TestFixtures.region())
                         .signingName("sts").expirationTime(Instant.now().plusSeconds(60)).build());
-        HttpRequest.Builder request = HttpRequest.newBuilder(signed.getUri()).timeout(Duration.ofSeconds(10))
-                .POST(HttpRequest.BodyPublishers.ofByteArray(body));
-        signed.headers().forEach((name, values) -> {
-            if (!name.equalsIgnoreCase("Host") && !name.equalsIgnoreCase("Content-Length")) {
-                values.forEach(value -> request.header(name, value));
-            }
-        });
-        HttpResponse<byte[]> response = HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofByteArray());
+        HttpResponse<byte[]> response = send(signed, signed.getUri(), body, version);
         assertThat(response.statusCode()).as(new String(response.body(), StandardCharsets.UTF_8)).isEqualTo(200);
+        URI forged = URI.create(signed.getUri().toString().replaceAll("X-Amz-Signature=[^&]*",
+                "X-Amz-Signature=" + "0".repeat(64)));
+        HttpResponse<byte[]> refused = send(signed, forged, body, version);
+        assertThat(refused.statusCode()).isEqualTo(403);
+        assertThat(new String(refused.body(), StandardCharsets.UTF_8)).contains("SignatureDoesNotMatch");
+        HttpResponse<byte[]> changed = send(signed, signed.getUri(),
+                (new String(body, StandardCharsets.UTF_8) + "&Extra=changed").getBytes(StandardCharsets.UTF_8), version);
+        assertThat(changed.statusCode()).isEqualTo(403);
+        assertThat(new String(changed.body(), StandardCharsets.UTF_8)).contains("SignatureDoesNotMatch");
+        if (credentials instanceof AwsSessionCredentials) {
+            for (String replacement : new String[]{"", "X-Amz-Security-Token=wrong"}) {
+                URI wrongToken = URI.create(signed.getUri().toString()
+                        .replaceAll("X-Amz-Security-Token=[^&]*", replacement));
+                HttpResponse<byte[]> invalid = send(signed, wrongToken, body, version);
+                assertThat(invalid.statusCode()).isEqualTo(403);
+                assertThat(new String(invalid.body(), StandardCharsets.UTF_8)).contains("InvalidClientTokenId");
+            }
+        }
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         factory.setNamespaceAware(true);
         factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
@@ -118,5 +130,20 @@ class StsPresignedIdentityTest {
         factory.setXIncludeAware(false);
         factory.setExpandEntityReferences(false);
         return factory.newDocumentBuilder().parse(new ByteArrayInputStream(response.body()));
+    }
+
+    private static HttpResponse<byte[]> send(SdkHttpFullRequest signed, URI uri, byte[] body,
+                                              HttpClient.Version version) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(body));
+        signed.headers().forEach((name, values) -> {
+            if (!name.equalsIgnoreCase("Host") && !name.equalsIgnoreCase("Content-Length")) {
+                values.forEach(value -> request.header(name, value));
+            }
+        });
+        HttpResponse<byte[]> response = HttpClient.newBuilder().version(version).build()
+                .send(request.build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(response.version()).isEqualTo(version);
+        return response;
     }
 }

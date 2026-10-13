@@ -118,3 +118,7 @@ so a presigned request reports the same caller identity. A nonblank Authorizatio
 precedence over query credentials.
 
 When `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`, requests signed with the seeded `floci` access key return `arn:aws:iam::000000000000:user/floci-deployer`. Other unknown local credentials continue to return the account root ARN for backward compatibility.
+
+When `FLOCI_AUTH_VALIDATE_SIGNATURES=true`, `GetCallerIdentity` verifies presigned query credentials,
+including the request signature, credential scope, expiry and session token, before returning the
+caller identity. Nonblank Authorization headers retain priority and use the existing header verifier.
