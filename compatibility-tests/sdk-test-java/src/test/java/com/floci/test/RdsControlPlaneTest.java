@@ -765,6 +765,7 @@ class RdsControlPlaneTest {
     }
 
     @Test
+    @DisplayName("IAM role associations: add, describe and remove for a cluster and an instance")
     void sdkRoundTripsIamRoleAssociations() {
         String clusterName = TestFixtures.uniqueName("rds-roles-cluster");
         String instanceName = TestFixtures.uniqueName("rds-roles-db");

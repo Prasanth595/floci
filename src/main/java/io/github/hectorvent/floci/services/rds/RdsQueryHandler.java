@@ -47,7 +47,11 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.function.BiFunction;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Query-protocol handler for all RDS actions (form-encoded POST, XML response).
@@ -399,11 +403,10 @@ public class RdsQueryHandler {
             // Every index the request names, in order, whichever field it carries: an entry with a
             // FeatureName and no RoleArn reaches validation and is refused there, and a gap in the
             // numbering does not hide the entries after it.
-            java.util.regex.Pattern field = java.util.regex.Pattern.compile(
-                    java.util.regex.Pattern.quote(prefix) + "\\.(\\d+)\\.(RoleArn|FeatureName)");
-            java.util.SortedSet<Integer> indexes = new java.util.TreeSet<>();
+            Pattern field = Pattern.compile(Pattern.quote(prefix) + "\\.(\\d+)\\.(RoleArn|FeatureName)");
+            SortedSet<Integer> indexes = new TreeSet<>();
             for (String key : params.keySet()) {
-                java.util.regex.Matcher matcher = field.matcher(key);
+                Matcher matcher = field.matcher(key);
                 if (matcher.matches()) {
                     indexes.add(Integer.parseInt(matcher.group(1)));
                 }
