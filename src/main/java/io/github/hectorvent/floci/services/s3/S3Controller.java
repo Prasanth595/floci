@@ -67,6 +67,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -3481,7 +3482,8 @@ public class S3Controller {
     private Response checkPreconditions(S3Object obj, String ifMatch, String ifNoneMatch,
                                          String ifModifiedSince, String ifUnmodifiedSince) {
         String eTag = obj.getETag();
-        Instant lastModified = obj.getLastModified();
+        // Dates compare at second precision, the resolution of an HTTP date and of Last-Modified.
+        Instant lastModified = obj.getLastModified().truncatedTo(ChronoUnit.SECONDS);
 
         if (ifMatch != null && !eTagMatches(ifMatch, eTag)) {
             return preconditionFailedResponse();
