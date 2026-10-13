@@ -1270,7 +1270,65 @@ account key carries no identity policies of its own.
 - **Action/Resource patterns**: literal matches, wildcards (`*`, `?`), and `NotAction`/`NotResource` blocks.
   Action names match without regard to case, resource ARNs match case-sensitively, as on AWS.
 - **Conditions**: support for `Condition` blocks with multiple operators.
+- **Policy variables**: `${...}` placeholders in a `Resource` pattern or a `Condition` value,
+  resolved from the request context.
 - **Effects**: `Allow` and `Deny`.
+
+#### Policy variables
+
+A `${...}` placeholder in a `Resource` pattern or a `Condition` value is resolved against the
+request context before it is matched, so a statement scoped to
+`arn:aws:iam::*:user/${aws:username}` grants the caller their own user and nobody else's. That is
+how AWS writes its own `IAMUserChangePassword` policy, and 244 of the 1,586
+[managed policies](#aws-managed-policies) floci vendors carry at least one variable: of the 1,635
+occurrences in them, 1,443 sit in a `Condition` value and 192 in a `Resource`.
+
+Substitution needs `"Version": "2012-10-17"`. Under the older `2008-10-17`, which is also the
+default when the element is absent, the user guide says variables "are instead treated as literal
+strings in the policy", and floci matches them as written.
+
+The rest of the rules, all from the user guide:
+
+- In a `Resource` or `NotResource` ARN a variable resolves only in the resource portion, the part
+  after the fifth colon: a variable "can't ... replace parts of the ARN before the fifth colon,
+  such as the service or the account", and one written there stays literal text and matches
+  nothing. One vendored managed policy,
+  `AmazonTimestreamInfluxDBServiceRolePolicy`, writes `arn:*:kms:*:${aws:PrincipalAccount}:key/*`,
+  in the account field, so that statement grants nothing under enforcement. floci follows the
+  documented rule rather than the one policy that reads past it.
+- In a `Condition` a variable resolves for the string and ARN operators only: `StringEquals`,
+  `StringNotEquals`, `StringLike`, `StringNotLike`, their `IgnoreCase` forms, and `ArnEquals`,
+  `ArnLike` and their negated forms. A variable is not supported with `Numeric`, `Date`, `Bool`,
+  `IpAddress` or `Null`, so there the value is compared as written.
+- A variable whose key has no value leaves the whole value effectively null. In `Resource` the
+  pattern then "will not match any resource", and in `NotResource` that same rule means it
+  excludes nothing, so the statement covers every resource. In a `Condition`, `StringEquals` and
+  `StringLike` do not match while the inverted `StringNotEquals` and `StringNotLike` do.
+- Key names are case-insensitive and hold no space. The guide allows a space inside a quoted
+  default and nowhere else, so `${ aws:username }` is not a variable and stays the text it is,
+  as do the other forms the guide's policy checks call errors: an empty `${}`, a missing closing
+  brace, and a default without its quotes.
+- Only a single-valued key resolves: a multivalued key cannot be used as a variable, having no one
+  value to stand in, and a default does not rescue it, a default answering a key with no value
+  rather than one with several.
+- `${key, 'default'}` falls back to the quoted default when the key has no value.
+- `${*}`, `${?}` and `${$}` stand for a literal `*`, `?` and `$`. The first two are matched as
+  those characters rather than as wildcards.
+- A resolved value is not escaped, so a value carrying a `*` widens the pattern it lands in. That
+  is AWS's behaviour too: its own policy checks warn that variables "can be evaluated as effective
+  wildcards".
+
+Variables resolve in every document the evaluator reads: identity policies, resource policies,
+session policies, permissions boundaries, SCPs, and the `Condition` of a role trust policy. A
+variable can only resolve to a key floci populates, which is the list under
+[Condition keys floci populates](#condition-keys-floci-populates).
+
+A role trust policy is the narrower case, because `sts:AssumeRole` is authorized before there is a
+session to describe: its context carries `aws:PrincipalArn`, `aws:PrincipalAccount`,
+`aws:ResourceAccount`, `aws:RequestedRegion`, `aws:PrincipalIsAWSService`, `sts:RoleSessionName`,
+and `sts:ExternalId` when the request passes one. `aws:username`, `aws:userid` and
+`aws:PrincipalType` are not among them, so a variable naming one of those resolves to nothing in a
+trust policy and the value it sits in matches nothing.
 
 #### Supported Condition Operators:
 - `StringEquals`, `StringNotEquals`, `StringEqualsIgnoreCase`, `StringNotEqualsIgnoreCase`
