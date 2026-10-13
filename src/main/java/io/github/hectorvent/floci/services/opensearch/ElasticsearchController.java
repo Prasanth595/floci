@@ -123,6 +123,11 @@ public class ElasticsearchController {
         rename(req, "ElasticsearchClusterConfig", "ClusterConfig");
         JsonNode version = req.remove("ElasticsearchVersion");
         if (version != null && !version.isNull()) {
+            // ElasticsearchVersionString is a pattern no blank or non-string value matches.
+            if (!version.isTextual() || version.asText().isBlank()) {
+                throw new AwsException("ValidationException",
+                        "ElasticsearchVersion must be a version string such as 7.10.", 400);
+            }
             req.put("EngineVersion", toEngineVersion(version.asText()));
         } else if (create) {
             req.put("EngineVersion", DEFAULT_VERSION);
@@ -140,6 +145,7 @@ public class ElasticsearchController {
         body.path("DomainStatusList").forEach(s -> toLegacyStatus((ObjectNode) s));
         if (body.get("DomainConfig") instanceof ObjectNode config) {
             rename(config, "ClusterConfig", "ElasticsearchClusterConfig");
+            toLegacyInstanceType(config.path("ElasticsearchClusterConfig").path("Options"));
             if (config.remove("EngineVersion") instanceof ObjectNode version) {
                 version.put("Options", toLegacyVersion(version.path("Options").asText(null)));
                 config.set("ElasticsearchVersion", version);
@@ -150,9 +156,23 @@ public class ElasticsearchController {
 
     private static void toLegacyStatus(ObjectNode status) {
         rename(status, "ClusterConfig", "ElasticsearchClusterConfig");
+        toLegacyInstanceType(status.path("ElasticsearchClusterConfig"));
         JsonNode version = status.remove("EngineVersion");
         if (version != null) {
             status.put("ElasticsearchVersion", toLegacyVersion(version.asText(null)));
+        }
+    }
+
+    /**
+     * ESPartitionInstanceType lists only {@code *.elasticsearch} types, so the
+     * OpenSearch spelling ({@code m5.large.search}, the store's default) is reported
+     * with the legacy suffix.
+     */
+    private static void toLegacyInstanceType(JsonNode cluster) {
+        if (cluster instanceof ObjectNode node
+                && node.path("InstanceType").asText("").endsWith(".search")) {
+            String type = node.get("InstanceType").asText();
+            node.put("InstanceType", type.substring(0, type.length() - ".search".length()) + ".elasticsearch");
         }
     }
 

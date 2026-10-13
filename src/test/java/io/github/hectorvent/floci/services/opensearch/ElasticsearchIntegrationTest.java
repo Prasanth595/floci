@@ -71,7 +71,7 @@ class ElasticsearchIntegrationTest {
     }
 
     @Test
-    @Order(3)
+    @Order(4)
     void describeElasticsearchDomains() {
         given()
             .contentType("application/json")
@@ -87,7 +87,7 @@ class ElasticsearchIntegrationTest {
     }
 
     @Test
-    @Order(3)
+    @Order(5)
     void listDomainNames() {
         given()
             .header("Authorization", AUTH_HEADER)
@@ -102,7 +102,7 @@ class ElasticsearchIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(6)
     void describeElasticsearchDomainConfig() {
         given()
             .header("Authorization", AUTH_HEADER)
@@ -118,7 +118,7 @@ class ElasticsearchIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(7)
     void updateElasticsearchDomainConfig() {
         given()
             .contentType("application/json")
@@ -143,7 +143,7 @@ class ElasticsearchIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(8)
     void addListRemoveTags() {
         given()
             .contentType("application/json")
@@ -183,7 +183,7 @@ class ElasticsearchIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(9)
     void createWithoutVersionIsElasticsearch() {
         given()
             .contentType("application/json")
@@ -193,7 +193,35 @@ class ElasticsearchIntegrationTest {
             .post("/2015-01-01/es/domain")
         .then()
             .statusCode(200)
-            .body("DomainStatus.ElasticsearchVersion", equalTo("7.10"));
+            .body("DomainStatus.ElasticsearchVersion", equalTo("7.10"))
+            .body("DomainStatus.ElasticsearchClusterConfig.InstanceType", equalTo("m5.large.elasticsearch"));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/2015-01-01/es/domain/legacy-es-default/config")
+        .then()
+            .statusCode(200)
+            .body("DomainConfig.ElasticsearchClusterConfig.Options.InstanceType", equalTo("m5.large.elasticsearch"));
+
+        // A domain created with no cluster or EBS block accepts a first update of either.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ElasticsearchClusterConfig\":{\"InstanceCount\":2},\"EBSOptions\":{\"EBSEnabled\":true,\"VolumeSize\":30}}")
+        .when()
+            .post("/2015-01-01/es/domain/legacy-es-default/config")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/2015-01-01/es/domain/legacy-es-default")
+        .then()
+            .statusCode(200)
+            .body("DomainStatus.ElasticsearchClusterConfig.InstanceCount", equalTo(2))
+            .body("DomainStatus.EBSOptions.VolumeSize", equalTo(30));
 
         given()
             .header("Authorization", AUTH_HEADER)
@@ -204,7 +232,51 @@ class ElasticsearchIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(10)
+    void blankVersionIsRejected() {
+        // ElasticsearchVersionString: ^[0-9]{1}\\.[0-9]{1,2}$|^OpenSearch_...$|^OS_...$ -- "" matches none.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"DomainName\":\"legacy-es-blank\",\"ElasticsearchVersion\":\"\"}")
+        .when()
+            .post("/2015-01-01/es/domain")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/2015-01-01/es/domain/legacy-es-blank")
+        .then()
+            .statusCode(409);
+    }
+
+    @Test
+    @Order(11)
+    void emptyBodiesAreValidationErrors() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("")
+        .when()
+            .post("/2015-01-01/es/domain")
+        .then()
+            .statusCode(400);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("")
+        .when()
+            .post("/2015-01-01/es/domain/" + DOMAIN_NAME + "/config")
+        .then()
+            .statusCode(lessThan(500));
+    }
+
+    @Test
+    @Order(12)
     void deleteElasticsearchDomain() {
         given()
             .header("Authorization", AUTH_HEADER)
