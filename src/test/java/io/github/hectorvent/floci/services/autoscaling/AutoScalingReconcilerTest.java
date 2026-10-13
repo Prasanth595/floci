@@ -172,6 +172,11 @@ class AutoScalingReconcilerTest {
         version.getData().setInstanceType("t3.micro");
         version.getData().setUserData(storedText);
         version.getData().setEncodedUserData(storedEncoding);
+        LaunchTemplateData.MetadataOptions metadata = new LaunchTemplateData.MetadataOptions();
+        metadata.setHttpTokens("required");
+        metadata.setHttpEndpoint("enabled");
+        metadata.setHttpPutResponseHopLimit(2);
+        version.getData().setMetadataOptions(metadata);
         version.getData().setIamInstanceProfile(new LaunchTemplateData.IamInstanceProfile(
                 "arn:aws:iam::000000000000:instance-profile/app-profile", null));
         when(ec2Service.iamInstanceProfileArn(version.getData()))
@@ -192,7 +197,7 @@ class AutoScalingReconcilerTest {
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
                 anyList(), eq(expectedText),
                 eq("arn:aws:iam::000000000000:instance-profile/app-profile"), eq(null),
-                isNull(), eq(0), isNull(), isNull(), isNull(), eq(expectedEncoding),
+                isNull(), eq(0), isNull(), eq(metadata), isNull(), eq(expectedEncoding),
                 anyBoolean(), isNull(), isNull(), any())).thenReturn(reservation);
 
         reconciler.reconcile(asg);
@@ -206,7 +211,7 @@ class AutoScalingReconcilerTest {
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
                 tags.capture(), eq(expectedText),
                 eq("arn:aws:iam::000000000000:instance-profile/app-profile"), eq(null),
-                isNull(), eq(0), isNull(), isNull(), isNull(), eq(expectedEncoding),
+                isNull(), eq(0), isNull(), eq(metadata), isNull(), eq(expectedEncoding),
                 anyBoolean(), isNull(), isNull(), any());
         assertEquals(storedText, version.getData().getUserData());
         assertEquals(storedEncoding, version.getData().getEncodedUserData());
@@ -422,6 +427,11 @@ class AutoScalingReconcilerTest {
         version.getData().setImageId("ami-version-3");
         version.getData().setInstanceType("t3.micro");
         version.getData().setEncodedUserData("IyEvYmluL2Jhc2gKZWNobyBoaQo=");
+        LaunchTemplateData.MetadataOptions metadata = new LaunchTemplateData.MetadataOptions();
+        metadata.setHttpTokens("required");
+        metadata.setHttpEndpoint("enabled");
+        metadata.setHttpPutResponseHopLimit(2);
+        version.getData().setMetadataOptions(metadata);
         when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
                 .thenReturn(List.of(launchTemplate));
         when(ec2Service.describeLaunchTemplateVersions("us-east-1", "lt-123", null, List.of("3")))
@@ -433,7 +443,7 @@ class AutoScalingReconcilerTest {
         when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-3"), eq("t3.small"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
                 eq(List.of()), eq("#!/bin/bash\necho hi\n"), eq(null), eq(null),
-                isNull(), eq(0), isNull(), isNull(), isNull(), any(),
+                isNull(), eq(0), isNull(), eq(metadata), isNull(), any(),
                 anyBoolean(), isNull(), isNull(), any())).thenReturn(reservation);
 
         reconciler.reconcile(asg);
@@ -446,7 +456,7 @@ class AutoScalingReconcilerTest {
         verify(ec2Service).runInstances(eq("us-east-1"), eq("ami-version-3"), eq("t3.small"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
                 eq(List.of()), eq("#!/bin/bash\necho hi\n"), eq(null), eq(null),
-                isNull(), eq(0), isNull(), isNull(), isNull(), any(), anyBoolean(), isNull(), isNull(), any());
+                isNull(), eq(0), isNull(), eq(metadata), isNull(), any(), anyBoolean(), isNull(), isNull(), any());
         assertNull(version.getData().getUserData());
     }
 
