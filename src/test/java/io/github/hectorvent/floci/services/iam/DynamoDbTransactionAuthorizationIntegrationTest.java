@@ -144,6 +144,61 @@ class DynamoDbTransactionAuthorizationIntegrationTest {
         transaction(user, operation, table).statusCode(200);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"Get", "Update", "ConditionCheck"})
+    void itemAttributesAreEnforcedWithoutNullGuard(String operation) {
+        String table = table();
+        String item = itemBody(operation, table);
+        if ("Get".equals(operation)) {
+            item = item.substring(0, item.length() - 1)
+                    + ",\"ProjectionExpression\":\"#v\",\"ExpressionAttributeNames\":{\"#v\":\"value\"}}";
+        } else if ("ConditionCheck".equals(operation)) {
+            item = keyBody(table);
+            item = item.substring(0, item.length() - 1)
+                    + ",\"ConditionExpression\":\"attribute_exists(#v)\","
+                    + "\"ExpressionAttributeNames\":{\"#v\":\"value\"}}";
+        }
+        String request = "{\"TransactItems\":[{\"" + operation + "\":" + item + "}]}";
+        String denied = user(policy("dynamodb:" + operation + "Item",
+                ",\"Condition\":{\"ForAllValues:StringEquals\":{\"dynamodb:Attributes\":[\"PK\"]}}"));
+        request(denied, enclosing(operation), request).statusCode(400)
+                .body(containsString("AccessDeniedException"));
+        request("test", "GetItem", keyBody(table)).statusCode(200).body("Item.value.S", equalTo("original"));
+        String allowed = user(policy("dynamodb:" + operation + "Item",
+                ",\"Condition\":{\"ForAllValues:StringEquals\":{\"dynamodb:Attributes\":[\"PK\",\"value\"]}}"));
+        ValidatableResponse response = request(allowed, enclosing(operation), request).statusCode(200);
+        if ("Get".equals(operation)) {
+            response.body("Responses[0].Item.value.S", equalTo("original"));
+        }
+        assertResult(operation, table);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void eachTableUsesItsOwnPartitionKeySchema(boolean forbiddenLaterKey) {
+        String first = table();
+        String second = table("tenant");
+        String secondItem = itemBody("Put", second).replace("\"PK\"", "\"tenant\"");
+        if (forbiddenLaterKey) {
+            secondItem = secondItem.replace("\"item\"", "\"forbidden\"");
+        }
+        String caller = user(policy("dynamodb:PutItem", ",\"Condition\":{\"ForAllValues:StringEquals\":{"
+                + "\"dynamodb:LeadingKeys\":[\"item\"]}}"));
+        ValidatableResponse response = request(caller, "TransactWriteItems", "{\"TransactItems\":[{\"Put\":"
+                + itemBody("Put", first) + "},{\"Put\":" + secondItem + "}]}");
+        if (forbiddenLaterKey) {
+            response.statusCode(400).body(containsString("AccessDeniedException"));
+            request("test", "GetItem", keyBody(second).replace("\"PK\"", "\"tenant\"")
+                    .replace("\"item\"", "\"forbidden\"")).statusCode(200).body(equalTo("{}"));
+        } else {
+            response.statusCode(200);
+        }
+        String expected = forbiddenLaterKey ? "original" : "changed";
+        request("test", "GetItem", keyBody(first)).statusCode(200).body("Item.value.S", equalTo(expected));
+        request("test", "GetItem", keyBody(second).replace("\"PK\"", "\"tenant\""))
+                .statusCode(200).body("Item.value.S", equalTo(expected));
+    }
+
     private void assertResult(String operation, String table) {
         ValidatableResponse response = request("test", "GetItem", keyBody(table)).statusCode(200);
         if ("Delete".equals(operation)) {
@@ -185,6 +240,10 @@ class DynamoDbTransactionAuthorizationIntegrationTest {
     }
 
     private String table() {
+        return table("PK");
+    }
+
+    private String table(String partitionKey) {
         String table = "tx-auth-" + UUID.randomUUID();
         int port = endpoint.getPort();
         cleanup.register(() -> given().port(port).header("Authorization", auth("test", "dynamodb"))
@@ -192,11 +251,12 @@ class DynamoDbTransactionAuthorizationIntegrationTest {
                 .contentType("application/x-amz-json-1.0").body("{\"TableName\":\"" + table + "\"}")
                 .post("/").then().statusCode(200));
         request("test", "CreateTable", """
-                {"TableName":"%s","KeySchema":[{"AttributeName":"PK","KeyType":"HASH"}],
-                 "AttributeDefinitions":[{"AttributeName":"PK","AttributeType":"S"}],
+                {"TableName":"%s","KeySchema":[{"AttributeName":"%s","KeyType":"HASH"}],
+                 "AttributeDefinitions":[{"AttributeName":"%s","AttributeType":"S"}],
                  "BillingMode":"PAY_PER_REQUEST"}
-                """.formatted(table)).statusCode(200);
-        request("test", "PutItem", itemBody("Put", table).replace("changed", "original")).statusCode(200);
+                """.formatted(table, partitionKey, partitionKey)).statusCode(200);
+        request("test", "PutItem", itemBody("Put", table).replace("changed", "original")
+                .replace("\"PK\"", "\"" + partitionKey + "\"")).statusCode(200);
         return table;
     }
 
