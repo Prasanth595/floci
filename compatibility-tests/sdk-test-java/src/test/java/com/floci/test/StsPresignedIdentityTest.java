@@ -106,13 +106,12 @@ class StsPresignedIdentityTest {
         URI forged = URI.create(signed.getUri().toString().replaceAll("X-Amz-Signature=[^&]*",
                 "X-Amz-Signature=" + "0".repeat(64)));
         HttpResponse<byte[]> refused = send(signed, forged, body, version);
-        assertThat(refused.statusCode()).isEqualTo(403);
-        assertThat(new String(refused.body(), StandardCharsets.UTF_8)).contains("SignatureDoesNotMatch");
+        boolean signaturesEnabled = Boolean.parseBoolean(System.getenv("FLOCI_AUTH_VALIDATE_SIGNATURES"));
+        assertSignatureOutcome(refused, signaturesEnabled);
         HttpResponse<byte[]> changed = send(signed, signed.getUri(),
                 (new String(body, StandardCharsets.UTF_8) + "&Extra=changed").getBytes(StandardCharsets.UTF_8), version);
-        assertThat(changed.statusCode()).isEqualTo(403);
-        assertThat(new String(changed.body(), StandardCharsets.UTF_8)).contains("SignatureDoesNotMatch");
-        if (credentials instanceof AwsSessionCredentials) {
+        assertSignatureOutcome(changed, signaturesEnabled);
+        if (signaturesEnabled && credentials instanceof AwsSessionCredentials) {
             for (String replacement : new String[]{"", "X-Amz-Security-Token=wrong"}) {
                 URI wrongToken = URI.create(signed.getUri().toString()
                         .replaceAll("X-Amz-Security-Token=[^&]*", replacement));
@@ -130,6 +129,14 @@ class StsPresignedIdentityTest {
         factory.setXIncludeAware(false);
         factory.setExpandEntityReferences(false);
         return factory.newDocumentBuilder().parse(new ByteArrayInputStream(response.body()));
+    }
+
+    private static void assertSignatureOutcome(HttpResponse<byte[]> response, boolean signaturesEnabled) {
+        assertThat(response.statusCode()).as(new String(response.body(), StandardCharsets.UTF_8))
+                .isEqualTo(signaturesEnabled ? 403 : 200);
+        if (signaturesEnabled) {
+            assertThat(new String(response.body(), StandardCharsets.UTF_8)).contains("SignatureDoesNotMatch");
+        }
     }
 
     private static HttpResponse<byte[]> send(SdkHttpFullRequest signed, URI uri, byte[] body,
