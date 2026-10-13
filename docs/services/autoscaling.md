@@ -133,7 +133,9 @@ Floci runs a background reconciler (10 s fixed rate) that keeps each group's InS
 `Terminate`. The desired count remains stored, and `ResumeProcesses` allows the
 next reconciliation pass to continue toward it. Omitting process names suspends
 or resumes all processes. Suspending another process does not pause these capacity
-adjustments.
+adjustments. Suspension and resumption wait for any desired-capacity adjustment already
+in progress for that group, so a completed suspension cannot be bypassed by an earlier
+reconciliation check.
 
 Suspension does not yet pause instance-refresh selection or replacement cleanup.
 Explicitly requested termination and stale-instance cleanup continue independently.
