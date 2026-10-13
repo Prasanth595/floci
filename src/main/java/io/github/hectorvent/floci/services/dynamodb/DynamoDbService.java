@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
@@ -1733,7 +1734,7 @@ public class DynamoDbService {
             return new TransactWriteResult(applyTransactWrite(transactItems, region).writeCapacity(), false);
         }
         String cacheKey = regionResolver.getAccountId() + "::" + region + "::" + clientRequestToken;
-        String requestHash = sha256(rawRequest.toString());
+        String requestHash = Digests.sha256Hex(rawRequest.toString());
         for (;;) {
             long nowNanos = System.nanoTime();
             IdempotencyEntry fresh = new IdempotencyEntry(requestHash, nowNanos, new CompletableFuture<>());
@@ -1821,9 +1822,10 @@ public class DynamoDbService {
             List<TransactionCanceledException.CancellationReason> cancellationReasons = new ArrayList<>();
             boolean hasFailed = false;
             for (JsonNode transactItem : transactItems) {
-                var failReason = transactUpdateValueTooDeep(transactItem);
+                TransactionCanceledException.CancellationReason failReason =
+                        evaluateTransactCondition(transactItem, region, staged);
                 if (failReason == null) {
-                    failReason = evaluateTransactCondition(transactItem, region, staged);
+                    failReason = transactItemValidationFailure(transactItem, region, staged);
                 }
                 if (failReason != null) {
                     hasFailed = true;
@@ -1834,15 +1836,6 @@ public class DynamoDbService {
             }
             if (hasFailed) {
                 throw new TransactionCanceledException(cancellationReasons);
-            }
-
-            for (int i = 0; i < transactItems.size(); i++) {
-                try {
-                    validateTransactItem(transactItems.get(i), region, staged);
-                } catch (KeySchemaMismatchException | ItemNestingExceededException
-                        | UpdatedItemTooLargeException e) {
-                    throw cancelledByMember(transactItems.size(), i, e.getMessage());
-                }
             }
             List<JsonNode> oldImages = stagedImages(memberParticipants, staged);
             for (JsonNode transactItem : transactItems) {
@@ -1974,17 +1967,6 @@ public class DynamoDbService {
         return new TransactParticipant(storageKey, itemKey, tableName);
     }
 
-    // AWS checks the depth of a transact Update's values as part of that member, so a too
-    // deep value cancels the transaction instead of failing the request up front.
-    private TransactionCanceledException.CancellationReason transactUpdateValueTooDeep(JsonNode transactItem) {
-        var values = transactItem.path("Update").get("ExpressionAttributeValues");
-        if (DynamoDbAttributeValueValidator.nestingWithinLimit(values)) {
-            return null;
-        }
-        return new TransactionCanceledException.CancellationReason("ValidationError", null,
-                "Nesting Levels have exceeded supported limits");
-    }
-
     // AWS checks every member's key against the table schema, in order, before it looks for
     // duplicate items or evaluates a condition. The first mismatch cancels with that member's
     // reason alone. An empty key value still fails the whole request.
@@ -2041,6 +2023,17 @@ public class DynamoDbService {
                     : new TransactionCanceledException.CancellationReason("", null));
         }
         return new TransactionCanceledException(reasons);
+    }
+
+    private TransactionCanceledException.CancellationReason transactItemValidationFailure(
+            JsonNode transactItem, String region,
+            Map<String, ConcurrentSkipListMap<String, JsonNode>> staged) {
+        try {
+            validateTransactItem(transactItem, region, staged);
+            return null;
+        } catch (KeySchemaMismatchException | ItemNestingExceededException | UpdatedItemTooLargeException e) {
+            return new TransactionCanceledException.CancellationReason("ValidationError", null, e.getMessage());
+        }
     }
 
     private TransactionCanceledException.CancellationReason evaluateTransactCondition(JsonNode transactItem, String region) {
@@ -2778,12 +2771,13 @@ public class DynamoDbService {
                 }
                 deletedForTable++;
                 if (streamService != null) {
-                    streamService.captureEvent("REMOVE", removed, null, scan.table(), scan.region());
+                    streamService.captureEvent("REMOVE", removed, null, scan.table(), scan.region(), true);
                 }
                 if (kinesisForwarder != null) {
                     // Out of request scope here: pass the table owner's account explicitly so the CDC
                     // record lands in the owner's stream, not the default account's same-named stream.
-                    kinesisForwarder.forward("REMOVE", removed, null, scan.table(), scan.region(), scan.accountId());
+                    kinesisForwarder.forward("REMOVE", removed, null, scan.table(), scan.region(), scan.accountId(),
+                            true);
                 }
             }
             if (deletedForTable > 0) {
@@ -4431,7 +4425,7 @@ public class DynamoDbService {
         if (exclusiveStartKey == null || exclusiveStartKey.isNull()) {
             return;
         }
-        DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, false);
+        DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath);
 
         boolean withinBounds = keyConditionExpression != null
                 ? ExpressionEvaluator.matches(keyConditionExpression, exclusiveStartKey,
@@ -4666,23 +4660,6 @@ public class DynamoDbService {
             return HexFormat.of().formatHex(digest);
         } catch (NoSuchAlgorithmException e) {
             return "unknown";
-        }
-    }
-
-    /**
-     * SHA-256 hex digest of a string, used by ClientRequestToken idempotency to compare
-     * request bodies. SHA-256 is required (not MD5) for the dedup contract because a
-     * collision would allow a request with different parameters to be silently treated
-     * as a replay; SHA-256 is supported on every JVM via {@link MessageDigest}.
-     */
-    private static String sha256(String input) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (NoSuchAlgorithmException e) {
-            // SHA-256 is mandated by the JLS to be available on every JVM; this should never trigger.
-            throw new IllegalStateException("SHA-256 is required but not available on this JVM", e);
         }
     }
 

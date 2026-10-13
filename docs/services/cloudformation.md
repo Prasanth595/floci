@@ -111,6 +111,27 @@ filter pattern) can fail after deletion and trigger restoration. The CFN schema 
 256-character metric namespace, but Floci's Logs API validation currently accepts at most 255:
 passing model validation does not imply provider acceptance.
 
+## Cognito user pool resource servers
+
+`AWS::Cognito::UserPoolResourceServer` returns its `Identifier` for `Ref`. Changing `Identifier`
+or `UserPoolId` replaces the server; changing `Name` or `Scopes` updates it in place. Optional
+`Scopes` or individual scope entries can be omitted by `Fn::If` selecting `AWS::NoValue`.
+The provisioner keeps the pool and identifier together in private replacement bookkeeping,
+so changing only the pool still cleans up the displaced server without changing the `Ref` value.
+
+Replacement rollback and historical cleanup use the shared bounded replacement lifecycle.
+Provisioning leaves historical cleanup for a committed update or stack deletion. A failed provision
+keeps that debt and its remaining retry budget.
+Committed replacements honor `UpdateReplacePolicy: Retain`; failed rollback replacements remain
+owed cleanup while their retry budget remains. Exhausted historical records are abandoned across
+later updates and stack-delete retries. Historical cleanup is address-based and does not provide
+an atomic ownership check against another stack or a direct Cognito API writer reusing the address.
+
+Failed in-place restoration preserves the original name and scopes for a later update retry.
+Deleting the current server keeps this snapshot if deletion fails. An update that skips a server
+with pending restoration can remain in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`, blocking another
+update. `ContinueUpdateRollback` remains unsupported.
+
 ## Supported Resource Types
 
 Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`. Each delegates to
@@ -129,7 +150,7 @@ cross-resource references.
 | SNS | `Topic`, `Subscription`, `TopicPolicy` |
 | SES | `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment) |
 | DynamoDB | `Table`, `GlobalTable` |
-| Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `EventInvokeConfig`, `MicrovmImage`, `NetworkConnector`, `Url`. Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
+| Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `EventInvokeConfig` (also what a SAM function's `EventInvokeConfig` expands into), `MicrovmImage`, `NetworkConnector`, `Url`. Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
 | IAM | `Role`, `User` (template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete), `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
 | Organizations | `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy` |
 | SSM | `Parameter` |
@@ -139,22 +160,23 @@ cross-resource references.
 | ECS | `Cluster`, `TaskDefinition`, `Service`, `CapacityProvider`, `ClusterCapacityProviderAssociations` |
 | EKS | `Cluster`, `Nodegroup` |
 | RDS | `DBInstance` (starts a real container), `DBCluster` (starts a real container), `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBProxy`, `DBProxyTargetGroup` |
-| ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `SubnetGroup` |
+| ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `SubnetGroup`, `User` (Tags are ignored), `UserGroup` (Tags are ignored) |
 | Redshift | `Cluster` (single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported), `ClusterParameterGroup`, `ClusterSubnetGroup`, `ClusterSecurityGroup` (accepted; no EC2-Classic security group model) |
 | Redshift Serverless | `Namespace` (ManageAdminPassword is accepted and not applied; GetAtt uses the dotted Namespace.* form), `Workgroup` (starts a real container; one workgroup per namespace; capacity, VPC and price-performance settings are stored only; snapshot restore properties are ignored; GetAtt uses the dotted Workgroup.* form) |
 | EC2 | `VPC`, `Subnet`, `SecurityGroup` (inline `SecurityGroupIngress`/`SecurityGroupEgress` supported), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `VPCEndpoint`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog` |
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
 | Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup`, `LifecycleHook`, `ScalingPolicy` |
+| Application Auto Scaling | `ScalableTarget` (`ScheduledActions` are accepted and not run; Floci has no scheduled scaling), `ScalingPolicy` |
 | Route 53 | `HostedZone`, `RecordSet` |
 | Cloud Map | `HttpNamespace`, `PrivateDnsNamespace`, `PublicDnsNamespace`, `Service` |
 | API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage`, `Account`, `DomainName`, `BasePathMapping`, `GatewayResponse`, `ApiKey`, `UsagePlan`, `UsagePlanKey` |
-| API Gateway v2 | `Api`, `Authorizer`, `Route`, `Integration`, `Stage`, `Deployment`, `VpcLink` |
+| API Gateway v2 | `Api`, `Authorizer`, `Route`, `Integration`, `Stage`, `Deployment`, `DomainName`, `ApiMapping`, `VpcLink` |
 | AppSync | `GraphQLApi`, `GraphQLSchema`, `DataSource`, `FunctionConfiguration`, `Resolver`, `ApiKey`. `Ref` on `GraphQLApi` and `ApiKey` returns the id where AWS returns the ARN. See [AppSync](appsync.md#cloudformation) for `Ref` and `Fn::GetAtt` compared with AWS. |
 | Step Functions | `StateMachine` |
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
-| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
+| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolResourceServer`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy`, `ApiDestination`, `Archive` (`KmsKeyIdentifier` is ignored) |
 | EventBridge Scheduler | `ScheduleGroup` |
@@ -164,11 +186,12 @@ cross-resource references.
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
 | IoT Core | `Authorizer`, `DomainConfiguration` (`ServerCertificates` resolves to a JSON string), `Policy` (deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached), `Thing`, `TopicRule` |
-| CloudFront | `CachePolicy`, `Distribution`, `OriginAccessControl`, `OriginRequestPolicy`, `ResponseHeadersPolicy` |
+| CloudFront | `CachePolicy`, `Distribution`, `Function` (`KeyValueStoreAssociations` is ignored), `KeyGroup`, `OriginAccessControl`, `OriginRequestPolicy`, `PublicKey`, `ResponseHeadersPolicy` |
 | CloudWatch | `Alarm`, `Dashboard` |
 | CloudWatch Logs | `LogGroup`, `LogStream`, `MetricFilter` |
 | WAFv2 | `WebACL`, `WebACLAssociation` |
 | Config | `ConfigRule` |
+| Bedrock AgentCore | `Runtime` (Ref returns the AgentRuntimeId; CapacityProviderConfiguration, FilesystemConfigurations, LifecycleConfiguration, PlatformVersion and RequestHeaderConfiguration are accepted and not stored), `RuntimeEndpoint` (Ref returns the endpoint ARN; Tags are accepted and not stored), `Memory` (Ref returns the memory ARN; MemoryStrategies, IndexedKeys, NamespaceKeys and StreamDeliveryResources are accepted and not stored) |
 | CloudFormation | `CustomResource`, `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `Stack` (nested stacks), `Custom::*` (Lambda-backed) |
 | CloudTrail | `Trail` |
 | CDK | `CDK::Metadata` (accepted; no-op) |
@@ -297,7 +320,16 @@ accepts, not only by name:
 - `MixedInstancesPolicy` → `LaunchTemplate` → `LaunchTemplateSpecification`, including
   `Overrides[].InstanceType` and `InstancesDistribution` (`OnDemandBaseCapacity`,
   `OnDemandPercentageAboveBaseCapacity`, `SpotAllocationStrategy`). A non-integer where AWS expects
-  a number fails the stack rather than being dropped.
+  a number fails the stack rather than being dropped. `Overrides[].WeightedCapacity` is carried
+  through as well.
+
+The group also passes `ServiceLinkedRoleARN`, `InstanceMaintenancePolicy`,
+`AvailabilityZoneDistribution` and `CapacityReservationSpecification` through to the group, with
+the same validation the Auto Scaling API applies. The resource schema requires
+`CapacityReservationPreference` on `CapacityReservationSpecification` and `Granularity` on each
+`MetricsCollection` entry. `MetricsCollection` enables the listed metrics (an entry naming none
+enables all of them), and on `UpdateStack` the group's enabled metrics are
+set to exactly what the template lists. Removing the property leaves collection as it was.
 
 ## Lambda Stack Updates
 
@@ -431,7 +463,24 @@ Lambda. floci supports two shapes:
   default); a resource that never completes fails the stack rather than hanging.
 
 The handler's `Data` keys resolve through `Fn::GetAtt`, except keys that begin with `__Floci`. Floci
-reserves that prefix for its own resource state, which no template can read.
+reserves that prefix for its own resource state and ignores such keys.
+
+A failed stack update rolls back a custom resource whose handler was sent an `Update`, as
+CloudFormation does. This holds whether the handler applied the update and a later resource failed,
+or the handler answered `FAILED` itself. The handler is sent a second `Update` under the same
+`PhysicalResourceId`, with the old properties as `ResourceProperties` and the attempted ones as
+`OldResourceProperties`, so it can undo the change. A handler that answers `FAILED` to that rollback
+leaves the resource `UPDATE_FAILED` with its `Reason`, and the stack `UPDATE_ROLLBACK_FAILED`. The
+old properties still become the resource's own, as on AWS: a later `DeleteStack` sends them in its
+`Delete`, and the next update sends them as `OldResourceProperties`. An update whose handler returned
+a new `PhysicalResourceId` replaced the resource. Its rollback sends no `Update`: the new id gets a
+`Delete` with the attempted properties, and the resource goes back to the old id. CloudFormation sends
+that `Delete` in its `UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS` phase. Floci has no rollback
+cleanup phase and sends it during the rollback. As in that phase, a `Delete` the handler fails is
+logged and does not fail the rollback. When the rollback's own `Update` returns a new id, the id it
+was sent gets a `Delete` straight away for the same reason. An update that changes `ServiceToken`
+reaches no handler: it fails with `Modifying service token is not allowed.`, as on AWS, and its
+rollback sends nothing.
 
 ## Deleted Stacks
 

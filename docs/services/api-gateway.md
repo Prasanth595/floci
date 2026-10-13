@@ -232,8 +232,8 @@ Rejections are `403`, and never reach the integration:
 | Signature mismatch | `The request signature we calculated does not match…` / `InvalidSignatureException` | `Forbidden` |
 
 A verified caller reaches the integration as `requestContext.identity.{accessKey, accountId, caller,
-user, userArn}` on a REST proxy event, and as `requestContext.authorizer.iam` on an HTTP API 2.0
-event.
+user, userArn}` on a REST proxy or HTTP API 1.0 event, and as `requestContext.authorizer.iam` on an
+HTTP API 2.0 event.
 
 As on AWS, a REST (v1) `AWS_PROXY` or `HTTP_PROXY` integration never receives the caller's
 `Authorization` header when the method is `AWS_IAM`, and on any method the header is dropped if it
@@ -613,14 +613,39 @@ object places no condition on its statement, as in IAM.
 | **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
 | **Deployments** | CreateDeployment, GetDeployment, GetDeployments, UpdateDeployment, DeleteDeployment |
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
-| **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, DeleteDomainName |
-| **API Mappings** | CreateApiMapping, GetApiMapping, GetApiMappings, DeleteApiMapping |
+| **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
+| **API Mappings** | CreateApiMapping, GetApiMapping, GetApiMappings, UpdateApiMapping, DeleteApiMapping |
 | **VPC Links** | CreateVpcLink, GetVpcLink, GetVpcLinks, UpdateVpcLink, DeleteVpcLink |
 | **Tags** | TagResource, UntagResource, GetTags |
 
 `TagResource`, `UntagResource` and `GetTags` accept API, stage and VPC link ARNs
 (`arn:<partition>:apigateway:<region>::/vpclinks/<vpcLinkId>`). `UpdateVpcLink` changes only the
 name, as in the API model.
+
+### Custom Domain Names and API Mappings
+
+A custom domain created through either API is one record, routed by its `Host` header as
+described under [Custom Domain Names](#custom-domain-names); an API mapping sends the request to
+the mapped stage of an HTTP, WebSocket or REST API. A REST API can be mapped under a key with
+several levels, such as `orders/v1`, which only the v2 API creates.
+
+`CreateDomainName` and `UpdateDomainName` take exactly one domain name configuration and refuse
+mutual TLS, ownership verification certificates, an IP address type other than `ipv4` and a routing
+mode other than `API_MAPPING_ONLY`; an update replaces the configuration as a whole. As on AWS, a v2
+domain is regional: the `EDGE` endpoint type is refused, and any other one, `PRIVATE` included,
+gives a `REGIONAL` domain, whose certificate the v1 API reports as
+`regionalCertificateArn`. The v2 API does not manage an edge-optimized domain, an HTTP API or a key
+with several levels needs a domain on the `TLS_1_2` security policy (so such a domain cannot leave
+it), and a WebSocket API cannot share a domain with an HTTP or REST API.
+
+A mapping key holds letters, digits and `$-_.+!*'(),`, with `/` between its levels, at most 300
+characters; it does not start or end with `/` or hold `//`. No key, an empty one, or on a create one
+of whitespace only, is the root mapping. `UpdateApiMapping` changes only what it names, and a
+mapping keeps its `apiMappingId` when its key changes. The keys and their messages were measured
+against API Gateway.
+
+Templates can create domains and mappings with `AWS::ApiGatewayV2::DomainName` and
+`AWS::ApiGatewayV2::ApiMapping`; see [CloudFormation](cloudformation.md).
 
 ### WebSocket Data-Plane {#websocket-data-plane}
 
@@ -681,7 +706,7 @@ DELETE /execute-api/{apiId}/{stageName}/@connections/{connectionId}  — Disconn
 
 ### Not Implemented
 
-- `ExportApi`, `UpdateDomainName`, `UpdateApiMapping`
+- `ExportApi`
 
 ### Examples
 

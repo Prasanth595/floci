@@ -4,7 +4,8 @@ Floci serves every AWS partition, not only the commercial one. A partition is th
 segment of every ARN (`arn:aws-cn:...`), the DNS suffix of every endpoint
 (`amazonaws.com.cn`), and the set of services and regions AWS publishes there. Floci reads
 all of it from AWS's own partition metadata (botocore's `partitions.json` and
-`endpoints.json`, vendored as `aws/partitions.json` and refreshed with `make aws-data-sync`).
+`endpoints.json`, vendored as `aws/partitions.json` and refreshed with `make aws-data-sync`,
+which also regenerates the AWS managed-policy catalog).
 
 | Partition | DNS suffix | Regions | Example |
 |---|---|---|---|
@@ -113,8 +114,8 @@ back to `aws` for a label no partition publishes.
   and `aws-cn`; the SAML sign-on URL for five partitions. The ISO and EUSC regions have no load
   balancer hosted zones, and only the two ISO-F regions have an S3 website zone; where a table has
   no row the field is omitted rather than guessed. An `EDGE` API Gateway REST API or custom domain is
-  refused outside the commercial partition (`BadRequestException`): GovCloud and ISO have no CloudFront,
-  and China has no edge-optimized API Gateway
+  refused outside the commercial partition (`BadRequestException`): GovCloud, EUSC and ISO have no
+  CloudFront, and China has no edge-optimized API Gateway
   ([China API Gateway](https://docs.amazonaws.cn/en_us/aws/latest/userguide/api-gateway.html)).
 - **VPC endpoint service names**: interface endpoints (as `DescribeVpcEndpointServices` lists them)
   are `com.amazonaws.<region>.<service>` everywhere, except the (region, service) pairs the CDK
@@ -191,13 +192,13 @@ partition.
 
 - **The partition rules themselves** (partition and region lookup, ARN minting, hostnames,
   service principals, managed-policy rewriting, STS) have unit tests over all eight partitions.
-- **Through the emulator**, IAM ARNs and Step Functions run in all eight partitions, and a smoke
-  test creates one resource in every non-commercial partition for SNS, Kinesis, Firehose, API
-  Gateway V2, ELBv2, Glue, IoT, ACM, CodeBuild, Batch and EFS and checks its ARN or host. A new
-  service that mints ARNs or hosts needs a case there or a recorded exemption. Most other
-  partition-dependent behaviour (S3 bucket rules, EC2 regions and DNS names, hosted zones, VPC
-  endpoint names, Lambda layers, CloudFormation pseudo-parameters, strict mode) is tested in one or
-  two partitions, nearly always China.
+- **Through the emulator**, IAM ARNs run in all eight partitions, and a smoke test creates one
+  resource per service in every non-commercial partition that publishes the service and checks
+  its ARN or host. It covers every service that mints ARNs or hosts; the few without a case are
+  listed with the reason in `src/test/resources/partition/smoke-exemptions.tsv`, and a new
+  service needs a case there or a recorded exemption. Most other partition-dependent behaviour
+  (EC2 regions and DNS names, hosted zones, VPC endpoint names, Lambda layers, Step Functions
+  integration ids, strict mode) is tested in one or two partitions, nearly always China.
 - **End to end**, the nightly Partition Compatibility workflow runs the Java SDK compatibility
   suite against a Floci deployed with `FLOCI_DEFAULT_REGION=cn-north-1`, with the SDK clients
   signing for `cn-north-1`, so the SDK's own China partition handling has to round-trip. Its list
@@ -226,13 +227,18 @@ These values have no published source Floci can cite, so it does not guess them;
 the commercial value or Floci's own base host until sourced:
 
 - the China CloudFront distribution domain suffix (only the API host is published);
-- the console device-authorization client ids (`arn:aws:signin:::devtools/...`) outside the
-  commercial partition;
+- the console cross-device sign-in redirect host outside the commercial partition: besides the
+  endpoint the authorize request arrived on, the only AWS host Floci accepts is
+  `<region>.signin.aws.amazon.com` (the device-authorization client ids themselves,
+  `arn:aws:signin:::devtools/...`, are the same in every partition);
 - the STS web-identity audience outside the commercial partition;
 - the EKS Pod Identity token audience (`pods.eks.amazonaws.com`) outside the commercial partition;
 - the Lambda function-URL host outside the commercial partition;
 - whether AWS managed policy documents differ in content in China or GovCloud;
 - the API Gateway regional hosted zone per region;
+- the availability-zone id prefix of the ISO and EUSC regions: zone ids there keep the whole region
+  (`us-iso-east-1-az1`), where the other partitions get AWS's short prefix (`use1-az1`, `usgw1-az1`,
+  `cnn1-az1`);
 - S3 `LocationConstraint` enum values and Route 53 hosted zones for the ISO and EUSC regions;
 - the SAML sign-on URL in `aws-iso-e`, `aws-iso-f` and `aws-eusc`, where assertions keep being
   checked against the commercial `https://signin.aws.amazon.com/saml`;

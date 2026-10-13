@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.rds.proxy;
 import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
@@ -17,8 +16,7 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.util.Properties;
 
-import static io.restassured.RestAssured.given;
-import static io.restassured.http.ContentType.URLENC;
+import static io.github.hectorvent.floci.testing.RdsRequests.rds;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -34,7 +32,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 @Tag("docker")
 class RdsPostgresStartupParametersIntegrationTest {
 
-    private static final String RDS_AUTH = "AWS4-HMAC-SHA256 Credential=test/20261006/us-east-1/rds/aws4_request";
     private static final String MASTER_USER = "master";
     private static final String MASTER_PASSWORD = "Master123!";
 
@@ -134,6 +131,50 @@ class RdsPostgresStartupParametersIntegrationTest {
         }
     }
 
+    @Test
+    void anIamSessionLoadsTheTokenRolesOwnDefaultsBeneathTheClientsParameters() throws Exception {
+        String dbId = "startup-params-iam-defaults-" + Long.toString(System.nanoTime(), 36);
+        int port = createIamInstance(dbId);
+        try {
+            asMaster(port,
+                    "CREATE ROLE reader NOLOGIN",
+                    "CREATE ROLE app_user LOGIN",
+                    "GRANT reader TO app_user",
+                    "ALTER ROLE app_user SET work_mem = '32MB'",
+                    "ALTER ROLE app_user IN DATABASE appdb SET work_mem = '48MB'",
+                    "ALTER ROLE app_user SET statement_timeout = '7s'",
+                    // Superuser-only: applies at login although app_user could not set it itself.
+                    "ALTER ROLE app_user SET log_min_duration_statement = '1s'",
+                    "ALTER ROLE app_user SET role = 'reader'",
+                    // Read on a session whose encoding the master's default would otherwise set.
+                    "ALTER ROLE app_user SET floci.note = 'café'",
+                    "ALTER ROLE " + MASTER_USER + " SET client_encoding = 'LATIN1'");
+
+            Properties iam = iamLogin(port, "app_user");
+            iam.setProperty("options", "-c statement_timeout=9s");
+
+            try (Connection connection = DriverManager.getConnection(jdbcUrl(port), iam)) {
+                assertThat(show(connection, "work_mem"), equalTo("48MB"));
+                assertThat(show(connection, "statement_timeout"), equalTo("9s"));
+                assertThat(show(connection, "log_min_duration_statement"), equalTo("1s"));
+                assertThat(show(connection, "role"), equalTo("reader"));
+                assertThat(show(connection, "session_authorization"), equalTo("app_user"));
+                assertThat(show(connection, "floci.note"), equalTo("café"));
+
+                // As at login, the role's defaults are what RESET returns to, so the role cannot
+                // shed a superuser-only one its administrator set.
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute("RESET ALL");
+                }
+                assertThat(show(connection, "work_mem"), equalTo("48MB"));
+                assertThat(show(connection, "log_min_duration_statement"), equalTo("1s"));
+                assertThat(show(connection, "statement_timeout"), equalTo("7s"));
+            }
+        } finally {
+            deleteInstance(dbId);
+        }
+    }
+
     /** Creates a PostgreSQL instance with IAM database authentication and returns its proxy port. */
     private static int createIamInstance(String dbId) {
         return rds("CreateDBInstance")
@@ -190,12 +231,5 @@ class RdsPostgresStartupParametersIntegrationTest {
             rows.next();
             return rows.getString(1);
         }
-    }
-
-    private static RequestSpecification rds(String action) {
-        return given().header("Authorization", RDS_AUTH)
-                .contentType(URLENC)
-                .formParam("Action", action)
-                .formParam("Version", "2014-10-31");
     }
 }

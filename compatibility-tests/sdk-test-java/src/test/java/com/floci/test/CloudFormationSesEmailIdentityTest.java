@@ -123,9 +123,9 @@ class CloudFormationSesEmailIdentityTest {
         awaitStatus("UPDATE_ROLLBACK_COMPLETE");
 
         assertThat(cfn.describeStackEvents(r -> r.stackName(stackId)).stackEvents())
+                .filteredOn(event -> "Broken".equals(event.logicalResourceId()))
                 .anySatisfy(event -> {
-                    assertThat(event.logicalResourceId()).isEqualTo("Broken");
-                    assertThat(event.resourceStatusAsString()).isEqualTo("UPDATE_FAILED");
+                    assertThat(event.resourceStatusAsString()).isEqualTo("CREATE_FAILED");
                     assertThat(event.resourceStatusReason())
                             .isEqualTo("You can't specify both SecretString and GenerateSecretString");
                 });

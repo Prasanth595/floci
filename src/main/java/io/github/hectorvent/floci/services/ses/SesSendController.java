@@ -36,13 +36,14 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.stringArrayOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
@@ -101,12 +102,15 @@ public class SesSendController {
             String fromEmailAddress = request.path("FromEmailAddress").asText(null);
 
             JsonNode destination = requireObjectOrAbsent(request, "Destination");
-            List<String> toAddresses = jsonArrayToList(destination.path("ToAddresses"));
-            List<String> ccAddresses = jsonArrayToList(destination.path("CcAddresses"));
-            List<String> bccAddresses = jsonArrayToList(destination.path("BccAddresses"));
-            List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
+            List<String> toAddresses = addressList(destination, "ToAddresses");
+            List<String> ccAddresses = addressList(destination, "CcAddresses");
+            List<String> bccAddresses = addressList(destination, "BccAddresses");
+            List<String> replyToAddresses = addressList(request, "ReplyToAddresses");
             String feedbackForwardingAddress =
                     request.path("FeedbackForwardingEmailAddress").asText(null);
+            // "For Raw emails, the FromEmailAddressIdentityArn value overrides the X-SES-SOURCE-ARN
+            // and X-SES-FROM-ARN headers", so it stands for both ARNs of a raw send.
+            String fromIdentityArn = request.path("FromEmailAddressIdentityArn").asText(null);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
             String tenantName = stringMemberOrAbsent(request, "TenantName");
             List<MessageTag> emailTags = parseEmailTagsArray(request.path("EmailTags"), "EmailTags");
@@ -120,6 +124,9 @@ public class SesSendController {
                     .bccAddresses(bccAddresses)
                     .replyToAddresses(replyToAddresses)
                     .returnPath(feedbackForwardingAddress)
+                    .sourceArn(fromIdentityArn)
+                    .fromArn(fromIdentityArn)
+                    .returnPathArn(request.path("FeedbackForwardingEmailAddressIdentityArn").asText(null))
                     .configurationSetName(configurationSetName)
                     .emailTags(emailTags)
                     .listManagement(listManagement)
@@ -134,13 +141,10 @@ public class SesSendController {
                     throw new AwsException("BadRequestException",
                             "Content.Raw.Data is required.", 400);
                 }
-                if (toAddresses.isEmpty() && ccAddresses.isEmpty() && bccAddresses.isEmpty()) {
-                    throw new AwsException("BadRequestException",
-                            "At least one destination address is required.", 400);
-                }
+                SendEmailRequest rawRequest = sendRequest.content(new EmailContent.Raw(rawData, true)).build();
                 sesService.checkTenantRawSendAccess(tenantName, fromEmailAddress, rawData,
-                        configurationSetName, regionResolver.getAccountId(), region);
-                messageId = sesService.sendEmail(sendRequest.content(new EmailContent.Raw(rawData)).build());
+                        rawRequest.hasRecipients(), configurationSetName, regionResolver.getAccountId(), region);
+                messageId = sesService.sendEmail(rawRequest);
             } else if (content.has("Simple")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     // AWS returns BadRequestException with a null message body here.
@@ -244,7 +248,7 @@ public class SesSendController {
                         "FromEmailAddress is required.", 400);
             }
             SesAddressSyntax.requireBulkAddress(fromEmailAddress);
-            List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
+            List<String> replyToAddresses = addressList(request, "ReplyToAddresses");
             String feedbackForwardingAddress =
                     request.path("FeedbackForwardingEmailAddress").asText(null);
             SesAddressSyntax.requireBulkAddress(feedbackForwardingAddress);
@@ -315,9 +319,9 @@ public class SesSendController {
                             "BulkEmailEntries elements must be JSON objects.", 400);
                 }
                 JsonNode dest = requireObjectOrAbsent(node, "Destination");
-                List<String> to = jsonArrayToList(dest.path("ToAddresses"));
-                List<String> cc = jsonArrayToList(dest.path("CcAddresses"));
-                List<String> bcc = jsonArrayToList(dest.path("BccAddresses"));
+                List<String> to = addressList(dest, "ToAddresses");
+                List<String> cc = addressList(dest, "CcAddresses");
+                List<String> bcc = addressList(dest, "BccAddresses");
                 JsonNode replacementContent = requireObjectOrAbsent(node, "ReplacementEmailContent");
                 JsonNode replacementTemplate = requireObjectOrAbsent(replacementContent, "ReplacementTemplate");
                 JsonNode replacementData = parseTemplateData(replacementTemplate, "ReplacementTemplateData");
@@ -406,13 +410,10 @@ public class SesSendController {
 
     // ──────────────────────────── Helpers ────────────────────────────
 
-    private List<String> jsonArrayToList(JsonNode arrayNode) {
-        if (arrayNode == null || arrayNode.isMissingNode() || !arrayNode.isArray()) {
-            return Collections.emptyList();
-        }
-        List<String> list = new ArrayList<>();
-        arrayNode.forEach(node -> list.add(node.asText()));
-        return list;
+    // A present address list of the wrong JSON type, or with a non-string element, is rejected
+    // rather than read as empty or coerced.
+    private static List<String> addressList(JsonNode parent, String field) {
+        return Objects.requireNonNullElse(stringArrayOrAbsent(parent, field), List.of());
     }
 
     private JsonNode parseTemplateData(JsonNode parent, String fieldName) {
