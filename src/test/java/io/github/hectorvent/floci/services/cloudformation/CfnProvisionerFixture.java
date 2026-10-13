@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.backup.BackupService;
 import io.github.hectorvent.floci.services.batch.BatchService;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreControlService;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreMemoryService;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AcmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayAccountCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayApiKeyCfnProvisioner;
@@ -28,6 +30,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScali
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingScalingPolicyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BackupVaultCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BatchCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.BedrockAgentCoreCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
@@ -238,6 +241,8 @@ final class CfnProvisionerFixture {
         private RedshiftServerlessService redshiftServerlessService;
         private CloudMapService cloudMapService;
         private GuardDutyService guardDutyService;
+        private BedrockAgentCoreControlService bedrockAgentCoreControlService;
+        private BedrockAgentCoreMemoryService bedrockAgentCoreMemoryService;
         private CloudFormationResourceRegistry resourceRegistry;
         private boolean registryChosenByTest;
         private CfnDynamicReferences dynamicReferences;
@@ -471,6 +476,10 @@ final class CfnProvisionerFixture {
             }
             if (guardDutyService != null) {
                 discovered.add(new GuardDutyMalwareProtectionPlanCfnProvisioner(guardDutyService));
+            }
+            if (bedrockAgentCoreControlService != null && bedrockAgentCoreMemoryService != null) {
+                discovered.add(new BedrockAgentCoreCfnProvisioner(bedrockAgentCoreControlService,
+                        bedrockAgentCoreMemoryService));
             }
             return discovered;
         }
@@ -762,6 +771,16 @@ final class CfnProvisionerFixture {
 
         public Builder guardDuty(GuardDutyService v) {
             this.guardDutyService = v;
+            return this;
+        }
+
+        public Builder bedrockAgentCoreControl(BedrockAgentCoreControlService v) {
+            this.bedrockAgentCoreControlService = v;
+            return this;
+        }
+
+        public Builder bedrockAgentCoreMemory(BedrockAgentCoreMemoryService v) {
+            this.bedrockAgentCoreMemoryService = v;
             return this;
         }
 

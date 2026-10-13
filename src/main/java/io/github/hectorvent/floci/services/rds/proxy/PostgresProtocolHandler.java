@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
+import io.github.hectorvent.floci.core.common.Digests;
 import org.jboss.logging.Logger;
 
 import javax.crypto.Mac;
@@ -710,7 +711,7 @@ public class PostgresProtocolHandler {
 
         byte[] saltedPassword = pbkdf2HmacSha256(password, salt, iterations);
         byte[] clientKey = hmacSha256(saltedPassword, "Client Key");
-        byte[] storedKey = sha256(clientKey);
+        byte[] storedKey = Digests.sha256(clientKey);
         byte[] clientSignature = hmacSha256(storedKey, authMessage.getBytes(StandardCharsets.UTF_8));
         byte[] clientProof = xor(clientKey, clientSignature);
 
@@ -774,14 +775,6 @@ public class PostgresProtocolHandler {
             return mac.doFinal(data);
         } catch (Exception e) {
             throw new RuntimeException("HMAC-SHA256 failed", e);
-        }
-    }
-
-    private static byte[] sha256(byte[] data) {
-        try {
-            return MessageDigest.getInstance("SHA-256").digest(data);
-        } catch (Exception e) {
-            throw new RuntimeException("SHA-256 failed", e);
         }
     }
 

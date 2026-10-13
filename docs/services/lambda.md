@@ -70,8 +70,11 @@ supported ranges before changing any stored settings. A rejected value returns
 `InvalidParameterValueException` and leaves the function configuration unchanged.
 
 The event invoke configuration is stored and returned as AWS does, and `AWS::Lambda::EventInvokeConfig`
-provisions it from a stack. Asynchronous invocations apply its retry, event age, destination settings,
-and dead-letter queue configurations (`DeadLetterConfig`).
+provisions it from a stack. A SAM function's `EventInvokeConfig` expands into that resource as
+`sam deploy` does: on `$LATEST`, or on the `AutoPublishAlias` alias, with the inline role policy for
+each destination and the SQS queue or SNS topic SAM creates when a destination gives only its `Type`.
+Asynchronous invocations apply its retry, event age, destination settings, and dead-letter queue
+configurations (`DeadLetterConfig`).
 
 ### Function policies under IAM enforcement
 
@@ -375,6 +378,12 @@ live service: `CreateFunction` keeps the unqualified `FunctionArn` while `Update
 returns the qualified one (`...:function:name:2`), as `PublishVersion` does. Without `Publish`
 both answer for `$LATEST` and create nothing. `UpdateFunctionConfiguration` has no `Publish`
 parameter in the AWS API and none here.
+
+On a cold launch, `AWS_LAMBDA_FUNCTION_VERSION` contains the executing version:
+`$LATEST` for an unqualified invocation and the published version number for a
+version or alias invocation. This follows the
+[Lambda environment variable contract](https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html#configuration-envvars-runtime)
+and was checked against live AWS in `us-east-1` on October 12, 2026 at 19:49 UTC.
 
 `DeleteFunction` honours `Qualifier` — it removes that published version only, leaving `$LATEST`,
 the other versions and the function's aliases in place; without a qualifier the whole function

@@ -219,6 +219,42 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void setUserGroupMembersReplacesCompleteMembershipAndEngine() {
+        service.createUser("default-user-id", "default", AuthMode.PASSWORD,
+                List.of("default-pass"), "on ~* +@all", null);
+        service.createUser("app-user-id", "app", AuthMode.PASSWORD,
+                List.of("app-pass"), "on ~* +@all", null);
+        service.createUser("extra-user-id", "extra", AuthMode.PASSWORD,
+                List.of("extra-pass"), "on ~* +@all", null);
+        service.createUserGroup("set-grp", "redis", List.of("default-user-id", "app-user-id"), "us-east-1");
+
+        ElastiCacheUserGroup updated = service.setUserGroupMembers("set-grp",
+                List.of("default-user-id", "extra-user-id"), "redis");
+        assertEquals(Set.of("default-user-id", "extra-user-id"), updated.getUserIds());
+        assertEquals("redis", updated.getEngine());
+
+        ElastiCacheUserGroup fetched = service.getUserGroup("set-grp");
+        assertEquals(Set.of("default-user-id", "extra-user-id"), fetched.getUserIds());
+    }
+
+    @Test
+    void setUserGroupMembersRejectsInvalidEngineOrMissingDefaultUserForRedis() {
+        service.createUser("default-user-id", "default", AuthMode.PASSWORD,
+                List.of("default-pass"), "on ~* +@all", null);
+        service.createUser("app-user-id", "app", AuthMode.PASSWORD,
+                List.of("app-pass"), "on ~* +@all", null);
+        service.createUserGroup("val-grp", "redis", List.of("default-user-id"), "us-east-1");
+
+        AwsException exMissing = assertThrows(AwsException.class,
+                () -> service.setUserGroupMembers("val-grp", List.of("app-user-id"), "redis"));
+        assertEquals("DefaultUserRequired", exMissing.getErrorCode());
+
+        AwsException exEngine = assertThrows(AwsException.class,
+                () -> service.setUserGroupMembers("val-grp", List.of("default-user-id"), "unknown"));
+        assertEquals("InvalidParameterValue", exEngine.getErrorCode());
+    }
+
+    @Test
     void userGroupNeedsInTransitEncryptionOnTheReplicationGroup() {
         service.createReplicationGroup("open", "test", AuthMode.NO_AUTH, null, "us-east-1");
         service.createUser("default-user-id", "default", AuthMode.PASSWORD,
@@ -426,6 +462,20 @@ class ElastiCacheServiceTest {
 
         service.deleteUser("app-user-id");
         assertEquals(Set.of("valkey-user-id"), service.getUserGroup("vk-group").getUserIds());
+    }
+
+    @Test
+    void userErrorsUseTheBotocoreWireCodesWithoutTheFaultSuffix() {
+        service.createUser("dupe-user", "dupe", AuthMode.PASSWORD, List.of("pw"), "on ~* +@all", "redis");
+
+        AwsException duplicate = assertThrows(AwsException.class, () -> service.createUser(
+                "dupe-user", "dupe", AuthMode.PASSWORD, List.of("pw"), "on ~* +@all", "redis"));
+        assertEquals("UserAlreadyExists", duplicate.getErrorCode());
+        assertEquals(400, duplicate.getHttpStatus());
+        assertEquals("UserNotFound", assertThrows(AwsException.class, () -> service.getUser("absent")).getErrorCode());
+        assertEquals("UserNotFound",
+                assertThrows(AwsException.class, () -> service.listUsers("absent", null)).getErrorCode());
+        assertEquals("UserNotFound", assertThrows(AwsException.class, () -> service.deleteUser("absent")).getErrorCode());
     }
 
     @Test
