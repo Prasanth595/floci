@@ -63,7 +63,7 @@ class StsSessionTokenCallerIntegrationTest {
             "GetSessionToken, missing", "GetFederationToken, missing", "AssumeRole, missing",
             "GetSessionToken, wrong", "GetFederationToken, wrong", "AssumeRole, wrong"
     })
-    void temporaryCallerCannotMintAnotherSessionToken(String issuer, String tokenMode) throws Exception {
+    void temporaryCallerCannotMintLongTermOnlyTokens(String issuer, String tokenMode) throws Exception {
         Credentials user = createUser();
         Map<String, String> params = new LinkedHashMap<>();
         if ("GetFederationToken".equals(issuer)) {
@@ -87,21 +87,29 @@ class StsSessionTokenCallerIntegrationTest {
             case "wrong" -> new Credentials(issued.key(), issued.secret(), "wrong-token");
             default -> issued;
         };
-        Response result = request(caller, "sts", "GetSessionToken", Map.of());
-        remember(result, "GetSessionToken");
-        result.then().statusCode(403).body("ErrorResponse.Error.Code",
-                equalTo("valid".equals(tokenMode) ? "AccessDenied" : "InvalidClientTokenId"));
-        request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200);
+        for (String action : new String[]{"GetSessionToken", "GetFederationToken"}) {
+            Response result = request(caller, "sts", action, issuanceParams(action));
+            remember(result, action);
+            result.then().statusCode(403).body("ErrorResponse.Error.Code",
+                    equalTo("valid".equals(tokenMode) ? "AccessDenied" : "InvalidClientTokenId"));
+            if ("valid".equals(tokenMode)) {
+                result.then().body("ErrorResponse.Error.Message",
+                        equalTo("Cannot call " + action + " with session credentials"));
+            }
+            request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200);
+        }
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void longTermCallerCanMintSessionToken(boolean user) throws Exception {
+    void longTermCallerCanMintBothTokenTypes(boolean user) throws Exception {
         Credentials caller = user ? createUser() : ROOT;
-        Credentials issued = credentials(request(caller, "sts", "GetSessionToken", Map.of()), "GetSessionToken");
-        assertTrue(issued.key().startsWith("ASIA"));
-        request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200)
-                .body("GetCallerIdentityResponse.GetCallerIdentityResult.Account", equalTo(ACCOUNT));
+        for (String action : new String[]{"GetSessionToken", "GetFederationToken"}) {
+            Credentials issued = credentials(request(caller, "sts", action, issuanceParams(action)), action);
+            assertTrue(issued.key().startsWith("ASIA"));
+            request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200)
+                    .body("GetCallerIdentityResponse.GetCallerIdentityResult.Account", equalTo(ACCOUNT));
+        }
     }
 
     @ParameterizedTest
@@ -109,9 +117,13 @@ class StsSessionTokenCallerIntegrationTest {
     void blankAuthorizationDoesNotHideTemporaryQueryCredentials(String authorization) throws Exception {
         Credentials user = createUser();
         Credentials issued = credentials(request(user, "sts", "GetSessionToken", Map.of()), "GetSessionToken");
-        Response result = querySessionRequest(authorization, issued);
-        remember(result, "GetSessionToken");
-        result.then().statusCode(403).body("ErrorResponse.Error.Code", equalTo("AccessDenied"));
+        for (String action : new String[]{"GetSessionToken", "GetFederationToken"}) {
+            Response result = querySessionRequest(authorization, issued, action);
+            remember(result, action);
+            result.then().statusCode(403).body("ErrorResponse.Error.Code", equalTo("AccessDenied"))
+                    .body("ErrorResponse.Error.Message",
+                            equalTo("Cannot call " + action + " with session credentials"));
+        }
     }
 
     @ParameterizedTest
@@ -120,13 +132,22 @@ class StsSessionTokenCallerIntegrationTest {
         Credentials user = createUser();
         String expected = request(user, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200)
                 .extract().path("GetCallerIdentityResponse.GetCallerIdentityResult.Arn");
-        Credentials issued = credentials(querySessionRequest(authorization, user), "GetSessionToken");
-        request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200)
-                .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn", equalTo(expected));
+        for (String action : new String[]{"GetSessionToken", "GetFederationToken"}) {
+            Credentials issued = credentials(querySessionRequest(authorization, user, action), action);
+            String expectedArn = "GetFederationToken".equals(action)
+                    ? "arn:aws:sts::" + ACCOUNT + ":federated-user/federated-caller" : expected;
+            request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200)
+                    .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn", equalTo(expectedArn));
+        }
     }
 
-    private Response querySessionRequest(String authorization, Credentials caller) throws Exception {
-        String body = "Action=GetSessionToken";
+    private static Map<String, String> issuanceParams(String action) {
+        return "GetFederationToken".equals(action) ? Map.of("Name", "federated-caller") : Map.of();
+    }
+
+    private Response querySessionRequest(String authorization, Credentials caller, String action) throws Exception {
+        String body = "Action=" + action
+                + ("GetFederationToken".equals(action) ? "&Name=federated-caller" : "");
         URI endpoint = URI.create("http://localhost:" + RestAssured.port + "/");
         Map<String, String> query = caller.token() == null ? Map.of()
                 : Map.of("X-Amz-Security-Token", caller.token());

@@ -22,7 +22,7 @@
 
 ## Session Token and Federation Token Permissions
 
-`GetSessionToken` rejects temporary callers with `AccessDenied` before issuing credentials,
+`GetSessionToken` and `GetFederationToken` reject temporary callers with `AccessDenied` before issuing credentials,
 including when IAM policy enforcement is disabled. Use a long-term IAM user or account key.
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, credentials from `GetSessionToken` and `GetFederationToken`

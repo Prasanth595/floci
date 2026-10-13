@@ -537,6 +537,10 @@ public class StsQueryHandler {
     }
 
     private Response handleGetFederationToken(MultivaluedMap<String, String> params) {
+        if (IamService.isTemporaryAccessKey(callerAccessKeyId())) {
+            return AwsQueryResponse.error("AccessDenied", "Cannot call GetFederationToken with session credentials",
+                    AwsNamespaces.STS, 403);
+        }
         Response validation = validateRequired(params, "Name");
         if (validation != null) {
             return validation;
