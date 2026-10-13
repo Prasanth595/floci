@@ -33,6 +33,18 @@ class RdsDataSqlParametersTest {
     }
 
     @Test
+    void mysqlDoubleMinusOperatorsDoNotHideASecondStatement() {
+        assertThrows(AwsException.class, () -> RdsDataSqlParameters.parse("select 1--1; select 2", true));
+        assertDoesNotThrow(() -> RdsDataSqlParameters.parse("select 1; -- ignored; comment\n", true));
+    }
+
+    @Test
+    void mysqlHashCommentsDoNotCreateASecondStatement() {
+        assertDoesNotThrow(() -> RdsDataSqlParameters.parse("select 1; # ignored; select 2\n", true));
+        assertThrows(AwsException.class, () -> RdsDataSqlParameters.parse("select 1; # ignored\n select 2", true));
+    }
+
+    @Test
     void rewritesNamedPlaceholdersToPositional() {
         ParsedSql parsed = RdsDataSqlParameters.parse(
                 "select * from t where id = :id and name = :name");

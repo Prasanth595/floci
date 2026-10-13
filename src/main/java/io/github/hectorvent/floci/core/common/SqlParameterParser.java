@@ -68,7 +68,7 @@ public final class SqlParameterParser {
         while (i < len) {
             char c = sql.charAt(i);
 
-            if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
+            if (startsLineComment(sql, i, options)) {
                 int end = sql.indexOf('\n', i);
                 end = end < 0 ? len : end;
                 out.append(sql, i, end);
@@ -77,7 +77,7 @@ public final class SqlParameterParser {
             }
 
             if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                int end = skipBlockComment(sql, i, !options.backslashEscapes());
+                int end = skipBlockComment(sql, i, !Options.RDS_MYSQL.equals(options));
                 out.append(sql, i, end);
                 i = end;
                 continue;
@@ -195,14 +195,14 @@ public final class SqlParameterParser {
         while (i < len) {
             char c = sql.charAt(i);
 
-            if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
+            if (startsLineComment(sql, i, options)) {
                 int end = sql.indexOf('\n', i);
                 i = end < 0 ? len : end;
                 continue;
             }
 
             if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                i = skipBlockComment(sql, i, !options.backslashEscapes());
+                i = skipBlockComment(sql, i, !Options.RDS_MYSQL.equals(options));
                 continue;
             }
 
@@ -228,6 +228,18 @@ public final class SqlParameterParser {
             i++;
         }
         return false;
+    }
+
+    private static boolean startsLineComment(String sql, int start, Options options) {
+        boolean mysql = Options.RDS_MYSQL.equals(options);
+        if (mysql && sql.charAt(start) == '#') {
+            return true;
+        }
+        if (sql.charAt(start) != '-' || start + 1 >= sql.length() || sql.charAt(start + 1) != '-') {
+            return false;
+        }
+        return !mysql || (start + 2 < sql.length()
+                && (Character.isWhitespace(sql.charAt(start + 2)) || Character.isISOControl(sql.charAt(start + 2))));
     }
 
     private static int skipBlockComment(String sql, int start, boolean nested) {

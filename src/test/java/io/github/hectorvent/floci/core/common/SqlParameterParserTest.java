@@ -177,6 +177,16 @@ class SqlParameterParserTest {
     }
 
     @Test
+    void mysqlCommentsFollowTheMysqlLineCommentRules() {
+        ParsedSql parsed = SqlParameterParser.parse("select 1--:value # :ignored\n", Options.RDS_MYSQL);
+        assertEquals("select 1--? # :ignored\n", parsed.sql());
+        assertEquals(List.of("value"), parsed.parameterOrder());
+        assertTrue(SqlParameterParser.isMultiStatement("select 1--1; select 2", Options.RDS_MYSQL));
+        assertFalse(SqlParameterParser.isMultiStatement("select 1--1; select 2", Options.REDSHIFT));
+        assertFalse(SqlParameterParser.isMultiStatement("select 1; # ignored; select 2\n", Options.RDS_MYSQL));
+    }
+
+    @Test
     void numericNamesAreNotArraySliceBounds() {
         for (String sql : new String[] {
                 "select arr[1:2] from t", "select arr[:2] from t", "select arr[1:] from t",
