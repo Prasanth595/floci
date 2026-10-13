@@ -27,13 +27,17 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.time.Instant;
+
 /**
- * GuardDuty (Smithy restJson1) — detector lifecycle, organization configuration and Malware
+ * GuardDuty (Smithy restJson1): detector lifecycle, organization configuration and Malware
  * Protection plans.
  *
  * <p>The literal {@code /detector} and {@code /admin} paths take JAX-RS precedence over S3's
  * {@code /{bucket}} and {@code /{bucket}/{key}} template routes, so these routes win with no
- * extra routing wiring. Tag operations ({@code /tags/{arn}}) are served by
+ * extra routing wiring. {@code /malware-protection-plan} would win the same way, so
+ * {@link GuardDutyRouteFilter} moves only GuardDuty-signed requests for it to an internal prefix,
+ * and a path-style S3 request for a bucket of that name still reaches S3. Tag operations ({@code /tags/{arn}}) are served by
  * {@code SharedTagsController} via {@link GuardDutyTagHandler}.
  *
  * <p>GuardDuty reports every client error as {@code BadRequestException} (HTTP 400); the
@@ -257,7 +261,7 @@ public class GuardDutyController {
         }
         response.put("arn", plan.getArn());
         // The model types createdAt as a timestamp, which restJson1 carries as epoch seconds.
-        response.put("createdAt", java.time.Instant.parse(plan.getCreatedAt()).toEpochMilli() / 1000.0);
+        response.put("createdAt", Instant.parse(plan.getCreatedAt()).toEpochMilli() / 1000.0);
         ObjectNode bucket = response.putObject("protectedResource").putObject("s3Bucket");
         bucket.put("bucketName", plan.getBucketName());
         if (plan.getObjectPrefixes() != null) {
