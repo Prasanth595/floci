@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.redshiftserverless.model.CustomDomainAssociation;
 import io.github.hectorvent.floci.services.redshiftserverless.model.EndpointAccess;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ResourcePolicy;
@@ -19,7 +20,9 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * The Redshift Serverless actions that only record metadata: resource policies, endpoint access,
@@ -124,6 +127,16 @@ public class RedshiftServerlessAdminJsonHandler {
                         ServerlessSupport.text(request, "customDomainName"), region);
                 yield emptyResponse();
             }
+            case "GetTrack" -> getTrack(ServerlessSupport.text(request, "trackName"));
+            case "ListTracks" -> listTracks(request);
+            case "ListManagedWorkgroups" -> listManagedWorkgroups(request);
+            case "ListReservations" -> listWithoutItems(request, "reservationsList");
+            case "ListReservationOfferings" -> listWithoutItems(request, "reservationOfferingsList");
+            case "GetReservation" -> throw ServerlessSupport.notFound("The reservation "
+                    + ServerlessSupport.text(request, "reservationId") + " was not found.");
+            case "GetReservationOffering" -> throw ServerlessSupport.notFound("The reservation offering "
+                    + ServerlessSupport.text(request, "offeringId") + " was not found.");
+            case "CreateReservation" -> createReservation(request);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",
                             "Operation " + action + " is not supported."))
@@ -364,6 +377,74 @@ public class RedshiftServerlessAdminJsonHandler {
         node.put("customDomainName", association.getCustomDomainName());
         node.put("workgroupName", association.getWorkgroupName());
         return node;
+    }
+
+    // ── Tracks, managed workgroups and reservations ────────────────────────
+
+    private static final List<String> TRACK_NAMES = List.of("current", "preview", "trailing");
+    private static final Pattern TRACK_NAME = Pattern.compile("^[a-zA-Z0-9_]+$");
+    private static final Pattern SOURCE_ARN = Pattern.compile(
+            "^arn:aws[a-z-]*:glue:[a-z0-9-]+:\\d+:(database|catalog)[a-z0-9-:]*(?:/[A-Za-z0-9-_]{1,255})*$");
+
+    /** The release tracks AWS defines. Floci runs one PostgreSQL version, so a track names no workgroup version. */
+    private Response getTrack(String trackName) {
+        ServerlessSupport.requireText(trackName, "trackName");
+        if (trackName.length() > 256 || !TRACK_NAME.matcher(trackName).matches()) {
+            throw ServerlessSupport.validation("trackName must be alphanumeric characters and underscores.");
+        }
+        if (!TRACK_NAMES.contains(trackName)) {
+            throw ServerlessSupport.notFound("The track " + trackName + " was not found.");
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("track", trackNode(trackName));
+        return Response.ok(response).build();
+    }
+
+    private Response listTracks(JsonNode request) {
+        PaginatedResult<String> page = Pagination.paginate(TRACK_NAMES, name -> name,
+                ServerlessSupport.maxResults(request), ServerlessSupport.text(request, "nextToken"),
+                100, 100, "InvalidPaginationException");
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("tracks");
+        page.items().forEach(name -> items.add(trackNode(name)));
+        putNextToken(response, page);
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode trackNode(String trackName) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("trackName", trackName);
+        node.putArray("updateTargets");
+        return node;
+    }
+
+    /** Managed workgroups come from Glue zero-ETL sources Floci does not model, so there are none. */
+    private Response listManagedWorkgroups(JsonNode request) {
+        String sourceArn = ServerlessSupport.text(request, "sourceArn");
+        if (sourceArn != null && !SOURCE_ARN.matcher(sourceArn).matches()) {
+            throw ServerlessSupport.validation("sourceArn must be a Glue database or catalog ARN.");
+        }
+        return listWithoutItems(request, "managedWorkgroups");
+    }
+
+    /** A list that is always empty, still validating the paging members the way AWS does. */
+    private Response listWithoutItems(JsonNode request, String listName) {
+        Pagination.paginate(List.<String>of(), name -> name, ServerlessSupport.maxResults(request),
+                ServerlessSupport.text(request, "nextToken"), 100, 100, "InvalidPaginationException");
+        ObjectNode response = objectMapper.createObjectNode();
+        response.putArray(listName);
+        return Response.ok(response).build();
+    }
+
+    /** Floci offers no reservation offerings, so no offering id can be bought. */
+    private Response createReservation(JsonNode request) {
+        Integer capacity = ServerlessSupport.integer(request, "capacity");
+        String offeringId = ServerlessSupport.text(request, "offeringId");
+        if (capacity == null) {
+            throw ServerlessSupport.validation("capacity is required.");
+        }
+        ServerlessSupport.requireText(offeringId, "offeringId");
+        throw ServerlessSupport.notFound("The reservation offering " + offeringId + " was not found.");
     }
 
     // ── Shared ─────────────────────────────────────────────────────────────

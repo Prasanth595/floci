@@ -395,7 +395,7 @@ class RedshiftServerlessJsonHandlerTest {
 
     @Test
     void anUnknownActionIsReportedAsUnknownOperation() {
-        Response response = handler.handle("ListTracks", mapper.createObjectNode(), REGION);
+        Response response = handler.handle("GetIdentityCenterAuthToken", mapper.createObjectNode(), REGION);
 
         assertEquals(400, response.getStatus());
         assertEquals("UnknownOperationException", errorType(response));

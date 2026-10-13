@@ -275,6 +275,38 @@ class RedshiftServerlessAdministrationHandlerTest {
     }
 
     @Test
+    void tracksAreTheThreeAwsReleaseTracks() {
+        JsonNode track = ok("GetTrack", "{\"trackName\":\"trailing\"}").get("track");
+        assertEquals("trailing", track.get("trackName").textValue());
+        assertEquals(0, track.get("updateTargets").size());
+        assertEquals("ResourceNotFoundException", errorType("GetTrack", "{\"trackName\":\"nightly\"}"));
+        assertEquals("ValidationException", errorType("GetTrack", "{\"trackName\":\"not valid!\"}"));
+
+        JsonNode page = ok("ListTracks", "{\"maxResults\":2}");
+        assertEquals(2, page.get("tracks").size());
+        String next = page.get("nextToken").textValue();
+        JsonNode rest = ok("ListTracks", "{\"nextToken\":\"" + next + "\"}");
+        assertEquals(1, rest.get("tracks").size());
+        assertEquals("ValidationException", errorType("ListTracks", "{\"maxResults\":\"x\"}"));
+    }
+
+    @Test
+    void managedWorkgroupsAndReservationsAreEmptyBecauseFlociModelsNone() {
+        assertEquals(0, ok("ListManagedWorkgroups", "{}").get("managedWorkgroups").size());
+        assertEquals("ValidationException", errorType("ListManagedWorkgroups", "{\"sourceArn\":\"nope\"}"));
+        assertEquals(0, ok("ListManagedWorkgroups", "{\"sourceArn\":\"arn:aws:glue:us-east-1:123456789012:"
+                + "database/db\"}").get("managedWorkgroups").size());
+
+        assertEquals(0, ok("ListReservations", "{}").get("reservationsList").size());
+        assertEquals(0, ok("ListReservationOfferings", "{}").get("reservationOfferingsList").size());
+        assertEquals("ResourceNotFoundException", errorType("GetReservation", "{\"reservationId\":\"r-1\"}"));
+        assertEquals("ResourceNotFoundException", errorType("GetReservationOffering", "{\"offeringId\":\"o-1\"}"));
+        assertEquals("ResourceNotFoundException",
+                errorType("CreateReservation", "{\"capacity\":128,\"offeringId\":\"o-1\"}"));
+        assertEquals("ValidationException", errorType("CreateReservation", "{\"offeringId\":\"o-1\"}"));
+    }
+
+    @Test
     void anUnknownActionIsStillRejected() {
         assertEquals("UnknownOperationException", errorType("NoSuchOperation", "{}"));
     }
