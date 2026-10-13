@@ -154,7 +154,10 @@ instead of the previous document with the same policy name; exceeding the limit 
 When CloudFormation renames an inline policy, Floci releases its tracked old name on
 retained principals before writing the replacement. Failed updates restore the captured
 previous policies, including historical documents saved before these limits were enforced.
-Compensation checks the current principal and document before restoration. Historical
+Compensation checks the current principal, document and mutation ownership before restoration.
+A later write to the same policy prevents restoration even when it writes the same document;
+nested compensations can still unwind in reverse order. Mutation ownership lasts only within
+the current process and active rollback handles. Historical
 oversized documents can be restored only when the other policies still match their captured
 state. A failed compensation is reported as a rollback failure.
 

@@ -53,6 +53,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.PrivateKey;
@@ -79,6 +80,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
@@ -392,6 +394,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final String seededAccountAlias;
     /** Guards case-insensitive IAM name uniqueness checks and their corresponding writes. */
     private final Object resourceNameLock = new Object();
+    // Undo handles retain their ownership keys; completed attempts leave no permanent history.
+    // Both keys and values are weak because each owner itself holds its canonical key.
+    private final Map<InlinePolicyKey, WeakReference<InlinePolicyOwner>> inlinePolicyOwners = new WeakHashMap<>();
     /**
      * Guards every check-then-write on a login profile. ChangePassword is the reason it has to
      * exist: it reads the profile to compare the old password, then writes the new one, so two
@@ -1899,6 +1904,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 checkInlinePolicyQuota(inlinePolicies, policyName, policyDocument,
                         USER_INLINE_POLICY_SIZE_LIMIT, "user " + userName);
                 inlinePolicies.put(policyName, policyDocument);
+                invalidateInlinePolicyOwner("User", user.getUserId(), policyName);
                 users.put(userName, user);
             }
         }
@@ -1921,6 +1927,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 throw new AwsException("NoSuchEntity",
                         "Policy " + policyName + " not found for user " + userName + ".", 404);
             }
+            invalidateInlinePolicyOwner("User", user.getUserId(), policyName);
             users.put(userName, user);
         }
     }
@@ -1941,6 +1948,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 checkInlinePolicyQuota(inlinePolicies, policyName, policyDocument,
                         GROUP_INLINE_POLICY_SIZE_LIMIT, "group " + groupName);
                 inlinePolicies.put(policyName, policyDocument);
+                invalidateInlinePolicyOwner("Group", group.getGroupId(), policyName);
                 groups.put(groupName, group);
             }
         }
@@ -1963,6 +1971,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 throw new AwsException("NoSuchEntity",
                         "Policy " + policyName + " not found for group " + groupName + ".", 404);
             }
+            invalidateInlinePolicyOwner("Group", group.getGroupId(), policyName);
             groups.put(groupName, group);
         }
     }
@@ -1985,6 +1994,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 checkInlinePolicyQuota(inlinePolicies, policyName, policyDocument,
                         ROLE_INLINE_POLICY_SIZE_LIMIT, "role " + roleName);
                 inlinePolicies.put(policyName, policyDocument);
+                invalidateInlinePolicyOwner("Role", role.getRoleId(), policyName);
                 roles.put(roleName, role);
             }
         }
@@ -1996,48 +2006,48 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * were enforced; it cannot admit a caller-supplied oversized replacement.
      */
     public InlinePolicyChange putUserPolicyWithRollback(String userName, String policyName, String document) {
-        return changeInlinePolicy(users, userName, policyName, () -> getUser(userName),
+        return changeInlinePolicy(users, "User", userName, policyName, () -> getUser(userName),
                 IamUser::getUserId,
                 IamUser::getInlinePolicies, () -> putUserPolicy(userName, policyName, document),
                 document, USER_INLINE_POLICY_SIZE_LIMIT);
     }
 
     public InlinePolicyChange deleteUserPolicyWithRollback(String userName, String policyName) {
-        return changeInlinePolicy(users, userName, policyName, () -> getUser(userName),
+        return changeInlinePolicy(users, "User", userName, policyName, () -> getUser(userName),
                 IamUser::getUserId,
                 IamUser::getInlinePolicies, () -> deleteUserPolicy(userName, policyName),
                 null, USER_INLINE_POLICY_SIZE_LIMIT);
     }
 
     public InlinePolicyChange putGroupPolicyWithRollback(String groupName, String policyName, String document) {
-        return changeInlinePolicy(groups, groupName, policyName, () -> getGroup(groupName),
+        return changeInlinePolicy(groups, "Group", groupName, policyName, () -> getGroup(groupName),
                 IamGroup::getGroupId,
                 IamGroup::getInlinePolicies, () -> putGroupPolicy(groupName, policyName, document),
                 document, GROUP_INLINE_POLICY_SIZE_LIMIT);
     }
 
     public InlinePolicyChange deleteGroupPolicyWithRollback(String groupName, String policyName) {
-        return changeInlinePolicy(groups, groupName, policyName, () -> getGroup(groupName),
+        return changeInlinePolicy(groups, "Group", groupName, policyName, () -> getGroup(groupName),
                 IamGroup::getGroupId,
                 IamGroup::getInlinePolicies, () -> deleteGroupPolicy(groupName, policyName),
                 null, GROUP_INLINE_POLICY_SIZE_LIMIT);
     }
 
     public InlinePolicyChange putRolePolicyWithRollback(String roleName, String policyName, String document) {
-        return changeInlinePolicy(roles, roleName, policyName, () -> getValidatedRole(roleName),
+        return changeInlinePolicy(roles, "Role", roleName, policyName, () -> getValidatedRole(roleName),
                 IamRole::getRoleId,
                 IamRole::getInlinePolicies, () -> putRolePolicy(roleName, policyName, document),
                 document, ROLE_INLINE_POLICY_SIZE_LIMIT);
     }
 
     public InlinePolicyChange deleteRolePolicyWithRollback(String roleName, String policyName) {
-        return changeInlinePolicy(roles, roleName, policyName, () -> getValidatedRole(roleName),
+        return changeInlinePolicy(roles, "Role", roleName, policyName, () -> getValidatedRole(roleName),
                 IamRole::getRoleId,
                 IamRole::getInlinePolicies, () -> deleteRolePolicy(roleName, policyName),
                 null, ROLE_INLINE_POLICY_SIZE_LIMIT);
     }
 
-    private <T> InlinePolicyChange changeInlinePolicy(StorageBackend<String, T> store, String principal,
+    private <T> InlinePolicyChange changeInlinePolicy(StorageBackend<String, T> store, String kind, String principal,
                                                        String policyName, Supplier<T> lookup, Function<T, String> identity,
                                                        Function<T, Map<String, String>> policies,
                                                        Runnable change, String expectedDocument, int limit) {
@@ -2050,7 +2060,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 String previousDocument = inlinePolicies.get(policyName);
                 Map<String, String> previousSiblings = new LinkedHashMap<>(inlinePolicies);
                 previousSiblings.remove(policyName);
+                InlinePolicyKey candidateKey = new InlinePolicyKey(account, kind, principalId, policyName);
+                InlinePolicyOwner previousOwner = inlinePolicyOwner(candidateKey);
+                InlinePolicyKey key = previousOwner == null ? candidateKey : previousOwner.key();
                 change.run();
+                // Remove an equal stale weak key before installing a new canonical key.
+                inlinePolicyOwners.remove(key);
+                InlinePolicyOwner owner = new InlinePolicyOwner(key);
+                inlinePolicyOwners.put(key, new WeakReference<>(owner));
                 return new InlinePolicyChange(previousDocument, () -> {
                     synchronized (resourceNameLock) {
                         if (!account.equals(regionResolver.getAccountId())) {
@@ -2063,7 +2080,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         }
                         Map<String, String> currentPolicies = policies.apply(current);
                         synchronized (currentPolicies) {
-                            if (!Objects.equals(expectedDocument, currentPolicies.get(policyName))) {
+                            if (inlinePolicyOwner(key) != owner
+                                    || !Objects.equals(expectedDocument, currentPolicies.get(policyName))) {
                                 throw inlinePolicyRollbackConflict(principal, policyName);
                             }
                             if (previousDocument != null
@@ -2080,11 +2098,28 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                                 currentPolicies.put(policyName, previousDocument);
                             }
                             store.put(principal, current);
+                            inlinePolicyOwners.remove(key);
+                            if (previousOwner != null) {
+                                inlinePolicyOwners.put(previousOwner.key(), new WeakReference<>(previousOwner));
+                            }
                         }
                     }
                 });
             }
         }
+    }
+
+    private record InlinePolicyKey(String account, String kind, String principalId, String policyName) {}
+
+    private record InlinePolicyOwner(InlinePolicyKey key) {}
+
+    private InlinePolicyOwner inlinePolicyOwner(InlinePolicyKey key) {
+        WeakReference<InlinePolicyOwner> owner = inlinePolicyOwners.get(key);
+        return owner == null ? null : owner.get();
+    }
+
+    private void invalidateInlinePolicyOwner(String kind, String principalId, String policyName) {
+        inlinePolicyOwners.remove(new InlinePolicyKey(regionResolver.getAccountId(), kind, principalId, policyName));
     }
 
     public record InlinePolicyChange(String previousDocument, Runnable rollback) {}
@@ -2142,6 +2177,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 throw new AwsException("NoSuchEntity",
                         "Policy " + policyName + " not found for role " + roleName + ".", 404);
             }
+            invalidateInlinePolicyOwner("Role", role.getRoleId(), policyName);
             roles.put(roleName, role);
         }
     }
