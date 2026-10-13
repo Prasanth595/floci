@@ -264,8 +264,11 @@ class IamPolicyQuotaRollbackTest {
         put(kind, "first", "shared", policy(500));
         InlinePolicyChange change = update(kind, "first", "shared", policy(200));
         put(kind, "first", "shared", policy(200));
-        assertEquals("ConcurrentModification", assertThrows(AwsException.class,
-                () -> change.rollback().run()).getErrorCode());
+        AwsException error = assertThrows(AwsException.class, () -> change.rollback().run());
+        assertEquals("ConcurrentModification", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
+        assertEquals("Cannot restore inline policy shared on first"
+                + " because its rollback ownership or state changed after the update.", error.getMessage());
         assertEquals(policy(200), get(kind, "first", "shared"));
     }
 

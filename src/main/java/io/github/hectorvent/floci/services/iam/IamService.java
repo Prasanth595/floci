@@ -2127,7 +2127,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static AwsException inlinePolicyRollbackConflict(String principal, String policyName) {
         return new AwsException("ConcurrentModification",
                 "Cannot restore inline policy " + policyName + " on " + principal
-                        + " because its principal or document changed after the update.", 409);
+                        + " because its rollback ownership or state changed after the update.", 409);
     }
 
     private static void checkInlinePolicyQuota(Map<String, String> inlinePolicies, String policyName,
