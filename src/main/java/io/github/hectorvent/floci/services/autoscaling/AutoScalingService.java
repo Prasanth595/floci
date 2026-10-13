@@ -503,7 +503,7 @@ public class AutoScalingService {
     }
 
     private Object lockFor(String key) {
-        return groupLocks.computeIfAbsent(key, ignored -> new Object());
+        return groupLocks.computeIfAbsent(regionResolver.getAccountId() + "::" + key, ignored -> new Object());
     }
 
     Set<String> autoScalingGroupAccountIds() {
