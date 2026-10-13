@@ -230,11 +230,11 @@ public class StsQueryHandler {
         String accountId = regionResolver.getAccountId();
         String accessKeyId = callerAccessKeyId();
         String sessionToken = headers == null ? null : headers.getHeaderString("X-Amz-Security-Token");
-        if (sessionToken == null && uriInfo != null) {
-            sessionToken = uriInfo.getQueryParameters().getFirst("X-Amz-Security-Token");
-        }
         if (sessionToken == null && params != null) {
             sessionToken = getParam(params, "X-Amz-Security-Token");
+        }
+        if (sessionToken == null && uriInfo != null) {
+            sessionToken = uriInfo.getQueryParameters().getFirst("X-Amz-Security-Token");
         }
         String arn = iamService.resolveCallerArn(accessKeyId)
                 .orElse(regionResolver.buildGlobalArn("iam", accountId, "root"));

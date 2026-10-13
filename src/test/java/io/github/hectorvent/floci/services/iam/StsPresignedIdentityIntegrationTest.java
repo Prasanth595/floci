@@ -32,7 +32,7 @@ class StsPresignedIdentityIntegrationTest {
     static Stream<Arguments> identities() {
         return Stream.of("000000000000:us-east-1:aws", "123456789012:cn-north-1:aws-cn")
                 .flatMap(scope -> Stream.of("root", "user", "role")
-                        .flatMap(kind -> Stream.of("header", "query", "mixed").map(mode -> Arguments.of(scope, kind, mode))));
+                        .flatMap(kind -> Stream.of("header", "query", "mixed", "form-only", "form-mixed").map(mode -> Arguments.of(scope, kind, mode))));
     }
 
     @ParameterizedTest
@@ -84,10 +84,14 @@ class StsPresignedIdentityIntegrationTest {
         } else {
             request.header("Authorization", auth(key, region, "sts"));
             if (token != null) {
-                request.header("X-Amz-Security-Token", token);
+                if (mode.startsWith("form-")) {
+                    request.formParam("X-Amz-Security-Token", token);
+                } else {
+                    request.header("X-Amz-Security-Token", token);
+                }
             }
         }
-        if (mode.equals("mixed")) {
+        if ((mode.equals("mixed") || mode.equals("form-mixed"))) {
             // A different query credential and token cannot relabel the header's caller.
             request.queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
                     .queryParam("X-Amz-Credential", "999999999999/20261013/us-east-1/sts/aws4_request")
