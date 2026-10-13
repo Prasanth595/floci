@@ -13,7 +13,6 @@ import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -51,7 +50,6 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
 
     private static final String DEFAULT_TENANCY = "default";
     private static final String DEDICATED_TENANCY = "dedicated";
-    private static final Logger LOG = Logger.getLogger(Ec2VpcCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     /**
      * What an in-place update changed on a reused VPC, recorded before the change so a stack
@@ -92,7 +90,7 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
         boolean dnsHostnames = Boolean.parseBoolean(ctx.resolveOrDefault(props, "EnableDnsHostnames", "false"));
         Map<String, String> desiredTags = ctx.resolveTags(props, "Tags");
 
-        guarded(r, ctx, !reused, () -> ec2Service.deleteVpc(region, vpcId), () -> {
+        CfnRollback.guarded(r, ctx, !reused, () -> ec2Service.deleteVpc(region, vpcId), () -> undoInPlace(r), () -> {
             if (reused) {
                 snapshotInPlace(r, vpc, desiredTenancy, dnsSupport, dnsHostnames, desiredTags, region);
             }
@@ -235,53 +233,15 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Runs the steps that follow a create or change a reused VPC in place. If one of them throws,
-     * what this provision did is undone before the failure propagates: a created VPC is deleted
-     * again, a reused one is put back from its snapshot. The engine only removes a failed create it
-     * can see, and on a failed update it restores the previous resource metadata and discards the
-     * attempted one, snapshot included, so the undo has to happen here. A compensation that fails
-     * is reported the way {@code Ec2NetworkCfnProvisioner} reports it: the entity stays rollback
-     * owned or listed in the cleanup record, and the reason lands in
-     * {@link CfnRollback#UPDATE_ROLLBACK_FAILURE_ATTR}.
+     * The in-place undo handed to {@link CfnRollback#guarded}: puts a reused VPC back from its
+     * snapshot. The snapshot is removed only after a successful restore, so a failed one keeps it
+     * for the rollback walker's retry.
      */
-    private void guarded(StackResource r, ProvisionContext ctx, boolean created, Runnable undoCreate, Runnable steps) {
-        if (created) {
-            r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
-        }
-        try {
-            steps.run();
-            r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
-        } catch (RuntimeException e) {
-            if (created) {
-                try {
-                    undoCreate.run();
-                    r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
-                } catch (RuntimeException undo) {
-                    e.addSuppressed(undo);
-                    String reason = "Could not remove " + r.getPhysicalId() + ", created for " + r.getLogicalId()
-                            + " by a failed update: " + undo.getMessage();
-                    LOG.warn(reason);
-                    r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
-                    if (ctx.isUpdate()) {
-                        ReplacementCleanup.recordOrphan(r, r.getPhysicalId(), r.getResourceType(), ctx.region());
-                    }
-                }
-            } else {
-                String snapshot = r.getAttributes().get(IN_PLACE_PRIOR_ATTR);
-                if (snapshot != null) {
-                    try {
-                        restoreInPlace(r, snapshot);
-                        r.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
-                    } catch (RuntimeException undo) {
-                        e.addSuppressed(undo);
-                        String reason = "Could not restore " + r.getPhysicalId() + " for " + r.getLogicalId()
-                                + " after a failed update: " + undo.getMessage();
-                        LOG.warn(reason);
-                        r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
-                    }
-                }
-            }
-            throw e;
+    private void undoInPlace(StackResource r) {
+        String snapshot = r.getAttributes().get(IN_PLACE_PRIOR_ATTR);
+        if (snapshot != null) {
+            restoreInPlace(r, snapshot);
+            r.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
         }
     }
 
