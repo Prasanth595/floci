@@ -293,7 +293,8 @@ class StsPresignedSignatureIntegrationTest {
 
     @ParameterizedTest
     @CsvSource({"sts, expired", "sts, scope", "iam, expired", "iam, scope",
-            "sqs, expired", "sqs, scope", "lambda, expired", "lambda, scope"})
+            "sqs, expired", "sqs, scope", "lambda, expired", "lambda, scope",
+            "sts, future", "iam, future", "sqs, future", "lambda, future"})
     void queryRefusalExplainsExpiryOrExpectedService(String service, String failure) throws Exception {
         boolean rest = "lambda".equals(service);
         boolean queryProtocol = "sts".equals(service) || "iam".equals(service);
@@ -302,8 +303,11 @@ class StsPresignedSignatureIntegrationTest {
         String body = "sts".equals(service) ? "Action=GetCallerIdentity&Version=2011-06-15"
                 : "iam".equals(service) ? "Action=ListUsers&Version=2010-05-08" : rest ? "" : "{}";
         boolean expired = "expired".equals(failure);
-        Instant signedAt = Instant.now().minusSeconds(expired ? 120 : 0).truncatedTo(ChronoUnit.SECONDS);
-        URI uri = presignRequest("test", "test", method, path, expired ? service : "kms", body,
+        boolean future = "future".equals(failure);
+        long cutoffOffset = future ? 900 : -60;
+        Instant signedAt = Instant.now().plusSeconds(future ? 1200 : expired ? -120 : 0)
+                .truncatedTo(ChronoUnit.SECONDS);
+        URI uri = presignRequest("test", "test", method, path, expired || future ? service : "kms", body,
                 new TreeMap<>(), null, signedAt);
         RequestSpecification request = given().urlEncodingEnabled(false);
         if (queryProtocol) {
@@ -316,9 +320,9 @@ class StsPresignedSignatureIntegrationTest {
         } else if (!rest) {
             request.body(body.getBytes(StandardCharsets.UTF_8));
         }
-        Instant before = Instant.now().minusSeconds(60).truncatedTo(ChronoUnit.SECONDS);
+        Instant before = Instant.now().plusSeconds(cutoffOffset).truncatedTo(ChronoUnit.SECONDS);
         Response response = request.request(method, uri);
-        Instant after = Instant.now().minusSeconds(60).truncatedTo(ChronoUnit.SECONDS);
+        Instant after = Instant.now().plusSeconds(cutoffOffset).truncatedTo(ChronoUnit.SECONDS);
         response.then().statusCode(403);
         String message;
         if (queryProtocol) {
@@ -328,9 +332,11 @@ class StsPresignedSignatureIntegrationTest {
             response.then().header("X-Amzn-Errortype", equalTo("InvalidSignatureException"));
             message = response.jsonPath().getString("message");
         }
-        if (expired) {
+        if (expired || future) {
             DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
-            String prefix = "Signature expired: " + format.format(signedAt) + " is now earlier than ";
+            String prefix = future
+                    ? "Signature not yet current: " + format.format(signedAt) + " is still later than "
+                    : "Signature expired: " + format.format(signedAt) + " is now earlier than ";
             assertTrue(message.startsWith(prefix), message);
             Instant cutoff = Instant.from(format.parse(message.substring(prefix.length())));
             assertTrue(!cutoff.isBefore(before) && !cutoff.isAfter(after), message);

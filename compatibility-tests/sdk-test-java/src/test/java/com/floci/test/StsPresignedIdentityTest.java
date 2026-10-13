@@ -9,6 +9,7 @@ import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.auth.signer.Aws4Signer;
 import software.amazon.awssdk.auth.signer.params.Aws4PresignerParams;
+import software.amazon.awssdk.auth.signer.params.Aws4SignerParams;
 import software.amazon.awssdk.http.SdkHttpFullRequest;
 import software.amazon.awssdk.http.SdkHttpMethod;
 import software.amazon.awssdk.services.iam.IamClient;
@@ -120,6 +121,9 @@ class StsPresignedIdentityTest {
             assertThat(expiryMessage).startsWith(prefix);
             Instant cutoff = Instant.from(format.parse(expiryMessage.substring(prefix.length())));
             assertThat(cutoff).isBetween(before, after);
+            assertClockRefusal(credentials, body, version, true, 1200);
+            assertClockRefusal(credentials, body, version, false, 1200);
+            assertClockRefusal(credentials, body, version, false, -1200);
             SdkHttpFullRequest wrongService = presign(credentials, body, "iam", Instant.now());
             HttpResponse<byte[]> scopeResponse = send(wrongService, wrongService.getUri(), body, version);
             assertSignatureRefused(scopeResponse);
@@ -138,6 +142,30 @@ class StsPresignedIdentityTest {
             }
         }
         return parse(response.body());
+    }
+
+    private static void assertClockRefusal(AwsCredentials credentials, byte[] body, HttpClient.Version version,
+                                           boolean query, long offset) throws Exception {
+        Instant signedAt = Instant.now().plusSeconds(offset).truncatedTo(ChronoUnit.SECONDS);
+        SdkHttpFullRequest signed = query ? presign(credentials, body, "sts", signedAt)
+                : Aws4Signer.create().sign(SdkHttpFullRequest.builder()
+                        .uri(TestFixtures.endpoint()).method(SdkHttpMethod.POST)
+                        .putHeader("Content-Type", "application/x-www-form-urlencoded")
+                        .contentStreamProvider(() -> new ByteArrayInputStream(body)).build(),
+                Aws4SignerParams.builder().awsCredentials(credentials).signingRegion(TestFixtures.region())
+                        .signingName("sts").signingClockOverride(Clock.fixed(signedAt, ZoneOffset.UTC)).build());
+        long cutoffOffset = offset > 0 ? 900 : -900;
+        Instant before = Instant.now().plusSeconds(cutoffOffset).truncatedTo(ChronoUnit.SECONDS);
+        HttpResponse<byte[]> response = send(signed, signed.getUri(), body, version);
+        Instant after = Instant.now().plusSeconds(cutoffOffset).truncatedTo(ChronoUnit.SECONDS);
+        assertSignatureRefused(response);
+        DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
+        String prefix = offset > 0
+                ? "Signature not yet current: " + format.format(signedAt) + " is still later than "
+                : "Signature expired: " + format.format(signedAt) + " is now earlier than ";
+        String message = parse(response.body()).getElementsByTagNameNS("*", "Message").item(0).getTextContent();
+        assertThat(message).startsWith(prefix);
+        assertThat(Instant.from(format.parse(message.substring(prefix.length())))).isBetween(before, after);
     }
 
     private static SdkHttpFullRequest presign(AwsCredentials credentials, byte[] body, String service, Instant signedAt) {

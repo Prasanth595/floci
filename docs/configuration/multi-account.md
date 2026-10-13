@@ -176,10 +176,14 @@ By default Floci does not verify SigV4 signatures. Only the access key ID matter
 
 An expired presigned query reports `Signature expired: <signed-date> is now earlier than <cutoff>`.
 The cutoff is the server time minus `X-Amz-Expires`, so the message describes the URL's lifetime.
+An expired header signature uses the same wording with a cutoff 15 minutes before server time.
+Query and header signatures more than 15 minutes ahead report
+`Signature not yet current: <signed-date> is still later than <cutoff>`, with a cutoff 15 minutes
+after server time.
 When the receiving service has one registered signing scope, a mismatch reports
 `Credential should be scoped to correct service: '<service>'`. Services with multiple accepted
 scopes retain the generic mismatch message because their aliases do not identify a canonical
-signing name. Header clock-skew messages retain their 15-minute window.
+signing name.
 
 To verify signatures:
 

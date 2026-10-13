@@ -230,11 +230,14 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
                     + AMZ_DATE.format(now.minusSeconds(expires)));
             return;
         }
-        if (presigned ? requestTime.isAfter(now.plus(MAX_CLOCK_SKEW))
-                : Duration.between(requestTime, now).abs().compareTo(MAX_CLOCK_SKEW) > 0) {
-            signatureDoesNotMatch(ctx, resource, "Signature expired: " + amzDate + " is outside the "
-                    + MAX_CLOCK_SKEW.toMinutes() + " minute window around the server time "
-                    + AMZ_DATE.format(now) + ".");
+        if (requestTime.isAfter(now.plus(MAX_CLOCK_SKEW))) {
+            signatureDoesNotMatch(ctx, resource, "Signature not yet current: " + amzDate + " is still later than "
+                    + AMZ_DATE.format(now.plus(MAX_CLOCK_SKEW)));
+            return;
+        }
+        if (!presigned && requestTime.isBefore(now.minus(MAX_CLOCK_SKEW))) {
+            signatureDoesNotMatch(ctx, resource, "Signature expired: " + amzDate + " is now earlier than "
+                    + AMZ_DATE.format(now.minus(MAX_CLOCK_SKEW)));
             return;
         }
         if (!amzDate.startsWith(scope.date())) {
