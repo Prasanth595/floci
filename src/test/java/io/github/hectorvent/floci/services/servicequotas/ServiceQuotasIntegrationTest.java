@@ -265,6 +265,51 @@ class ServiceQuotasIntegrationTest {
     }
 
     @Test
+    void getRequestedServiceQuotaChangeReturnsStoredRequest() {
+        String requestId =
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "ServiceQuotasV20190624.RequestServiceQuotaIncrease")
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"ServiceCode\":\"codebuild\",\"QuotaCode\":\"L-2DC20C30\",\"DesiredValue\":9000}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("RequestedQuota.Id");
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.GetRequestedServiceQuotaChange")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"RequestId\":\"" + requestId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RequestedQuota.Id", equalTo(requestId))
+            .body("RequestedQuota.ServiceCode", equalTo("codebuild"))
+            .body("RequestedQuota.QuotaCode", equalTo("L-2DC20C30"))
+            .body("RequestedQuota.DesiredValue", notNullValue())
+            .body("RequestedQuota.Status", equalTo("PENDING"));
+    }
+
+    @Test
+    void getRequestedServiceQuotaChange_unknownId_returnsNoSuchResource() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.GetRequestedServiceQuotaChange")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"RequestId\":\"DEADBEEF\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("NoSuchResourceException"));
+    }
+
+    @Test
     void getServiceQuota_unknownQuotaCode_returnsNoSuchResource() {
         given()
             .contentType(CONTENT_TYPE)

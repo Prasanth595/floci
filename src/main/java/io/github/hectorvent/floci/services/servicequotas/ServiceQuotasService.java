@@ -1,11 +1,14 @@
 package io.github.hectorvent.floci.services.servicequotas;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -74,10 +77,14 @@ public class ServiceQuotasService {
             "Concurrent operations");
 
     private final ObjectMapper objectMapper;
+    private final StorageBackend<String, ObjectNode> requestedQuotaStore;
 
     @Inject
-    public ServiceQuotasService(ObjectMapper objectMapper) {
+    public ServiceQuotasService(StorageFactory storageFactory, ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
+        this.requestedQuotaStore = storageFactory.create("servicequotas",
+                "servicequotas-requested-changes.json",
+                new TypeReference<Map<String, ObjectNode>>() {});
     }
 
     public ObjectNode listServiceQuotas(String serviceCode, String quotaCodeFilter, String nextToken,
@@ -279,8 +286,23 @@ public class ServiceQuotasService {
             requestedQuota.set("QuotaContext", context);
         }
 
+        requestedQuotaStore.put(id, requestedQuota.deepCopy());
+
         ObjectNode response = objectMapper.createObjectNode();
         response.set("RequestedQuota", requestedQuota);
+        return response;
+    }
+
+    public ObjectNode getRequestedServiceQuotaChange(String requestId) {
+        if (requestId == null || requestId.isEmpty()) {
+            throw new AwsException("IllegalArgumentException",
+                    "Invalid input: RequestId must not be empty.", 400);
+        }
+        ObjectNode requestedQuota = requestedQuotaStore.get(requestId)
+                .orElseThrow(() -> new AwsException("NoSuchResourceException",
+                        "The request failed because the specified request ID does not exist.", 400));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("RequestedQuota", requestedQuota.deepCopy());
         return response;
     }
 }

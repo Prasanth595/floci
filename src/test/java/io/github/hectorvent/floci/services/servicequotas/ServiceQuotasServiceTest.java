@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.servicequotas;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -16,7 +19,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ServiceQuotasServiceTest {
 
-    private final ServiceQuotasService service = new ServiceQuotasService(new ObjectMapper());
+    private static final String ACCOUNT_ID = "000000000000";
+
+    private final ServiceQuotasService service =
+            new ServiceQuotasService(new InMemoryStorageFactory(), new ObjectMapper());
 
     @Test
     void syntheticQuotaCodesAreStableAndWellFormed() {
@@ -105,8 +111,45 @@ class ServiceQuotasServiceTest {
     void wellFormedServiceCodesAreStillAccepted() {
         // Including an unknown-but-valid code: generating a catalog for those is deliberate.
         for (String good : List.of("codebuild", "widgetfactory", "elasticloadbalancing", "AWS-Thing", "ec")) {
-            assertTrue(service.listServiceQuotas(good, null, null, null, "us-east-1", "000000000000")
+            assertTrue(service.listServiceQuotas(good, null, null, null, "us-east-1", ACCOUNT_ID)
                     .withArray("Quotas").size() > 0, good);
+        }
+    }
+
+    @Test
+    void requestedIncreaseIsReadableBackById() {
+        ObjectNode created = service.requestServiceQuotaIncrease(
+                "codebuild", "L-2DC20C30", 9000.0, null, "us-east-1", ACCOUNT_ID)
+                .withObject("RequestedQuota");
+        String id = created.path("Id").asText();
+
+        ObjectNode read = service.getRequestedServiceQuotaChange(id).withObject("RequestedQuota");
+        assertEquals(id, read.path("Id").asText());
+        assertEquals("codebuild", read.path("ServiceCode").asText());
+        assertEquals("L-2DC20C30", read.path("QuotaCode").asText());
+        assertEquals("Concurrently running builds", read.path("QuotaName").asText());
+        assertEquals(9000.0, read.path("DesiredValue").asDouble());
+        assertEquals("PENDING", read.path("Status").asText());
+    }
+
+    @Test
+    void unknownRequestIdThrowsNoSuchResource() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.getRequestedServiceQuotaChange("DEADBEEF"));
+        assertEquals("NoSuchResourceException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    private static final class InMemoryStorageFactory extends StorageFactory {
+
+        InMemoryStorageFactory() {
+            super(null, null);
+        }
+
+        @Override
+        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                                                        TypeReference<Map<String, V>> typeReference) {
+            return AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         }
     }
 }
