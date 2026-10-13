@@ -227,8 +227,9 @@ These values have no published source Floci can cite, so it does not guess them;
 the commercial value or Floci's own base host until sourced:
 
 - the China CloudFront distribution domain suffix (only the API host is published);
-- the console cross-device sign-in redirect host outside the commercial partition: Floci accepts
-  only `<region>.signin.aws.amazon.com` (the device-authorization client ids themselves,
+- the console cross-device sign-in redirect host outside the commercial partition: besides the
+  endpoint the authorize request arrived on, the only AWS host Floci accepts is
+  `<region>.signin.aws.amazon.com` (the device-authorization client ids themselves,
   `arn:aws:signin:::devtools/...`, are the same in every partition);
 - the STS web-identity audience outside the commercial partition;
 - the EKS Pod Identity token audience (`pods.eks.amazonaws.com`) outside the commercial partition;
