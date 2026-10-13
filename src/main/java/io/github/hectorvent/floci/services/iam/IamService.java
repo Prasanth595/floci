@@ -703,9 +703,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     /**
      * The owner of a key in the calling account, for a read that is not the owner's own request.
-     * Unlike {@link #findUserNameByAccessKeyId}, an unprefixed pre-multi-account key is adopted into
-     * this account only when its user lives here, so another account asking first cannot read the
-     * owner's name or take the key out of the account that holds it.
+     * Unlike {@link #findUserNameByAccessKeyId}, this never migrates: an unprefixed
+     * pre-multi-account key belongs to the default account and is only read in place, so another
+     * account asking (even one with a same-named user) neither learns the owner nor moves the key.
      */
     public Optional<String> findAccessKeyOwnerInThisAccount(String accessKeyId) {
         if (accessKeyId == null) {
@@ -714,8 +714,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (!(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
             return findUserNameByAccessKeyId(accessKeyId);
         }
-        return aware.getForAccountMigratingLegacy(aware.accountId(), accessKeyId,
-                        key -> users.get(key.getUserName()).isPresent())
+        String accountId = aware.accountId();
+        return aware.getForAccount(accountId, accessKeyId)
+                .or(() -> aware.scanAllAccountEntries(accessKeyId::equals).stream()
+                        .filter(entry -> accountId.equals(entry.accountId()))
+                        .map(AccountAwareStorageBackend.AccountEntry::value)
+                        .findFirst())
                 .map(AccessKey::getUserName);
     }
 

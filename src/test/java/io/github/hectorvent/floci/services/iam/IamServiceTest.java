@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Totp;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -23,6 +24,7 @@ import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -39,6 +41,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static io.github.hectorvent.floci.services.iam.InlinePolicyTestHelper.policyWithNonWhitespaceLength;
 import static org.junit.jupiter.api.Assertions.*;
@@ -823,15 +826,40 @@ class IamServiceTest {
 
     @Test
     void anotherAccountCannotClaimALegacyAccessKeyThroughItsOwnerLookup() {
+        assertLegacyKeyStaysWithTheDefaultAccount(false);
+    }
+
+    @Test
+    void aSameNamedUserInAnotherAccountCannotClaimALegacyAccessKey() {
+        assertLegacyKeyStaysWithTheDefaultAccount(true);
+    }
+
+    /** One shared key store, two accounts told apart by the request context, as in a real boot. */
+    @SuppressWarnings("unchecked")
+    private static void assertLegacyKeyStaysWithTheDefaultAccount(boolean strangerHasSameNamedUser) {
+        AtomicReference<String> caller = new AtomicReference<>("000000000000");
+        RequestContext context = Mockito.mock(RequestContext.class);
+        Mockito.when(context.getAccountId()).thenAnswer(inv -> caller.get());
+        Instance<RequestContext> contexts = Mockito.mock(Instance.class);
+        Mockito.when(contexts.get()).thenReturn(context);
         InMemoryStorage<String, AccessKey> raw = new InMemoryStorage<>();
         raw.put("AKIALEGACYEXAMPLE", new AccessKey("AKIALEGACYEXAMPLE", "secret", "worker"));
-        IamService stranger = iamService(false, new AccountAwareStorageBackend<>(raw, null, "111122223333"));
-        IamService owner = iamService(false, new AccountAwareStorageBackend<>(raw, null, "000000000000"));
+        AccountAwareStorageBackend<AccessKey> keys = new AccountAwareStorageBackend<>(raw, contexts, "000000000000");
+        IamService owner = iamService(false, keys);
+        IamService stranger = iamService(false, keys);
         owner.createUser("worker", "/");
 
+        caller.set("111122223333");
+        if (strangerHasSameNamedUser) {
+            stranger.createUser("worker", "/");
+        }
         assertTrue(stranger.findAccessKeyOwnerInThisAccount("AKIALEGACYEXAMPLE").isEmpty());
         assertTrue(raw.get("AKIALEGACYEXAMPLE").isPresent(), "the stranger's lookup must leave the key unmoved");
+        assertTrue(raw.get("111122223333/AKIALEGACYEXAMPLE").isEmpty(), "the stranger's lookup must not copy the key");
+
+        caller.set("000000000000");
         assertEquals("worker", owner.findAccessKeyOwnerInThisAccount("AKIALEGACYEXAMPLE").orElseThrow());
+        assertTrue(raw.get("AKIALEGACYEXAMPLE").isPresent(), "the owner's read must not migrate either");
     }
 
     @Test
