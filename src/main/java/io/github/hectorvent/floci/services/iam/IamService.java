@@ -716,10 +716,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         String accountId = aware.accountId();
         return aware.getForAccount(accountId, accessKeyId)
-                .or(() -> aware.scanAllAccountEntries(accessKeyId::equals).stream()
-                        .filter(entry -> accountId.equals(entry.accountId()))
-                        .map(AccountAwareStorageBackend.AccountEntry::value)
-                        .findFirst())
+                .or(() -> aware.getLegacyForAccount(accountId, accessKeyId))
                 .map(AccessKey::getUserName);
     }
 
