@@ -1109,7 +1109,8 @@ public class Ec2QueryHandler {
         for (Tag tag : fleetInstanceTags) {
             tags.put(tag.getKey(), tag);
         }
-        // The primary interface's subnet, as RunInstances reads it, before any other interface's.
+        // The primary (device index 0) interface's subnet first; only when that names none does a
+        // fleet fall back, as it always has, to the first interface that names one.
         LaunchTemplateData.NetworkInterface primary = template.primaryNetworkInterface();
         String templateSubnetId = primary != null && isSet(primary.getSubnetId()) ? primary.getSubnetId()
                 : template.getNetworkInterfaces().stream()

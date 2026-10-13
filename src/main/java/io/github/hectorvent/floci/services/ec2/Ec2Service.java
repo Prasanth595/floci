@@ -3994,9 +3994,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             InstanceState prev = inst.getState();
             if (config.services().ec2().mock()) {
-                inst.setState(InstanceState.terminated());
-                // Termination also disassociates an Elastic IP, so nothing public is left.
-                clearPublicAddress(inst);
+                // Under the instance's lock, so a concurrent Elastic IP write sees the new state.
+                synchronized (inst) {
+                    inst.setState(InstanceState.terminated());
+                    // Termination also disassociates an Elastic IP, so nothing public is left.
+                    clearPublicAddress(inst);
+                }
                 inst.setTerminatedAt(System.currentTimeMillis());
             } else {
                 // Also attempt the reclaim once this container is really gone. The synchronous
@@ -4108,8 +4111,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             InstanceState prev = inst.getState();
             if (config.services().ec2().mock()) {
-                inst.setState(InstanceState.stopped());
-                releaseMockPublicAddress(region, inst);
+                synchronized (inst) {
+                    inst.setState(InstanceState.stopped());
+                    releaseMockPublicAddress(region, inst);
+                }
             } else {
                 containerManager.stop(inst);
             }
@@ -9463,10 +9468,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             disassociateAddress(region, addr.getAssociationId());
         }
         // "If you associate an Elastic IP address with an instance that has an existing Elastic IP
-        // address, the existing address is disassociated from the instance" (AssociateAddress).
+        // address, the existing address is disassociated from the instance" (AssociateAddress),
+        // including one a retained interface carried onto this instance as its primary.
         if (instanceId != null) {
+            String primaryInterfaceId = instances.get(key(region, instanceId))
+                    .filter(inst -> inst.getNetworkInterfaces() != null && !inst.getNetworkInterfaces().isEmpty())
+                    .map(inst -> inst.getNetworkInterfaces().get(0).getNetworkInterfaceId())
+                    .orElse(null);
             for (Address existing : addresses.scan(k -> k.startsWith(region + "::"))) {
-                if (instanceId.equals(existing.getInstanceId()) && existing.getAssociationId() != null
+                boolean onInstance = instanceId.equals(existing.getInstanceId())
+                        || primaryInterfaceId != null && primaryInterfaceId.equals(existing.getNetworkInterfaceId());
+                if (onInstance && existing.getAssociationId() != null
                         && !allocationId.equals(existing.getAllocationId())) {
                     disassociateAddress(region, existing.getAssociationId());
                 }

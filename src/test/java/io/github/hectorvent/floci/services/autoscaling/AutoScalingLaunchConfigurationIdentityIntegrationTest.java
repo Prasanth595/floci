@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.autoscaling;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
+import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -12,7 +13,6 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.startsWith;
 
 @QuarkusTest
 class AutoScalingLaunchConfigurationIdentityIntegrationTest {
@@ -147,33 +147,59 @@ class AutoScalingLaunchConfigurationIdentityIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void groupRefusesALaunchTemplateNamingBothProfileSelectors(boolean mixedInstances) {
+    @ValueSource(strings = {"create", "mixed", "update"})
+    void groupRefusesALaunchTemplateNamingBothProfileSelectors(String request) {
         String name = "pair-template-" + UUID.randomUUID();
+        String ec2 = AUTH.replace("/autoscaling/", "/ec2/");
         String arn = given().header("Authorization", AUTH.replace("/autoscaling/", "/iam/"))
                 .formParam("Action", "CreateInstanceProfile").formParam("InstanceProfileName", name)
                 .post("/").then().statusCode(200).extract().path(
                         "CreateInstanceProfileResponse.CreateInstanceProfileResult.InstanceProfile.Arn");
-        String template = given().header("Authorization", AUTH.replace("/autoscaling/", "/ec2/"))
+        String template = given().header("Authorization", ec2)
                 .formParam("Action", "CreateLaunchTemplate").formParam("LaunchTemplateName", name)
                 .formParam("LaunchTemplateData.ImageId", "ami-amazonlinux2023")
                 .formParam("LaunchTemplateData.InstanceType", "t3.micro")
                 .formParam("LaunchTemplateData.IamInstanceProfile.Name", name)
-                .formParam("LaunchTemplateData.IamInstanceProfile.Arn", arn)
                 .post("/").then().statusCode(200)
                 .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
-        String prefix = mixedInstances ? "MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification." : "LaunchTemplate.";
-        given().header("Authorization", AUTH).formParam("Action", "CreateAutoScalingGroup")
+        // Version 2 adds the ARN beside the name; version 1 names the profile once.
+        given().header("Authorization", ec2).formParam("Action", "CreateLaunchTemplateVersion")
+                .formParam("LaunchTemplateId", template)
+                .formParam("LaunchTemplateData.ImageId", "ami-amazonlinux2023")
+                .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+                .formParam("LaunchTemplateData.IamInstanceProfile.Name", name)
+                .formParam("LaunchTemplateData.IamInstanceProfile.Arn", arn)
+                .post("/").then().statusCode(200);
+        String prefix = "mixed".equals(request)
+                ? "MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification." : "LaunchTemplate.";
+        if ("update".equals(request)) {
+            given().header("Authorization", AUTH).formParam("Action", "CreateAutoScalingGroup")
+                    .formParam("AutoScalingGroupName", name).formParam(prefix + "LaunchTemplateId", template)
+                    .formParam(prefix + "Version", "1")
+                    .formParam("MinSize", "0").formParam("MaxSize", "1").formParam("DesiredCapacity", "0")
+                    .formParam("AvailabilityZones.member.1", "us-east-1a").post("/").then().statusCode(200);
+        }
+        given().header("Authorization", AUTH)
+                .formParam("Action", "update".equals(request) ? "UpdateAutoScalingGroup" : "CreateAutoScalingGroup")
                 .formParam("AutoScalingGroupName", name).formParam(prefix + "LaunchTemplateId", template)
-                .formParam(prefix + "Version", "1")
+                .formParam(prefix + "Version", "2")
                 .formParam("MinSize", "0").formParam("MaxSize", "1").formParam("DesiredCapacity", "1")
                 .formParam("AvailabilityZones.member.1", "us-east-1a").post("/").then().statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-                .body("ErrorResponse.Error.Message", startsWith("You must use a valid fully-formed launch template."));
-        given().header("Authorization", AUTH).formParam("Action", "DescribeAutoScalingGroups")
-                .formParam("AutoScalingGroupNames.member.1", name).post("/").then().statusCode(200)
-                .body("DescribeAutoScalingGroupsResponse.DescribeAutoScalingGroupsResult"
-                        + ".AutoScalingGroups.member.size()", equalTo(0));
+                .body("ErrorResponse.Error.Message", equalTo("You must use a valid fully-formed launch template. "
+                        + "The parameter iamInstanceProfile.name may not be used with iamInstanceProfile.arn."));
+        String group = "DescribeAutoScalingGroupsResponse.DescribeAutoScalingGroupsResult.AutoScalingGroups.member";
+        ValidatableResponse described = given().header("Authorization", AUTH)
+                .formParam("Action", "DescribeAutoScalingGroups")
+                .formParam("AutoScalingGroupNames.member.1", name).post("/").then().statusCode(200);
+        if ("update".equals(request)) {
+            described.body(group + ".LaunchTemplate.Version", equalTo("1"));
+            given().header("Authorization", AUTH).formParam("Action", "DeleteAutoScalingGroup")
+                    .formParam("AutoScalingGroupName", name).formParam("ForceDelete", "true")
+                    .post("/").then().statusCode(200);
+        } else {
+            described.body(group + ".size()", equalTo(0));
+        }
     }
 
     @Test

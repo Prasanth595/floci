@@ -262,12 +262,66 @@ class Ec2MockPublicAddressIntegrationTest {
     }
 
     @Test
+    void secondAddressDisplacesTheOneARetainedInterfaceCarried() {
+        String owner = Long.toString(ACCOUNTS.incrementAndGet());
+        String vpc = request("CreateVpc", owner).formParam("CidrBlock", "10.89.0.0/16")
+                .post("/").then().statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
+        String subnet = request("CreateSubnet", owner).formParam("VpcId", vpc)
+                .formParam("CidrBlock", "10.89.1.0/24").formParam("AvailabilityZone", REGION + "a")
+                .post("/").then().statusCode(200).extract().path("CreateSubnetResponse.subnet.subnetId");
+        String eni = request("CreateNetworkInterface", owner).formParam("SubnetId", subnet)
+                .post("/").then().statusCode(200)
+                .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+        String first = launchOnInterface(owner, eni);
+        ValidatableResponse carried = request("AllocateAddress", owner).formParam("Domain", "vpc")
+                .post("/").then().statusCode(200);
+        String carriedAllocation = carried.extract().path("AllocateAddressResponse.allocationId");
+        request("AssociateAddress", owner).formParam("AllocationId", carriedAllocation)
+                .formParam("InstanceId", first).post("/").then().statusCode(200);
+        // The interface outlives the instance and keeps the address associated with it.
+        request("TerminateInstances", owner).formParam("InstanceId.1", first).post("/").then().statusCode(200);
+
+        String second = launchOnInterface(owner, eni);
+        ValidatableResponse replacement = request("AllocateAddress", owner).formParam("Domain", "vpc")
+                .post("/").then().statusCode(200);
+        String replacementAllocation = replacement.extract().path("AllocateAddressResponse.allocationId");
+        String replacementIp = replacement.extract().path("AllocateAddressResponse.publicIp");
+        String replacementAssociation = request("AssociateAddress", owner)
+                .formParam("AllocationId", replacementAllocation).formParam("InstanceId", second)
+                .post("/").then().statusCode(200).extract().path("AssociateAddressResponse.associationId");
+
+        request("DescribeAddresses", owner).formParam("AllocationId.1", carriedAllocation).post("/").then()
+                .statusCode(200)
+                .body("DescribeAddressesResponse.addressesSet.item.associationId.size()", equalTo(0));
+        assertEquals(replacementIp, publicIp(owner, second));
+
+        request("TerminateInstances", owner).formParam("InstanceId.1", second).post("/").then().statusCode(200);
+        request("DisassociateAddress", owner).formParam("AssociationId", replacementAssociation).post("/").then()
+                .statusCode(200);
+        request("ReleaseAddress", owner).formParam("AllocationId", replacementAllocation).post("/").then()
+                .statusCode(200);
+        request("ReleaseAddress", owner).formParam("AllocationId", carriedAllocation).post("/").then().statusCode(200);
+        request("DeleteNetworkInterface", owner).formParam("NetworkInterfaceId", eni).post("/").then().statusCode(200);
+        request("DeleteSubnet", owner).formParam("SubnetId", subnet).post("/").then().statusCode(200);
+        request("DeleteVpc", owner).formParam("VpcId", vpc).post("/").then().statusCode(200);
+    }
+
+    private String launchOnInterface(String owner, String networkInterface) {
+        return request("RunInstances", owner).formParam("ImageId", "ami-amazonlinux2023")
+                .formParam("InstanceType", "t3.micro").formParam("MinCount", 1).formParam("MaxCount", 1)
+                .formParam("NetworkInterface.1.DeviceIndex", 0)
+                .formParam("NetworkInterface.1.NetworkInterfaceId", networkInterface)
+                .post("/").then().statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+    }
+
+    @Test
     void fleetLaunchesIntoThePrimaryInterfaceSubnetWhateverTheInterfaceOrder() {
         String owner = Long.toString(ACCOUNTS.incrementAndGet());
         String vpc = request("CreateVpc", owner).formParam("CidrBlock", "10.88.0.0/16")
                 .post("/").then().statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
         String secondary = request("CreateSubnet", owner).formParam("VpcId", vpc)
-                .formParam("CidrBlock", "10.88.1.0/24").formParam("AvailabilityZone", REGION + "a")
+                .formParam("CidrBlock", "10.88.1.0/24").formParam("AvailabilityZone", REGION + "b")
                 .post("/").then().statusCode(200).extract().path("CreateSubnetResponse.subnet.subnetId");
         String primary = request("CreateSubnet", owner).formParam("VpcId", vpc)
                 .formParam("CidrBlock", "10.88.2.0/24").formParam("AvailabilityZone", REGION + "a")
@@ -290,10 +344,14 @@ class Ec2MockPublicAddressIntegrationTest {
                 .post("/").then().statusCode(200)
                 .extract().path("CreateFleetResponse.fleetInstanceSet.item.instanceIds.item");
 
-        describe(owner, instance).body(INSTANCE + "subnetId", equalTo(primary));
+        describe(owner, instance).body(INSTANCE + "subnetId", equalTo(primary))
+                .body(INSTANCE + "placement.availabilityZone", equalTo(REGION + "a"));
         assertTrue(publicIp(owner, instance).matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"));
         request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
         request("DeleteLaunchTemplate", owner).formParam("LaunchTemplateId", template).post("/").then().statusCode(200);
+        request("DeleteSubnet", owner).formParam("SubnetId", primary).post("/").then().statusCode(200);
+        request("DeleteSubnet", owner).formParam("SubnetId", secondary).post("/").then().statusCode(200);
+        request("DeleteVpc", owner).formParam("VpcId", vpc).post("/").then().statusCode(200);
     }
 
     private String publicIp(String owner, String instance) {

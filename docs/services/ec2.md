@@ -739,7 +739,8 @@ Two behaviours worth calling out, because they are what Terraform reads back:
 - **`NetworkInterfaces` stays a `NetworkInterfaces` block.** Its `Groups` are not hoisted into
   top-level `SecurityGroupIds`; on AWS the two are mutually exclusive. A launch from the template
   resolves its security groups from whichever of the two is populated, and takes its subnet and
-  `AssociatePublicIpAddress` from the interface at device index 0.
+  `AssociatePublicIpAddress` from the interface at device index 0. When that interface names no
+  subnet, `CreateFleet` still uses the first interface that does.
 
 #### Launch template versions
 
@@ -776,12 +777,13 @@ prefix lists, `EnaSrdSpecification`, `PrimaryIpv6` and `EnaQueueCount` are likew
 
 Launches and association changes resolve both names and ARNs against IAM in the
 caller's account. Unknown profiles and foreign-account ARNs fail with
-`InvalidParameterValue` before allocation or association changes. A RunInstances or
-CreateFleet launch that names both a profile name and an ARN, directly or through its
-launch template, fails with `InvalidParameterCombination`; association replacement uses
-the ARN when both are provided. Launch templates reject malformed profile ARNs at
-creation with `InvalidIamInstanceProfileArn.Malformed` but, as on AWS, store a name and
-ARN pair as given, so the pair only fails once something launches from the template.
+`InvalidParameterValue` before allocation or association changes. A RunInstances launch
+that names both a profile name and an ARN, directly or through its launch template, and a
+CreateFleet launch through such a template, fail with `InvalidParameterCombination`;
+association replacement uses the ARN when both are provided. Launch templates reject
+malformed profile ARNs at creation with `InvalidIamInstanceProfileArn.Malformed` but, as
+on AWS, store a name and ARN pair as given; the pair fails when something uses the
+template, and Auto Scaling refuses a group over it.
 EC2 stores and returns IAM's profile ID, including for launch-template, EC2 Fleet and
 Auto Scaling instances. Persisted instances from older versions omit the unknown ID until the
 profile is reassociated; looking up the ARN could misidentify a deleted and recreated
