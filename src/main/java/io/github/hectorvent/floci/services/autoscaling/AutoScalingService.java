@@ -684,6 +684,9 @@ public class AutoScalingService {
     public void detachInstances(String region, String name, List<String> instanceIds,
                                  boolean decrementDesiredCapacity) {
         AutoScalingGroup asg = requireGroup(region, name);
+        List<String> detached = asg.getInstances().stream().map(AsgInstance::getInstanceId)
+                .filter(instanceIds::contains).toList();
+        releaseRefreshOwnership(asg, detached);
         asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
         if (decrementDesiredCapacity) {
             int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - instanceIds.size());
@@ -700,13 +703,7 @@ public class AutoScalingService {
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ValidationError",
                         "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
-        InstanceRefresh refresh = activeInstanceRefresh(asg);
-        if (refresh != null && refresh.getReplacements() != null) {
-            refresh.getReplacements().removeIf(replacement ->
-                    instanceId.equals(replacement.getOriginalInstanceId())
-                            || instanceId.equals(replacement.getReplacementInstanceId()));
-            saveInstanceRefresh(refresh);
-        }
+        releaseRefreshOwnership(asg, List.of(instanceId));
         asg.getInstances().stream()
                 .filter(i -> instanceId.equals(i.getInstanceId()))
                 .findFirst()
@@ -716,6 +713,16 @@ public class AutoScalingService {
             asg.setDesiredCapacity(newDesired);
         }
         groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
+    }
+
+    private void releaseRefreshOwnership(AutoScalingGroup asg, List<String> instanceIds) {
+        InstanceRefresh refresh = activeInstanceRefresh(asg);
+        if (refresh != null && refresh.getReplacements() != null) {
+            refresh.getReplacements().removeIf(replacement -> instanceIds.stream().anyMatch(instanceId ->
+                    instanceId.equals(replacement.getOriginalInstanceId())
+                            || instanceId.equals(replacement.getReplacementInstanceId())));
+            saveInstanceRefresh(refresh);
+        }
     }
 
     // ── Instance refreshes ────────────────────────────────────────────────────

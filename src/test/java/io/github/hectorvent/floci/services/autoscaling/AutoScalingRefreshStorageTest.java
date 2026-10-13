@@ -14,6 +14,8 @@ import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
+import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
+import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -247,7 +249,7 @@ class AutoScalingRefreshStorageTest {
         InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
         Reservation launched = reservation("i-recovered");
         launched.getInstances().getFirst().setClientToken(refresh.getReplacements().getFirst().getLaunchClientToken());
-        when(ec2.describeInstances(REGION, null, null)).thenReturn(List.of(launched));
+        when(ec2.describeInstances(REGION, List.of(), null)).thenReturn(List.of(launched));
         group.getInstances().clear();
         service.saveAutoScalingGroupIfPresent(group);
         restart(mode);
@@ -332,7 +334,7 @@ class AutoScalingRefreshStorageTest {
         InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
         Reservation launched = reservation("i-recovered");
         launched.getInstances().getFirst().setClientToken(refresh.getReplacements().getFirst().getLaunchClientToken());
-        when(ec2.describeInstances(REGION, null, null)).thenReturn(List.of(launched));
+        when(ec2.describeInstances(REGION, List.of(), null)).thenReturn(List.of(launched));
         group.getInstances().clear();
         AsgInstance member = new AsgInstance();
         member.setInstanceId("i-recovered");
@@ -349,6 +351,80 @@ class AutoScalingRefreshStorageTest {
         assertEquals("Successful", restored.getStatus());
         verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
                 any(), anyList(), any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"persistent,Launch", "persistent,Terminate", "persistent,InstanceRefresh",
+            "hybrid,Launch", "hybrid,Terminate", "hybrid,InstanceRefresh",
+            "wal,Launch", "wal,Terminate", "wal,InstanceRefresh"})
+    void pausedOriginalKeepsTargetRegistrationUntilResume(String mode, String process) throws IOException {
+        setUp(mode);
+        group.setTargetGroupARNs(List.of("test-target-group"));
+        service.saveAutoScalingGroupIfPresent(group);
+        service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        service.suspendProcesses(REGION, "suspended-group", List.of(process));
+        restart(mode);
+        ElbV2Service elb = mock(ElbV2Service.class);
+        TargetDescription target = new TargetDescription();
+        target.setId("i-original");
+        TargetHealth health = new TargetHealth();
+        health.setTarget(target);
+        health.setState("healthy");
+        when(elb.describeTargetHealth(REGION, "test-target-group", List.of())).thenReturn(List.of(health));
+        reconciler = new AutoScalingReconciler(service, ec2, elb);
+        reconciler.reconcile(group);
+        verify(elb, never()).deregisterTargets(anyString(), anyString(), anyList());
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+        service.resumeProcesses(REGION, "suspended-group", List.of(process));
+        reconciler.reconcile(group);
+        verify(ec2).terminateInstances(REGION, List.of("i-original"));
+        verify(elb, atLeastOnce()).deregisterTargets(eq(REGION), eq("test-target-group"),
+                argThat(targets -> targets.stream().anyMatch(value -> "i-original".equals(value.getId()))));
+        assertEquals(List.of("i-replacement"), group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"persistent,false,false", "persistent,false,true", "persistent,true,false", "persistent,true,true",
+            "hybrid,false,false", "hybrid,false,true", "hybrid,true,false", "hybrid,true,true",
+            "wal,false,false", "wal,false,true", "wal,true,false", "wal,true,true"})
+    void detachedInstancesAreNotReadoptedAfterRestart(String mode, boolean replacement, boolean decrement)
+            throws IOException {
+        setUp(mode);
+        InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        String detachedId = replacement ? "i-detached" : "i-original";
+        if (replacement) {
+            group.getInstances().clear();
+            AsgInstance member = new AsgInstance();
+            member.setInstanceId(detachedId);
+            member.setLifecycleState("InService");
+            member.setHealthStatus("Healthy");
+            group.getInstances().add(member);
+            refresh.getReplacements().getFirst().setReplacementInstanceId(detachedId);
+            refresh.getReplacements().getFirst().setPhase("Warming");
+            service.saveInstanceRefresh(refresh);
+            service.saveAutoScalingGroupIfPresent(group);
+            Reservation launched = reservation(detachedId);
+            launched.getInstances().getFirst().setClientToken(refresh.getReplacements().getFirst().getLaunchClientToken());
+            when(ec2.describeInstances(eq(REGION), any(), isNull())).thenReturn(List.of(launched));
+        }
+        service.suspendProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        service.detachInstances(REGION, "suspended-group", List.of(detachedId), decrement);
+        restart(mode);
+        InstanceRefresh restored = service.describeInstanceRefreshes(REGION, "suspended-group", null, null, null)
+                .instanceRefreshes().getFirst();
+        assertTrue(restored.getReplacements().isEmpty(), "Explicit detach retained refresh ownership");
+        service.resumeProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        reconciler.reconcile(group);
+        reconciler.reconcile(group);
+        assertEquals(decrement ? 0 : 1, group.getDesiredCapacity());
+        assertEquals(decrement ? 0 : 1, group.getInstances().size());
+        assertTrue(group.getInstances().stream().noneMatch(member -> detachedId.equals(member.getInstanceId())));
+        verify(ec2, never()).terminateInstances(anyString(), argThat(ids -> ids.contains(detachedId)));
+        if (decrement) {
+            verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
+                    any(), anyList(), any(), any(), any());
+        }
+        assertEquals("Successful", restored.getStatus());
     }
 
     private static Reservation reservation(String id) {

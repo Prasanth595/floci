@@ -349,7 +349,8 @@ public class AutoScalingReconciler {
         }
 
         Set<String> activeInstanceIds = asg.getInstances().stream()
-                .filter(instance -> isActiveLifecycleState(instance.getLifecycleState()))
+                .filter(instance -> isActiveLifecycleState(instance.getLifecycleState())
+                        || pausedRefreshOwns(asg, instance.getInstanceId()))
                 .map(AsgInstance::getInstanceId)
                 .collect(Collectors.toSet());
 
@@ -527,7 +528,7 @@ public class AutoScalingReconciler {
     }
 
     private List<Instance> findRefreshLaunch(AutoScalingGroup asg, String clientToken) {
-        return ec2Service.describeInstances(asg.getRegion(), null, null).stream()
+        return ec2Service.describeInstances(asg.getRegion(), List.of(), null).stream()
                 .flatMap(result -> result.getInstances().stream())
                 .filter(instance -> clientToken.equals(instance.getClientToken()))
                 .filter(instance -> instance.getState() != null

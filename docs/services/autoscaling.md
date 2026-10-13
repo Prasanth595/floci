@@ -77,7 +77,10 @@ across persistent, hybrid, and WAL storage reloads. Suspending `InstanceRefresh`
 the refresh continue. A failed replacement launch remains part of the refresh, so
 ordinary desired-capacity reconciliation does not bypass the pause. Explicit
 `TerminateInstanceInAutoScalingGroup` requests still run, and independent capacity
-increases can proceed while only `InstanceRefresh` is suspended.
+increases can proceed while only `InstanceRefresh` is suspended. Paused original
+instances keep their target-group registrations until replacement resumes.
+Explicitly detached instances leave refresh ownership and are not adopted again
+when the refresh resumes.
 
 This does not implement rolling health-percentage limits, checkpoints, rollback,
 or cancellation. Refreshes saved by older versions without replacement ownership
