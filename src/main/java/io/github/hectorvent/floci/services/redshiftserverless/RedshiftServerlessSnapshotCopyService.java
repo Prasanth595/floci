@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.redshiftserverless.model.SnapshotCopyConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -15,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -70,6 +72,7 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
         configuration.setSnapshotCopyConfigurationArn(regionResolver.buildArn("redshift-serverless", region,
                 "snapshotcopyconfiguration/" + configuration.getSnapshotCopyConfigurationId()));
         configuration.setNamespaceName(namespaceName);
+        configuration.setOwnerId(serverless.findNamespace(namespaceName, region).map(Namespace::getNamespaceId).orElse(null));
         configuration.setDestinationRegion(destinationRegion);
         configuration.setDestinationKmsKeyId(destinationKmsKeyId);
         configuration.setSnapshotRetentionPeriod(snapshotRetentionPeriod);
@@ -117,7 +120,7 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
     private SnapshotCopyConfiguration require(String id, String region) {
         ServerlessSupport.requireText(id, "snapshotCopyConfigurationId");
         SnapshotCopyConfiguration configuration = configurations.get(storageKey(region, id)).orElse(null);
-        if (configuration != null && !serverless.namespaceExists(configuration.getNamespaceName(), region)) {
+        if (configuration != null && !isOnSameNamespace(configuration, region)) {
             configurations.delete(storageKey(region, id));
             configuration = null;
         }
@@ -131,7 +134,7 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
     private List<SnapshotCopyConfiguration> live(String region) {
         List<SnapshotCopyConfiguration> alive = new ArrayList<>();
         for (SnapshotCopyConfiguration configuration : configurations.scan(key -> key.startsWith(region + "::"))) {
-            if (serverless.namespaceExists(configuration.getNamespaceName(), region)) {
+            if (isOnSameNamespace(configuration, region)) {
                 alive.add(configuration);
             } else {
                 configurations.delete(storageKey(region, configuration.getSnapshotCopyConfigurationId()));
@@ -140,6 +143,7 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
         return alive;
     }
 
+/** A namespace recreated under the same name has a new id, so it never inherits its predecessor's configurations. */    private boolean isOnSameNamespace(SnapshotCopyConfiguration configuration, String region) {        return serverless.findNamespace(configuration.getNamespaceName(), region)                .map(namespace -> Objects.equals(namespace.getNamespaceId(), configuration.getOwnerId()))                .orElse(false);    }
     private static void validateRetention(Integer retentionPeriod) {
         if (retentionPeriod != null && retentionPeriod != -1
                 && (retentionPeriod < 1 || retentionPeriod > MAX_RETENTION_DAYS)) {

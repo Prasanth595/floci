@@ -307,6 +307,74 @@ class RedshiftServerlessAdministrationHandlerTest {
     }
 
     @Test
+    void aWorkgroupRecreatedUnderTheSameNameDoesNotInheritEndpointsOrDomains() {
+        workgroup("recreate-wg-ns", "recreate-wg");
+        ok("CreateEndpointAccess", "{\"endpointName\":\"old-ep\",\"workgroupName\":\"recreate-wg\","
+                + "\"subnetIds\":[\"subnet-a\"]}");
+        ok("CreateCustomDomainAssociation", "{\"workgroupName\":\"recreate-wg\",\"customDomainName\":\"old.example.com\","
+                + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}");
+
+        ok("DeleteWorkgroup", "{\"workgroupName\":\"recreate-wg\"}");
+        ok("CreateWorkgroup", "{\"workgroupName\":\"recreate-wg\",\"namespaceName\":\"recreate-wg-ns\"}");
+
+        assertEquals("ResourceNotFoundException", errorType("GetEndpointAccess", "{\"endpointName\":\"old-ep\"}"));
+        assertEquals("ResourceNotFoundException", errorType("GetCustomDomainAssociation",
+                "{\"workgroupName\":\"recreate-wg\",\"customDomainName\":\"old.example.com\"}"));
+        assertEquals(0, ok("ListEndpointAccess", "{\"workgroupName\":\"recreate-wg\"}").get("endpoints").size());
+        ok("CreateEndpointAccess", "{\"endpointName\":\"old-ep\",\"workgroupName\":\"recreate-wg\","
+                + "\"subnetIds\":[\"subnet-a\"]}");
+        ok("CreateCustomDomainAssociation", "{\"workgroupName\":\"recreate-wg\",\"customDomainName\":\"old.example.com\","
+                + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}");
+    }
+
+    @Test
+    void aNamespaceRecreatedUnderTheSameNameDoesNotInheritActionsOrCopyConfigurations() {
+        namespace("recreate-ns");
+        ok("CreateScheduledAction", "{\"scheduledActionName\":\"old-action\",\"namespaceName\":\"recreate-ns\","
+                + "\"roleArn\":\"r\",\"schedule\":{\"cron\":\"x\"},\"targetAction\":{\"createSnapshot\":"
+                + "{\"namespaceName\":\"recreate-ns\",\"snapshotNamePrefix\":\"p\"}}}");
+        ok("CreateSnapshotCopyConfiguration", "{\"namespaceName\":\"recreate-ns\",\"destinationRegion\":\"us-west-2\"}");
+
+        ok("DeleteNamespace", "{\"namespaceName\":\"recreate-ns\"}");
+        namespace("recreate-ns");
+
+        assertEquals("ResourceNotFoundException", errorType("GetScheduledAction",
+                "{\"scheduledActionName\":\"old-action\"}"));
+        assertEquals(0, ok("ListSnapshotCopyConfigurations", "{\"namespaceName\":\"recreate-ns\"}")
+                .get("snapshotCopyConfigurations").size());
+        ok("CreateScheduledAction", "{\"scheduledActionName\":\"old-action\",\"namespaceName\":\"recreate-ns\","
+                + "\"roleArn\":\"r\",\"schedule\":{\"cron\":\"x\"},\"targetAction\":{\"createSnapshot\":"
+                + "{\"namespaceName\":\"recreate-ns\",\"snapshotNamePrefix\":\"p\"}}}");
+        ok("CreateSnapshotCopyConfiguration", "{\"namespaceName\":\"recreate-ns\",\"destinationRegion\":\"us-west-2\"}");
+    }
+
+    @Test
+    void aSnapshotRecreatedUnderTheSameNameDoesNotInheritItsPolicy() {
+        String arn = snapshot("recreate-snap-ns", "recreate-snap");
+        ok("PutResourcePolicy", "{\"resourceArn\":\"" + arn + "\",\"policy\":\"{}\"}");
+
+        ok("DeleteSnapshot", "{\"snapshotName\":\"recreate-snap\"}");
+        ok("CreateSnapshot", "{\"snapshotName\":\"recreate-snap\",\"namespaceName\":\"recreate-snap-ns\"}");
+
+        assertEquals("ResourceNotFoundException", errorType("GetResourcePolicy", "{\"resourceArn\":\"" + arn + "\"}"));
+    }
+
+    @Test
+    void scheduledActionUpdateRejectsAPartialTargetAndATagWithoutAKey() {
+        namespace("partial-ns");
+        String create = "{\"scheduledActionName\":\"partial-action\",\"namespaceName\":\"partial-ns\",\"roleArn\":\"r\","
+                + "\"schedule\":{\"cron\":\"x\"},\"targetAction\":{\"createSnapshot\":"
+                + "{\"namespaceName\":\"partial-ns\",\"snapshotNamePrefix\":\"p\"";
+        ok("CreateScheduledAction", create + "}}}");
+
+        assertEquals("ValidationException", errorType("UpdateScheduledAction",
+                "{\"scheduledActionName\":\"partial-action\",\"targetAction\":{\"createSnapshot\":"
+                        + "{\"retentionPeriod\":5}}}"));
+        assertEquals("ValidationException", errorType("CreateScheduledAction",
+                create.replace("partial-action", "tag-action") + ",\"tags\":[{\"value\":\"v\"}]}}}"));
+    }
+
+    @Test
     void anUnknownActionIsStillRejected() {
         assertEquals("UnknownOperationException", errorType("NoSuchOperation", "{}"));
     }

@@ -14,11 +14,13 @@ public class CustomDomainAssociation {
     private String workgroupName;
     private String customDomainName;
     private String customDomainCertificateArn;
+    private String ownerId;
 
     public CustomDomainAssociation() {
     }
 
     public CustomDomainAssociation(CustomDomainAssociation other) {
+        this.ownerId = other.ownerId;
         this.workgroupName = other.workgroupName;
         this.customDomainName = other.customDomainName;
         this.customDomainCertificateArn = other.customDomainCertificateArn;
@@ -46,5 +48,13 @@ public class CustomDomainAssociation {
 
     public void setCustomDomainCertificateArn(String customDomainCertificateArn) {
         this.customDomainCertificateArn = customDomainCertificateArn;
+    }
+
+    public String getOwnerId() {
+        return ownerId;
+    }
+
+    public void setOwnerId(String ownerId) {
+        this.ownerId = ownerId;
     }
 }

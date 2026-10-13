@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -71,6 +72,7 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
         endpoint.setEndpointArn(regionResolver.buildArn("redshift-serverless", region,
                 "managedvpcendpoint/" + UUID.randomUUID()));
         endpoint.setWorkgroupName(workgroupName);
+        endpoint.setOwnerId(workgroup.getWorkgroupId());
         endpoint.setStatus("ACTIVE");
         endpoint.setCreateTime(Instant.now());
         endpoint.setAddress(workgroup.getEndpoint() == null ? null : workgroup.getEndpoint().getAddress());
@@ -129,7 +131,7 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
     private EndpointAccess require(String endpointName, String region) {
         ServerlessSupport.requireText(endpointName, "endpointName");
         EndpointAccess endpoint = endpoints.get(storageKey(region, endpointName)).orElse(null);
-        if (endpoint != null && serverless.findWorkgroup(endpoint.getWorkgroupName(), region).isEmpty()) {
+        if (endpoint != null && !isOnSameWorkgroup(endpoint, region)) {
             endpoints.delete(storageKey(region, endpointName));
             endpoint = null;
         }
@@ -143,7 +145,7 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
     private List<EndpointAccess> live(String region) {
         List<EndpointAccess> alive = new ArrayList<>();
         for (EndpointAccess endpoint : endpoints.scan(key -> key.startsWith(region + "::"))) {
-            if (serverless.findWorkgroup(endpoint.getWorkgroupName(), region).isPresent()) {
+            if (isOnSameWorkgroup(endpoint, region)) {
                 alive.add(endpoint);
             } else {
                 endpoints.delete(storageKey(region, endpoint.getEndpointName()));
@@ -152,6 +154,7 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
         return alive;
     }
 
+/** A workgroup recreated under the same name has a new id, so it never inherits its predecessor's endpoints. */    private boolean isOnSameWorkgroup(EndpointAccess endpoint, String region) {        return serverless.findWorkgroup(endpoint.getWorkgroupName(), region)                .map(workgroup -> Objects.equals(workgroup.getWorkgroupId(), endpoint.getOwnerId()))                .orElse(false);    }
     private static List<String> networkInterfaceIdsFor(List<String> subnetIds) {
         List<String> ids = new ArrayList<>();
         for (int i = 0; i < subnetIds.size(); i++) {

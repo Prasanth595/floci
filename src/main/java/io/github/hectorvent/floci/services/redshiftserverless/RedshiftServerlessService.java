@@ -696,6 +696,11 @@ public class RedshiftServerlessService implements Resettable {
         return workgroup;
     }
 
+    /** The namespace called {@code namespaceName} in {@code region}, empty when there is none. */
+    public Optional<Namespace> findNamespace(String namespaceName, String region) {
+        return namespaceName == null ? Optional.empty() : namespaces.get(storageKey(region, namespaceName));
+    }
+
     /** Whether {@code namespaceName} names a namespace in {@code region}; never throws for an unknown name. */
     public boolean namespaceExists(String namespaceName, String region) {
         return namespaceName != null && namespaces.get(storageKey(region, namespaceName)).isPresent();

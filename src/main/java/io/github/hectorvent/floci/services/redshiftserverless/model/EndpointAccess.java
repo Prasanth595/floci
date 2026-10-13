@@ -26,11 +26,13 @@ public class EndpointAccess {
     private List<String> networkInterfaceIds = new ArrayList<>();
     private List<String> vpcSecurityGroupIds = new ArrayList<>();
     private String vpcEndpointId;
+    private String ownerId;
 
     public EndpointAccess() {
     }
 
     public EndpointAccess(EndpointAccess other) {
+        this.ownerId = other.ownerId;
         this.endpointName = other.endpointName;
         this.endpointArn = other.endpointArn;
         this.workgroupName = other.workgroupName;
@@ -130,5 +132,13 @@ public class EndpointAccess {
 
     public void setVpcEndpointId(String vpcEndpointId) {
         this.vpcEndpointId = vpcEndpointId;
+    }
+
+    public String getOwnerId() {
+        return ownerId;
+    }
+
+    public void setOwnerId(String ownerId) {
+        this.ownerId = ownerId;
     }
 }

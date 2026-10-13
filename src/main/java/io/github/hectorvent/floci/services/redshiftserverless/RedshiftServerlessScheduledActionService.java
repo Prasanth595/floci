@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ScheduledAction;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -14,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -58,6 +60,7 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
         }
 
         ScheduledAction action = new ScheduledAction(request);
+        action.setOwnerId(namespaceIdOf(request.getNamespaceName(), region));
         action.setScheduledActionUuid(UUID.randomUUID().toString());
         action.setEnabled(request.getEnabled() == null || request.getEnabled());
         actions.put(storageKey(region, action.getScheduledActionName()), action);
@@ -107,7 +110,9 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
             updated.setScheduleAt(changes.getScheduleAt());
             updated.setScheduleCron(changes.getScheduleCron());
         }
-        if (changes.getSnapshotNamePrefix() != null) {
+        boolean changesTarget = changes.getTargetNamespaceName() != null || changes.getSnapshotNamePrefix() != null
+                || changes.getRetentionPeriod() != null || changes.getSnapshotTags() != null;
+        if (changesTarget) {
             validateTarget(changes, region);
             updated.setTargetNamespaceName(changes.getTargetNamespaceName());
             updated.setSnapshotNamePrefix(changes.getSnapshotNamePrefix());
@@ -133,7 +138,7 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
     private ScheduledAction require(String scheduledActionName, String region) {
         validateName(scheduledActionName);
         ScheduledAction action = actions.get(storageKey(region, scheduledActionName)).orElse(null);
-        if (action != null && !serverless.namespaceExists(action.getNamespaceName(), region)) {
+        if (action != null && !isOnSameNamespace(action, region)) {
             actions.delete(storageKey(region, scheduledActionName));
             action = null;
         }
@@ -147,7 +152,7 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
     private List<ScheduledAction> live(String region) {
         List<ScheduledAction> alive = new ArrayList<>();
         for (ScheduledAction action : actions.scan(key -> key.startsWith(region + "::"))) {
-            if (serverless.namespaceExists(action.getNamespaceName(), region)) {
+            if (isOnSameNamespace(action, region)) {
                 alive.add(action);
             } else {
                 actions.delete(storageKey(region, action.getScheduledActionName()));
@@ -156,6 +161,7 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
         return alive;
     }
 
+/** A namespace recreated under the same name has a new id, so it never inherits its predecessor's actions. */    private boolean isOnSameNamespace(ScheduledAction action, String region) {        return serverless.findNamespace(action.getNamespaceName(), region)                .map(namespace -> Objects.equals(namespace.getNamespaceId(), action.getOwnerId()))                .orElse(false);    }    private String namespaceIdOf(String namespaceName, String region) {        return serverless.findNamespace(namespaceName, region).map(Namespace::getNamespaceId).orElse(null);    }
     private static void validateName(String name) {
         ServerlessSupport.requireText(name, "scheduledActionName");
         if (name.length() < 3 || name.length() > 60 || !ServerlessSupport.LOWER_NAME.matcher(name).matches()) {

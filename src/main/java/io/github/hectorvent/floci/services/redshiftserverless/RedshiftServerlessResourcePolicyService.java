@@ -7,11 +7,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.redshiftserverless.model.RedshiftServerlessSnapshot;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ResourcePolicy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Resource policies for Redshift Serverless snapshots. A policy is stored and echoed, not
@@ -42,8 +45,10 @@ public class RedshiftServerlessResourcePolicyService implements Resettable {
         ServerlessSupport.requireText(resourceArn, "resourceArn");
         ServerlessSupport.requireText(policy, "policy");
         requireJsonObject(policy);
-        requireSnapshot(resourceArn, region);
+        RedshiftServerlessSnapshot snapshot = findSnapshot(resourceArn, region)
+                .orElseThrow(() -> ServerlessSupport.notFound("The resource " + resourceArn + " was not found."));
         ResourcePolicy stored = new ResourcePolicy(resourceArn, policy);
+        stored.setSnapshotCreateTime(snapshot.getSnapshotCreateTime());
         policies.put(storageKey(region, resourceArn), stored);
         return new ResourcePolicy(resourceArn, policy);
     }
@@ -67,7 +72,7 @@ public class RedshiftServerlessResourcePolicyService implements Resettable {
 
     private ResourcePolicy require(String resourceArn, String region) {
         ResourcePolicy stored = policies.get(storageKey(region, resourceArn)).orElse(null);
-        if (stored != null && !snapshotExists(resourceArn, region)) {
+        if (stored != null && !isOnSameSnapshot(stored, region)) {
             policies.delete(storageKey(region, resourceArn));
             stored = null;
         }
@@ -77,15 +82,18 @@ public class RedshiftServerlessResourcePolicyService implements Resettable {
         return stored;
     }
 
-    private void requireSnapshot(String resourceArn, String region) {
-        if (!snapshotExists(resourceArn, region)) {
-            throw ServerlessSupport.notFound("The resource " + resourceArn + " was not found.");
-        }
+    /**
+     * A snapshot ARN carries only the snapshot's name, so a snapshot recreated under the same name
+     * is told apart by its creation time: a policy left by its predecessor is not this snapshot's.
+     */
+    private boolean isOnSameSnapshot(ResourcePolicy stored, String region) {
+        return findSnapshot(stored.getResourceArn(), region)
+                .map(snapshot -> Objects.equals(snapshot.getSnapshotCreateTime(), stored.getSnapshotCreateTime()))
+                .orElse(false);
     }
 
-    private boolean snapshotExists(String resourceArn, String region) {
-        String snapshotName = serverless.snapshotNameFromArn(resourceArn, region);
-        return serverless.findSnapshot(snapshotName, region).isPresent();
+    private Optional<RedshiftServerlessSnapshot> findSnapshot(String resourceArn, String region) {
+        return serverless.findSnapshot(serverless.snapshotNameFromArn(resourceArn, region), region);
     }
 
     private void requireJsonObject(String policy) {

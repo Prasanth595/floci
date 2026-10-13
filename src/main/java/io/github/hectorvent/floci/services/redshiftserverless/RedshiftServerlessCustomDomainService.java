@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshiftserverless.model.CustomDomainAssociation;
+import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -14,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Pattern;
 
 /**
@@ -48,15 +50,15 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
     public synchronized CustomDomainAssociation createCustomDomainAssociation(
             String workgroupName, String customDomainName, String certificateArn, String region) {
         validate(workgroupName, customDomainName, certificateArn);
-        if (serverless.findWorkgroup(workgroupName, region).isEmpty()) {
-            throw ServerlessSupport.notFound("The workgroup " + workgroupName + " was not found.");
-        }
+        Workgroup workgroup = serverless.findWorkgroup(workgroupName, region)
+                .orElseThrow(() -> ServerlessSupport.notFound("The workgroup " + workgroupName + " was not found."));
         if (find(workgroupName, customDomainName, region) != null) {
             throw ServerlessSupport.conflict("The custom domain " + customDomainName
                     + " is already associated with the workgroup " + workgroupName + ".");
         }
         CustomDomainAssociation association = new CustomDomainAssociation();
         association.setWorkgroupName(workgroupName);
+        association.setOwnerId(workgroup.getWorkgroupId());
         association.setCustomDomainName(customDomainName);
         association.setCustomDomainCertificateArn(certificateArn);
         associations.put(storageKey(region, workgroupName, customDomainName), association);
@@ -120,7 +122,7 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
     private CustomDomainAssociation find(String workgroupName, String customDomainName, String region) {
         String key = storageKey(region, workgroupName, customDomainName);
         CustomDomainAssociation association = associations.get(key).orElse(null);
-        if (association != null && serverless.findWorkgroup(workgroupName, region).isEmpty()) {
+        if (association != null && !isOnSameWorkgroup(association, region)) {
             associations.delete(key);
             return null;
         }
@@ -131,7 +133,7 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
     private List<CustomDomainAssociation> live(String region) {
         List<CustomDomainAssociation> alive = new ArrayList<>();
         for (CustomDomainAssociation association : associations.scan(key -> key.startsWith(region + "::"))) {
-            if (serverless.findWorkgroup(association.getWorkgroupName(), region).isPresent()) {
+            if (isOnSameWorkgroup(association, region)) {
                 alive.add(association);
             } else {
                 associations.delete(storageKey(region, association.getWorkgroupName(),
@@ -141,6 +143,7 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
         return alive;
     }
 
+/** A workgroup recreated under the same name has a new id, so it never inherits its predecessor's domains. */    private boolean isOnSameWorkgroup(CustomDomainAssociation association, String region) {        return serverless.findWorkgroup(association.getWorkgroupName(), region)                .map(workgroup -> Objects.equals(workgroup.getWorkgroupId(), association.getOwnerId()))                .orElse(false);    }
     private static void validate(String workgroupName, String customDomainName, String certificateArn) {
         ServerlessSupport.requireText(workgroupName, "workgroupName");
         ServerlessSupport.requireText(customDomainName, "customDomainName");

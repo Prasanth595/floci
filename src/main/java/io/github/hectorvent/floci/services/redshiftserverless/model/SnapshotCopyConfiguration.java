@@ -17,11 +17,13 @@ public class SnapshotCopyConfiguration {
     private String destinationRegion;
     private String destinationKmsKeyId;
     private Integer snapshotRetentionPeriod;
+    private String ownerId;
 
     public SnapshotCopyConfiguration() {
     }
 
     public SnapshotCopyConfiguration(SnapshotCopyConfiguration other) {
+        this.ownerId = other.ownerId;
         this.snapshotCopyConfigurationId = other.snapshotCopyConfigurationId;
         this.snapshotCopyConfigurationArn = other.snapshotCopyConfigurationArn;
         this.namespaceName = other.namespaceName;
@@ -76,5 +78,13 @@ public class SnapshotCopyConfiguration {
 
     public void setSnapshotRetentionPeriod(Integer snapshotRetentionPeriod) {
         this.snapshotRetentionPeriod = snapshotRetentionPeriod;
+    }
+
+    public String getOwnerId() {
+        return ownerId;
+    }
+
+    public void setOwnerId(String ownerId) {
+        this.ownerId = ownerId;
     }
 }

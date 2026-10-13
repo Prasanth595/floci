@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -37,6 +38,11 @@ public class RedshiftServerlessAdminJsonHandler {
 
     private static final DateTimeFormatter ISO_8601 =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
+    private static final List<String> TRACK_NAMES = List.of("current", "preview", "trailing");
+    private static final Pattern TRACK_NAME = Pattern.compile("^[a-zA-Z0-9_]+$");
+    private static final Pattern SOURCE_ARN = Pattern.compile(
+            "^arn:" + AwsArnUtils.PARTITION_REGEX
+                    + ":glue:[a-z0-9-]+:\\d+:(database|catalog)[a-z0-9-:]*(?:/[A-Za-z0-9-_]{1,255})*$");
 
     private final ObjectMapper objectMapper;
     private final RedshiftServerlessResourcePolicyService resourcePolicies;
@@ -279,7 +285,10 @@ public class RedshiftServerlessAdminJsonHandler {
             if (!tag.isObject()) {
                 throw ServerlessSupport.validation("tags must contain only tag objects.");
             }
-            parsed.put(tag.path("key").asText(), tag.path("value").asText(""));
+            if (!tag.path("key").isTextual() || tag.path("key").textValue().isEmpty()) {
+                throw ServerlessSupport.validation("every tag needs a key.");
+            }
+            parsed.put(tag.path("key").textValue(), tag.path("value").asText(""));
         }
         return parsed;
     }
@@ -381,10 +390,6 @@ public class RedshiftServerlessAdminJsonHandler {
 
     // ── Tracks, managed workgroups and reservations ────────────────────────
 
-    private static final List<String> TRACK_NAMES = List.of("current", "preview", "trailing");
-    private static final Pattern TRACK_NAME = Pattern.compile("^[a-zA-Z0-9_]+$");
-    private static final Pattern SOURCE_ARN = Pattern.compile(
-            "^arn:aws[a-z-]*:glue:[a-z0-9-]+:\\d+:(database|catalog)[a-z0-9-:]*(?:/[A-Za-z0-9-_]{1,255})*$");
 
     /** The release tracks AWS defines. Floci runs one PostgreSQL version, so a track names no workgroup version. */
     private Response getTrack(String trackName) {
