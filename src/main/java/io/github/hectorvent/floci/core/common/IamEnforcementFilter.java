@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
+import io.github.hectorvent.floci.services.iam.IamAuthorizedActions;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
@@ -561,7 +562,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             String servingScope = catalog.byExternalKey(service)
                     .map(descriptor -> iamServiceScope(descriptor, claimedScope))
                     .orElseGet(() -> catalog.canonicalCredentialScope(service));
-            return new ResolvedAuthorization(servingScope, servingScope + ":" + queryAction);
+            return new ResolvedAuthorization(servingScope,
+                    IamAuthorizedActions.actionFor(servingScope, queryAction));
         }
 
         ResolvedAuthorization routeAuthorization = restRouteAuthorization(ctx);
@@ -1407,7 +1409,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /** Whether the operation this request names is one AWS serves without credentials. */
     private boolean servesWithoutCredentials(ProtocolClaim claim, ContainerRequestContext ctx) {
         if (claim.protocol() == WireProtocol.AWS_QUERY) {
-            return NO_AUTH_QUERY_OPERATIONS.contains(queryOperation(ctx));
+            String operation = queryOperation(ctx);
+            return operation != null && NO_AUTH_QUERY_OPERATIONS.contains(operation);
         }
         if (claim.service() == null || claim.operation() == null) {
             // Nothing names the operation, so there is nothing to match against the list. Refusing
@@ -1422,12 +1425,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     /**
      * The {@code Action} a Query request names, via the registry so the form body is read and put
-     * back the one way this codebase already does it. The scope passed in is a placeholder: for a
-     * Query request the registry returns {@code <scope>:<Action>} and only the suffix is wanted.
+     * back the one way this codebase already does it.
      */
     private String queryOperation(ContainerRequestContext ctx) {
-        String resolved = actionRegistry.resolve("", ctx);
-        return resolved == null ? null : resolved.substring(resolved.indexOf(':') + 1);
+        return actionRegistry.queryAction(ctx);
     }
 
     /**

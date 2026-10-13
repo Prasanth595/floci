@@ -1114,6 +1114,17 @@ a Query `Action` field on it does not change the action it is checked as, and it
 still percent-encoded, as the router matches it, so an encoded `/` inside a parameter cannot make
 the route's rule miss.
 
+A request that names its operation, in a Query `Action` or an `X-Amz-Target` header, is authorized
+as the action AWS checks for that operation, which is usually the operation's own name. Where AWS
+authorizes an operation as a single action of another name, Floci does the same: `SendMessageBatch`
+is checked as `sqs:SendMessage` and `PublishBatch` as `sns:Publish`, so a policy granting the
+single-message action covers the batch call, and one naming the batch operation, which is not an
+IAM action, grants nothing. The mapping is taken from AWS's Service Reference and vendored in
+`src/main/resources/aws/iam-authorized-actions.json`. DynamoDB `TransactGetItems`, which AWS checks
+as `dynamodb:GetItem`, is checked item by item, as described under
+[Condition keys floci populates](#condition-keys-floci-populates): each `Get` as
+`dynamodb:GetItem` on its own table, with its own `dynamodb:LeadingKeys`.
+
 ### Resource-based policies
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries registered `ResourcePolicyProvider` SPI implementations (such as S3 bucket policies) during request authorization:
