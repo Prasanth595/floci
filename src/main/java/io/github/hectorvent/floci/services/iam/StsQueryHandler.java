@@ -246,6 +246,10 @@ public class StsQueryHandler {
     }
 
     private Response handleGetSessionToken(MultivaluedMap<String, String> params) {
+        if (IamService.isTemporaryAccessKey(callerAccessKeyId())) {
+            return AwsQueryResponse.error("AccessDenied", "Cannot call GetSessionToken with session credentials",
+                    AwsNamespaces.STS, 403);
+        }
         Response durationValidation = validateDurationSeconds(params, 900, 129600);
         if (durationValidation != null) {
             return durationValidation;
