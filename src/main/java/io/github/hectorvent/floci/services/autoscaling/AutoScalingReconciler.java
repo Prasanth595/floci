@@ -727,7 +727,7 @@ public class AutoScalingReconciler {
                     asg.getLaunchTemplateId(),
                     asg.getLaunchTemplateName(),
                     resolvedVersion,
-                    null,
+                    version.getData().effectiveAssociatePublicIpAddress(),
                     version.getData().getBlockDeviceMappings(), version.getData().getMetadataOptions());
         }
 
@@ -762,7 +762,7 @@ public class AutoScalingReconciler {
                                 : specification.getLaunchTemplateId(),
                         specification.getLaunchTemplateName(),
                         resolvedVersion,
-                        null,
+                        version.getData().effectiveAssociatePublicIpAddress(),
                         version.getData().getBlockDeviceMappings(), version.getData().getMetadataOptions());
             }
         }
