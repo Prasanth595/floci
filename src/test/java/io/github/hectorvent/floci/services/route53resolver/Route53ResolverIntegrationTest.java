@@ -93,15 +93,7 @@ class Route53ResolverIntegrationTest {
     // where the emulator's earlier wire name came from. Every SDK, the CLI and the
     // Terraform provider send IpAddresses, and the CLI will not send the old name at
     // all, so reading only the old one made the operation dispatch and stay
-    // uncallable. These cover both spellings so the alias cannot be dropped silently.
-
-    private static String createEndpointBody(String ipMember, String creatorRequestId) {
-        return "{\"Name\":\"ep\",\"Direction\":\"INBOUND\","
-             + "\"CreatorRequestId\":\"" + creatorRequestId + "\","
-             + "\"SecurityGroupIds\":[\"sg-abc123\"],"
-             + "\"" + ipMember + "\":[{\"SubnetId\":\"subnet-abc\",\"Ip\":\"10.0.0.10\"},"
-             + "{\"SubnetId\":\"subnet-def\",\"Ip\":\"10.0.0.11\"}]}";
-    }
+        // uncallable. These cover both spellings so the alias cannot be dropped silently.
 
     @Test
     void createResolverEndpoint_acceptsTheAwsIpAddressesMember() {
@@ -109,7 +101,7 @@ class Route53ResolverIntegrationTest {
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
             .header("Authorization", AUTH_HEADER)
-            .body(createEndpointBody("IpAddresses", "aws-member-1"))
+            .body(endpointBody("IpAddresses", "aws-member-1", 2))
         .when()
             .post("/")
         .then()
@@ -125,7 +117,7 @@ class Route53ResolverIntegrationTest {
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
             .header("Authorization", AUTH_HEADER)
-            .body(createEndpointBody("IpAddressRequests", "legacy-member-1"))
+            .body(endpointBody("IpAddressRequests", "legacy-member-1", 2))
         .when()
             .post("/")
         .then()
@@ -142,14 +134,14 @@ class Route53ResolverIntegrationTest {
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
             .header("Authorization", AUTH_HEADER)
-            .body(createEndpointBody("IpAddressRequests", "replay-across-names"))
+            .body(endpointBody("IpAddressRequests", "replay-across-names", 2))
         .when().post("/").then().statusCode(200);
 
         given()
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
             .header("Authorization", AUTH_HEADER)
-            .body(createEndpointBody("IpAddresses", "replay-across-names"))
+            .body(endpointBody("IpAddresses", "replay-across-names", 2))
         .when()
             .post("/")
         .then()
@@ -176,7 +168,7 @@ class Route53ResolverIntegrationTest {
 
     // ── CreateResolverEndpoint: IpAddresses is min 2 / max 20 ──────────────────
     //
-    // The request shape only says min 1, but AWS documents that a resolver endpoint
+    // The request shape models IpAddresses as min 2 / max 20, so a resolver endpoint
     // needs at least two IP addresses and rejects more than twenty. The emulator used
     // to accept a single address and create the endpoint, which a real SDK would never
     // be allowed to do.
@@ -187,7 +179,7 @@ class Route53ResolverIntegrationTest {
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
             .header("Authorization", AUTH_HEADER)
-            .body(endpointBody("single-address", 1))
+            .body(endpointBody("IpAddresses", "single-address", 1))
         .when()
             .post("/")
         .then()
@@ -202,7 +194,7 @@ class Route53ResolverIntegrationTest {
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
             .header("Authorization", AUTH_HEADER)
-            .body(endpointBody("too-many-addresses", 21))
+            .body(endpointBody("IpAddresses", "too-many-addresses", 21))
         .when()
             .post("/")
         .then()
@@ -217,7 +209,7 @@ class Route53ResolverIntegrationTest {
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
             .header("Authorization", AUTH_HEADER)
-            .body(endpointBody("two-addresses", 2))
+            .body(endpointBody("IpAddresses", "two-addresses", 2))
         .when()
             .post("/")
         .then()
@@ -231,7 +223,7 @@ class Route53ResolverIntegrationTest {
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
             .header("Authorization", AUTH_HEADER)
-            .body(endpointBody("rejected-endpoint", 1))
+            .body(endpointBody("IpAddresses", "rejected-endpoint", 1))
         .when()
             .post("/")
         .then()
@@ -250,7 +242,7 @@ class Route53ResolverIntegrationTest {
                     equalTo(0));
     }
 
-    private static String endpointBody(String creatorRequestId, int ipCount) {
+    private static String endpointBody(String ipMember, String creatorRequestId, int ipCount) {
         StringBuilder addresses = new StringBuilder();
         for (int i = 0; i < ipCount; i++) {
             if (i > 0) {
@@ -262,6 +254,6 @@ class Route53ResolverIntegrationTest {
         return "{\"Name\":\"ep-" + creatorRequestId + "\",\"Direction\":\"INBOUND\","
              + "\"CreatorRequestId\":\"" + creatorRequestId + "\","
              + "\"SecurityGroupIds\":[\"sg-abc123\"],"
-             + "\"IpAddresses\":[" + addresses + "]}";
+             + "\"" + ipMember + "\":[" + addresses + "]}";
     }
 }
