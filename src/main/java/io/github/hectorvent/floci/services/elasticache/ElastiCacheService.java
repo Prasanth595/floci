@@ -264,13 +264,13 @@ public class ElastiCacheService implements ResourceProvider {
             // provisioningIds, and cacheClusterIdTaken for the same test the other way round.
             if (groups.get(groupId).isPresent() || cacheClusters.get(groupId).isPresent()
                     || memcachedClusters.get(groupId).isPresent()) {
-                throw new AwsException("ReplicationGroupAlreadyExistsFault",
+                throw new AwsException("ReplicationGroupAlreadyExists",
                         "Replication group " + groupId + " already exists.", 400);
             }
             // Claim the id for the whole provisioning attempt so a concurrent create can't race
             // ahead and be stopped by this request's handle-less rollback fallback.
             if (!provisioningIds.claim(groupId)) {
-                throw new AwsException("ReplicationGroupAlreadyExistsFault",
+                throw new AwsException("ReplicationGroupAlreadyExists",
                         "Replication group " + groupId + " is already being created.", 400);
             }
 
@@ -1748,7 +1748,7 @@ public class ElastiCacheService implements ResourceProvider {
                 for (String userId : nextUserIds) {
                     ElastiCacheUser u = users.get(userId).orElse(null);
                     if (u != null && !seenUserNames.add(u.getUserName())) {
-                        throw new AwsException("DuplicateUserNameFault",
+                        throw new AwsException("DuplicateUserName",
                                 "Duplicate user name " + u.getUserName() + " in user group.", 400);
                     }
                 }

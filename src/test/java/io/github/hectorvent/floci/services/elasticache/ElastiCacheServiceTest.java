@@ -570,10 +570,10 @@ class ElastiCacheServiceTest {
         service.createUser("uid-1", "same-name", AuthMode.PASSWORD, List.of("pass1"), "on ~* +@all", null);
         service.createUser("uid-2", "same-name", AuthMode.NO_AUTH, List.of(), "on ~* +@all", null);
 
-        // Attempting to associate both users in the same call must fail with DuplicateUserNameFault
+        // Attempting to associate both users in the same call must fail with DuplicateUserName
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.modifyReplicationGroup("grp-dup", List.of("uid-1", "uid-2"), null));
-        assertEquals("DuplicateUserNameFault", ex.getErrorCode());
+        assertEquals("DuplicateUserName", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
 
         // Associate uid-1 first
@@ -583,7 +583,7 @@ class ElastiCacheServiceTest {
         // Attempting to add uid-2 with the same username must also fail
         AwsException ex2 = assertThrows(AwsException.class,
                 () -> service.modifyReplicationGroup("grp-dup", List.of("uid-2"), null));
-        assertEquals("DuplicateUserNameFault", ex2.getErrorCode());
+        assertEquals("DuplicateUserName", ex2.getErrorCode());
         assertEquals(400, ex2.getHttpStatus());
 
         // Validate password must not allow bypassing password check
@@ -1182,7 +1182,7 @@ class ElastiCacheServiceTest {
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null, "us-east-1"));
-        assertEquals("ReplicationGroupAlreadyExistsFault", ex.jsonType());
+        assertEquals("ReplicationGroupAlreadyExists", ex.jsonType());
         verify(containerManager, never()).stop(any());
         verify(containerManager, never()).stopByGroupId(anyString());
 
@@ -1546,7 +1546,7 @@ class ElastiCacheServiceTest {
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.createReplicationGroup(requestWithParameterGroup("grp", "custom-pg")));
-        assertEquals("ReplicationGroupAlreadyExistsFault", ex.jsonType());
+        assertEquals("ReplicationGroupAlreadyExists", ex.jsonType());
 
         service.deleteCacheParameterGroup("custom-pg");
         assertTrue(service.findParameterGroup("custom-pg").isEmpty());
@@ -1692,7 +1692,7 @@ class ElastiCacheServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.createReplicationGroup("shared", "d", AuthMode.NO_AUTH, null, "us-east-1"));
 
-        assertEquals("ReplicationGroupAlreadyExistsFault", ex.getErrorCode());
+        assertEquals("ReplicationGroupAlreadyExists", ex.getErrorCode());
         verify(containerManager, times(1)).tryStart(eq("shared"), anyString(), any());
         verify(containerManager, never()).stopByGroupId("shared");
         assertEquals("shared", service.findCacheClusters("shared").getFirst().getCacheClusterId());
@@ -1741,7 +1741,7 @@ class ElastiCacheServiceTest {
         cacheCluster.start();
         assertTrue(startedLatch.await(5, TimeUnit.SECONDS), "create never reached container start");
 
-        assertEquals("ReplicationGroupAlreadyExistsFault",
+        assertEquals("ReplicationGroupAlreadyExists",
                 assertThrows(AwsException.class, () -> service.createReplicationGroup(
                         "raced", "d", AuthMode.NO_AUTH, null, "us-east-1")).getErrorCode());
         verify(containerManager, never()).stopByGroupId("raced");
@@ -2061,7 +2061,7 @@ class ElastiCacheServiceTest {
         AwsException ex = assertThrows(AwsException.class, () -> service.createReplicationGroup(
                 "shared-id", "d", AuthMode.NO_AUTH, null, "us-east-1"));
 
-        assertEquals("ReplicationGroupAlreadyExistsFault", ex.getErrorCode());
+        assertEquals("ReplicationGroupAlreadyExists", ex.getErrorCode());
         verify(containerManager, never()).tryStart(eq("shared-id"), anyString(), any());
     }
 
