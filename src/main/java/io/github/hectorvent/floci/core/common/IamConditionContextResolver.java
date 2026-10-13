@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -547,6 +548,59 @@ public class IamConditionContextResolver {
             conditions.put("dynamodb:Select", List.of(keys.select()));
         }
         return conditions.isEmpty() ? null : conditions;
+    }
+
+    /** One transaction item keeps its action, table and condition keys together. */
+    record DynamoDbTransactionItem(String action, String resource, Map<String, List<String>> context) {
+    }
+
+    /**
+     * Resolves every recognized item before the handler can mutate anything. Unknown envelope fields
+     * cannot turn item checks back into a transaction-verb permission check.
+     */
+    List<DynamoDbTransactionItem> dynamoDbTransactionItems(String action, ContainerRequestContext ctx,
+                                                         String region, String accountId) {
+        boolean read = "dynamodb:TransactGetItems".equals(action);
+        if (!read && !"dynamodb:TransactWriteItems".equals(action)) {
+            return List.of();
+        }
+        JsonNode body = bufferedJsonBody(ctx);
+        JsonNode items = body == null ? null : body.get("TransactItems");
+        if (items == null || !items.isArray()) {
+            return List.of();
+        }
+        List<DynamoDbTransactionItem> checks = new ArrayList<>();
+        List<String> operations = read ? List.of("Get") : List.of("Put", "Delete", "Update", "ConditionCheck");
+        for (JsonNode item : items) {
+            for (String operation : operations) {
+                JsonNode request = item.get(operation);
+                if (request == null || !request.isObject()) {
+                    continue;
+                }
+                String tableName = targetTableName(request);
+                if (tableName == null) {
+                    continue;
+                }
+                String itemAction = "dynamodb:" + operation + "Item";
+                DynamoDbConditionKeys.Result keys = DynamoDbConditionKeys.extract(
+                        itemAction, request, describeTargetTable(tableName));
+                Map<String, List<String>> context = new LinkedHashMap<>();
+                context.put("dynamodb:EnclosingOperation", List.of(read ? "TransactGetItems" : "TransactWriteItems"));
+                if (!keys.leadingKeys().isEmpty()) {
+                    context.put("dynamodb:LeadingKeys", keys.leadingKeys());
+                }
+                if (!keys.attributes().isEmpty()) {
+                    context.put("dynamodb:Attributes", keys.attributes());
+                }
+                if (!read) {
+                    context.put("dynamodb:ReturnValues",
+                            List.of(request.path("ReturnValuesOnConditionCheckFailure").asText("NONE")));
+                }
+                checks.add(new DynamoDbTransactionItem(itemAction,
+                        ResourceArnBuilder.toDynamoDbTableArn(tableName, region, accountId), context));
+            }
+        }
+        return checks;
     }
 
     /** Resolves each batch entry with its own schema, optionally restricted to one resource. */

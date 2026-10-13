@@ -475,6 +475,22 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         RequestPrincipal principal = RequestPrincipal.caller(callerArns.orElse(null));
+        List<IamConditionContextResolver.DynamoDbTransactionItem> transactionItems =
+                "dynamodb".equals(credentialScope)
+                        ? conditionContextResolver.dynamoDbTransactionItems(action, ctx, region, accountId)
+                        : List.of();
+        if (!transactionItems.isEmpty()) {
+            for (IamConditionContextResolver.DynamoDbTransactionItem item : transactionItems) {
+                Map<String, List<String>> itemContext = new HashMap<>(item.context());
+                callerArns.ifPresent(arns -> itemContext.put("aws:PrincipalArn", List.of(arns.principalArn())));
+                if (abortIfDenied(ctx, caller, principal, item.action(), credentialScope,
+                        resolveResourceArns(credentialScope, List.of(item.resource())), List.of(itemContext),
+                        region, accountId, akid)) {
+                    return;
+                }
+            }
+            return;
+        }
         if (abortIfDenied(ctx, caller, principal, action, credentialScope, resources, targetContexts,
                 region, accountId, akid)) {
             return;
