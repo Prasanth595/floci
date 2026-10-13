@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.core.common.docker;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
@@ -9,8 +8,9 @@ import com.github.dockerjava.core.DefaultDockerClientConfig;
 import com.github.dockerjava.core.DockerClientImpl;
 import com.github.dockerjava.core.SSLConfig;
 import com.github.dockerjava.core.util.CertificateUtils;
-import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
 import com.github.dockerjava.transport.DockerHttpClient;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Digests;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
@@ -22,12 +22,9 @@ import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 import java.io.IOException;
 import java.io.Serializable;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.Optional;
@@ -285,7 +282,7 @@ public class DockerClientProducer {
 
     private static String readContextDockerHost(Path dockerConfigDir, String contextName) {
         Path metaFile = dockerConfigDir.resolve("contexts").resolve("meta")
-                .resolve(sha256Hex(contextName)).resolve("meta.json");
+                .resolve(Digests.sha256Hex(contextName)).resolve("meta.json");
         if (!Files.isRegularFile(metaFile)) {
             return null;
         }
@@ -310,7 +307,7 @@ public class DockerClientProducer {
      */
     private static boolean readContextSkipTlsVerify(Path dockerConfigDir, String contextName) {
         Path metaFile = dockerConfigDir.resolve("contexts").resolve("meta")
-                .resolve(sha256Hex(contextName)).resolve("meta.json");
+                .resolve(Digests.sha256Hex(contextName)).resolve("meta.json");
         if (!Files.isRegularFile(metaFile)) {
             return false;
         }
@@ -343,7 +340,7 @@ public class DockerClientProducer {
      */
     private static Optional<Path> resolveActiveDockerContextTlsMaterial(Path dockerConfigDir, String contextName) {
         Path tlsDir = dockerConfigDir.resolve("contexts").resolve("tls")
-                .resolve(sha256Hex(contextName)).resolve(CONTEXT_TLS_ENDPOINT_DIR);
+                .resolve(Digests.sha256Hex(contextName)).resolve(CONTEXT_TLS_ENDPOINT_DIR);
         if (!Files.isDirectory(tlsDir)) {
             return Optional.empty();
         }
@@ -362,20 +359,6 @@ public class DockerClientProducer {
                             + "to an unauthenticated or unverified connection.", contextName, tlsDir));
         }
         return Optional.empty();
-    }
-
-    private static String sha256Hex(String value) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(value.getBytes(StandardCharsets.UTF_8));
-            StringBuilder hex = new StringBuilder(hash.length * 2);
-            for (byte b : hash) {
-                hex.append(String.format("%02x", b));
-            }
-            return hex.toString();
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 algorithm not available", e);
-        }
     }
 
     private static DefaultDockerClientConfig.Builder createDockerConfigBuilder() {
@@ -402,21 +385,33 @@ public class DockerClientProducer {
      * connection pool to reject it with a generic error.
      */
     static int validateMaxConnections(int maxConnections) {
-        if (maxConnections < 1) {
-            throw new IllegalArgumentException("floci.docker.max-connections (FLOCI_DOCKER_MAX_CONNECTIONS) "
-                    + "must be at least 1, got: " + maxConnections);
-        }
-        return maxConnections;
+        return requireAtLeastOne(maxConnections, "floci.docker.max-connections", "FLOCI_DOCKER_MAX_CONNECTIONS");
     }
 
     /** Same check as {@link #validateMaxConnections(int)}, for the streaming pool's setting. */
     static int validateStreamingMaxConnections(int streamingMaxConnections) {
-        if (streamingMaxConnections < 1) {
-            throw new IllegalArgumentException("floci.docker.streaming-max-connections "
-                    + "(FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS) must be at least 1, got: "
-                    + streamingMaxConnections);
+        return requireAtLeastOne(streamingMaxConnections, "floci.docker.streaming-max-connections",
+                "FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS");
+    }
+
+    /**
+     * Rejects a lease timeout below 1 second: httpclient5 reads zero as no timeout at all, so a
+     * call would wait forever on a full pool, and a negative value fails deep inside the client.
+     */
+    static int validateConnectionRequestTimeoutSeconds(int seconds) {
+        return requireAtLeastOne(seconds, "floci.docker.connection-request-timeout-seconds",
+                "FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS");
+    }
+
+    static int validateApiTimeoutSeconds(int seconds) {
+        return requireAtLeastOne(seconds, "floci.docker.api-timeout-seconds", "FLOCI_DOCKER_API_TIMEOUT_SECONDS");
+    }
+
+    private static int requireAtLeastOne(int value, String setting, String envVar) {
+        if (value < 1) {
+            throw new IllegalArgumentException(setting + " (" + envVar + ") must be at least 1, got: " + value);
         }
-        return streamingMaxConnections;
+        return value;
     }
 
     /**
@@ -489,17 +484,21 @@ public class DockerClientProducer {
         LOG.infov("Creating {0} DockerClient pool (maxConnections={1}) for host: {2}",
                 role, maxConnections, clientConfig.getDockerHost());
 
-        return DockerClientImpl.getInstance(clientConfig,
-                wrapForRole(newHttpClient(clientConfig, maxConnections), role));
+        return DockerClientImpl.getInstance(clientConfig, wrapForRole(newHttpClient(clientConfig, maxConnections,
+                Duration.ofSeconds(validateApiTimeoutSeconds(config.docker().apiTimeoutSeconds())),
+                Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
+                        config.docker().connectionRequestTimeoutSeconds()))), role));
     }
 
-    static ApacheDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections) {
-        return new ApacheDockerHttpClient.Builder()
+    static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections,
+                                               Duration apiTimeout, Duration connectionRequestTimeout) {
+        return new FlociDockerHttpClient.Builder()
                 .dockerHost(clientConfig.getDockerHost())
                 .sslConfig(clientConfig.getSSLConfig())
                 .maxConnections(maxConnections)
                 .connectionTimeout(Duration.ofSeconds(30))
-                .responseTimeout(Duration.ofMinutes(5))
+                .responseTimeout(apiTimeout)
+                .connectionRequestTimeout(connectionRequestTimeout)
                 .build();
     }
 

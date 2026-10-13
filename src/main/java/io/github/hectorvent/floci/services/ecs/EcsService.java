@@ -4,10 +4,14 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -28,18 +32,18 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDependency;
 import io.github.hectorvent.floci.services.ecs.model.ContainerImage;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
+import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.ecs.model.CreateServiceRequest;
 import io.github.hectorvent.floci.services.ecs.model.CreateTaskSetRequest;
 import io.github.hectorvent.floci.services.ecs.model.Deployment;
-import io.github.hectorvent.floci.services.ecs.model.EphemeralStorage;
-import io.github.hectorvent.floci.services.ecs.model.Failure;
-import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.EcsTaskAddress;
+import io.github.hectorvent.floci.services.ecs.model.EphemeralStorage;
+import io.github.hectorvent.floci.services.ecs.model.Failure;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
@@ -70,12 +74,15 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
-import java.util.Base64;
-
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -83,23 +90,19 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.stream.Collectors;
 import java.util.Set;
-import java.util.Comparator;
-import java.util.HashSet;
 import java.util.UUID;
-import java.util.function.Function;
-import java.util.function.Predicate;
-
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import io.github.hectorvent.floci.core.resource.ExplorerResource;
-import io.github.hectorvent.floci.core.resource.ResourceProvider;
-import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 
 @ApplicationScoped
 public class EcsService implements ContainerTeardown, ResourceProvider, Resettable {
@@ -181,6 +184,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public static final int MAX_TASKS_PER_RUN = 10;
     /** A listing returns at most a hundred ARNs per page. */
     private static final int MAX_LIST_RESULTS = 100;
+    /** How long a CloudFormation-provisioned service may take to reach a steady state. */
+    private static final Duration SERVICE_STABLE_TIMEOUT = Duration.ofMinutes(5);
+    private static final long SERVICE_STABLE_POLL_MILLIS = 50;
+    /**
+     * Reconcile passes a steady-state wait runs at once instead of waiting for ticks. A pass
+     * reports the running count it found before it acted, so a deployment that both starts tasks
+     * and drains the previous deployment's reads as settled after the third.
+     */
+    private static final int SERVICE_STABLE_PASSES = 3;
     /** ListServices answers with ten ARNs per page when the request names no maxResults. */
     private static final int DEFAULT_SERVICE_PAGE_SIZE = 10;
     public static final String STATUS_ACTIVE = "ACTIVE";
@@ -212,6 +224,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private Map<String, String> accountSettings = new ConcurrentHashMap<>();
     // deploymentIds for which SERVICE_DEPLOYMENT_IN_PROGRESS has already been emitted this process.
     private final Set<String> inProgressEmitted = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    // serviceArn → why the reconciler's last attempt to launch one of its tasks failed, and for which
+    // deployment. Memory-only.
+    private final Map<String, LaunchFailure> launchFailures = new ConcurrentHashMap<>();
 
     @Inject
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
@@ -387,7 +402,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     @Override
     public void clear() {
-        // Nothing to wipe: the stores hold the ECS state and afterReset() restarts the reconciler.
+        // The stores hold the ECS state and afterReset() restarts the reconciler.
+        launchFailures.clear();
     }
 
     /**
@@ -426,6 +442,150 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     boolean isReconcilerShutdown() {
         return reconciler.isShutdown();
+    }
+
+    // ── Steady state ─────────────────────────────────────────────────────────
+
+    /**
+     * Waits until a service reaches a steady state, which is what CloudFormation waits for before
+     * it reports an {@code AWS::ECS::Service} CREATE_COMPLETE or UPDATE_COMPLETE. CloudFormation
+     * reads it off {@code DescribeServices}, so the service must report {@code runningCount}
+     * equal to {@code desiredCount}, its current deployment must run that many tasks, and no task
+     * of an earlier deployment may still be running. A {@code desiredCount} of 0 with nothing
+     * running is stable at once.
+     *
+     * <p>Rather than sit idle until the next tick, the wait runs reconcile passes at once on the
+     * reconciler's own single thread, so a pass never overlaps a scheduled tick.
+     *
+     * @throws AwsException when the reconciler could not launch a task for the service, when a task
+     *         launched for it during the wait failed to start, or when the service does not stabilize
+     *         within the timeout
+     */
+    public void awaitServiceStable(EcsServiceModel svc) {
+        awaitServiceStable(svc, SERVICE_STABLE_TIMEOUT);
+    }
+
+    void awaitServiceStable(EcsServiceModel svc, Duration timeout) {
+        String serviceArn = svc.getServiceArn();
+        recordLaunchFailure(svc, null, null);
+        Instant waitStarted = Instant.now();
+        long deadline = System.nanoTime() + timeout.toNanos();
+        Future<?> pass = null;
+        int passes = 0;
+        while (true) {
+            // Checked before the service is read, so a finished pass's writes are visible to the read.
+            boolean passRunning = pass != null && !pass.isDone();
+            EcsServiceModel current = serviceByArn(serviceArn);
+            if (current == null || !STATUS_ACTIVE.equals(current.getStatus())) {
+                throw notStabilized(serviceArn, " The service is no longer ACTIVE.");
+            }
+            if (!passRunning) {
+                failIfTasksCannotStart(current, waitStarted);
+            }
+            if (isSteady(current)) {
+                return;
+            }
+            if (!passRunning && passes < SERVICE_STABLE_PASSES) {
+                pass = reconcileNow();
+                passes++;
+            }
+            if (System.nanoTime() - deadline >= 0) {
+                throw notStabilized(serviceArn, "");
+            }
+            try {
+                Thread.sleep(SERVICE_STABLE_POLL_MILLIS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AwsException("InternalError", "Interrupted while waiting for ECS service "
+                        + serviceArn + " to stabilize", 500);
+            }
+        }
+    }
+
+    /**
+     * Runs one reconcile pass now on the reconciler's single thread. Null when the reconciler is
+     * shut down, which only happens on shutdown and for the length of a state reset.
+     */
+    private Future<?> reconcileNow() {
+        try {
+            return reconciler.submit(this::reconcile);
+        } catch (RejectedExecutionException e) {
+            LOG.debugv("ECS reconciler is shut down, waiting for the next scheduled tick: {0}", e.getMessage());
+            return null;
+        }
+    }
+
+    private boolean isSteady(EcsServiceModel svc) {
+        if (svc.getRunningCount() != svc.getDesiredCount()) {
+            return false;
+        }
+        EcsCluster cluster = resolveClusterByArn(svc.getClusterArn());
+        if (cluster == null) {
+            return svc.getDesiredCount() == 0;
+        }
+        String currentDeploymentId = deploymentId(svc);
+        String taskDefinitionArn = resolvedTaskDefinitionArn(svc, serviceRegion(svc));
+        long current = 0;
+        for (EcsTask task : tasks.values()) {
+            if (!ownedBy(task, svc, cluster) || !TaskStatus.RUNNING.name().equals(task.getLastStatus())) {
+                continue;
+            }
+            if (isStaleForDeployment(task, currentDeploymentId, taskDefinitionArn)) {
+                return false;
+            }
+            current++;
+        }
+        return current == svc.getDesiredCount();
+    }
+
+    /**
+     * Ends a wait that cannot succeed: the reconciler could not launch a task for the service's
+     * current deployment, or a task launched for it since {@code since} stopped before it ever ran.
+     */
+    private void failIfTasksCannotStart(EcsServiceModel svc, Instant since) {
+        String currentDeploymentId = deploymentId(svc);
+        LaunchFailure launchFailure = launchFailures.get(svc.getServiceArn());
+        if (launchFailure != null && currentDeploymentId.equals(launchFailure.deploymentId())) {
+            throw notStabilized(svc.getServiceArn(), " Task launch failed: " + launchFailure.message());
+        }
+        EcsCluster cluster = resolveClusterByArn(svc.getClusterArn());
+        if (cluster == null) {
+            return;
+        }
+        String taskDefinitionArn = resolvedTaskDefinitionArn(svc, serviceRegion(svc));
+        for (EcsTask task : tasks.values()) {
+            if (ownedBy(task, svc, cluster)
+                    && TaskStatus.STOPPED.name().equals(task.getLastStatus())
+                    && STOP_CODE_TASK_FAILED_TO_START.equals(task.getStopCode())
+                    && task.getCreatedAt() != null && !task.getCreatedAt().isBefore(since)
+                    && !isStaleForDeployment(task, currentDeploymentId, taskDefinitionArn)) {
+                throw notStabilized(svc.getServiceArn(),
+                        " Task " + task.getTaskArn() + " stopped: " + task.getStoppedReason());
+            }
+        }
+    }
+
+    /** AWS's wording when a service does not reach a steady state, followed by any detail. */
+    private static AwsException notStabilized(String serviceArn, String detail) {
+        return new AwsException("NotStabilized", "Service " + serviceArn + " did not stabilize." + detail, 500);
+    }
+
+    private record LaunchFailure(String deploymentId, String message) {}
+
+    /** Records why the reconciler could not launch a task for {@code svc}'s {@code deploymentId}; null clears it. */
+    private void recordLaunchFailure(EcsServiceModel svc, String deploymentId, String failure) {
+        if (svc.getServiceArn() == null) {
+            return;
+        }
+        if (failure == null) {
+            launchFailures.remove(svc.getServiceArn());
+        } else {
+            launchFailures.put(svc.getServiceArn(), new LaunchFailure(deploymentId, failure));
+        }
+    }
+
+    boolean hasLaunchFailure(String serviceArn) {
+        return launchFailures.containsKey(serviceArn);
     }
 
     // ── Clusters ─────────────────────────────────────────────────────────────
@@ -1480,22 +1640,24 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * reconciliation can recognize it as service-owned without trusting the caller-settable
      * {@code group}. This is the only path that sets {@code owningServiceArn}.
      */
-    private EcsTask launchServiceTask(EcsCluster cluster, EcsServiceModel svc, LaunchType launchType,
+    private EcsTask launchServiceTask(EcsCluster cluster, EcsServiceModel svc, Placement placement,
                                        String containerInstanceArn, String region) {
+        // Read before the task definition: UpdateService sets it first, so a launch it overtakes is stamped stale.
+        String deploymentId = deploymentId(svc);
         TaskDefinition taskDef = resolveTaskDefinitionOrThrow(svc.getTaskDefinition(), region);
         RunTaskRequest request = new RunTaskRequest();
         request.setCount(1);
-        request.setLaunchType(launchType);
         // AWS labels a service's tasks "service:<name>" and attributes them to the deployment.
         request.setGroup("service:" + svc.getServiceName());
-        request.setStartedBy(deploymentId(svc));
+        request.setStartedBy(deploymentId);
         request.setNetworkConfiguration(svc.getNetworkConfiguration());
         request.setPlatformVersion(svc.getPlatformVersion());
         request.setEnableExecuteCommand(svc.isEnableExecuteCommand());
-        // A service pinned to a capacity provider places its tasks through it, unless the
-        // reconciler is placing a DAEMON task on a named container instance.
-        if (containerInstanceArn == null) {
-            request.setCapacityProviderStrategy(svc.getCapacityProviderStrategy());
+        if (placement.capacityProviderName() != null) {
+            request.setCapacityProviderStrategy(List.of(
+                    new CapacityProviderStrategyItem(placement.capacityProviderName(), 1, 0)));
+        } else {
+            request.setLaunchType(placement.launchType());
         }
         if (EcsService.PROPAGATE_TAGS_SERVICE.equals(svc.getPropagateTags())) {
             request.setTags(svc.getTags());
@@ -1505,12 +1667,37 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         EcsTask task = launchTasks(cluster, taskDef, request, containerInstanceArn,
                 svc.getServiceArn(), region).getFirst();
-        task.setDeploymentId(deploymentId(svc));
+        task.setDeploymentId(deploymentId);
         return task;
     }
 
     /** Where a task runs: a launch type, or the capacity provider that chose one for it. */
     private record Placement(LaunchType launchType, String capacityProviderName) {}
+
+    /** Fill provider deficits for the current deployment, without counting tasks it is replacing. */
+    private List<Placement> serviceTaskPlacements(EcsServiceModel svc, List<EcsTask> currentTasks, int count) {
+        List<CapacityProviderStrategyItem> strategy = svc.getCapacityProviderStrategy();
+        if (strategy == null || strategy.isEmpty()) {
+            return Collections.nCopies(count, new Placement(svc.getLaunchType(), null));
+        }
+        Map<String, Integer> existing = new HashMap<>();
+        for (EcsTask task : currentTasks) {
+            existing.merge(task.getCapacityProviderName(), 1, Integer::sum);
+        }
+        List<Placement> missing = new ArrayList<>();
+        for (Placement placement : distribute(strategy, svc.getDesiredCount())) {
+            int running = existing.getOrDefault(placement.capacityProviderName(), 0);
+            if (running > 0) {
+                existing.put(placement.capacityProviderName(), running - 1);
+            } else {
+                missing.add(placement);
+                if (missing.size() == count) {
+                    break;
+                }
+            }
+        }
+        return missing;
+    }
 
     /**
      * Decides where each of {@code count} tasks runs, in request order.
@@ -2186,9 +2373,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 : (serviceName != null ? clusters.get(clusterKey(region, DEFAULT_CLUSTER)) : null);
         String clusterArn = clusterRef != null ? cluster.getClusterArn() : null;
         // A serviceName filter selects the service's own tasks, so it resolves through the
-        // reconciler-stamped ownership rather than the caller-supplied group.
+        // reconciler-stamped ownership rather than the caller-supplied group. It may be the
+        // service's name or its ARN; as on AWS, only the last path segment names the service.
         EcsServiceModel svc = serviceName != null && cluster != null
-                ? services.get(serviceKey(region, cluster.getClusterName(), serviceName))
+                ? services.get(serviceKey(region, cluster.getClusterName(), extractServiceName(serviceName)))
                 : null;
         String family = request.getFamily();
         LaunchType launchType = request.getLaunchType();
@@ -2241,8 +2429,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         int end = Math.min(offset + pageSize, arns.size());
         String token = end < arns.size()
-                ? Base64.getUrlEncoder().withoutPadding()
-                        .encodeToString(String.valueOf(end).getBytes(StandardCharsets.UTF_8))
+                ? Base64Url.encode(String.valueOf(end))
                 : null;
         return new ListPage(List.copyOf(arns.subList(offset, end)), token);
     }
@@ -2776,6 +2963,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (serviceArn != null) {
             serviceDeployments.values().removeIf(d -> serviceArn.equals(d.getServiceArn()));
             serviceRevisions.values().removeIf(r -> serviceArn.equals(r.getServiceArn()));
+            launchFailures.remove(serviceArn);
         }
         return svc;
     }
@@ -3053,8 +3241,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         int end = Math.min(offset + pageSize, filtered.size());
         String token = end < filtered.size()
-                ? Base64.getUrlEncoder().withoutPadding()
-                        .encodeToString(String.valueOf(end).getBytes(StandardCharsets.UTF_8))
+                ? Base64Url.encode(String.valueOf(end))
                 : null;
         return new AccountSettingPage(List.copyOf(filtered.subList(offset, end)), token);
     }
@@ -3216,8 +3403,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         int end = Math.min(offset + pageSize, matches.size());
         String token = end < matches.size()
-                ? Base64.getUrlEncoder().withoutPadding()
-                        .encodeToString(String.valueOf(end).getBytes(StandardCharsets.UTF_8))
+                ? Base64Url.encode(String.valueOf(end))
                 : null;
         return new ListAttributesPage(List.copyOf(matches.subList(offset, end)), token);
     }
@@ -4899,7 +5085,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 break;
             }
             try {
-                EcsTask launched = launchServiceTask(cluster, svc, LaunchType.EC2,
+                EcsTask launched = launchServiceTask(cluster, svc, new Placement(LaunchType.EC2, null),
                         ci.getContainerInstanceArn(), region);
                 // A Docker start failure comes back already STOPPED: the slot stays uncovered and
                 // the next tick retries, and it must not count towards runningCount.
@@ -5082,15 +5268,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             }
             deployment = deploymentRecordForCurrentWorkload(svc);
             int toStart = svc.getDesiredCount() - (int) current;
-            for (int i = 0; i < toStart; i++) {
+            List<EcsTask> currentTasks = runningTasks.stream()
+                    .filter(task -> !isStaleForDeployment(task, currentDeploymentId, currentTaskDefinitionArn))
+                    .toList();
+            for (Placement placement : serviceTaskPlacements(svc, currentTasks, toStart)) {
                 try {
-                    EcsTask launched = launchServiceTask(cluster, svc, svc.getLaunchType(), null, region);
+                    EcsTask launched = launchServiceTask(cluster, svc, placement, null, region);
+                    recordLaunchFailure(svc, null, null);
                     LOG.infov("Service reconciler started task {0} for service {1}",
                             launched.getTaskArn(), svc.getServiceName());
                     if (countLaunch(svc, deployment, launched)) {
                         break;
                     }
                 } catch (Exception e) {
+                    recordLaunchFailure(svc, currentDeploymentId, String.valueOf(e.getMessage()));
                     LOG.warnv("Service reconciler failed to start task for {0}: {1}",
                             svc.getServiceName(), e.getMessage());
                 }
@@ -5264,10 +5455,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private TaskDefinition resolveTaskDefinitionOrThrow(String ref, String region) {
+        if (ref == null || ref.isBlank()) {
+            throw new AwsException("ClientException", "Unable to describe task definition: " + ref, 400);
+        }
         TaskDefinition td = taskDefinitions.get(familyKey(region, ref));
         if (td != null) { return td; }
         td = taskDefinitionsIn(region)
-                .filter(d -> d.getTaskDefinitionArn().equals(ref)
+                .filter(d -> ref.equals(d.getTaskDefinitionArn())
                         || (d.getFamily() + ":" + d.getRevision()).equals(ref))
                 .findFirst().orElse(null);
         if (td != null) { return td; }

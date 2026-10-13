@@ -5,17 +5,18 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
-import java.time.Instant;
 
 /**
  * Service Quotas emulation backed by a generated in-memory catalog.
@@ -185,8 +186,7 @@ public class ServiceQuotasService {
     }
 
     private static String encodeToken(int offset) {
-        return Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(Integer.toString(offset).getBytes(StandardCharsets.UTF_8));
+        return Base64Url.encode(Integer.toString(offset));
     }
 
     private static int decodeToken(String token) {

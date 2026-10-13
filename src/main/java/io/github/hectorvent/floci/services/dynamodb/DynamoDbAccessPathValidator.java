@@ -56,11 +56,13 @@ final class DynamoDbAccessPathValidator {
                                   String select, String projectionExpression,
                                   JsonNode attributesToGet, JsonNode expressionAttributeNames) {
         if (projectionExpression != null && select != null && !"SPECIFIC_ATTRIBUTES".equals(select)) {
-            throw validationException("Cannot specify the ProjectionExpression when choosing to get "
+            throw validationException("1 validation error detected: "
+                    + "Cannot specify the ProjectionExpression when choosing to get "
                     + ("COUNT".equals(select) ? "only the Count" : select));
         }
         if ("ALL_PROJECTED_ATTRIBUTES".equals(select) && !accessPath.isIndex()) {
-            throw validationException("ALL_PROJECTED_ATTRIBUTES can be used only when Querying using an IndexName");
+            throw validationException("1 validation error detected: "
+                    + "ALL_PROJECTED_ATTRIBUTES can be used only when Querying using an IndexName");
         }
         if (attributesToGet != null && select != null && !"SPECIFIC_ATTRIBUTES".equals(select)) {
             throw validationException("Cannot use both Select and AttributesToGet unless Select is SPECIFIC_ATTRIBUTES");
@@ -427,9 +429,9 @@ final class DynamoDbAccessPathValidator {
         return new AwsException("ValidationException", message, 400);
     }
     // DynamoDB requires an ExclusiveStartKey to exactly match the paged key schema's
-    // attribute names and scalar types. Query and Scan report different messages for faults.
+    // attribute names and scalar types.
     static void validateExclusiveStartKey(JsonNode exclusiveStartKey, TableDefinition table,
-                                          DynamoDbAccessPath accessPath, boolean isScan) {
+                                          DynamoDbAccessPath accessPath) {
         if (exclusiveStartKey == null || exclusiveStartKey.isNull()) return;
         Set<String> expected = new HashSet<>();
         expected.add(table.getPartitionKeyName());
@@ -443,7 +445,7 @@ final class DynamoDbAccessPathValidator {
         Set<String> actual = new HashSet<>();
         exclusiveStartKey.fieldNames().forEachRemaining(actual::add);
         if (!actual.equals(expected) || hasInvalidKeyValue(exclusiveStartKey, table, expected)) {
-            throw invalidStartingKey(isScan);
+            throw invalidStartingKey();
         }
     }
 
@@ -483,9 +485,7 @@ final class DynamoDbAccessPathValidator {
         return false;
     }
 
-    private static AwsException invalidStartingKey(boolean isScan) {
-        return new AwsException("ValidationException", isScan
-                ? "The provided starting key is invalid: The provided key element does not match the schema"
-                : "The provided starting key is invalid", 400);
+    private static AwsException invalidStartingKey() {
+        return new AwsException("ValidationException", "The provided starting key is invalid", 400);
     }
 }

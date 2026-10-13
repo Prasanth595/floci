@@ -23,6 +23,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
@@ -89,6 +90,13 @@ public class AppConfigController {
     @Path("/applications/{appId}/environments/{envId}")
     public Response getEnvironment(@PathParam("appId") String appId, @PathParam("envId") String envId) {
         return Response.ok(service.getEnvironment(appId, envId)).build();
+    }
+
+    @DELETE
+    @Path("/applications/{appId}/environments/{envId}")
+    public Response deleteEnvironment(@PathParam("appId") String appId, @PathParam("envId") String envId) {
+        service.deleteEnvironment(appId, envId);
+        return Response.noContent().build();
     }
 
     @GET

@@ -6,19 +6,17 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
+import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
-import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
-import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
-import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
-import io.github.hectorvent.floci.services.rds.model.EventSubscription;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceScalingChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
-import io.github.hectorvent.floci.services.rds.model.LogExportChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
@@ -27,8 +25,10 @@ import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.rds.model.EventSubscription;
 import io.github.hectorvent.floci.services.rds.model.GlobalCluster;
 import io.github.hectorvent.floci.services.rds.model.GlobalClusterMember;
+import io.github.hectorvent.floci.services.rds.model.LogExportChanges;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import io.github.hectorvent.floci.services.rds.model.PointInTimeRestoreRequest;
@@ -92,6 +92,12 @@ public class RdsQueryHandler {
                 case "PromoteReadReplica" -> handlePromoteReadReplica(params, region);
                 case "SwitchoverReadReplica" -> handleSwitchoverReadReplica(params, region);
                 case "PromoteReadReplicaDBCluster" -> handlePromoteReadReplicaDbCluster(params, region);
+                case "DescribeDBEngineVersions" -> handleDescribeDbEngineVersions(params);
+                case "DescribeEngineDefaultParameters" -> handleDescribeEngineDefaultParameters(params,
+                        "DescribeEngineDefaultParameters");
+                case "DescribeEngineDefaultClusterParameters" -> handleDescribeEngineDefaultParameters(params,
+                        "DescribeEngineDefaultClusterParameters");
+                case "DescribeValidDBInstanceModifications" -> handleDescribeValidDbInstanceModifications(params, region);
                 case "DescribeOrderableDBInstanceOptions" -> handleDescribeOrderableDbInstanceOptions(params);
                 case "DescribeEvents" -> handleDescribeEvents(params, region);
                 case "CreateEventSubscription" -> handleCreateEventSubscription(params, region);
@@ -199,22 +205,27 @@ public class RdsQueryHandler {
         String dbInstanceClass = params.getFirst("DBInstanceClass");
         String allocatedStorageStr = params.getFirst("AllocatedStorage");
         int allocatedStorage = allocatedStorageStr != null ? parseIntSafe(allocatedStorageStr, 20) : 20;
-        boolean iamEnabled = "true".equalsIgnoreCase(params.getFirst("EnableIAMDatabaseAuthentication"));
+        boolean iamEnabled;
         String paramGroupName = params.getFirst("DBParameterGroupName");
         String optionGroupName = params.getFirst("OptionGroupName");
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         String dbClusterIdentifier = params.getFirst("DBClusterIdentifier");
-        boolean manageMasterUserPassword = "true".equalsIgnoreCase(params.getFirst("ManageMasterUserPassword"));
+        boolean manageMasterUserPassword;
         String masterUserSecretKmsKeyId = params.getFirst("MasterUserSecretKmsKeyId");
         Map<String, String> tags = parseTags(params);
         String availabilityZone = params.getFirst("AvailabilityZone");
-        boolean multiAz = "true".equalsIgnoreCase(params.getFirst("MultiAZ"));
+        boolean multiAz;
         // AWS defaults this to true when the request omits it - unlike most boolean flags here,
         // which default to false.
-        boolean autoMinorVersionUpgrade = !"false".equalsIgnoreCase(params.getFirst("AutoMinorVersionUpgrade"));
+        boolean autoMinorVersionUpgrade;
         Boolean publiclyAccessible;
         Boolean deletionProtection;
         try {
+            iamEnabled = Boolean.TRUE.equals(parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"));
+            manageMasterUserPassword = Boolean.TRUE.equals(parseOptionalBoolean(params, "ManageMasterUserPassword"));
+            multiAz = Boolean.TRUE.equals(parseOptionalBoolean(params, "MultiAZ"));
+            Boolean requestedAutoMinorVersionUpgrade = parseOptionalBoolean(params, "AutoMinorVersionUpgrade");
+            autoMinorVersionUpgrade = requestedAutoMinorVersionUpgrade == null || requestedAutoMinorVersionUpgrade;
             publiclyAccessible = parseOptionalBoolean(params, "PubliclyAccessible");
             deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
         } catch (AwsException e) {
@@ -308,7 +319,7 @@ public class RdsQueryHandler {
                 params.getFirst("SourceType"),
                 memberList(params, "SourceIds"),
                 memberList(params, "EventCategories"),
-                optionalBoolean(params.getFirst("Enabled")),
+                parseOptionalBoolean(params, "Enabled"),
                 parseTags(params));
         return Response.ok(AwsQueryResponse.envelope("CreateEventSubscription", AwsNamespaces.RDS,
                 new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
@@ -320,7 +331,7 @@ public class RdsQueryHandler {
                 params.getFirst("SnsTopicArn"),
                 params.getFirst("SourceType"),
                 memberList(params, "EventCategories"),
-                optionalBoolean(params.getFirst("Enabled")));
+                parseOptionalBoolean(params, "Enabled"));
         return Response.ok(AwsQueryResponse.envelope("ModifyEventSubscription", AwsNamespaces.RDS,
                 new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
     }
@@ -595,16 +606,18 @@ public class RdsQueryHandler {
             return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
         }
         String newPassword = params.getFirst("MasterUserPassword");
-        String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
-        Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
+        Boolean iamEnabled;
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         String optionGroupName = params.getFirst("OptionGroupName");
-        String autoMinorVersionUpgradeStr = params.getFirst("AutoMinorVersionUpgrade");
-        Boolean autoMinorVersionUpgrade = autoMinorVersionUpgradeStr != null
-                ? Boolean.parseBoolean(autoMinorVersionUpgradeStr) : null;
+        Boolean autoMinorVersionUpgrade;
         Boolean publiclyAccessible;
         Boolean deletionProtection;
         try {
+            // These request members are accepted, but their modify behavior is not yet emulated.
+            parseOptionalBoolean(params, "MultiAZ");
+            parseOptionalBoolean(params, "ManageMasterUserPassword");
+            iamEnabled = parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication");
+            autoMinorVersionUpgrade = parseOptionalBoolean(params, "AutoMinorVersionUpgrade");
             publiclyAccessible = parseOptionalBoolean(params, "PubliclyAccessible");
             deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
         } catch (AwsException e) {
@@ -648,15 +661,15 @@ public class RdsQueryHandler {
     private static DbInstanceSettings instanceSettings(MultivaluedMap<String, String> params,
                                                        boolean includeEncryption) {
         return new DbInstanceSettings(
-                includeEncryption ? optionalBoolean(params.getFirst("StorageEncrypted")) : null,
+                includeEncryption ? parseOptionalBoolean(params, "StorageEncrypted") : null,
                 includeEncryption ? params.getFirst("KmsKeyId") : null,
                 optionalInt(params.getFirst("BackupRetentionPeriod")),
                 params.getFirst("PreferredBackupWindow"),
                 params.getFirst("PreferredMaintenanceWindow"),
-                optionalBoolean(params.getFirst("CopyTagsToSnapshot")),
+                parseOptionalBoolean(params, "CopyTagsToSnapshot"),
                 optionalInt(params.getFirst("MonitoringInterval")),
                 params.getFirst("MonitoringRoleArn"),
-                optionalBoolean(params.getFirst("EnablePerformanceInsights")),
+                parseOptionalBoolean(params, "EnablePerformanceInsights"),
                 optionalInt(params.getFirst("PerformanceInsightsRetentionPeriod")),
                 params.getFirst("EngineLifecycleSupport"),
                 includeEncryption ? cloudwatchLogsExports(params) : null,
@@ -706,6 +719,109 @@ public class RdsQueryHandler {
             throw new AwsException("InvalidParameterValue",
                     "Value " + value + " is not a valid integer.", 400);
         }
+    }
+
+    private Response handleDescribeDbEngineVersions(MultivaluedMap<String, String> params) {
+        Map<String, List<String>> filters = new LinkedHashMap<>();
+        for (String name : List.of("db-parameter-group-family", "engine", "engine-mode", "engine-version", "status")) {
+            List<String> values = extractRdsFilterValues(params, name);
+            if (!values.isEmpty()) {
+                filters.put(name, values);
+            }
+        }
+        RdsService.EngineVersionPage page = service.describeDbEngineVersions(
+                params.getFirst("Engine"),
+                params.getFirst("EngineVersion"),
+                params.getFirst("DBParameterGroupFamily"),
+                Boolean.parseBoolean(params.getFirst("DefaultOnly")),
+                filters,
+                optionalInt(params.getFirst("MaxRecords")),
+                params.getFirst("Marker"));
+        XmlBuilder xml = new XmlBuilder().start("DBEngineVersions");
+        for (RdsEngineCatalog.EngineVersion v : page.versions()) {
+            xml.start("DBEngineVersion")
+               .elem("Engine", v.engine())
+               .elem("MajorEngineVersion", v.majorVersion())
+               .elem("EngineVersion", v.version())
+               .elem("DBParameterGroupFamily", v.family())
+               .elem("DBEngineDescription", v.engineDescription())
+               .elem("DBEngineVersionDescription", v.versionDescription())
+               .start("ValidUpgradeTarget");
+            for (RdsEngineCatalog.EngineVersion target : RdsEngineCatalog.upgradeTargets(v)) {
+                xml.start("UpgradeTarget")
+                   .elem("Engine", target.engine())
+                   .elem("EngineVersion", target.version())
+                   .elem("Description", target.versionDescription())
+                   .elem("AutoUpgrade", false)
+                   .elem("IsMajorVersionUpgrade", !target.majorVersion().equals(v.majorVersion()))
+                   .end("UpgradeTarget");
+            }
+            xml.end("ValidUpgradeTarget").start("ExportableLogTypes");
+            RdsEngineCatalog.exportableLogTypes(v).forEach(type -> xml.elem("member", type));
+            xml.end("ExportableLogTypes")
+               .elem("SupportsLogExportsToCloudwatchLogs", !RdsEngineCatalog.exportableLogTypes(v).isEmpty())
+               .elem("SupportsReadReplica", RdsEngineCatalog.supportsReadReplica(v))
+               .start("SupportedEngineModes");
+            v.engineModes().forEach(mode -> xml.elem("member", mode));
+            xml.end("SupportedEngineModes").start("SupportedFeatureNames");
+            RdsEngineCatalog.supportedFeatureNames(v).forEach(name -> xml.elem("member", name));
+            xml.end("SupportedFeatureNames")
+               .elem("Status", "available")
+               .elem("SupportsParallelQuery", false)
+               .elem("SupportsGlobalDatabases", RdsEngineCatalog.supportsGlobalDatabases(v))
+               .elem("SupportsBabelfish", false)
+               .end("DBEngineVersion");
+        }
+        xml.end("DBEngineVersions");
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBEngineVersions", AwsNamespaces.RDS,
+                xml.build())).build();
+    }
+
+    /** Serves both engine default calls; they share the request and the EngineDefaults shape. */
+    private Response handleDescribeEngineDefaultParameters(MultivaluedMap<String, String> params, String action) {
+        String family = params.getFirst("DBParameterGroupFamily");
+        List<Map<String, String>> parameters = service.describeEngineDefaultParameters(family);
+        XmlBuilder xml = new XmlBuilder().start("EngineDefaults")
+                .elem("DBParameterGroupFamily", family)
+                .start("Parameters");
+        for (Map<String, String> parameter : parameters) {
+            xml.start("Parameter")
+               .elem("ParameterName", parameter.get("name"))
+               .elem("ParameterValue", parameter.get("value"))
+               .end("Parameter");
+        }
+        xml.end("Parameters").end("EngineDefaults");
+        return Response.ok(AwsQueryResponse.envelope(action, AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleDescribeValidDbInstanceModifications(MultivaluedMap<String, String> params, String region) {
+        List<RdsService.StorageModification> storage = service.describeValidDbInstanceModifications(
+                params.getFirst("DBInstanceIdentifier"), region);
+        XmlBuilder xml = new XmlBuilder().start("ValidDBInstanceModificationsMessage").start("Storage");
+        for (RdsService.StorageModification option : storage) {
+            xml.start("ValidStorageOptions")
+               .elem("StorageType", option.storageType())
+               .start("StorageSize");
+            for (RdsService.SizeRange range : option.sizes()) {
+                xml.start("Range")
+                   .elem("From", range.from())
+                   .elem("To", range.to())
+                   .elem("Step", 1)
+                   .end("Range");
+            }
+            xml.end("StorageSize")
+               .elem("SupportsStorageAutoscaling", true)
+               .end("ValidStorageOptions");
+        }
+        xml.end("Storage")
+           .start("ValidProcessorFeatures").end("ValidProcessorFeatures")
+           .elem("SupportsDedicatedLogVolume", false)
+           .end("ValidDBInstanceModificationsMessage");
+        return Response.ok(AwsQueryResponse.envelope("DescribeValidDBInstanceModifications", AwsNamespaces.RDS,
+                xml.build())).build();
     }
 
     private Response handleDescribeOrderableDbInstanceOptions(MultivaluedMap<String, String> params) {
@@ -1281,7 +1397,7 @@ public class RdsQueryHandler {
         }
         try {
             DbParameterGroup group = service.resetDbParameterGroup(name,
-                    Boolean.parseBoolean(params.getFirst("ResetAllParameters")), parameterNames(params), region);
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "ResetAllParameters")), parameterNames(params), region);
             String result = new XmlBuilder()
                     .elem("DBParameterGroupName", group.getDbParameterGroupName())
                     .build();
@@ -1436,7 +1552,7 @@ public class RdsQueryHandler {
         }
         try {
             DbClusterParameterGroup group = service.resetDbClusterParameterGroup(name,
-                    Boolean.parseBoolean(params.getFirst("ResetAllParameters")), parameterNames(params), region);
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "ResetAllParameters")), parameterNames(params), region);
             String result = new XmlBuilder()
                     .elem("DBClusterParameterGroupName", group.getDbClusterParameterGroupName())
                     .build();
@@ -1690,8 +1806,7 @@ public class RdsQueryHandler {
         }
         String dbInstanceClass = params.getFirst("DBInstanceClass");
         String availabilityZone = params.getFirst("AvailabilityZone");
-        String multiAzStr = params.getFirst("MultiAZ");
-        boolean multiAz = multiAzStr != null && Boolean.parseBoolean(multiAzStr);
+        boolean multiAz = Boolean.TRUE.equals(parseOptionalBoolean(params, "MultiAZ"));
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
 
         List<String> vpcSecurityGroupIds = new ArrayList<>();
@@ -1705,13 +1820,10 @@ public class RdsQueryHandler {
 
         try {
             Integer requestedPort = parseIntegerParam(params, "Port");
-            DbInstance instance = requestedPort == null
-                    ? service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
-                            dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
-                            vpcSecurityGroupIds, tags, region)
-                    : service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
-                            dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
-                            vpcSecurityGroupIds, tags, region, requestedPort);
+            DbInstance instance = service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
+                    dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
+                    vpcSecurityGroupIds, tags, region, requestedPort,
+                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"));
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBInstanceFromDBSnapshot", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1779,8 +1891,8 @@ public class RdsQueryHandler {
         validateDbProxyNetworkType(targetConnectionNetworkType, "TargetConnectionNetworkType", false, "IPV4 or IPV6");
         String name = params.getFirst("DBProxyName");
         String engineFamily = params.getFirst("EngineFamily");
-        boolean requireTls = "true".equalsIgnoreCase(params.getFirst("RequireTLS"));
-        boolean debugLogging = "true".equalsIgnoreCase(params.getFirst("DebugLogging"));
+        boolean requireTls = Boolean.TRUE.equals(parseOptionalBoolean(params, "RequireTLS"));
+        boolean debugLogging = Boolean.TRUE.equals(parseOptionalBoolean(params, "DebugLogging"));
         int idleClientTimeout = 1800;
         String idleClientTimeoutValue = params.getFirst("IdleClientTimeout");
         if (idleClientTimeoutValue != null) {
@@ -2293,7 +2405,7 @@ public class RdsQueryHandler {
         if (missing != null) {
             return missing;
         }
-        boolean copyTags = "true".equalsIgnoreCase(params.getFirst("CopyTags"));
+        boolean copyTags = Boolean.TRUE.equals(parseOptionalBoolean(params, "CopyTags"));
         DbClusterSnapshot copy = service.copyDbClusterSnapshot(sourceId, targetId, copyTags, parseTags(params), region);
         return Response.ok(AwsQueryResponse.envelope("CopyDBClusterSnapshot", AwsNamespaces.RDS,
                 dbClusterSnapshotXml(copy))).build();
@@ -2347,7 +2459,7 @@ public class RdsQueryHandler {
                     parseOptionalBoolean(params, "UseLatestRestorableTime"),
                     optionalInt(params.getFirst("Port")), params.getFirst("DBSubnetGroupName"),
                     params.getFirst("DBClusterParameterGroupName"),
-                    optionalBoolean(params.getFirst("EnableIAMDatabaseAuthentication")),
+                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
                     params.getFirst("EngineMode"), parseTags(params), region);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterToPointInTime", AwsNamespaces.RDS,
                     dbClusterXml(cluster))).build();
@@ -2372,7 +2484,7 @@ public class RdsQueryHandler {
                 params.getFirst("DatabaseName"), params.getFirst("DBSubnetGroupName"),
                 params.getFirst("DBClusterParameterGroupName"),
                 params.getFirst("AvailabilityZones.member.1"),
-                optionalBoolean(params.getFirst("EnableIAMDatabaseAuthentication")),
+                parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
                 params.getFirst("EngineMode"), parseTags(params), region);
         return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterFromSnapshot", AwsNamespaces.RDS,
                 dbClusterXml(cluster))).build();
@@ -3203,16 +3315,9 @@ public class RdsQueryHandler {
         }
     }
 
+    /** The catalogue's default for the engine, or {@code 1.0} for an engine it does not list. */
     private static String defaultEngineVersion(String engine) {
-        if (engine == null) {
-            return "16.3";
-        }
-        return switch (engine.toLowerCase()) {
-            case "postgres", "aurora-postgresql" -> "16.3";
-            case "mysql", "aurora-mysql", "aurora" -> "8.0.36";
-            case "mariadb" -> "11.2";
-            case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web" -> "15.00";
-            default -> "1.0";
-        };
+        String version = RdsEngineCatalog.defaultVersion(engine);
+        return version != null ? version : "1.0";
     }
 }

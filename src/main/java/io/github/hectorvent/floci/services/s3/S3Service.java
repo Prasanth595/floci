@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
@@ -40,6 +42,7 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
@@ -65,6 +68,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -77,11 +81,13 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.LongConsumer;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -110,6 +116,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final Set<String> SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES = Set.of("AES256", "aws:kms", "aws:kms:dsse", "aws:fsx");
     private static final String SSE_C_ALGORITHM = "AES256";
     private static final int SSE_C_KEY_BYTES = 32;
+    private static final int DELETE_PREFIX_PAGE_SIZE = 1000;
 
     @FunctionalInterface
     interface LambdaInvoker {
@@ -117,6 +124,8 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static final Logger LOG = Logger.getLogger(S3Service.class);
+    /** Last {@code s3.object.sequencer} handed out, in microseconds since the epoch. */
+    private final AtomicLong lastEventSequencer = new AtomicLong();
 
     record RequestAuthorization(boolean signed, String accessKeyId, String sessionToken) {
         static RequestAuthorization unsigned() {
@@ -214,7 +223,11 @@ public class S3Service implements Resettable, ResourceProvider {
         return locks;
     }
     // Memory mode keeps an object in one byte array; this is the largest the JDK reliably allocates.
-    private static final long MAX_IN_MEMORY_OBJECT_SIZE = Integer.MAX_VALUE - 8;
+    static final long MAX_IN_MEMORY_OBJECT_SIZE = Integer.MAX_VALUE - 8;
+    // Directory under .multipart where a streamed part or object body is written before it is
+    // published. Upload IDs are UUIDs, so it never collides with an upload's own directory, and the
+    // sweep at startup and reset clears it with them.
+    private static final String INCOMING_BODIES = ".incoming";
     // Upload ID to part bytes, keyed by each part's storage ID.
     private final ConcurrentHashMap<String, Map<String, byte[]>> memoryMultipartStore = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, MultipartUpload> multipartUploads = new ConcurrentHashMap<>();
@@ -485,9 +498,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private void deleteBucketLocked(String bucketName) {
-        // Check if bucket is empty
-        List<S3Object> objects = listObjects(bucketName, null, null, 1);
-        if (!objects.isEmpty()) {
+        if (!objectStore.scan(key -> key.startsWith(bucketPrefix(bucketName))).isEmpty()) {
             throw new AwsException("BucketNotEmpty",
                     "The bucket you tried to delete is not empty.", 409);
         }
@@ -618,6 +629,60 @@ public class S3Service implements Resettable, ResourceProvider {
         return createObject(bucketName, key, data, contentType, metadata, options, "ObjectCreated:Put");
     }
 
+    /**
+     * Stores an object streamed from {@code body}, checked against {@code checksums}, without holding
+     * it in memory in the disk-backed modes. Everything the request alone decides is checked before
+     * any of the body is read, so a write that cannot succeed fails without transferring it. The body
+     * is staged on disk with its ETag and checksum worked out as it arrives, then moved into place
+     * like an assembled multipart object. A body of more than 5 GiB, the most S3 takes in one
+     * PutObject, fails with EntityTooLarge as soon as it passes that.
+     */
+    S3Object putObject(String bucketName, String key, InputStream body, UploadChecksums checksums,
+                       String contentType, Map<String, String> metadata, PutObjectOptions options) {
+        PutObjectOptions effectiveOptions = options != null ? options : new PutObjectOptions();
+        checksums.requireWellFormedContentMd5();
+        AccountAwareStorageBackend.OwnedEntry<Bucket> checkedBucket = resolveBucketEntry(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
+        rejectConflictingServerSideEncryption(
+                normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption()),
+                validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(),
+                        effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5()));
+        ChecksumAlgorithm declared = ChecksumAlgorithm.fromWireValue(effectiveOptions.getChecksumAlgorithm());
+        // Checked again under the bucket lock when the object is stored; this only spares a transfer.
+        checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
+        if (inMemory) {
+            byte[] data = readVerified(body, checksums, "PutObject of " + bucketName + "/" + key);
+            S3Object object = storeObject(checkedBucket, bucketName, key, new BytesBody(data),
+                    contentType, metadata, null, null, effectiveOptions, null);
+            fireNotifications(bucketName, key, "ObjectCreated:Put", object);
+            return object;
+        }
+
+        // A checksum the client sent is stored as sent; otherwise the declared algorithm's, or CRC64NVME.
+        ChecksumAlgorithm computed = effectiveOptions.getClientChecksum() != null ? null
+                : declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
+        DigestingInputStream digests = new DigestingInputStream(body,
+                digestAlgorithms(checksums, computed), MAX_PUT_OBJECT_SIZE);
+        Path staged = stageBody(digests);
+        try {
+            checksums.verify(digests.md5(), digests::checksum);
+            verifyChunkedTrailers(body, digests, checksums);
+            S3Checksum checksum = null;
+            if (computed != null) {
+                checksum = new S3Checksum();
+                checksum.setValueFor(computed, digests.checksum(computed));
+                checksum.setChecksumType(ChecksumType.FULL_OBJECT);
+            }
+            S3Object object = storeObject(checkedBucket, bucketName, key, new AssembledBody(staged, digests.size()),
+                    contentType, metadata, checksum, null, effectiveOptions, digests.eTag());
+            fireNotifications(bucketName, key, "ObjectCreated:Put", object);
+            return object;
+        } finally {
+            deleteQuietly(staged, "staged body of an object that was not stored");
+        }
+    }
+
     public S3Object postObject(String bucketName, String key, byte[] data,
                                String contentType, Map<String, String> metadata) {
         return postObject(bucketName, key, data, contentType, metadata, new PutObjectOptions());
@@ -671,19 +736,39 @@ public class S3Service implements Resettable, ResourceProvider {
     private S3Object storeObject(String bucketName, String key, ObjectBody body,
                                  String contentType, Map<String, String> metadata,
                                  S3Checksum checksum, List<Part> parts, PutObjectOptions options, String eTag) {
+        return storeObject(null, bucketName, key, body, contentType, metadata, checksum, parts, options, eTag);
+    }
+
+    /**
+     * Stores the object, and with {@code checkedBucket} given, only in that bucket: an upload checked
+     * against a bucket that was deleted while its body arrived fails with NoSuchBucket rather than
+     * landing in a bucket created under the same name since, whose policy it was never checked
+     * against. A bucket is created once and keeps its instance until it is deleted, so the instance
+     * tells one bucket of a name from another.
+     */
+    private S3Object storeObject(AccountAwareStorageBackend.OwnedEntry<Bucket> checkedBucket,
+                                 String bucketName, String key, ObjectBody body,
+                                 String contentType, Map<String, String> metadata,
+                                 S3Checksum checksum, List<Part> parts, PutObjectOptions options, String eTag) {
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
         Bucket bucket = ownedBucket.value();
         synchronized (bucket) {
+            // Rechecked under the bucket's monitor, which deleting the bucket also holds.
+            if (checkedBucket != null && resolveBucketEntry(bucketName)
+                    .map(current -> current.value() != checkedBucket.value())
+                    .orElse(true)) {
+                throw new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404);
+            }
             return storeObjectInternal(ownedBucket.account(), bucket, bucketName, key, body,
                     contentType, metadata, checksum, parts, options, eTag);
         }
     }
 
     /**
-     * The body of an object being stored: the bytes of a single-request write, or the file a
-     * multipart upload was assembled into, which is moved into place instead of being read back.
+     * The body of an object being stored: bytes already in memory, or a file on disk, which is moved
+     * into place instead of being read back.
      */
     private sealed interface ObjectBody permits BytesBody, AssembledBody {
         long size();
@@ -697,9 +782,10 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     /**
-     * A body already on disk that is moved into place: an assembled multipart object, or the pinned
-     * file of a copy source. It is stored with an ETag and checksum worked out beforehand, since
-     * computing either here would mean reading the whole file under the bucket lock.
+     * A body already on disk that is moved into place: an assembled multipart object, the pinned file
+     * of a copy source, or a streamed PutObject body. It is stored with an ETag and checksum worked
+     * out beforehand, since computing either here would mean reading the whole file under the bucket
+     * lock.
      */
     private record AssembledBody(Path file, long size) implements ObjectBody { }
 
@@ -854,6 +940,9 @@ public class S3Service implements Resettable, ResourceProvider {
             putObjectForAccount(bucketOwnerAccount, objectKey(bucketName, key), object);
             LOG.debugv("Put object: {0}/{1} ({2} bytes)", bucketName, key, body.size());
         }
+        // Still under the bucket lock, so the sequencers of concurrent writes to one key follow
+        // the order they were stored in, whenever their notifications are built.
+        object.setEventSequencer(nextEventSequencer());
         return object;
     }
 
@@ -922,7 +1011,7 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    private String normalizeEntityTag(String value) {
+    static String normalizeEntityTag(String value) {
         String normalized = value == null ? "" : value.trim();
         if (normalized.length() >= 2 && normalized.startsWith("\"") && normalized.endsWith("\"")) {
             normalized = normalized.substring(1, normalized.length() - 1);
@@ -1829,6 +1918,37 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * Deletes every object whose key starts with {@code prefix}. The bucket monitor is held across the
+     * listing, the authorization of each key and the deletes, so a concurrent PutObject cannot land
+     * between them and survive. {@code authorizeDelete} runs for every key before the first delete, so
+     * a denial removes nothing.
+     */
+    public int deleteObjectsWithPrefix(String bucketName, String prefix, Consumer<String> authorizeDelete) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
+        synchronized (bucket) {
+            List<String> keys = new ArrayList<>();
+            String continuationToken = null;
+            do {
+                ListObjectsResult page = listObjectsWithPrefixes(
+                        bucketName, prefix, null, DELETE_PREFIX_PAGE_SIZE, continuationToken, null);
+                for (S3Object object : page.objects()) {
+                    keys.add(object.getKey());
+                }
+                continuationToken = page.isTruncated() ? page.nextContinuationToken() : null;
+            } while (continuationToken != null);
+            for (String key : keys) {
+                authorizeDelete.accept(key);
+            }
+            for (String key : keys) {
+                deleteObject(bucketName, key);
+            }
+            return keys.size();
+        }
+    }
+
     // A current delete marker answers 404 NoSuchKey, the same as a missing key. That is deliberate:
     // the S3 conditional-deletes guide says "If the latest version of the object is a delete marker,
     // the object doesn't exist and the DeleteObject API will fail and return a 412 Precondition
@@ -1965,10 +2085,19 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     public boolean isGovernanceRetentionActive(String bucketName, String key, String versionId) {
         ensureBucketExists(bucketName);
-        S3Object object = (versionId != null
-                ? objectStore.get(versionedKey(bucketName, key, versionId))
-                : objectStore.get(objectKey(bucketName, key)))
-                .orElse(null);
+        S3Object object;
+        if ("null".equals(versionId)) {
+            // Resolved as deleteObjectLocked resolves it: the null version is the unversioned object
+            // at the plain key, so a versioned key named "null" would miss a retained one.
+            object = objectStore.get(objectKey(bucketName, key))
+                    .filter(existing -> existing.getVersionId() == null)
+                    .orElse(null);
+        } else {
+            object = (versionId != null
+                    ? objectStore.get(versionedKey(bucketName, key, versionId))
+                    : objectStore.get(objectKey(bucketName, key)))
+                    .orElse(null);
+        }
         return object != null
                 && !object.isDeleteMarker()
                 && "GOVERNANCE".equals(object.getObjectLockMode())
@@ -2172,6 +2301,43 @@ public class S3Service implements Resettable, ResourceProvider {
 
     // S3 copies at most 5 GiB in one CopyObject; a larger object is copied with UploadPartCopy.
     static final long MAX_COPY_OBJECT_SOURCE_SIZE = 5L * 1024 * 1024 * 1024;
+
+    // The most one part of a multipart upload can hold, per S3's multipart upload limits.
+    static final long MAX_PART_SIZE = 5L * 1024 * 1024 * 1024;
+
+    // The User Guide's "up to 5 GB" in one PutObject, read as 5 GiB like CopyObject's 5 GB limit;
+    // a larger object is uploaded in parts.
+    static final long MAX_PUT_OBJECT_SIZE = 5L * 1024 * 1024 * 1024;
+
+    /**
+     * The message of S3's {@code EntityTooLarge} error as S3 sends it, which is not the wording of the
+     * error code table's description.
+     */
+    static final String ENTITY_TOO_LARGE_MESSAGE = "Your proposed upload exceeds the maximum allowed size";
+
+    /** S3's error for an upload over the most it takes, naming the size proposed and the most allowed. */
+    static AwsException entityTooLarge(long proposedSize, long maxSizeAllowed) {
+        return new AwsException("EntityTooLarge", ENTITY_TOO_LARGE_MESSAGE, 400,
+                Map.of("ProposedSize", proposedSize, "MaxSizeAllowed", maxSizeAllowed));
+    }
+
+    /** The same error for a body that ran past the most allowed before its whole size was known. */
+    static AwsException entityTooLarge(long maxSizeAllowed) {
+        return new AwsException("EntityTooLarge", ENTITY_TOO_LARGE_MESSAGE, 400,
+                Map.of("MaxSizeAllowed", maxSizeAllowed));
+    }
+
+    /**
+     * The message of S3's {@code EntityTooSmall} error as S3 sends it, which, like
+     * {@link #ENTITY_TOO_LARGE_MESSAGE}, is not the wording of the error code table's description.
+     */
+    static final String ENTITY_TOO_SMALL_MESSAGE = "Your proposed upload is smaller than the minimum allowed size";
+
+    /** S3's error for an upload under the least it takes, naming the size proposed and the least allowed. */
+    static AwsException entityTooSmall(long proposedSize, long minSizeAllowed) {
+        return new AwsException("EntityTooSmall", ENTITY_TOO_SMALL_MESSAGE, 400,
+                Map.of("ProposedSize", proposedSize, "MinSizeAllowed", minSizeAllowed));
+    }
 
     static void requireCopyableSize(S3Object source) {
         if (source.getSize() > MAX_COPY_OBJECT_SOURCE_SIZE) {
@@ -2487,7 +2653,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public record DeleteResult(String key, String versionId, boolean deleteMarker, String deleteMarkerVersionId) {
     }
 
-    public record DeleteError(String key, String code, String message) {
+    public record DeleteError(String key, String versionId, String code, String message) {
     }
 
     public record DeleteObjectsResult(List<DeleteResult> deleted, List<DeleteError> errors) {
@@ -2512,9 +2678,9 @@ public class S3Service implements Resettable, ResourceProvider {
                     deleted.add(new DeleteResult(entry.key(), entry.versionId(), false, null));
                 }
             } catch (AwsException e) {
-                errors.add(new DeleteError(entry.key(), e.getErrorCode(), e.getMessage()));
+                errors.add(new DeleteError(entry.key(), entry.versionId(), e.getErrorCode(), e.getMessage()));
             } catch (Exception e) {
-                errors.add(new DeleteError(entry.key(), "InternalError", e.getMessage()));
+                errors.add(new DeleteError(entry.key(), entry.versionId(), "InternalError", e.getMessage()));
             }
         }
         return new DeleteObjectsResult(deleted, errors);
@@ -2573,6 +2739,7 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = requireBucket(bucketName);
         S3Object[] notificationTarget = {null};
         ObjectAnnotation annotation;
+        String sequencer;
         synchronized (bucket) {
             versionId = normalizeNullVersionId(versionId);
             S3Object parent = resolveParentObject(bucketName, key, versionId);
@@ -2616,10 +2783,11 @@ public class S3Service implements Resettable, ResourceProvider {
             annotationStore.put(storeKey, annotation);
             LOG.debugv("Put annotation {0} on object: {1}/{2}", annotationName, bucketName, key);
             notificationTarget[0] = parent;
+            sequencer = nextEventSequencer();
         }
         // Fired outside the bucket monitor (the storeObject callers' pattern): a slow SQS/SNS/
         // Lambda delivery must not block every other write and annotation op on the bucket.
-        fireNotifications(bucketName, key, "ObjectAnnotation:Put", notificationTarget[0]);
+        fireNotifications(bucketName, key, "ObjectAnnotation:Put", notificationTarget[0], sequencer);
         return annotation;
     }
 
@@ -2686,6 +2854,7 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = requireBucket(bucketName);
         S3Object[] notificationTarget = {null};
         String parentVersionId;
+        String sequencer;
         synchronized (bucket) {
             versionId = normalizeNullVersionId(versionId);
             S3Object parent = resolveParentObject(bucketName, key, versionId);
@@ -2711,9 +2880,10 @@ public class S3Service implements Resettable, ResourceProvider {
             LOG.debugv("Deleted annotation {0} from object: {1}/{2}", annotationName, bucketName, key);
             parentVersionId = parent.getVersionId();
             notificationTarget[0] = parent;
+            sequencer = nextEventSequencer();
         }
         // Fired outside the bucket monitor, as in putObjectAnnotation.
-        fireNotifications(bucketName, key, "ObjectAnnotation:Delete", notificationTarget[0]);
+        fireNotifications(bucketName, key, "ObjectAnnotation:Delete", notificationTarget[0], sequencer);
         return parentVersionId;
     }
 
@@ -2854,8 +3024,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private String encodeAnnotationContinuationToken(String lastAnnotationName) {
-        return Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(lastAnnotationName.getBytes(StandardCharsets.UTF_8));
+        return Base64Url.encode(lastAnnotationName);
     }
 
     private String decodeAnnotationContinuationToken(String token) {
@@ -2884,22 +3053,8 @@ public class S3Service implements Resettable, ResourceProvider {
         // collision-free across object keys that contain '#v#', '@', or path-like characters.
         // Cleanup is metadata-driven, so the mapping never needs to be reversed.
         // Every path component below bucketDir is SHA-256 hex, so no traversal is possible.
-        Path parentDir = bucketDir.resolve(sha256Hex(annotationIdentity(key, versionId)));
-        return parentDir.resolve(sha256Hex(annotationName) + ANNOTATION_DATA_SUFFIX);
-    }
-
-    private static String sha256Hex(String value) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(digest.length * 2);
-            for (byte b : digest) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 algorithm is not available", e);
-        }
+        Path parentDir = bucketDir.resolve(Digests.sha256Hex(annotationIdentity(key, versionId)));
+        return parentDir.resolve(Digests.sha256Hex(annotationName) + ANNOTATION_DATA_SUFFIX);
     }
 
     private void writeAnnotationPayload(ObjectAnnotation annotation, byte[] payload) {
@@ -3734,7 +3889,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         .filter(part -> part.getPartNumber() != partNumber)
                         .mapToLong(Part::getSize)
                         .sum();
-                requireFitsInMemory(uploadId, otherParts + data.length);
+                requireFitsInMemory("Multipart upload " + uploadId, otherParts + data.length);
                 memoryMultipartStore.get(uploadId).put(storageId, data);
             } else {
                 Path partPath = dataRoot.resolve(".multipart").resolve(uploadId).resolve(storageId);
@@ -3756,6 +3911,147 @@ public class S3Service implements Resettable, ResourceProvider {
             LOG.debugv("Uploaded part {0} for upload {1} ({2} bytes)", partNumber, uploadId, data.length);
             return part;
         });
+    }
+
+    /**
+     * Stores one part streamed from {@code body}, checked against {@code checksums}, without holding it
+     * in memory in the disk-backed modes. The upload is checked before any of the body is read. The
+     * body is staged outside the upload's directory and outside any lock, so parts of one upload still
+     * arrive in parallel and a slow client never holds up the bucket's other multipart operations. Only
+     * once it has passed its checks is it moved into the upload and its record published, under the
+     * upload's lock, so an upload aborted or completed meanwhile fails the part with NoSuchUpload. A
+     * body of more than 5 GiB, the most one part holds, fails with EntityTooLarge as soon as it
+     * passes that.
+     */
+    Part storePart(String bucket, String key, String uploadId, int partNumber, InputStream body,
+                   UploadChecksums checksums,
+                   String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5) {
+        checksums.requireWellFormedContentMd5();
+        ChecksumAlgorithm declared = withMultipartOperationLock(bucket, uploadId, () -> {
+            MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
+            if (partNumber < 1 || partNumber > 10000) {
+                throw new AwsException("InvalidArgument",
+                        "Part number must be between 1 and 10000.", 400);
+            }
+            validateSseCustomerAccess(upload, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
+            return upload.getChecksumAlgorithm();
+        });
+        if (inMemory) {
+            byte[] data = readVerified(body, checksums, "Multipart upload " + uploadId);
+            return storePart(bucket, key, uploadId, partNumber, data,
+                    sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
+        }
+        ChecksumAlgorithm algorithm = declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
+        DigestingInputStream digests = new DigestingInputStream(body,
+                digestAlgorithms(checksums, algorithm), MAX_PART_SIZE);
+        Path staged = stageBody(digests);
+        try {
+            checksums.verify(digests.md5(), digests::checksum);
+            verifyChunkedTrailers(body, digests, checksums);
+            S3Checksum partChecksum = new S3Checksum();
+            partChecksum.setValueFor(algorithm, digests.checksum(algorithm));
+            return withMultipartOperationLock(bucket, uploadId, () -> {
+                MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
+                String storageId = partNumber + "-" + UUID.randomUUID();
+                try {
+                    Files.move(staged, dataRoot.resolve(".multipart").resolve(uploadId).resolve(storageId),
+                            StandardCopyOption.ATOMIC_MOVE);
+                } catch (IOException e) {
+                    throw new UncheckedIOException("Failed to write multipart part", e);
+                }
+                Part part = new Part(partNumber, digests.eTag(), digests.size());
+                part.setChecksum(partChecksum);
+                part.setStorageId(storageId);
+                Part replaced = upload.getParts().put(partNumber, part);
+                if (replaced != null) {
+                    discardPartBytes(uploadId, replaced);
+                }
+                LOG.debugv("Uploaded part {0} for upload {1} ({2} bytes)", partNumber, uploadId, digests.size());
+                return part;
+            });
+        } finally {
+            deleteQuietly(staged, "staged part of an upload that was not stored");
+        }
+    }
+
+    /**
+     * Reads a memory-mode upload body into one array, checked against {@code checksums}, failing
+     * with EntityTooLarge once it outgrows the largest array the JDK allocates.
+     */
+    private static byte[] readVerified(InputStream body, UploadChecksums checksums, String upload) {
+        // The memory cap is lower than the most S3 takes in one body, so it is the limit here.
+        DigestingInputStream digests = new DigestingInputStream(body, digestAlgorithms(checksums, null),
+                Long.MAX_VALUE);
+        byte[] data = readWithin(digests, MAX_IN_MEMORY_OBJECT_SIZE,
+                readSoFar -> warnTooLargeForMemory(upload, readSoFar));
+        checksums.verify(digests.md5(), digests::checksum);
+        verifyChunkedTrailers(body, digests, checksums);
+        return data;
+    }
+
+    /**
+     * Reads all of {@code body} into one array, failing with EntityTooLarge once it passes
+     * {@code maxSize}, after telling {@code tooLarge} how many bytes it had read by then.
+     */
+    static byte[] readWithin(InputStream body, long maxSize, LongConsumer tooLarge) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[64 * 1024];
+        try {
+            for (int read = body.read(buffer); read >= 0; read = body.read(buffer)) {
+                long readSoFar = (long) out.size() + read;
+                if (readSoFar > maxSize) {
+                    tooLarge.accept(readSoFar);
+                    // The rest of the body is not read, so its whole size is not known to name.
+                    throw entityTooLarge(maxSize);
+                }
+                out.write(buffer, 0, read);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read the upload body", e);
+        }
+        return out.toByteArray();
+    }
+
+    /**
+     * Algorithms hashed as a body is read. A trailing checksum is hashed only when
+     * {@code x-amz-trailer} named it, which is the only trailer line that is checked.
+     */
+    private static Set<ChecksumAlgorithm> digestAlgorithms(UploadChecksums checksums, ChecksumAlgorithm stored) {
+        Set<ChecksumAlgorithm> algorithms = EnumSet.noneOf(ChecksumAlgorithm.class);
+        algorithms.addAll(checksums.algorithms());
+        if (stored != null) {
+            algorithms.add(stored);
+        }
+        if (checksums.trailerAlgorithm() != null) {
+            algorithms.add(checksums.trailerAlgorithm());
+        }
+        return algorithms;
+    }
+
+    private static void verifyChunkedTrailers(InputStream body, DigestingInputStream digests,
+                                              UploadChecksums checksums) {
+        if (body instanceof AwsChunkedInputStream chunked) {
+            checksums.verifyTrailers(chunked, digests::checksum);
+        }
+    }
+
+    /**
+     * Writes a streamed body to a new file under the staging directory and returns it. The file is
+     * deleted if the body fails partway, so on return the caller owns it.
+     */
+    private Path stageBody(InputStream body) {
+        Path staged = dataRoot.resolve(".multipart").resolve(INCOMING_BODIES).resolve(UUID.randomUUID().toString());
+        try {
+            Files.createDirectories(staged.getParent());
+            Files.copy(body, staged);
+            return staged;
+        } catch (IOException e) {
+            deleteQuietly(staged, "partly staged upload body");
+            throw new UncheckedIOException("Failed to write the upload body", e);
+        } catch (RuntimeException e) {
+            deleteQuietly(staged, "partly staged upload body");
+            throw e;
+        }
     }
 
     /**
@@ -3797,9 +4093,9 @@ public class S3Service implements Resettable, ResourceProvider {
                                   SseCustomerHeaders copySourceSseCustomerHeaders,
                                   SseCustomerHeaders sseCustomerHeaders,
                                   CopySourceConditions copySourceConditions) {
-        byte[] data;
-        // The source is streamed the way GetObject serves it and only the copied range is read, so
-        // the source can be any size.
+        // The source is streamed the way GetObject serves it, and only the copied range is read,
+        // straight into the part the way a streamed UploadPart body is, so neither the source nor
+        // the part has to fit in memory in the disk-backed modes.
         try (ObjectRead read = openObject(sourceBucket, sourceKey, sourceVersionId)) {
             S3Object source = read.object();
             checkCopySourcePreconditions(source, copySourceConditions);
@@ -3808,18 +4104,16 @@ public class S3Service implements Resettable, ResourceProvider {
                     copySourceSseCustomerHeaders.key(),
                     copySourceSseCustomerHeaders.keyMd5());
             CopySourceRange range = CopySourceRange.parse(copySourceRange, source.getSize());
-            if (range.length() > MAX_IN_MEMORY_OBJECT_SIZE) {
-                LOG.warnv("UploadPartCopy of {0} bytes into upload {1} is over the {2} bytes one part can hold in Floci; copy the source in smaller ranges",
-                        range.length(), uploadId, MAX_IN_MEMORY_OBJECT_SIZE);
-                throw new AwsException("EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size.", 400);
+            if (range.length() > MAX_PART_SIZE) {
+                throw entityTooLarge(range.length(), MAX_PART_SIZE);
             }
-            data = readRange(read.body(), range);
+            return storePart(destBucket, destKey, uploadId, partNumber,
+                    new ByteRangeInputStream(read.body(), range.first(), range.length()), UploadChecksums.NONE,
+                    sseCustomerHeaders.algorithm(), sseCustomerHeaders.key(), sseCustomerHeaders.keyMd5())
+                    .getETag();
         } catch (IOException e) {
-            throw new UncheckedIOException("Failed to read the copy source", e);
+            throw new UncheckedIOException("Failed to close the copy source", e);
         }
-
-        return uploadPart(destBucket, destKey, uploadId, partNumber, data,
-                sseCustomerHeaders.algorithm(), sseCustomerHeaders.key(), sseCustomerHeaders.keyMd5());
     }
 
     /** An inclusive byte range of a copy source. Offsets are longs, since a source can pass 2 GiB. */
@@ -3882,17 +4176,6 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    /** Reads exactly the bytes of {@code range} from {@code body}, skipping the bytes before it. */
-    static byte[] readRange(InputStream body, CopySourceRange range) throws IOException {
-        body.skipNBytes(range.first());
-        byte[] data = body.readNBytes((int) range.length());
-        if (data.length != range.length()) {
-            throw new IOException("Copy source ended " + (range.length() - data.length)
-                    + " bytes before the end of the requested range");
-        }
-        return data;
-    }
-
     public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
                                             String checksumType, S3Checksum expectedChecksum) {
         return completeMultipartUpload(bucket, key, uploadId, partNumbers, Map.of(), Map.of(), checksumType,
@@ -3940,7 +4223,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
             validateCompleteChecksumType(algorithm, storedChecksumType, ChecksumType.fromWireValue(checksumType));
             if (inMemory) {
-                requireFitsInMemory(uploadId, parts.stream().mapToLong(Part::getSize).sum());
+                requireFitsInMemory("Multipart upload " + uploadId, parts.stream().mapToLong(Part::getSize).sum());
             }
 
             // Concatenate parts in order
@@ -4017,15 +4300,20 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /**
      * Rejects an upload that memory mode could not hold in one byte array, with the error S3 gives an
-     * object over its size limit, so it fails at the part that crosses the limit instead of running
-     * the heap out of memory or overflowing the array size at completion.
+     * object over its size limit, naming the upload's size and the most memory mode holds, so it fails
+     * at the part that crosses the limit instead of running the heap out of memory or overflowing the
+     * array size at completion.
      */
-    private static void requireFitsInMemory(String uploadId, long uploadSize) {
+    private static void requireFitsInMemory(String upload, long uploadSize) {
         if (uploadSize > MAX_IN_MEMORY_OBJECT_SIZE) {
-            LOG.warnv("Multipart upload {0} would hold {1} bytes, over the {2} an object can have in memory storage mode; set FLOCI_STORAGE_SERVICES_S3_MODE=persistent for larger objects",
-                    uploadId, uploadSize, MAX_IN_MEMORY_OBJECT_SIZE);
-            throw new AwsException("EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size.", 400);
+            warnTooLargeForMemory(upload, uploadSize);
+            throw entityTooLarge(uploadSize, MAX_IN_MEMORY_OBJECT_SIZE);
         }
+    }
+
+    private static void warnTooLargeForMemory(String upload, long uploadSize) {
+        LOG.warnv("{0} would hold {1} bytes, over the {2} an object can have in memory storage mode; set FLOCI_STORAGE_SERVICES_S3_MODE=persistent for larger objects",
+                upload, uploadSize, MAX_IN_MEMORY_OBJECT_SIZE);
     }
 
     /**
@@ -4043,7 +4331,7 @@ public class S3Service implements Resettable, ResourceProvider {
             }
             totalSize += partData[i].length;
         }
-        requireFitsInMemory(uploadId, totalSize);
+        requireFitsInMemory("Multipart upload " + uploadId, totalSize);
         byte[] allData = new byte[(int) totalSize];
         int offset = 0;
         for (byte[] part : partData) {
@@ -5192,6 +5480,15 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private void fireNotifications(String bucketName, String key, String eventName, S3Object obj) {
+        fireNotifications(bucketName, key, eventName, obj, eventSequencer(eventName, obj));
+    }
+
+    /**
+     * Fires the event with a {@code sequencer} the caller took under the bucket lock, so it orders
+     * against other writes to the key the way they were applied, however late the event is built.
+     */
+    private void fireNotifications(String bucketName, String key, String eventName, S3Object obj,
+                                   String sequencer) {
         if (s3UpdatedEvent != null && eventName.startsWith("ObjectCreated")) {
             s3UpdatedEvent.fire(new S3ObjectUpdatedEvent(bucketName, key));
         }
@@ -5209,7 +5506,8 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         String region = bucket.getRegion();
-        String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region, bucket.isVersioningEnabled());
+        String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region, bucket.isVersioningEnabled(),
+                sequencer);
 
         for (QueueNotification qn : config.getQueueConfigurations()) {
             if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && qn.matchesKey(key)) {
@@ -5362,7 +5660,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private String buildS3EventJson(String bucketName, String key, String eventName,
-                                    S3Object obj, String region, boolean isVersionEnabled) {
+                                    S3Object obj, String region, boolean isVersionEnabled, String sequencer) {
         try {
             String eventTime = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
             long size = obj != null ? obj.getSize() : 0;
@@ -5374,13 +5672,14 @@ public class S3Service implements Resettable, ResourceProvider {
             bucketNode.put("arn", AwsArnUtils.Arn.global(bucketPartition(bucketName), "s3", "", bucketName).toString());
 
             ObjectNode objectNode = objectMapper.createObjectNode();
-            objectNode.put("key", key);
+            objectNode.put("key", eventRecordKey(key));
             objectNode.put("size", size);
             objectNode.put("eTag", eTag);
             if(isVersionEnabled) {
                 String versionId = obj !=null && obj.getVersionId()!=null ? obj.getVersionId() : "";
                 objectNode.put("versionId", versionId);
             }
+            objectNode.put("sequencer", sequencer);
             ObjectNode s3Node = objectMapper.createObjectNode();
             s3Node.put("s3SchemaVersion", "1.0");
             s3Node.put("configurationId", "emulator");
@@ -5404,6 +5703,41 @@ public class S3Service implements Resettable, ResourceProvider {
         } catch (Exception e) {
             return "{\"Records\":[]}";
         }
+    }
+
+    /**
+     * The key as S3 writes it into an event record: form URL-encoded (a space is {@code +}, a
+     * {@code +} is {@code %2B}) with {@code /} left as is, so consumers decode it the documented
+     * way, with {@code unquote_plus} or {@code URLDecoder}.
+     */
+    static String eventRecordKey(String key) {
+        if (key == null) {
+            return null;
+        }
+        return URLEncoder.encode(key, StandardCharsets.UTF_8).replace("%2F", "/");
+    }
+
+    /**
+     * The sequencer a created object was given when it was stored. Any other event names an object
+     * that already existed, whose stored sequencer belongs to its own creation, so it gets a new one:
+     * the delete paths fire inside the bucket lock, so that value is still taken under it.
+     */
+    private String eventSequencer(String eventName, S3Object obj) {
+        if (eventName.startsWith("ObjectCreated") && obj != null && obj.getEventSequencer() != null) {
+            return obj.getEventSequencer();
+        }
+        return nextEventSequencer();
+    }
+
+    /**
+     * An 18-digit uppercase hex value that increases with every event this process emits, so two
+     * events for one key compare in the order they happened, as S3's sequencer does. It is seeded
+     * from the clock, so values keep increasing across a restart too.
+     */
+    private String nextEventSequencer() {
+        long nowMicros = ChronoUnit.MICROS.between(Instant.EPOCH, Instant.now());
+        long value = lastEventSequencer.updateAndGet(last -> Math.max(last + 1, nowMicros));
+        return String.format(Locale.ROOT, "%018X", value);
     }
 
     private void cleanupMultipart(String uploadId) {
@@ -5561,6 +5895,14 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     /**
+     * Whether the calling account has the bucket, which is the lookup {@link #createBucket} makes.
+     * Unlike {@link #bucketExists}, it never spans other accounts' buckets.
+     */
+    public boolean ownsBucket(String bucketName) {
+        return bucketStore.get(bucketName).isPresent();
+    }
+
+    /**
      * Resolves a bucket for existence/access. With {@code globalBucketNamespace} enabled, the
      * lookup spans every account's partition (AWS bucket names are globally unique and reachable
      * cross-account); otherwise it stays scoped to the calling account. Write-side ownership
@@ -5687,6 +6029,10 @@ public class S3Service implements Resettable, ResourceProvider {
                 putObjectForAccount(accountId, latestKey, object);
             }
         }
+    }
+
+    private String bucketPrefix(String bucketName) {
+        return bucketName + "/";
     }
 
     private String objectKey(String bucketName, String key) {

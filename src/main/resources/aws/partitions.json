@@ -10,9 +10,6 @@
     "IoTSecuredTunneling": [
       "api.tunneling.iot"
     ],
-    "agent-registry": [
-      "agent-registry-control"
-    ],
     "appconfig": [
       "appconfigdata"
     ],
@@ -37,9 +34,6 @@
       "bedrock-data-automation",
       "bedrock-data-automation-runtime",
       "bedrock-runtime"
-    ],
-    "bedrock-agentcore": [
-      "bedrock-agentcore-control"
     ],
     "cassandra": [
       "cassandra-streams"
@@ -71,9 +65,6 @@
     ],
     "ecr-public": [
       "api.ecr-public"
-    ],
-    "execute-api": [
-      "participant.connect"
     ],
     "forecast": [
       "forecastquery"
@@ -699,6 +690,7 @@
         "workspaces-web",
         "xray"
       ],
+      "servicesFromRulesets": [],
       "globalServices": {
         "account": {
           "hostname": "account.us-east-1.amazonaws.com",
@@ -841,7 +833,8 @@
         "us-east-2",
         "us-west-1",
         "us-west-2"
-      ]
+      ],
+      "signinHost": "{region}.signin.aws.amazon.com"
     },
     {
       "id": "aws-cn",
@@ -1028,6 +1021,7 @@
         "workspaces",
         "xray"
       ],
+      "servicesFromRulesets": [],
       "globalServices": {
         "account": {
           "hostname": "account.cn-northwest-1.amazonaws.com.cn",
@@ -1078,7 +1072,8 @@
       "s3DualStackRegions": [
         "cn-north-1",
         "cn-northwest-1"
-      ]
+      ],
+      "signinHost": "{region}.signin.amazonaws.cn"
     },
     {
       "id": "aws-eusc",
@@ -1116,6 +1111,8 @@
         "backup",
         "batch",
         "bedrock",
+        "budgets",
+        "ce",
         "cloudcontrolapi",
         "cloudformation",
         "cloudtrail",
@@ -1154,6 +1151,7 @@
         "glue",
         "guardduty",
         "health",
+        "iam",
         "identitystore",
         "internetmonitor",
         "kafka",
@@ -1184,6 +1182,7 @@
         "redshift-serverless",
         "resource-groups",
         "rolesanywhere",
+        "route53",
         "route53profiles",
         "route53resolver",
         "rum",
@@ -1213,8 +1212,15 @@
         "wafv2",
         "xray"
       ],
+      "servicesFromRulesets": [
+        "budgets",
+        "ce",
+        "iam",
+        "route53"
+      ],
       "globalServices": {},
-      "s3DualStackRegions": []
+      "s3DualStackRegions": [],
+      "signinHost": "{region}.signin.amazonaws-eusc.eu"
     },
     {
       "id": "aws-iso",
@@ -1348,6 +1354,7 @@
         "workspaces",
         "xray"
       ],
+      "servicesFromRulesets": [],
       "globalServices": {
         "budgets": {
           "hostname": "budgets.c2s.ic.gov",
@@ -1383,7 +1390,8 @@
       "s3DualStackRegions": [
         "us-iso-east-1",
         "us-iso-west-1"
-      ]
+      ],
+      "signinHost": "{region}.signin.c2shome.ic.gov"
     },
     {
       "id": "aws-iso-b",
@@ -1509,6 +1517,7 @@
         "workspaces",
         "xray"
       ],
+      "servicesFromRulesets": [],
       "globalServices": {
         "budgets": {
           "hostname": "budgets.global.sc2s.sgov.gov",
@@ -1543,7 +1552,8 @@
       },
       "s3DualStackRegions": [
         "us-isob-east-1"
-      ]
+      ],
+      "signinHost": "{region}.signin.sc2shome.sgov.gov"
     },
     {
       "id": "aws-iso-e",
@@ -1579,6 +1589,7 @@
         "autoscaling",
         "batch",
         "budgets",
+        "ce",
         "cloudcontrolapi",
         "cloudformation",
         "cloudtrail",
@@ -1606,6 +1617,7 @@
         "firehose",
         "glue",
         "health",
+        "iam",
         "kinesis",
         "kms",
         "lakeformation",
@@ -1649,6 +1661,10 @@
         "trustedadvisor",
         "xray"
       ],
+      "servicesFromRulesets": [
+        "ce",
+        "iam"
+      ],
       "globalServices": {
         "budgets": {
           "hostname": "budgets.global.cloud.adc-e.uk",
@@ -1671,7 +1687,8 @@
           "regionalized": false
         }
       },
-      "s3DualStackRegions": []
+      "s3DualStackRegions": [],
+      "signinHost": "{region}.signin.csphome.adc-e.uk"
     },
     {
       "id": "aws-iso-f",
@@ -1798,6 +1815,7 @@
         "trustedadvisor",
         "xray"
       ],
+      "servicesFromRulesets": [],
       "globalServices": {
         "budgets": {
           "hostname": "budgets.global.csp.hci.ic.gov",
@@ -1830,7 +1848,8 @@
           "regionalized": false
         }
       },
-      "s3DualStackRegions": []
+      "s3DualStackRegions": [],
+      "signinHost": "{region}.signin.csphome.hci.ic.gov"
     },
     {
       "id": "aws-us-gov",
@@ -1985,6 +2004,7 @@
         "osis",
         "outposts",
         "participant.connect",
+        "partnercentral-channel",
         "pi",
         "pinpoint",
         "polly",
@@ -2049,6 +2069,9 @@
         "workspaces",
         "xray"
       ],
+      "servicesFromRulesets": [
+        "partnercentral-channel"
+      ],
       "globalServices": {
         "iam": {
           "hostname": "iam.us-gov.amazonaws.com",
@@ -2079,7 +2102,8 @@
       "s3DualStackRegions": [
         "us-gov-east-1",
         "us-gov-west-1"
-      ]
+      ],
+      "signinHost": "{region}.signin.amazonaws-us-gov.com"
     }
   ]
 }

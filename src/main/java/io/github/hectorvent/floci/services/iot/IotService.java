@@ -11,14 +11,20 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
 import io.github.hectorvent.floci.services.iot.model.IotJob;
 import io.github.hectorvent.floci.services.iot.model.IotJobExecution;
@@ -28,17 +34,12 @@ import io.github.hectorvent.floci.services.iot.model.IotShadow;
 import io.github.hectorvent.floci.services.iot.model.IotThingGroup;
 import io.github.hectorvent.floci.services.iot.model.IotThingType;
 import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
-import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.iot.model.Thing;
 import io.github.hectorvent.floci.services.iot.rules.RuleSql;
 import io.github.hectorvent.floci.services.iot.rules.RuleSqlContext;
 import io.github.hectorvent.floci.services.iot.rules.RuleSqlEvaluator;
 import io.github.hectorvent.floci.services.iot.rules.RuleSqlParseException;
 import io.github.hectorvent.floci.services.iot.rules.RuleSqlParser;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
-import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
-import io.github.hectorvent.floci.services.firehose.FirehoseService;
-import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -51,8 +52,6 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.X509Certificate;
 import java.time.Clock;
@@ -62,7 +61,6 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -403,8 +401,8 @@ public class IotService {
     }
 
     /** AWS IoT's certificateId is the lowercase hex SHA-256 of the certificate's DER encoding. */
-    private static String certificateIdOf(X509Certificate x509) throws CertificateEncodingException, NoSuchAlgorithmException {
-        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(x509.getEncoded()));
+    private static String certificateIdOf(X509Certificate x509) throws CertificateEncodingException {
+        return Digests.sha256Hex(x509.getEncoded());
     }
 
     public IotCertificate describeCertificate(String certificateId, String region) {
@@ -457,7 +455,7 @@ public class IotService {
         String certificateId;
         try {
             certificateId = certificateIdOf(presented);
-        } catch (CertificateEncodingException | NoSuchAlgorithmException e) {
+        } catch (CertificateEncodingException e) {
             LOG.debugv("Could not fingerprint the presented device certificate: {0}", e.getMessage());
             return Optional.empty();
         }
@@ -495,14 +493,30 @@ public class IotService {
             return false;
         }
         List<String> documents = attachedPolicyDocuments(certificate.getCertificateArn(), device.region(), device.accountId());
+        return isConnectAllowed(documents, connectionVariables(device, clientId, sourceIp, domainName),
+                device.region(), device.accountId(), clientId);
+    }
+
+    /**
+     * Decides {@code iot:Connect} for a client a custom authorizer admitted, from the policies its
+     * function returned, with the basic connection variables: there is no certificate, so the thing
+     * variables do not resolve.
+     */
+    public boolean isConnectAllowedBy(List<String> documents, String clientId, String sourceIp, String domainName) {
+        // ponytail: the broker has no request context, so a custom-auth client connects to the default account and region.
+        return isConnectAllowed(documents, basicConnectionVariables(clientId, sourceIp, domainName),
+                regionResolver.getDefaultRegion(), regionResolver.getDefaultAccountId(), clientId);
+    }
+
+    private boolean isConnectAllowed(List<String> documents, Map<String, String> variables, String region, String accountId,
+                                     String clientId) {
         if (documents.isEmpty()) {
             return false;
         }
-        Map<String, String> variables = connectionVariables(device, clientId, sourceIp, domainName);
         List<String> resolved = documents.stream().map(document -> resolvePolicyVariables(document, variables)).toList();
         Map<String, List<String>> conditionContext = new LinkedHashMap<>();
         variables.forEach((key, value) -> conditionContext.put(key, List.of(value)));
-        String clientArn = AwsArnUtils.Arn.of("iot", device.region(), device.accountId(), "client/" + clientId).toString();
+        String clientArn = AwsArnUtils.Arn.of("iot", region, accountId, "client/" + clientId).toString();
         return policyEvaluator.evaluate(CallerContext.of(resolved), null, "iot:Connect", clientArn, conditionContext)
                 == IamPolicyEvaluator.Decision.ALLOW;
     }
@@ -533,14 +547,7 @@ public class IotService {
      * the client id names a thing attached to the certificate, as on AWS.
      */
     private Map<String, String> connectionVariables(RegisteredDevice device, String clientId, String sourceIp, String domainName) {
-        Map<String, String> variables = new LinkedHashMap<>();
-        variables.put("iot:ClientId", clientId);
-        if (sourceIp != null) {
-            variables.put("aws:SourceIp", sourceIp);
-        }
-        if (domainName != null) {
-            variables.put("iot:DomainName", domainName);
-        }
+        Map<String, String> variables = basicConnectionVariables(clientId, sourceIp, domainName);
         Optional<Thing> thing = getForAccount(thingStore, device.accountId(), thingKey(device.region(), clientId));
         boolean attached = thing.isPresent()
                 && getForAccount(thingPrincipalStore, device.accountId(), thingPrincipalKey(device.region(), clientId))
@@ -552,6 +559,18 @@ public class IotService {
                 variables.put("iot:Connection.Thing.ThingTypeName", thing.get().getThingTypeName());
             }
             thing.get().getAttributes().forEach((name, value) -> variables.put("iot:Connection.Thing.Attributes[" + name + "]", value));
+        }
+        return variables;
+    }
+
+    private static Map<String, String> basicConnectionVariables(String clientId, String sourceIp, String domainName) {
+        Map<String, String> variables = new LinkedHashMap<>();
+        variables.put("iot:ClientId", clientId);
+        if (sourceIp != null) {
+            variables.put("aws:SourceIp", sourceIp);
+        }
+        if (domainName != null) {
+            variables.put("iot:DomainName", domainName);
         }
         return variables;
     }

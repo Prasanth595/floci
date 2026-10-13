@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda.durable;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableErrorObject;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableExecution;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableExecutionStatus;
@@ -19,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -30,22 +32,37 @@ final class DurableCheckpointApplier {
 
     static final int MAX_OPERATION_PAYLOAD_BYTES = 256 * 1024;
     static final int MAX_ERROR_BYTES = 32 * 1024;
+    static final int MAX_CHAINED_INVOKE_PAYLOAD_BYTES = 1024 * 1024;
     private static final Pattern OPERATION_ID = Pattern.compile("[a-zA-Z0-9-_]{1,64}");
 
     private DurableCheckpointApplier() {
     }
 
-    record Outcome(boolean closed) {
+    /**
+     * A non-null {@code closingStatus} means the batch closed the execution, which the service then
+     * closes. {@code chainedInvokes} names the CHAINED_INVOKE operations this batch started, for the
+     * service to run. {@code unreachableChainedInvokes} holds those whose target cannot be invoked,
+     * with the error that fails them, in batch order.
+     */
+    record Outcome(DurableExecutionStatus closingStatus, String closingResult, DurableErrorObject closingError,
+                   List<String> chainedInvokes, Map<String, AwsException> unreachableChainedInvokes) {
+
+        boolean closed() {
+            return closingStatus != null;
+        }
     }
 
-    static Outcome apply(DurableExecution execution, List<DurableOperationUpdate> updates, long now) {
+    /** {@code unreachableTarget} gives the error for a chained target that cannot be invoked, or null. */
+    static Outcome apply(DurableExecution execution, List<DurableOperationUpdate> updates, long now,
+                         Function<String, AwsException> unreachableTarget) {
         validateBatch(updates);
-        Draft draft = new Draft(execution, now);
+        Draft draft = new Draft(execution, now, unreachableTarget);
         for (DurableOperationUpdate update : updates) {
             draft.apply(update);
         }
         draft.commit();
-        return new Outcome(draft.closingStatus != null);
+        return new Outcome(draft.closingStatus, draft.closingResult, draft.closingError,
+                List.copyOf(draft.chainedInvokes), draft.unreachableChainedInvokes);
     }
 
     /** Completes waits, step retries and callback timeouts whose time has come. The sweeper and every checkpoint call it. */
@@ -154,16 +171,20 @@ final class DurableCheckpointApplier {
 
         private final DurableExecution execution;
         private final long now;
+        private final Function<String, AwsException> unreachableTarget;
         private final LinkedHashMap<String, DurableOperation> operations = new LinkedHashMap<>();
         private final List<Consumer<DurableExecution>> events = new ArrayList<>();
+        private final List<String> chainedInvokes = new ArrayList<>();
+        private final LinkedHashMap<String, AwsException> unreachableChainedInvokes = new LinkedHashMap<>();
         private long changeSequence;
         private DurableExecutionStatus closingStatus;
         private String closingResult;
         private DurableErrorObject closingError;
 
-        Draft(DurableExecution execution, long now) {
+        Draft(DurableExecution execution, long now, Function<String, AwsException> unreachableTarget) {
             this.execution = execution;
             this.now = now;
+            this.unreachableTarget = unreachableTarget;
             this.changeSequence = execution.getChangeSequence();
             for (Map.Entry<String, DurableOperation> entry : execution.getOperations().entrySet()) {
                 operations.put(entry.getKey(), entry.getValue().copy());
@@ -189,7 +210,12 @@ final class DurableCheckpointApplier {
                 }
             }
             requireErrorSize(update);
-            if (utf8Length(update.payload()) > MAX_OPERATION_PAYLOAD_BYTES) {
+            if (update.type() == DurableOperationType.CHAINED_INVOKE) {
+                if (utf8Length(update.payload()) > MAX_CHAINED_INVOKE_PAYLOAD_BYTES) {
+                    throw invalid("CHAINED_INVOKE input payload size must be less than or equal to "
+                            + MAX_CHAINED_INVOKE_PAYLOAD_BYTES + " bytes.");
+                }
+            } else if (utf8Length(update.payload()) > MAX_OPERATION_PAYLOAD_BYTES) {
                 throw invalid(update.type() + " payload size must be less than or equal to "
                         + MAX_OPERATION_PAYLOAD_BYTES + " bytes.");
             }
@@ -198,7 +224,7 @@ final class DurableCheckpointApplier {
                 case STEP -> applyStep(update, existing);
                 case WAIT -> applyWait(update, existing);
                 case CALLBACK -> applyCallback(update, existing);
-                case CHAINED_INVOKE -> throw invalid(update.type() + " operations are not supported yet");
+                case CHAINED_INVOKE -> applyChainedInvoke(update, existing);
                 default -> throw invalid("Unknown operation type.");
             }
         }
@@ -208,17 +234,6 @@ final class DurableCheckpointApplier {
             execution.setChangeSequence(changeSequence);
             for (Consumer<DurableExecution> event : events) {
                 event.accept(execution);
-            }
-            if (closingStatus != null) {
-                execution.setStatus(closingStatus);
-                execution.setResult(closingResult);
-                execution.setError(closingError);
-                execution.setEndTimestamp(now);
-                if (closingStatus == DurableExecutionStatus.SUCCEEDED) {
-                    DurableHistory.executionSucceeded(execution, now);
-                } else {
-                    DurableHistory.executionEnded(execution, "ExecutionFailed", now);
-                }
             }
         }
 
@@ -236,12 +251,6 @@ final class DurableCheckpointApplier {
             closingStatus = succeeded ? DurableExecutionStatus.SUCCEEDED : DurableExecutionStatus.FAILED;
             closingResult = succeeded ? update.payload() : null;
             closingError = succeeded ? null : update.error();
-            DurableOperation operation = operations.get(execution.getExecutionId());
-            if (operation != null) {
-                operation.setStatus(succeeded ? DurableOperationStatus.SUCCEEDED : DurableOperationStatus.FAILED);
-                operation.setEndTimestamp(now);
-                touch(operation);
-            }
         }
 
         private void applyContext(DurableOperationUpdate update, DurableOperation existing) {
@@ -365,6 +374,53 @@ final class DurableCheckpointApplier {
                     event(existing, "WaitCancelled", new LinkedHashMap<>());
                 }
                 default -> throw invalid("Invalid action for the given operation type.");
+            }
+        }
+
+        /** The service resolves and runs the target, and records ChainedInvokeStarted with what it found. */
+        private void applyChainedInvoke(DurableOperationUpdate update, DurableOperation existing) {
+            if (update.action() != DurableOperationAction.START) {
+                throw invalid("Invalid action for the given operation type.");
+            }
+            if (update.chainedFunctionName() == null) {
+                throw invalid("Update for CHAINED_INVOKE operation requires ChainedInvokeOptions.");
+            }
+            if (existing != null) {
+                throw invalid("Cannot start a CHAINED_INVOKE that already exist.");
+            }
+            requireSameAccountAndRegion(update.chainedFunctionName());
+            DurableOperation operation = create(update);
+            operation.setChainedFunctionName(update.chainedFunctionName());
+            operation.setChainedTenantId(update.chainedTenantId());
+            operation.setInputPayload(update.payload());
+            AwsException unreachable = unreachableTarget.apply(update.chainedFunctionName());
+            if (unreachable == null) {
+                chainedInvokes.add(update.id());
+                return;
+            }
+            // AWS logs the start of a target it cannot invoke in batch order, naming only the function.
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("FunctionName", update.chainedFunctionName());
+            if (update.chainedTenantId() != null) {
+                details.put("TenantId", update.chainedTenantId());
+            }
+            event(operation, "ChainedInvokeStarted", details);
+            unreachableChainedInvokes.put(update.id(), unreachable);
+        }
+
+        /** A name that does not parse is left to the target lookup, which fails the operation. */
+        private void requireSameAccountAndRegion(String functionName) {
+            LambdaArnUtils.ResolvedFunctionRef ref;
+            try {
+                ref = LambdaArnUtils.resolve(functionName);
+            } catch (AwsException e) {
+                return;
+            }
+            if (ref.account() != null && !ref.account().equals(execution.getAccountId())) {
+                throw invalid("Cannot start a CHAINED_INVOKE on a function in another account.");
+            }
+            if (ref.region() != null && !ref.region().equals(execution.getRegion())) {
+                throw invalid("Cannot start a CHAINED_INVOKE on a function in another region.");
             }
         }
 

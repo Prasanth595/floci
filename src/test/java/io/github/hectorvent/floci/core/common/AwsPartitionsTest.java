@@ -102,6 +102,21 @@ class AwsPartitionsTest {
     }
 
     /** botocore publishes no {@code aws-eusc-global}, and EUSC has no partition-wide service at all. */
+    @ParameterizedTest
+    @CsvSource({
+            "aws,        us-east-1,      us-east-1.signin.aws.amazon.com",
+            "aws-cn,     cn-north-1,     cn-north-1.signin.amazonaws.cn",
+            "aws-us-gov, us-gov-west-1,  us-gov-west-1.signin.amazonaws-us-gov.com",
+            "aws-iso,    us-iso-east-1,  us-iso-east-1.signin.c2shome.ic.gov",
+            "aws-iso-b,  us-isob-east-1, us-isob-east-1.signin.sc2shome.sgov.gov",
+            "aws-iso-e,  eu-isoe-west-1, eu-isoe-west-1.signin.csphome.adc-e.uk",
+            "aws-iso-f,  us-isof-south-1, us-isof-south-1.signin.csphome.hci.ic.gov",
+            "aws-eusc,   eusc-de-east-1, eusc-de-east-1.signin.amazonaws-eusc.eu"
+    })
+    void everyPartitionPublishesItsSigninHost(String partition, String region, String host) {
+        assertEquals(Optional.of(host), AwsPartitions.byId(partition).signinHostname(region));
+    }
+
     @Test
     void euscHasNoPseudoRegionAndNoGlobalServices() {
         AwsPartition eusc = AwsPartitions.byId("aws-eusc");
@@ -134,12 +149,12 @@ class AwsPartitionsTest {
     }
 
     @Test
-    void serviceAvailabilityFollowsEndpointsJson() {
+    void serviceAvailabilityFollowsThePublishedData() {
         assertTrue(AwsPartitions.commercial().offers("cloudfront"));
         assertTrue(AwsPartitions.byId("aws-cn").offers("cloudfront"));
         assertFalse(AwsPartitions.byId("aws-us-gov").offers("cloudfront"));
-        assertFalse(AwsPartitions.byId("aws-eusc").offers("iam"));
-        assertFalse(AwsPartitions.byId("aws-iso-e").offers("iam"));
+        assertFalse(AwsPartitions.byId("aws-cn").offers("lightsail"));
+        assertTrue(AwsPartitions.byId("aws-eusc").offers("iam"), "IAM's endpoint ruleset names aws-eusc");
         assertFalse(AwsPartitions.byId("aws-cn").offers("cognito-idp"));
         assertFalse(AwsPartitions.commercial().offers(null));
     }
@@ -156,7 +171,7 @@ class AwsPartitionsTest {
         assertTrue(AwsPartitions.byId("aws-cn").offersSigningName("ecr"));
         assertTrue(AwsPartitions.byId("aws-cn").offersSigningName("sqs"));
         assertFalse(AwsPartitions.byId("aws-us-gov").offersSigningName("cloudfront"));
-        assertFalse(AwsPartitions.byId("aws-eusc").offersSigningName("iam"));
+        assertFalse(AwsPartitions.byId("aws-cn").offersSigningName("lightsail"));
         assertFalse(AwsPartitions.commercial().offersSigningName("no-such-service"));
         assertFalse(AwsPartitions.commercial().offersSigningName(null));
 
@@ -165,6 +180,35 @@ class AwsPartitionsTest {
         assertFalse(AwsPartitions.publishesSomewhere("fis"), "endpoints.json omits the ruleset-only services");
         assertFalse(AwsPartitions.publishesSomewhere("no-such-service"));
         assertFalse(AwsPartitions.publishesSomewhere(null));
+    }
+
+    /**
+     * {@code endpoints.json} leaves IAM, Route 53, Budgets and Cost Explorer out of {@code aws-eusc},
+     * and IAM and Cost Explorer out of {@code aws-iso-e}, but each service's endpoint ruleset has an
+     * explicit branch for the partition ({@code iam.eusc-de-east-1.amazonaws.eu}).
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "aws-eusc, iam",
+        "aws-eusc, route53",
+        "aws-eusc, budgets",
+        "aws-eusc, ce",
+        "aws-iso-e, iam",
+        "aws-iso-e, ce",
+    })
+    void partitionsAServiceRulesetNamesExplicitlyOfferIt(String partitionId, String signingName) {
+        assertTrue(AwsPartitions.byId(partitionId).offersSigningName(signingName));
+    }
+
+    /**
+     * API Gateway's invoke endpoints and its WebSocket management API sign {@code execute-api},
+     * as Connect Participant does, and the published data lists the API Gateway side nowhere, so
+     * the name must not be judged by where Connect Participant is offered.
+     */
+    @Test
+    void executeApiIsNotTiedToConnectParticipant() {
+        assertEquals(Set.of(), AwsPartitions.endpointPrefixes("execute-api"));
+        assertFalse(AwsPartitions.publishesSomewhere("execute-api"));
     }
 
     @Test

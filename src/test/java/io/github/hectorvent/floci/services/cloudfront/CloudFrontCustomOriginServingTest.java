@@ -16,23 +16,35 @@ import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolic
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.RestAssured;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.Signature;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -42,7 +54,9 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -314,6 +328,166 @@ class CloudFrontCustomOriginServingTest {
             .statusCode(201);
         assertEquals("0", received.get().header("Content-Length"));
         assertEquals(5, hits.get());
+    }
+
+    @Test
+    void streamsALargeOriginResponseWithItsLength() throws Exception {
+        byte[] video = randomBytes(3 * 1024 * 1024 + 1);
+        startServingOrigin(video, true);
+        Distribution created = cloudFrontService.createDistribution(
+                customOriginDistribution(allMethodsBehavior()), Map.of());
+
+        Response response = given().header("Host", created.getDomainName()).when().get("/video.bin");
+
+        assertEquals(200, response.statusCode());
+        assertEquals(Integer.toString(video.length), response.header("Content-Length"));
+        assertArrayEquals(video, response.asByteArray());
+    }
+
+    @Test
+    void passesAChunkedOriginResponseThroughChunked() throws Exception {
+        byte[] video = randomBytes(3 * 1024 * 1024 + 1);
+        startServingOrigin(video, false);
+        Distribution created = cloudFrontService.createDistribution(
+                customOriginDistribution(allMethodsBehavior()), Map.of());
+
+        Response response = given().header("Host", created.getDomainName()).when().get("/video.bin");
+
+        assertEquals(200, response.statusCode());
+        assertNull(response.header("Content-Length"), "an origin that sent no length was given one");
+        assertArrayEquals(video, response.asByteArray());
+    }
+
+    @Test
+    void streamsALargeViewerBodyToTheOriginWithItsLength() throws Exception {
+        AtomicReference<ReceivedRequest> received = new AtomicReference<>();
+        startRecordingOrigin(received, new AtomicInteger());
+        Distribution created = cloudFrontService.createDistribution(
+                customOriginDistribution(allMethodsBehavior()), Map.of());
+        byte[] upload = randomBytes(3 * 1024 * 1024 + 1);
+
+        given()
+            .header("Host", created.getDomainName())
+            .contentType("application/octet-stream")
+            .body(upload)
+        .when()
+            .put("/uploads/video.bin")
+        .then()
+            .statusCode(200);
+
+        assertEquals(Integer.toString(upload.length), received.get().header("Content-Length"));
+        assertArrayEquals(upload, received.get().body());
+    }
+
+    @Test
+    void forwardsAChunkedViewerBodyChunked() throws Exception {
+        AtomicReference<ReceivedRequest> received = new AtomicReference<>();
+        startRecordingOrigin(received, new AtomicInteger());
+        Distribution created = cloudFrontService.createDistribution(
+                customOriginDistribution(allMethodsBehavior()), Map.of());
+        byte[] upload = randomBytes(200_001);
+
+        int status = assertTimeoutPreemptively(Duration.ofSeconds(60),
+                () -> postChunked(created.getDomainName(), "/uploads", upload));
+
+        assertEquals(201, status);
+        assertEquals("chunked", received.get().header("Transfer-Encoding"));
+        assertNull(received.get().header("Content-Length"));
+        assertArrayEquals(upload, received.get().body());
+    }
+
+    @Test
+    void releasesOriginConnectionsWhenViewersDisconnectBeforeOriginHeaders() throws Exception {
+        BlockingQueue<CountDownLatch> pendingResponses = new LinkedBlockingQueue<>();
+        originServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        originServer.createContext("/", exchange -> {
+            CountDownLatch sendResponse = new CountDownLatch(1);
+            pendingResponses.add(sendResponse);
+            try {
+                if (!sendResponse.await(10, TimeUnit.SECONDS)) {
+                    throw new IOException("Timed out waiting for viewer disconnect");
+                }
+                byte[] body = "origin-ok".getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Origin response interrupted", e);
+            } finally {
+                exchange.close();
+            }
+        });
+        originServer.createContext("/after-disconnects", exchange -> {
+            byte[] body = "origin-ok".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        originServer.start();
+        Distribution created = cloudFrontService.createDistribution(
+                customOriginDistribution(allMethodsBehavior()), Map.of());
+
+        for (int i = 0; i < CloudFrontOriginHttpClient.MAX_CONNECTIONS + 10; i++) {
+            disconnectViewerBeforeOriginHeaders(created.getDomainName(), i, pendingResponses);
+        }
+
+        given().header("Host", created.getDomainName()).when().get("/after-disconnects")
+                .then().statusCode(200).body(equalTo("origin-ok"));
+    }
+
+    @Test
+    void releasesTheOriginConnectionOfEveryResponseItDoesNotSend() throws Exception {
+        // The origin client keeps a fixed number of connections. An error response replaced by a custom
+        // error page, or a HEAD's, that kept its connection would leave a request past that number
+        // waiting for one.
+        originServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        originServer.createContext("/", exchange -> {
+            boolean errorPage = "/errors/404.html".equals(exchange.getRequestURI().getRawPath());
+            byte[] body = (errorPage ? "error-page" : "x".repeat(100_000)).getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/plain");
+            boolean head = "HEAD".equals(exchange.getRequestMethod());
+            exchange.sendResponseHeaders(errorPage ? 200 : 404, head ? -1 : body.length);
+            if (!head) {
+                exchange.getResponseBody().write(body);
+            }
+            exchange.close();
+        });
+        originServer.start();
+        Map<String, Object> errorPage = new LinkedHashMap<>(Map.of(
+                "ErrorCode", "404", "ResponseCode", "200", "ResponsePagePath", "/errors/404.html"));
+        Distribution distribution = customOriginDistribution(allMethodsBehavior());
+        distribution.getConfig().setCustomErrorResponses(List.of(errorPage));
+        Distribution created = cloudFrontService.createDistribution(distribution, Map.of());
+
+        assertTimeoutPreemptively(Duration.ofSeconds(60), () -> {
+            for (int i = 0; i < CloudFrontOriginHttpClient.MAX_CONNECTIONS + 10; i++) {
+                given().header("Host", created.getDomainName()).when().get("/missing/" + i)
+                        .then().statusCode(200).body(equalTo("error-page"));
+                given().header("Host", created.getDomainName()).when().head("/missing/" + i)
+                        .then().statusCode(200);
+            }
+        });
+    }
+
+    @Test
+    void forwardsARangeGetWhateverTheCachePolicyAndPassesThePartialResponse() throws Exception {
+        byte[] video = randomBytes(1000);
+        AtomicReference<ReceivedRequest> received = new AtomicReference<>();
+        startRangeOrigin(video, received);
+        // CachingDisabled forwards no viewer headers, but CloudFront still forwards a range GET.
+        Distribution created = cloudFrontService.createDistribution(
+                customOriginDistribution(policyBehavior(CACHING_DISABLED, null)), Map.of());
+
+        Response response = given().header("Host", created.getDomainName())
+                .header("Range", "bytes=100-199").header("If-Range", "\"v1\"")
+                .when().get("/video.bin");
+
+        assertEquals(206, response.statusCode());
+        assertEquals("bytes 100-199/1000", response.header("Content-Range"));
+        assertEquals("100", response.header("Content-Length"));
+        assertArrayEquals(Arrays.copyOfRange(video, 100, 200), response.asByteArray());
+        assertEquals("bytes=100-199", received.get().header("Range"));
+        assertEquals("\"v1\"", received.get().header("If-Range"));
     }
 
     @Test
@@ -681,6 +855,23 @@ class CloudFrontCustomOriginServingTest {
         assertEquals("127.0.0.1:" + originServer.getAddress().getPort(), request.header("Host"));
     }
 
+    private static void disconnectViewerBeforeOriginHeaders(String host, int requestIndex,
+                                                            BlockingQueue<CountDownLatch> pendingResponses)
+            throws Exception {
+        CountDownLatch sendResponse = null;
+        try (Socket viewer = new Socket("127.0.0.1", RestAssured.port)) {
+            viewer.setSoLinger(true, 0);
+            viewer.getOutputStream().write(("GET /disconnect/" + requestIndex + " HTTP/1.1\r\nHost: "
+                    + host + "\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+            sendResponse = pendingResponses.poll(5, TimeUnit.SECONDS);
+            assertNotNull(sendResponse, "No origin connection for viewer " + requestIndex);
+        } finally {
+            if (sendResponse != null) {
+                sendResponse.countDown();
+            }
+        }
+    }
+
     private void startRecordingOrigin(AtomicReference<ReceivedRequest> received, AtomicInteger hits)
             throws IOException {
         originServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -703,6 +894,75 @@ class CloudFrontCustomOriginServingTest {
             exchange.close();
         });
         originServer.start();
+    }
+
+    /** An origin that answers every GET with {@code body}, with its length or chunked. */
+    private void startServingOrigin(byte[] body, boolean withLength) throws IOException {
+        originServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        originServer.createContext("/", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            exchange.getResponseHeaders().add("Content-Type", "application/octet-stream");
+            exchange.sendResponseHeaders(200, withLength ? body.length : 0);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        originServer.start();
+    }
+
+    /** An origin that answers a GET for {@code body} with the one {@code bytes=first-last} range asked for. */
+    private void startRangeOrigin(byte[] body, AtomicReference<ReceivedRequest> received) throws IOException {
+        originServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        originServer.createContext("/", exchange -> {
+            received.set(new ReceivedRequest(exchange.getRequestMethod(), exchange.getRequestURI().getRawPath(),
+                    exchange.getRequestURI().getRawQuery(), exchange.getRequestHeaders(), new byte[0]));
+            exchange.getResponseHeaders().add("Content-Type", "application/octet-stream");
+            String range = exchange.getRequestHeaders().getFirst("Range");
+            if (range == null) {
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+            } else {
+                String[] bounds = range.substring("bytes=".length()).split("-");
+                int first = Integer.parseInt(bounds[0]);
+                int last = Integer.parseInt(bounds[1]);
+                exchange.getResponseHeaders().add("Content-Range", "bytes " + first + "-" + last + "/" + body.length);
+                exchange.sendResponseHeaders(206, last - first + 1);
+                exchange.getResponseBody().write(body, first, last - first + 1);
+            }
+            exchange.close();
+        });
+        originServer.start();
+    }
+
+    /**
+     * POSTs {@code body} with {@code Transfer-Encoding: chunked} over a raw connection, since an HTTP
+     * client library buffers a stream it is given and sends its length instead.
+     */
+    private static int postChunked(String host, String path, byte[] body) throws IOException {
+        try (Socket socket = new Socket("localhost", RestAssured.port)) {
+            // A response that never comes fails the read instead of leaving it waiting.
+            socket.setSoTimeout(30_000);
+            OutputStream out = socket.getOutputStream();
+            out.write(("POST " + path + " HTTP/1.1\r\nHost: " + host
+                    + "\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked"
+                    + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+            for (int offset = 0; offset < body.length; offset += 8192) {
+                int size = Math.min(8192, body.length - offset);
+                out.write((Integer.toHexString(size) + "\r\n").getBytes(StandardCharsets.US_ASCII));
+                out.write(body, offset, size);
+                out.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+            }
+            out.write("0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+            out.flush();
+            String statusLine = new BufferedReader(
+                    new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII)).readLine();
+            return Integer.parseInt(statusLine.split(" ")[1]);
+        }
+    }
+
+    private static byte[] randomBytes(int size) {
+        byte[] bytes = new byte[size];
+        new Random(size).nextBytes(bytes);
+        return bytes;
     }
 
     private Distribution customOriginDistribution(DefaultCacheBehavior behavior) {

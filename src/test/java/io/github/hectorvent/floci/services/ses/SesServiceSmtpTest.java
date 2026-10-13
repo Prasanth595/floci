@@ -6,16 +6,19 @@ import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EmailContent;
 import io.github.hectorvent.floci.services.ses.model.InsightsEvent;
+import io.github.hectorvent.floci.services.ses.model.MessageAttachment;
 import io.github.hectorvent.floci.services.ses.model.SendEmailRequest;
+import io.github.hectorvent.floci.services.ses.model.SentAttachment;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import org.mockito.ArgumentCaptor;
-
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -45,6 +48,7 @@ class SesServiceSmtpTest {
         suppression = builder.suppressionService();
         cvetTemplates = builder.cvetService();
         identities = builder.identityService();
+        identities.verifyEmailIdentity("from@example.com", "us-east-1");
     }
 
     private void cvetTemplate(String name, String subject, String content) {
@@ -148,6 +152,66 @@ class SesServiceSmtpTest {
         assertEquals(messageId, relayed.messageId());
     }
 
+    private static MessageAttachment pdfAttachment(byte[] content) {
+        return new MessageAttachment("report.pdf", content, "application/pdf",
+                MessageAttachment.Disposition.ATTACHMENT, null, null, null);
+    }
+
+    @Test
+    void sendEmail_withAttachments_relaysThemAndStoresTheAssembledMessage() {
+        byte[] pdf = "pdf-bytes".getBytes(StandardCharsets.UTF_8);
+        String messageId = service.sendEmail(SendEmailRequest.builder()
+                .source("from@example.com")
+                .toAddresses(List.of("to@example.com"))
+                .region("us-east-1")
+                .content(new EmailContent.Simple("Subject", "text", null, List.of(),
+                        List.of(pdfAttachment(pdf))))
+                .build());
+
+        SmtpRelay.RelayMessage relayed = capturedRelay();
+        assertEquals(1, relayed.attachments().size());
+        assertArrayEquals(pdf, relayed.attachments().get(0).rawContent());
+        SentEmail stored = storedEmail(messageId);
+        assertFalse(stored.isRaw());
+        assertEquals(List.of(new SentAttachment("report.pdf", "application/pdf", "ATTACHMENT", null, null,
+                pdf.length)), stored.getAttachments());
+        String mime = new String(Base64.getDecoder().decode(stored.getMimeData()), StandardCharsets.UTF_8);
+        assertTrue(mime.contains("report.pdf"), mime);
+    }
+
+    @Test
+    void sendEmail_withSignatureInAnAttachment_isRejectedAndNotRelayed() {
+        String messageId = service.sendEmail(SendEmailRequest.builder()
+                .source("from@example.com")
+                .toAddresses(List.of("to@example.com"))
+                .region("us-east-1")
+                .content(new EmailContent.Simple("Subject", "clean", null, List.of(),
+                        List.of(pdfAttachment(SesContentScan.signature().getBytes(StandardCharsets.US_ASCII)))))
+                .build());
+
+        SentEmail stored = storedEmail(messageId);
+        assertEquals("Bad content", stored.getRejectReason());
+        assertNull(stored.getAttachments());
+        assertNull(stored.getMimeData());
+        assertEquals(List.of("SEND", "REJECT"), insightsEventTypes(messageId));
+        verify(smtpRelay, never()).relay(any());
+    }
+
+    @Test
+    void sendEmail_withoutAttachments_storesNoAttachmentFields() {
+        String messageId = service.sendEmail(SendEmailRequest.builder()
+                .source("from@example.com")
+                .toAddresses(List.of("to@example.com"))
+                .region("us-east-1")
+                .content(new EmailContent.Simple("Subject", "text", null, List.of()))
+                .build());
+
+        SentEmail stored = storedEmail(messageId);
+        assertNull(stored.getAttachments());
+        assertNull(stored.getMimeData());
+        assertNull(capturedRelay().attachments());
+    }
+
     @Test
     void sendEmail_storesAndRelays() {
         String messageId = service.sendEmail(SendEmailRequest.builder()
@@ -176,6 +240,7 @@ class SesServiceSmtpTest {
 
     @Test
     void sendEmail_explicitReturnPath_isRelayedAndStored() {
+        identities.verifyEmailIdentity("bounces@example.com", "us-east-1");
         String messageId = service.sendEmail(SendEmailRequest.builder()
                 .source("from@example.com")
                 .toAddresses(List.of("to@example.com"))
@@ -191,7 +256,10 @@ class SesServiceSmtpTest {
     @Test
     void sendRawEmail_rejectedMessage_keepsNoReturnPathFromItsHeaders() {
         // The scan trips on the subject; the Return-Path header, read off the same message, must
-        // not survive on the record either, so the request's return path is used.
+        // not survive on the record either, so the request's return path is used. Both return paths
+        // are verified, so the send gets past the sender check to the scan.
+        identities.verifyEmailIdentity("bounces@example.com", "us-east-1");
+        identities.verifyEmailIdentity("bounces@evil.example", "us-east-1");
         String raw = "From: from@example.com\r\nTo: to@example.com\r\nReturn-Path: <bounces@evil.example>\r\n"
                 + "Subject: " + SesContentScan.signature() + "\r\n\r\nbody\r\n";
 
@@ -244,6 +312,8 @@ class SesServiceSmtpTest {
 
     @Test
     void sendRawEmail_returnPathHeader_winsOverRequestField() {
+        identities.verifyEmailIdentity("request-bounces@example.com", "us-east-1");
+        identities.verifyEmailIdentity("mime-bounces@example.com", "us-east-1");
         String raw = "From: from@example.com\r\n"
                 + "To: to@example.com\r\n"
                 + "Return-Path: <mime-bounces@example.com>\r\n"
@@ -263,6 +333,7 @@ class SesServiceSmtpTest {
 
     @Test
     void sendRawEmail_noReturnPathHeader_usesRequestField() {
+        identities.verifyEmailIdentity("request-bounces@example.com", "us-east-1");
         String raw = "From: from@example.com\r\nTo: to@example.com\r\nSubject: x\r\n\r\nbody";
 
         service.sendEmail(SendEmailRequest.builder()

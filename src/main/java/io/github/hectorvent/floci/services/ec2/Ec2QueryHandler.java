@@ -1,13 +1,14 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -45,18 +46,20 @@ public class Ec2QueryHandler {
     private final Ec2EbsEncryptionService ebsEncryptionService;
     private final Ec2SnapshotBlockPublicAccessService snapshotBlockPublicAccessService;
     private final Ec2IpamService ipamService;
+    private final RegionResolver regionResolver;
 
     @Inject
     public Ec2QueryHandler(Ec2Service service, EmulatorConfig config, FlowLogService flowLogService,
                            Ec2EbsEncryptionService ebsEncryptionService,
                            Ec2SnapshotBlockPublicAccessService snapshotBlockPublicAccessService,
-                           Ec2IpamService ipamService) {
+                           Ec2IpamService ipamService, RegionResolver regionResolver) {
         this.service = service;
         this.config = config;
         this.flowLogService = flowLogService;
         this.ebsEncryptionService = ebsEncryptionService;
         this.snapshotBlockPublicAccessService = snapshotBlockPublicAccessService;
         this.ipamService = ipamService;
+        this.regionResolver = regionResolver;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -132,6 +135,16 @@ public class Ec2QueryHandler {
                         handleModifyTransitGatewayVpcAttachment(params, region);
                 case "DeleteTransitGatewayVpcAttachment" ->
                         handleDeleteTransitGatewayVpcAttachment(params, region);
+                case "CreateTransitGatewayPeeringAttachment" ->
+                        handleCreateTransitGatewayPeeringAttachment(params, region);
+                case "DescribeTransitGatewayPeeringAttachments" ->
+                        handleDescribeTransitGatewayPeeringAttachments(params, region);
+                case "AcceptTransitGatewayPeeringAttachment" -> peeringAttachmentResponse(
+                        "AcceptTransitGatewayPeeringAttachmentResponse", service.acceptTransitGatewayPeeringAttachment(
+                                region, params.getFirst("TransitGatewayAttachmentId")));
+                case "DeleteTransitGatewayPeeringAttachment" -> peeringAttachmentResponse(
+                        "DeleteTransitGatewayPeeringAttachmentResponse", service.deleteTransitGatewayPeeringAttachment(
+                                region, params.getFirst("TransitGatewayAttachmentId")));
                 // Transit Gateway route tables, associations, propagations and routes
                 case "CreateTransitGatewayRouteTable" -> handleCreateTransitGatewayRouteTable(params, region);
                 case "DescribeTransitGatewayRouteTables" ->
@@ -380,6 +393,18 @@ public class Ec2QueryHandler {
 
     private Map<String, List<String>> getFilters(MultivaluedMap<String, String> p) {
         Map<String, List<String>> filters = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> filter : getFiltersList(p)) {
+            filters.put(filter.getKey(), filter.getValue());
+        }
+        return filters;
+    }
+
+    /**
+     * Returns filters as a list of entries to preserve multiple filters with the same name
+     * (AND semantics across filters, OR within values of the same filter).
+     */
+    private List<Map.Entry<String, List<String>>> getFiltersList(MultivaluedMap<String, String> p) {
+        List<Map.Entry<String, List<String>>> filters = new ArrayList<>();
         for (int i = 1; ; i++) {
             String name = p.getFirst("Filter." + i + ".Name");
             if (name == null) break;
@@ -389,7 +414,7 @@ public class Ec2QueryHandler {
                 if (v == null) break;
                 values.add(v);
             }
-            filters.put(name, values);
+            filters.add(new AbstractMap.SimpleEntry<>(name, values));
         }
         return filters;
     }
@@ -535,11 +560,28 @@ public class Ec2QueryHandler {
      * spellings are read, because an action that used the plural silently lost every tag.
      */
     private List<Tag> parseTagsForResource(MultivaluedMap<String, String> p, String resourceType) {
+        return parseTagsForResource(p, resourceType, false);
+    }
+
+    private List<Tag> parseTagsForResource(MultivaluedMap<String, String> p, String resourceType,
+                                         boolean requireMatchingResourceType) {
         List<Tag> tags = new ArrayList<>();
         for (String prefix : new String[] {"TagSpecification", "TagSpecifications"}) {
             for (int i = 1; ; i++) {
-                String resType = p.getFirst(prefix + "." + i + ".ResourceType");
-                if (resType == null) break;
+                String specificationPrefix = prefix + "." + i + ".";
+                String resType = p.getFirst(specificationPrefix + "ResourceType");
+                if (resType == null && p.keySet().stream().noneMatch(key -> key.startsWith(specificationPrefix))) {
+                    break;
+                }
+                if (requireMatchingResourceType && !resourceType.equals(resType)) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Tag specification resource type '" + (resType == null ? "" : resType)
+                                    + "' is not valid for this operation. The valid resource type is '"
+                                    + resourceType + "'.", 400);
+                }
+                if (resType == null) {
+                    break;
+                }
                 if (resourceType.equals(resType)) {
                     for (int j = 1; ; j++) {
                         String key = p.getFirst(prefix + "." + i + ".Tag." + j + ".Key");
@@ -1523,7 +1565,7 @@ public class Ec2QueryHandler {
     private Response handleCreateVpc(MultivaluedMap<String, String> p, String region) {
         String cidrBlock = p.getFirst("CidrBlock");
         boolean amazonProvidedIpv6 = "true".equalsIgnoreCase(p.getFirst("AmazonProvidedIpv6CidrBlock"));
-        Vpc vpc = service.createVpc(region, cidrBlock, false, amazonProvidedIpv6);
+        Vpc vpc = service.createVpc(region, cidrBlock, false, amazonProvidedIpv6, p.getFirst("InstanceTenancy"));
         List<Tag> vpcTags = new ArrayList<>();
         for (int i = 1; ; i++) {
             String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
@@ -1617,7 +1659,7 @@ public class Ec2QueryHandler {
 
     private Response handleDescribeVpcEndpointServices(MultivaluedMap<String, String> p, String region) {
         List<String> requested = getList(p, "ServiceName");
-        List<String> azNames = service.describeAvailabilityZones(region).stream()
+        List<String> azNames = service.describeAvailabilityZones(region, List.of(), List.of(), null).stream()
                 .map(z -> z.get("zoneName")).toList();
 
         XmlBuilder xml = new XmlBuilder()
@@ -2163,7 +2205,7 @@ public class Ec2QueryHandler {
                 p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
                 p.getFirst("PolicyDocument"),
                 parseTagsForResource(p, "vpc-endpoint"),
-                parseSubnetConfigurations(p));
+                parseSubnetConfigurations(p), p.getFirst("IpAddressType"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVpcEndpointResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2185,7 +2227,7 @@ public class Ec2QueryHandler {
                 p.getFirst("PolicyDocument"),
                 p.getFirst("ResetPolicy") != null ? Boolean.valueOf(p.getFirst("ResetPolicy")) : null,
                 p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
-                parseSubnetConfigurations(p));
+                parseSubnetConfigurations(p), p.getFirst("IpAddressType"));
         // ModifyVpcEndpoint returns only a boolean; the caller re-reads the endpoint
         // through DescribeVpcEndpoints to see the result.
         XmlBuilder xml = new XmlBuilder()
@@ -2488,6 +2530,63 @@ public class Ec2QueryHandler {
                 .end("transitGatewayVpcAttachment")
                 .end("DeleteTransitGatewayVpcAttachmentResponse");
         return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateTransitGatewayPeeringAttachment(MultivaluedMap<String, String> p, String region) {
+        return peeringAttachmentResponse("CreateTransitGatewayPeeringAttachmentResponse",
+                service.createTransitGatewayPeeringAttachment(region,
+                        p.getFirst("TransitGatewayId"),
+                        p.getFirst("PeerTransitGatewayId"),
+                        p.getFirst("PeerAccountId"),
+                        p.getFirst("PeerRegion"),
+                        p.getFirst("Options.DynamicRouting"),
+                        parseTagsForResource(p, "transit-gateway-attachment")));
+    }
+
+    private Response handleDescribeTransitGatewayPeeringAttachments(MultivaluedMap<String, String> p,
+                                                                   String region) {
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTransitGatewayPeeringAttachmentsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayPeeringAttachments");
+        for (TransitGatewayPeeringAttachment attachment : service.describeTransitGatewayPeeringAttachments(
+                region, getList(p, "TransitGatewayAttachmentIds"), getFilters(p))) {
+            xml.start("item").raw(peeringAttachmentXml(attachment)).end("item");
+        }
+        xml.end("transitGatewayPeeringAttachments").end("DescribeTransitGatewayPeeringAttachmentsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /** Create, accept and delete all answer with the attachment under the same member name. */
+    private Response peeringAttachmentResponse(String responseName, TransitGatewayPeeringAttachment attachment) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(responseName, AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayPeeringAttachment").raw(peeringAttachmentXml(attachment))
+                .end("transitGatewayPeeringAttachment")
+                .end(responseName);
+        return xmlResponse(xml.build());
+    }
+
+    private String peeringAttachmentXml(TransitGatewayPeeringAttachment attachment) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("transitGatewayAttachmentId", attachment.getTransitGatewayAttachmentId());
+        List<Map.Entry<String, TransitGatewayPeeringAttachment.TgwInfo>> sides = List.of(
+                Map.entry("requesterTgwInfo", attachment.getRequesterTgwInfo()),
+                Map.entry("accepterTgwInfo", attachment.getAccepterTgwInfo()));
+        for (Map.Entry<String, TransitGatewayPeeringAttachment.TgwInfo> side : sides) {
+            xml.start(side.getKey())
+                    .elem("transitGatewayId", side.getValue().getTransitGatewayId())
+                    .elem("ownerId", side.getValue().getOwnerId())
+                    .elem("region", side.getValue().getRegion())
+                    .end(side.getKey());
+        }
+        return xml.start("options").elem("dynamicRouting", attachment.getDynamicRouting()).end("options")
+                .start("status").elem("code", attachment.getState()).end("status")
+                .elem("state", attachment.getState())
+                .elem("creationTime", attachment.getCreationTime())
+                .raw(tagSetXml(attachment.getTags()))
+                .build();
     }
 
     private TransitGatewayVpcAttachmentOptions parseVpcAttachmentOptions(MultivaluedMap<String, String> p) {
@@ -2974,8 +3073,21 @@ public class Ec2QueryHandler {
         String az = p.getFirst("AvailabilityZone");
         String azId = p.getFirst("AvailabilityZoneId");
         String ipv6CidrBlock = p.getFirst("Ipv6CidrBlock");
+        List<Tag> tags = parseTagsForResource(p, "subnet", true);
         Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az, azId, ipv6CidrBlock);
-        applyResourceTags(p, region, "subnet", subnet.getSubnetId());
+        try {
+            if (!tags.isEmpty()) {
+                service.createTags(region, List.of(subnet.getSubnetId()), tags);
+            }
+        } catch (RuntimeException failure) {
+            try {
+                service.deleteSubnet(region, subnet.getSubnetId());
+            } catch (RuntimeException cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+                LOG.warnv(cleanupFailure, "Failed to delete subnet {0} after tagging failed", subnet.getSubnetId());
+            }
+            throw failure;
+        }
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSubnetResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4272,7 +4384,11 @@ public class Ec2QueryHandler {
     // ─── Region / AZ / Account handlers ──────────────────────────────────────
 
     private Response handleDescribeAvailabilityZones(MultivaluedMap<String, String> p, String region) {
-        List<Map<String, String>> zones = service.describeAvailabilityZones(region);
+        List<String> zoneNames = getList(p, "ZoneName");
+        List<String> zoneIds = getList(p, "ZoneId");
+        List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
+
+        List<Map<String, String>> zones = service.describeAvailabilityZones(region, zoneNames, zoneIds, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeAvailabilityZonesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4283,7 +4399,10 @@ public class Ec2QueryHandler {
                     .elem("zoneState", az.get("state"))
                     .elem("regionName", az.get("regionName"))
                     .elem("zoneId", az.get("zoneId"))
+                    .elem("groupName", az.get("groupName"))
+                    .elem("groupLongName", az.get("groupLongName"))
                     .elem("zoneType", az.get("zoneType"))
+                    .elem("optInStatus", az.get("optInStatus"))
                     .start("messageSet").end("messageSet")
                     .end("item");
         }
@@ -4292,7 +4411,9 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeRegions(MultivaluedMap<String, String> p, String region) {
-        AwsPartition partition = AwsPartitions.forRegionOrCommercial(region);
+        // The partition the request is scoped to, not the region's own: a region no partition
+        // publishes is served in the deployment's partition, where its ARNs are minted too.
+        AwsPartition partition = AwsPartitions.byId(regionResolver.partitionForRegion(region));
         boolean allRegions = Boolean.parseBoolean(p.getFirst("AllRegions"));
         Set<String> requested = new HashSet<>(getList(p, "RegionName"));
         XmlBuilder xml = new XmlBuilder()
@@ -4557,6 +4678,10 @@ public class Ec2QueryHandler {
         }
         xml.end("groupSet");
         xml.raw(tagSetXml(ni.getTagSet()));
+        ni.getPrivateIpAddresses().stream()
+                .filter(ip -> ip.isPrimary() && ip.getAssociation() != null)
+                .findFirst()
+                .ifPresent(ip -> xml.raw(networkInterfaceAssociationXml(ip.getAssociation())));
         if (ni.getAttachment() != null) {
             xml.start("attachment")
                     .elem("attachmentId", ni.getAttachment().getAttachmentId())
@@ -4576,18 +4701,22 @@ public class Ec2QueryHandler {
                         .elem("privateDnsName", ip.getPrivateDnsName())
                         .elem("primary", String.valueOf(ip.isPrimary()));
                 if (ip.getAssociation() != null) {
-                    xml.start("association")
-                            .elem("publicIp", ip.getAssociation().getPublicIp())
-                            .elem("allocationId", ip.getAssociation().getAllocationId())
-                            .elem("associationId", ip.getAssociation().getAssociationId())
-                            .elem("ipOwnerId", ip.getAssociation().getIpOwnerId())
-                            .end("association");
+                    xml.raw(networkInterfaceAssociationXml(ip.getAssociation()));
                 }
                 xml.end("item");
             }
             xml.end("privateIpAddressesSet");
         }
         return xml.build();
+    }
+
+    private static String networkInterfaceAssociationXml(NetworkInterfaceAssociation association) {
+        return new XmlBuilder().start("association")
+                .elem("publicIp", association.getPublicIp())
+                .elem("allocationId", association.getAllocationId())
+                .elem("associationId", association.getAssociationId())
+                .elem("ipOwnerId", association.getIpOwnerId())
+                .end("association").build();
     }
 
     private Response handleCreateNetworkInterface(MultivaluedMap<String, String> p, String region) {
@@ -5732,6 +5861,7 @@ public class Ec2QueryHandler {
                 .elem("vpcId", endpoint.getVpcId())
                 .elem("serviceName", endpoint.getServiceName())
                 .elem("state", endpoint.getState())
+                .elem("ipAddressType", endpoint.getIpAddressType())
                 .elem("privateDnsEnabled", String.valueOf(endpoint.isPrivateDnsEnabled()));
         if (endpoint.getCreationTimestamp() != null) {
             xml.elem("creationTimestamp", ISO_FMT.format(endpoint.getCreationTimestamp()));
@@ -6151,10 +6281,10 @@ public class Ec2QueryHandler {
         String subnetId = p.getFirst("LaunchSpecification.SubnetId");
         List<String> securityGroupIds = getList(p, "LaunchSpecification.SecurityGroupId");
         String userDataEncoded = p.getFirst("LaunchSpecification.UserData");
-        String userData = null;
-        if (userDataEncoded != null && !userDataEncoded.isBlank()) {
-            userData = new String(Base64.getDecoder().decode(userDataEncoded), StandardCharsets.UTF_8);
+        if (userDataEncoded != null && !userDataEncoded.isEmpty() && userDataEncoded.isBlank()) {
+            userDataEncoded = null;
         }
+        String userData = Ec2UserDataDecoder.decode(userDataEncoded);
         String iamInstanceProfileArn = p.getFirst("LaunchSpecification.IamInstanceProfile.Arn");
 
         // Parse TagSpecifications
@@ -6182,7 +6312,7 @@ public class Ec2QueryHandler {
 
         List<SpotInstanceRequest> requests = service.requestSpotInstances(region, spotPrice, instanceCount,
                 type, productDescription, imageId, instanceType, keyName, subnetId, securityGroupIds, userData, iamInstanceProfileArn,
-                spotRequestTags, instanceTags);
+                spotRequestTags, instanceTags, userDataEncoded);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RequestSpotInstancesResponse", AwsNamespaces.EC2)
@@ -6328,8 +6458,9 @@ public class Ec2QueryHandler {
             }
             xml.end("groupSet");
 
-            if (spec.getUserData() != null) {
-                String encodedUserData = Base64.getEncoder().encodeToString(spec.getUserData().getBytes(StandardCharsets.UTF_8));
+            if (spec.getEncodedUserData() != null || spec.getUserData() != null) {
+                String encodedUserData = spec.getEncodedUserData() != null ? spec.getEncodedUserData()
+                        : Base64.getEncoder().encodeToString(spec.getUserData().getBytes(StandardCharsets.UTF_8));
                 xml.elem("userData", encodedUserData);
             }
             if (spec.getIamInstanceProfileArn() != null) {

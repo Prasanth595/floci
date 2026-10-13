@@ -24,6 +24,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -36,8 +37,9 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class EventBridgeServiceTest {
 
@@ -371,7 +373,19 @@ class EventBridgeServiceTest {
     @Test
     void putRuleForNonExistentBusThrows() {
         assertThrows(AwsException.class, () ->
-                service.putRule("rule", "missing-bus", null, null, null, null, null, null, REGION));
+                service.putRule("rule", "missing-bus", "{\"source\":[\"my.app\"]}", null, null,
+                        null, null, null, REGION));
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void putRuleWithoutPatternOrScheduleThrowsValidation(String missing) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putRule("rule", null, missing, missing, RuleState.ENABLED, null, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("Parameter(s) EventPattern or ScheduleExpression must be specified.", error.getMessage());
+        assertTrue(service.listRules(null, null, REGION).isEmpty());
     }
 
     @Test
@@ -681,6 +695,31 @@ class EventBridgeServiceTest {
         service.putTargets("my-rule", null, List.of(second), REGION);
         assertEquals(List.of("t1", "t2"),
                 currentTargets.getValue().get().stream().map(Target::getId).toList());
+    }
+
+    @Test
+    void putEventsDoesNotMatchAScheduleOnlyRule() {
+        service.putRule("nightly", null, null, "rate(1 day)", RuleState.ENABLED,
+                null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("nightly", null, List.of(target), REGION);
+
+        service.putEvents(List.of(Map.of("Source", "aws.ecs", "DetailType", "ECS Deployment State Change",
+                "Detail", "{}")), REGION);
+
+        verify(dispatcherMock, never()).dispatch(anyString(), any(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void putEventsMatchesARuleWithBothAPatternAndASchedule() {
+        Rule rule = service.putRule("both", null, "{\"source\":[\"my.app\"]}", "rate(1 day)",
+                RuleState.ENABLED, null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("both", null, List.of(target), REGION);
+
+        service.putEvents(List.of(Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), REGION);
+
+        verify(dispatcherMock).dispatch(eq(rule.getArn()), eq(target), anyString(), eq(REGION), any());
     }
 
     private void assertPutTargetsValidation(String expectedMessage, Target... targets) {
@@ -1359,5 +1398,162 @@ class EventBridgeServiceTest {
 
         List<ApiDestination> prefixed = service.listApiDestinations("prefix-", null, REGION);
         assertEquals(2, prefixed.size());
+    }
+
+    // ──────────────────────────── PutEvents MalformedDetail ────────────────────────────
+
+    @Test
+    void putEventsRejectsMalformedDetailWithErrorCode() {
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Source", "s", "DetailType", "d", "Detail", "{")
+        );
+
+        EventBridgeService.PutEventsResult result = service.putEvents(entries, REGION);
+
+        assertEquals(1, result.failedCount());
+        assertEquals(1, result.entries().size());
+        Map<String, String> entry = result.entries().getFirst();
+        assertNull(entry.get("EventId"));
+        assertEquals("MalformedDetail", entry.get("ErrorCode"));
+        assertNotNull(entry.get("ErrorMessage"));
+    }
+
+    @Test
+    void putEventsMalformedDetailDoesNotBlockValidEntriesInSameBatch() {
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Source", "good", "DetailType", "d", "Detail", "{\"ok\":true}"),
+                Map.of("Source", "bad", "DetailType", "d", "Detail", "{"),
+                Map.of("Source", "also-good", "DetailType", "d", "Detail", "{}")
+        );
+
+        EventBridgeService.PutEventsResult result = service.putEvents(entries, REGION);
+
+        assertEquals(1, result.failedCount());
+        assertEquals(3, result.entries().size());
+
+        assertNotNull(result.entries().get(0).get("EventId"));
+        assertNull(result.entries().get(0).get("ErrorCode"));
+
+        assertNull(result.entries().get(1).get("EventId"));
+        assertEquals("MalformedDetail", result.entries().get(1).get("ErrorCode"));
+
+        assertNotNull(result.entries().get(2).get("EventId"));
+        assertNull(result.entries().get(2).get("ErrorCode"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{", "not json at all", "[}", "{\"key\": }", "{'single': 'quotes'}"})
+    void putEventsRejectsVariousFormsOfInvalidDetailJson(String malformedDetail) {
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Source", "s", "DetailType", "d", "Detail", malformedDetail)
+        );
+
+        EventBridgeService.PutEventsResult result = service.putEvents(entries, REGION);
+
+        assertEquals(1, result.failedCount());
+        Map<String, String> entry = result.entries().getFirst();
+        assertEquals("MalformedDetail", entry.get("ErrorCode"));
+        assertNull(entry.get("EventId"));
+    }
+
+    @Test
+    void putEventsRejectsMalformedDetailWithTrailingGarbage() {
+        EventBridgeService.PutEventsResult result = service.putEvents(
+                List.of(Map.of("Source", "s", "DetailType", "d",
+                        "Detail", "{} garbage")),
+                REGION);
+        assertMalformedDetail(result);
+    }
+
+    @Test
+    void putEventsRejectsTwoConcatenatedValidJsonObjects() {
+        EventBridgeService.PutEventsResult result = service.putEvents(
+                List.of(Map.of("Source", "s", "DetailType", "d",
+                        "Detail", "{\"a\":1}{\"b\":2}")),
+                REGION);
+        assertMalformedDetail(result);
+    }
+
+    @Test
+    void putEventsRejectsTwoConcatenatedEmptyObjects() {
+        EventBridgeService.PutEventsResult result = service.putEvents(
+                List.of(Map.of("Source", "s", "DetailType", "d",
+                        "Detail", "{} {}")),
+                REGION);
+        assertMalformedDetail(result);
+    }
+
+    @Test
+    void putEventsAcceptsSingleObjectWithTrailingWhitespace() {
+        EventBridgeService.PutEventsResult result = service.putEvents(
+                List.of(Map.of("Source", "s", "DetailType", "d",
+                        "Detail", "{\"a\":1}   \n\t")),
+                REGION);
+        assertEquals(0, result.failedCount());
+        assertNotNull(result.entries().getFirst().get("EventId"));
+    }
+
+    @Test
+    void putEventsRejectsNonObjectDetail() {
+        assertMalformedDetail(service.putEvents(
+                List.of(Map.of("Source", "s", "DetailType", "d",
+                        "Detail", "[1,2,3]")),
+                REGION));
+        assertMalformedDetail(service.putEvents(
+                List.of(Map.of("Source", "s", "DetailType", "d",
+                        "Detail", "123")),
+                REGION));
+    }
+
+    private static void assertMalformedDetail(EventBridgeService.PutEventsResult r) {
+        assertEquals(1, r.failedCount());
+        Map<String, String> entry = r.entries().getFirst();
+        assertEquals("MalformedDetail", entry.get("ErrorCode"));
+        assertNull(entry.get("EventId"));
+    }
+
+    @Test
+    void putEventsReportsMissingRequiredFieldsDistinctlyFromMalformedDetail() {
+        EventBridgeService.PutEventsResult result = service.putEvents(
+                List.of(
+                        Map.of("Source", "s", "DetailType", "d"),                        // missing Detail
+                        Map.of("Source", "s", "DetailType", "d", "Detail", "not json"),   // malformed Detail
+                        Map.of("Source", "s", "Detail", "{}"),                           // missing DetailType
+                        Map.of("DetailType", "d", "Detail", "{}")                        // missing Source
+                ),
+                REGION);
+
+        assertEquals(4, result.failedCount());
+
+        Map<String, String> missingDetail = result.entries().getFirst();
+        assertEquals("InvalidArgument", missingDetail.get("ErrorCode"));
+        assertEquals("Parameter Detail is not valid. Reason: Detail is a required argument.",
+                missingDetail.get("ErrorMessage"));
+        assertNull(missingDetail.get("EventId"));
+
+        Map<String, String> malformedDetail = result.entries().get(1);
+        assertEquals("MalformedDetail", malformedDetail.get("ErrorCode"));
+        assertEquals("The JSON provided is not valid.", malformedDetail.get("ErrorMessage"));
+        assertNull(malformedDetail.get("EventId"));
+
+        Map<String, String> missingDetailType = result.entries().get(2);
+        assertEquals("InvalidArgument", missingDetailType.get("ErrorCode"));
+        assertEquals("Parameter DetailType is not valid. Reason: DetailType is a required argument.",
+                missingDetailType.get("ErrorMessage"));
+        assertNull(missingDetailType.get("EventId"));
+
+        Map<String, String> missingSource = result.entries().get(3);
+        assertEquals("InvalidArgument", missingSource.get("ErrorCode"));
+        assertEquals("Parameter Source is not valid. Reason: Source is a required argument.",
+                missingSource.get("ErrorMessage"));
+        assertNull(missingSource.get("EventId"));
+    }
+
+    @Test
+    void putEventsReportsSourceFirstWhenMultipleRequiredFieldsAreMissing() {
+        EventBridgeService.PutEventsResult result = service.putEvents(List.of(Map.of("Detail", "{}")), REGION);
+        assertEquals(1, result.failedCount());
+        assertEquals("Parameter Source is not valid. Reason: Source is a required argument.",
+                result.entries().get(0).get("ErrorMessage"));
     }
 }

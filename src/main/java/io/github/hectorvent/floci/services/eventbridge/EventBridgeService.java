@@ -1,10 +1,21 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -22,18 +33,12 @@ import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.databind.node.TextNode;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Instant;
@@ -42,18 +47,16 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
-import java.util.regex.Pattern;
-import io.github.hectorvent.floci.core.resource.ExplorerResource;
-import io.github.hectorvent.floci.core.resource.ResourceProvider;
-import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class EventBridgeService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(EventBridgeService.class);
+    private static final List<String> REQUIRED_ENTRY_FIELDS = List.of("Source", "DetailType", "Detail");
 
     private final StorageBackend<String, EventBus> busStore;
     private final StorageBackend<String, Rule> ruleStore;
@@ -313,6 +316,11 @@ public class EventBridgeService implements ResourceProvider {
     public Rule putRule(String name, String busName, String eventPattern,
                         String scheduleExpression, RuleState state, String description,
                         String roleArn, Map<String, String> tags, String region) {
+        if ((eventPattern == null || eventPattern.isBlank())
+                && (scheduleExpression == null || scheduleExpression.isBlank())) {
+            throw new AwsException("ValidationException",
+                    "Parameter(s) EventPattern or ScheduleExpression must be specified.", 400);
+        }
         String effectiveBus = resolvedBusName(busName);
         ensureBusExists(effectiveBus, region);
 
@@ -782,6 +790,33 @@ public class EventBridgeService implements ResourceProvider {
             // delivered envelope would correctly carry the call's region/account, giving an
             // inconsistent observable.
             Map<String, Object> entry = new HashMap<>(originalEntry);
+
+            String missingRequiredField = null;
+            for(String field : REQUIRED_ENTRY_FIELDS) {
+                if(entry.get(field) == null) {
+                    missingRequiredField = field;
+                    break;
+                }
+            }
+
+            if(missingRequiredField != null) {
+                Map<String, String> errorEntry = new HashMap<>();
+                errorEntry.put("ErrorCode", "InvalidArgument");
+                errorEntry.put("ErrorMessage",
+                        "Parameter " + missingRequiredField +  " is not valid. Reason: " + missingRequiredField + " is a required argument.");
+                resultEntries.add(errorEntry);
+                failed++;
+                continue;
+            }
+            if (!isValidDetailJson(entry)) {
+                Map<String, String> errorEntry = new HashMap<>();
+                errorEntry.put("ErrorCode", "MalformedDetail");
+                errorEntry.put("ErrorMessage", "The JSON provided is not valid.");
+                resultEntries.add(errorEntry);
+                failed++;
+
+                continue;
+            }
             if (isBlank(entry.get("Region"))) {
                 entry.put("Region", isBlank(region) ? regionResolver.getDefaultRegion() : region);
             }
@@ -812,6 +847,10 @@ public class EventBridgeService implements ResourceProvider {
                 if (rule.getState() != RuleState.ENABLED) {
                     continue;
                 }
+                // A rule without an event pattern is a schedule rule: it never matches put events.
+                if (rule.getEventPattern() == null || rule.getEventPattern().isBlank()) {
+                    continue;
+                }
                 if (matchesPattern(entry, rule.getEventPattern())) {
                     String ruleKey = ruleKey(region, effectiveBus, rule.getName());
                     List<Target> targets = accountGet(targetStore, accountId, ruleKey).orElse(List.of());
@@ -831,6 +870,24 @@ public class EventBridgeService implements ResourceProvider {
         }
 
         return new PutEventsResult(failed, resultEntries);
+    }
+
+    private boolean isValidDetailJson(Map<String, Object> detail) {
+        Object raw = detail.get("Detail");
+        if (!(raw instanceof String jsonString) || jsonString.trim().isEmpty()) {
+            return false;
+        }
+
+        try (JsonParser parser = objectMapper.getFactory().createParser(jsonString)) {
+            JsonNode node = objectMapper.readTree(parser);
+            if (node == null || !node.isObject()) {
+                return false; // empty input or "123" or "[1,2]"
+            }
+            // check if there is more
+            return parser.nextToken() == null;
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     // ──────────────────────────── Pattern Matching ────────────────────────────

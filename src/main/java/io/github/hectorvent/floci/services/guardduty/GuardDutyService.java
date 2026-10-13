@@ -5,18 +5,20 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.guardduty.model.AdminAccount;
-import io.github.hectorvent.floci.services.guardduty.model.MemberAccount;
 import io.github.hectorvent.floci.services.guardduty.model.Detector;
 import io.github.hectorvent.floci.services.guardduty.model.DetectorAdditionalConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.DetectorFeature;
+import io.github.hectorvent.floci.services.guardduty.model.MemberAccount;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationAdditionalConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationFeature;
+import io.github.hectorvent.floci.services.iam.ServiceLinkedRoles;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -567,7 +569,8 @@ public class GuardDutyService {
 
     private static String serviceRoleArn(String region, String accountId) {
         return AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
-                "role/aws-service-role/" + ServicePrincipals.of("guardduty") + "/AWSServiceRoleForAmazonGuardDuty")
+                "role/aws-service-role/" + ServicePrincipals.of("guardduty") + "/"
+                        + ServiceLinkedRoles.roleName(ServicePrincipals.of("guardduty")).orElseThrow())
                 .toString();
     }
 
@@ -632,8 +635,7 @@ public class GuardDutyService {
     }
 
     private static String encodeOffset(int offset) {
-        return Base64.getUrlEncoder().withoutPadding()
-                .encodeToString((TOKEN_PREFIX + offset).getBytes(StandardCharsets.UTF_8));
+        return Base64Url.encode(TOKEN_PREFIX + offset);
     }
 
     private static AwsException detectorNotFound() {

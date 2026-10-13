@@ -1,9 +1,20 @@
 package io.github.hectorvent.floci.services.ecs.container;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.command.StatsCmd;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.Ports;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import com.github.dockerjava.api.model.StatisticNetworksConfig;
+import com.github.dockerjava.api.model.Statistics;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -13,13 +24,13 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
-import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.SecurityGroupFirewallManager;
 import io.github.hectorvent.floci.services.ec2.SecurityGroupNftCompiler;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
@@ -46,16 +57,6 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import io.github.hectorvent.floci.services.ssm.SsmService;
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.command.StatsCmd;
-import com.github.dockerjava.api.exception.NotFoundException;
-import com.github.dockerjava.api.model.ContainerNetwork;
-import com.github.dockerjava.api.model.ExposedPort;
-import com.github.dockerjava.api.model.LogConfig;
-import com.github.dockerjava.api.model.StatisticNetworksConfig;
-import com.github.dockerjava.api.model.Statistics;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -63,19 +64,16 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.Closeable;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -2202,13 +2200,13 @@ public class EcsContainerManager {
      */
     static String efsVolumeToken(String fileSystemId, String accessPointId, String rootDirectory) {
         if (accessPointId != null && !accessPointId.isBlank()) {
-            return "efs-" + fileSystemId + "-" + sha256Hex("accessPoint:" + accessPointId);
+            return "efs-" + fileSystemId + "-" + Digests.sha256Hex("accessPoint:" + accessPointId);
         }
         String normalizedRoot = normalizeRootDirectory(rootDirectory);
         if ("/".equals(normalizedRoot)) {
             return "efs-" + fileSystemId;
         }
-        return "efs-" + fileSystemId + "-" + sha256Hex(normalizedRoot);
+        return "efs-" + fileSystemId + "-" + Digests.sha256Hex(normalizedRoot);
     }
 
     /**
@@ -2242,15 +2240,6 @@ public class EcsContainerManager {
             collapsed = collapsed.substring(0, collapsed.length() - 1);
         }
         return collapsed.startsWith("/") ? collapsed : "/" + collapsed;
-    }
-
-    private static String sha256Hex(String value) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 is required but not available", e);
-        }
     }
 
     // Inner enum to avoid import cycle — mirrors model.TaskStatus for readability

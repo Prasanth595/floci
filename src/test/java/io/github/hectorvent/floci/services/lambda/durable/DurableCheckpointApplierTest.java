@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -20,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class DurableCheckpointApplierTest {
 
     private static final long NOW = 1_700_000_000_000L;
+    private static final Function<String, AwsException> REACHABLE = functionName -> null;
     private static final String EXECUTION_ARN =
             "arn:aws:lambda:us-east-1:000000000000:function:fn:1/durable-execution/exec/exec-id";
 
@@ -33,10 +35,10 @@ class DurableCheckpointApplierTest {
     void anExecutionCloseCarriesOnlyItsOwnResultKind() {
         DurableErrorObject error = DurableErrorObject.of("m", "T");
         assertRejected(List.of(new DurableOperationUpdate("result", null, null, DurableOperationType.EXECUTION, null,
-                DurableOperationAction.SUCCEED, "\"p\"", error, null, null, null, null, null)),
+                DurableOperationAction.SUCCEED, "\"p\"", error, null, null, null, null, null, null, null)),
                 "Cannot provide an Error for SUCCEED action.");
         assertRejected(List.of(new DurableOperationUpdate("result", null, null, DurableOperationType.EXECUTION, null,
-                DurableOperationAction.FAIL, "\"p\"", error, null, null, null, null, null)),
+                DurableOperationAction.FAIL, "\"p\"", error, null, null, null, null, null, null, null)),
                 "Cannot provide a Payload for FAIL action.");
     }
 
@@ -44,7 +46,7 @@ class DurableCheckpointApplierTest {
     void anExecutionErrorHasTheSameSizeLimitAsAnOperationError() {
         DurableErrorObject large = DurableErrorObject.of("x".repeat(DurableCheckpointApplier.MAX_ERROR_BYTES), "T");
         assertRejected(List.of(new DurableOperationUpdate("result", null, null, DurableOperationType.EXECUTION, null,
-                DurableOperationAction.FAIL, null, large, null, null, null, null, null)),
+                DurableOperationAction.FAIL, null, large, null, null, null, null, null, null, null)),
                 "Error object size must be less than 32768 bytes.");
     }
 
@@ -56,7 +58,7 @@ class DurableCheckpointApplierTest {
                 "Cannot update the same operation twice in a single request.");
         DurableExecution execution = execution();
         DurableCheckpointApplier.apply(execution, List.of(stepStart("s1", null), update("s1", null,
-                DurableOperationType.STEP, DurableOperationAction.SUCCEED, "1")), NOW);
+                DurableOperationType.STEP, DurableOperationAction.SUCCEED, "1")), NOW, REACHABLE);
         assertEquals(DurableOperationStatus.SUCCEEDED, execution.getOperations().get("s1").getStatus());
     }
 
@@ -64,7 +66,7 @@ class DurableCheckpointApplierTest {
     void parentMustBeAContextAndMetadataMustStayConsistent() {
         assertRejected(List.of(stepStart("s1", "missing")), "Invalid parent operation id.");
         DurableExecution execution = execution();
-        DurableCheckpointApplier.apply(execution, List.of(stepStart("s1", null)), NOW);
+        DurableCheckpointApplier.apply(execution, List.of(stepStart("s1", null)), NOW, REACHABLE);
         assertEquals("Inconsistent operation type.", reject(execution, List.of(waitStart("s1"))));
         assertEquals("Inconsistent parent operation id.", reject(execution, List.of(stepStart("ctx", null),
                 update("s1", "ctx", DurableOperationType.STEP, DurableOperationAction.SUCCEED, "1"))));
@@ -73,15 +75,15 @@ class DurableCheckpointApplierTest {
     @Test
     void stepTransitionsAreGuarded() {
         DurableExecution execution = execution();
-        DurableCheckpointApplier.apply(execution, List.of(stepStart("s1", null)), NOW);
+        DurableCheckpointApplier.apply(execution, List.of(stepStart("s1", null)), NOW, REACHABLE);
         assertEquals("Invalid current STEP state to start.", reject(execution, List.of(stepStart("s1", null))));
         assertEquals("Cannot provide an Error for SUCCEED action.", reject(execution, List.of(
                 new DurableOperationUpdate("s1", null, null, DurableOperationType.STEP, null,
-                        DurableOperationAction.SUCCEED, null, DurableErrorObject.of("x", "y"), null, null, null, null, null))));
+                        DurableOperationAction.SUCCEED, null, DurableErrorObject.of("x", "y"), null, null, null, null, null, null, null))));
         assertEquals("Invalid StepOptions for the given action.", reject(execution, List.of(
                 update("s1", null, DurableOperationType.STEP, DurableOperationAction.RETRY, null))));
         DurableCheckpointApplier.apply(execution, List.of(update("s1", null, DurableOperationType.STEP,
-                DurableOperationAction.FAIL, null)), NOW);
+                DurableOperationAction.FAIL, null)), NOW, REACHABLE);
         assertEquals("Invalid current STEP state to close.", reject(execution, List.of(
                 update("s1", null, DurableOperationType.STEP, DurableOperationAction.SUCCEED, "1"))));
     }
@@ -93,10 +95,10 @@ class DurableCheckpointApplierTest {
         assertRejected(List.of(update("w1", null, DurableOperationType.WAIT, DurableOperationAction.CANCEL, null)),
                 "Cannot cancel a WAIT that does not exist or has already completed.");
         DurableExecution execution = execution();
-        DurableCheckpointApplier.apply(execution, List.of(waitStart("w1")), NOW);
+        DurableCheckpointApplier.apply(execution, List.of(waitStart("w1")), NOW, REACHABLE);
         assertEquals("Cannot start a WAIT that already exist.", reject(execution, List.of(waitStart("w1"))));
         DurableCheckpointApplier.apply(execution, List.of(update("w1", null, DurableOperationType.WAIT,
-                DurableOperationAction.CANCEL, null)), NOW);
+                DurableOperationAction.CANCEL, null)), NOW, REACHABLE);
         assertEquals(DurableOperationStatus.CANCELLED, execution.getOperations().get("w1").getStatus());
     }
 
@@ -118,15 +120,32 @@ class DurableCheckpointApplierTest {
     }
 
     @Test
-    void chainedInvokesAreNotSupportedYet() {
+    void aChainedInvokeNeedsItsOptionsAndAnInputOfAtMostOneMegabyte() {
         assertRejected(List.of(update("i1", null, DurableOperationType.CHAINED_INVOKE, DurableOperationAction.START,
-                null)), "CHAINED_INVOKE operations are not supported yet");
+                null)), "Update for CHAINED_INVOKE operation requires ChainedInvokeOptions.");
+        assertRejected(List.of(chainedStart("i1", "\"" + "x".repeat(1024 * 1024) + "\"")),
+                "CHAINED_INVOKE input payload size must be less than or equal to 1048576 bytes.");
+        assertRejected(List.of(chainedStart("i1", "arn:aws:lambda:us-east-1:111111111111:function:fn", null)),
+                "Cannot start a CHAINED_INVOKE on a function in another account.");
+        assertRejected(List.of(chainedStart("i1", "arn:aws:lambda:eu-west-1:000000000000:function:fn", null)),
+                "Cannot start a CHAINED_INVOKE on a function in another region.");
+
+        DurableExecution execution = execution();
+        DurableCheckpointApplier.Outcome outcome = DurableCheckpointApplier.apply(execution,
+                List.of(chainedStart("i1", "arn:aws:lambda:us-east-1:000000000000:function:target-fn",
+                        "\"" + "x".repeat(300 * 1024) + "\"")), NOW, REACHABLE);
+        assertEquals(List.of("i1"), outcome.chainedInvokes(), "the service runs what the batch started");
+        DurableOperation invoke = execution.getOperations().get("i1");
+        assertEquals(DurableOperationStatus.STARTED, invoke.getStatus());
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:target-fn", invoke.getChainedFunctionName());
+        assertEquals("Invalid action for the given operation type.", reject(execution, List.of(
+                update("i1", null, DurableOperationType.CHAINED_INVOKE, DurableOperationAction.SUCCEED, "1"))));
     }
 
     @Test
     void aCallbackStartsWithAnIdThatNamesItsExecution() {
         DurableExecution execution = execution();
-        DurableCheckpointApplier.apply(execution, List.of(callbackStart("c1", 30, 10)), NOW);
+        DurableCheckpointApplier.apply(execution, List.of(callbackStart("c1", 30, 10)), NOW, REACHABLE);
 
         DurableOperation callback = execution.getOperations().get("c1");
         assertEquals(DurableOperationStatus.STARTED, callback.getStatus());
@@ -145,7 +164,7 @@ class DurableCheckpointApplierTest {
     void aCallbackTimesOutOnTheDeadlineItMissesFirst() {
         DurableExecution execution = execution();
         DurableCheckpointApplier.apply(execution, List.of(callbackStart("slow", 5, 0), callbackStart("silent", 60, 3)),
-                NOW);
+                NOW, REACHABLE);
 
         DurableCheckpointApplier.fireDueTimers(execution, NOW + 3_000);
         DurableOperation silent = execution.getOperations().get("silent");
@@ -180,7 +199,7 @@ class DurableCheckpointApplierTest {
 
     private static String reject(DurableExecution execution, List<DurableOperationUpdate> updates) {
         AwsException rejected = assertThrows(AwsException.class,
-                () -> DurableCheckpointApplier.apply(execution, updates, NOW));
+                () -> DurableCheckpointApplier.apply(execution, updates, NOW, REACHABLE));
         assertEquals(400, rejected.getHttpStatus());
         assertEquals("InvalidParameterValueException", rejected.getErrorCode());
         return rejected.getMessage();
@@ -190,6 +209,8 @@ class DurableCheckpointApplierTest {
         DurableExecution execution = new DurableExecution();
         execution.setExecutionId("exec-id");
         execution.setExecutionArn(EXECUTION_ARN);
+        execution.setAccountId("000000000000");
+        execution.setRegion("us-east-1");
         execution.setName("exec");
         execution.setMaxResultBytes(DurableExecutionService.ASYNC_PAYLOAD_LIMIT);
         DurableOperation root = new DurableOperation();
@@ -208,12 +229,21 @@ class DurableCheckpointApplierTest {
 
     private static DurableOperationUpdate waitStart(String id) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.WAIT, null, DurableOperationAction.START,
-                null, null, null, 5, null, null, null);
+                null, null, null, 5, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate callbackStart(String id, int timeoutSeconds, int heartbeatSeconds) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.CALLBACK, "Callback",
-                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, heartbeatSeconds);
+                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, heartbeatSeconds, null, null);
+    }
+
+    private static DurableOperationUpdate chainedStart(String id, String payload) {
+        return chainedStart(id, "target-fn", payload);
+    }
+
+    private static DurableOperationUpdate chainedStart(String id, String functionName, String payload) {
+        return new DurableOperationUpdate(id, null, null, DurableOperationType.CHAINED_INVOKE, "ChainedInvoke",
+                DurableOperationAction.START, payload, null, null, null, null, null, null, functionName, null);
     }
 
     private static DurableOperationUpdate executionSucceed() {
@@ -223,6 +253,6 @@ class DurableCheckpointApplierTest {
     private static DurableOperationUpdate update(String id, String parentId, DurableOperationType type,
                                                  DurableOperationAction action, String payload) {
         return new DurableOperationUpdate(id, parentId, null, type, null, action, payload, null, null, null, null, null,
-                null);
+                null, null, null);
     }
 }

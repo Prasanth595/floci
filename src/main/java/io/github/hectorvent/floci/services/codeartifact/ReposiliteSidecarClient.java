@@ -121,6 +121,66 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
         return Optional.of(response.body());
     }
 
+    /**
+     * Only a confirmed 404 means absent; confirmed live (a {@code GET} on a missing directory, or a
+     * never-provisioned repository, both answer a clean 404). Anything else, an auth failure or a
+     * server error, throws instead of collapsing to "not found": a Reposilite outage must not read
+     * as every Maven package having been deleted.
+     */
+    @Override
+    public boolean packageExists(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName) {
+        String baseUrl = manager.ensureReady();
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl),
+                        packageDirectoryPath(repositoryContainerId, namespace, packageName)))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .GET()
+                .build();
+        int status = send(request, BodyHandlers.discarding()).statusCode();
+        if (status == 404) {
+            return false;
+        }
+        if (status != 200) {
+            throw new IllegalStateException("Could not look up " + packageName + " on the Reposilite sidecar: "
+                    + "upstream returned " + status);
+        }
+        return true;
+    }
+
+    /**
+     * Removes a whole package, every version at once: a single {@code DELETE} on the group/artifact
+     * directory. Confirmed against a live Reposilite container: it recursively removes everything
+     * beneath that path in one call. {@link #packageExists} is checked by the caller first, since
+     * Reposilite answers a confusing HTTP 500 for a {@code DELETE} on a path that was never there,
+     * not a 404.
+     */
+    @Override
+    public void deletePackage(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName) {
+        String baseUrl = manager.ensureReady();
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl),
+                        packageDirectoryPath(repositoryContainerId, namespace, packageName)))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .DELETE()
+                .build();
+        HttpResponse<Void> response = send(request, BodyHandlers.discarding());
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not delete " + packageName
+                    + " from the Reposilite sidecar: upstream returned " + response.statusCode());
+        }
+    }
+
+    private static String packageDirectoryPath(String repositoryContainerId, String namespace, String packageName) {
+        StringBuilder path = new StringBuilder("/").append(SidecarUriUtils.encodeSegment(repositoryContainerId));
+        for (String namespacePart : namespace.split("\\.", -1)) {
+            path.append('/').append(SidecarUriUtils.encodeSegment(namespacePart));
+        }
+        path.append('/').append(SidecarUriUtils.encodeSegment(packageName)).append('/');
+        return path.toString();
+    }
+
     /** Ensures a Reposilite repository named {@code repoId} exists, creating it if not. */
     public void ensureRepository(String repoId) {
         String baseUrl = manager.ensureReady();
@@ -277,6 +337,14 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     }
 
     /**
+     * {@code wroteNewContent} is {@code false} for the idempotent-match short-circuit (nothing was
+     * actually sent to Reposilite) and {@code true} only when the real {@code PUT} below got back
+     * a success status; a genuine conflict (Reposilite's own {@code redeployment: false} rejection)
+     * or any other non-2xx status wrote nothing either, despite having been attempted.
+     */
+    public record DeployOutcome(int status, boolean wroteNewContent) {}
+
+    /**
      * Deploys {@code content} to {@code repoId}'s {@code gav} path, returning the HTTP status.
      *
      * <p>Reposilite's own {@code redeployment: false} setting (set in {@link #ensureRepository})
@@ -292,15 +360,16 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
      * the deploy outright, since Reposilite's own redeployment check is still there to catch a
      * genuine conflict either way.
      */
-    public int deployArtifact(String repoId, String gav, byte[] content) {
+    public DeployOutcome deployArtifact(String repoId, String gav, byte[] content) {
         String baseUrl = manager.ensureReady();
         if (existingArtifactMatches(baseUrl, repoId, gav, content)) {
-            return 200;
+            return new DeployOutcome(200, false);
         }
         HttpRequest request = authenticated(baseUrl, repoId, gav)
                 .PUT(BodyPublishers.ofByteArray(content))
                 .build();
-        return send(request, BodyHandlers.discarding()).statusCode();
+        int status = send(request, BodyHandlers.discarding()).statusCode();
+        return new DeployOutcome(status, status == 200 || status == 201);
     }
 
     /**

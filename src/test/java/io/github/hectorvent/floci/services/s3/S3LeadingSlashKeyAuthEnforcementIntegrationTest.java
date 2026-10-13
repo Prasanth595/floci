@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.testing.S3EnforceAuthProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
@@ -10,6 +11,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -20,14 +23,11 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -240,7 +240,7 @@ class S3LeadingSlashKeyAuthEnforcementIntegrationTest {
         String stringToSign = "AWS4-HMAC-SHA256\n"
                 + timestamp + "\n"
                 + credentialScope + "\n"
-                + hex(MessageDigest.getInstance("SHA-256").digest(canonicalRequest.getBytes(StandardCharsets.UTF_8)));
+                + Digests.sha256Hex(canonicalRequest);
 
         byte[] kDate = hmac(("AWS4test").getBytes(StandardCharsets.UTF_8), date);
         byte[] kRegion = hmac(kDate, "us-east-1");

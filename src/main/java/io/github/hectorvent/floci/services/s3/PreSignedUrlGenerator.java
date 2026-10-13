@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -24,7 +25,6 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -140,6 +140,12 @@ public class PreSignedUrlGenerator {
      */
     public String generatePresignedUrl(String baseUrl, String bucket, String key,
                                          String method, int expiresSeconds, String region) {
+        return generatePresignedUrl(baseUrl, bucket, key, method, expiresSeconds, region,
+                resolveSigningIdentity(region).accountId());
+    }
+
+    public String generatePresignedUrl(String baseUrl, String bucket, String key,
+                                         String method, int expiresSeconds, String region, String accountId) {
         int expiry = expiresSeconds > 0 ? expiresSeconds : defaultExpiry;
         if (expiry < 1 || expiry > MAX_PRESIGN_EXPIRY_SECONDS) {
             throw new IllegalArgumentException("Presigned URL expiry must be between 1 and 604800 seconds");
@@ -148,10 +154,10 @@ public class PreSignedUrlGenerator {
         String amzDate = AMZ_DATE_FORMAT.format(signedAt);
 
         if (iamService == null) {
-            return generateLegacyPresignedUrl(baseUrl, bucket, key, method, expiry, amzDate, region);
+            return generateLegacyPresignedUrl(baseUrl, bucket, key, method, expiry, amzDate, region, accountId);
         }
 
-        SigningIdentity identity = resolveSigningIdentity(region);
+        SigningIdentity identity = new SigningIdentity(accountId, region);
         TemporaryCredential temporaryCredential = temporaryCredential(identity, bucket, key, method, signedAt, expiry);
         String date = amzDate.substring(0, 8);
         String credentialScope = date + "/" + identity.region() + "/s3/aws4_request";
@@ -193,8 +199,8 @@ public class PreSignedUrlGenerator {
     }
 
     private String generateLegacyPresignedUrl(String baseUrl, String bucket, String key,
-                                                String method, int expiry, String amzDate, String region) {
-        String accountId = resolveSigningIdentity(region).accountId();
+                                                String method, int expiry, String amzDate, String region,
+                                                String accountId) {
         String credential = accountId + "/" + amzDate.substring(0, 8)
                 + "/" + region + "/s3/aws4_request";
 
@@ -213,9 +219,10 @@ public class PreSignedUrlGenerator {
                                                     String method, Instant signedAt, int expiry) {
         // The in-memory retirement list cannot survive a restart. Sweep persisted expired
         // sessions once on first use, then retire this process's replacements as they expire.
+        // IamService judges which sessions have expired on its own clock, as it does everywhere.
         if (expiredSessionsSwept.compareAndSet(false, true)) {
             try {
-                iamService.sweepExpiredSessions(signedAt);
+                iamService.sweepExpiredSessions();
             } catch (RuntimeException failure) {
                 expiredSessionsSwept.set(false);
                 throw failure;
@@ -302,7 +309,7 @@ public class PreSignedUrlGenerator {
     private String randomUrlSafeValue(int byteCount) {
         byte[] bytes = new byte[byteCount];
         random.nextBytes(bytes);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        return Base64Url.encode(bytes);
     }
 
     private static String awsUriEncodePath(String value) {

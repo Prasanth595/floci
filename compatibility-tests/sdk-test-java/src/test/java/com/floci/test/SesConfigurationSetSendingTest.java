@@ -7,13 +7,12 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.ses.model.ConfigurationSetAttribute;
 import software.amazon.awssdk.services.ses.model.DescribeConfigurationSetRequest;
 import software.amazon.awssdk.services.ses.model.DescribeConfigurationSetResponse;
 import software.amazon.awssdk.services.ses.model.UpdateConfigurationSetSendingEnabledRequest;
-
+import software.amazon.awssdk.services.ses.model.VerifyEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.Body;
 import software.amazon.awssdk.services.sesv2.model.Content;
@@ -69,6 +68,7 @@ class SesConfigurationSetSendingTest {
         } catch (Exception ignored) {}
         sesV2.createConfigurationSet(CreateConfigurationSetRequest.builder()
                 .configurationSetName(CS_NAME).build());
+        sesV1.verifyEmailIdentity(VerifyEmailIdentityRequest.builder().emailAddress(FROM).build());
     }
 
     @AfterAll

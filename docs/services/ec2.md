@@ -112,6 +112,8 @@ Notes and limitations:
 
 EC2 containers receive `AWS_EC2_METADATA_SERVICE_ENDPOINT` for IMDS and `AWS_ENDPOINT_URL` for AWS service API calls back to Floci.
 
+CloudFormation `AWS::EC2::VPCEndpoint` resolves `IpAddressType` on create and update, including parameter references. Omission, a selected `AWS::NoValue` branch, or `not-specified` uses the default `ipv4`; an explicitly empty value is rejected. Updates retain the existing replacement behavior; synthetic interfaces remain IPv4-only.
+
 ## Instance Metadata Service (IMDS)
 
 Floci runs an IMDS-compatible HTTP server on port `9169` of the host. Each launched container receives the environment variable `AWS_EC2_METADATA_SERVICE_ENDPOINT` pointing to this server.
@@ -129,6 +131,8 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
 ```
 
 As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A token is valid only on the instance that requested it: presenting it from another instance returns `401`. A request without a token header still uses IMDSv1; Floci does not enforce `HttpTokens=required`.
+
+User data is returned as the original base64-decoded bytes, without decompressing gzip content or converting binary data to text. Older records without the original encoding, or records with malformed saved encoding, use their saved UTF-8 text. The response uses `application/octet-stream`, matching the [AWS user-data retrieval contract](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html). Missing or empty data returns `404`; whitespace is preserved. Script execution retains its separate bounded gzip decoding.
 
 ### Supported IMDS endpoints
 
@@ -149,10 +153,14 @@ As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT
 | `GET /latest/meta-data/iam/info` | IAM instance profile info |
 | `GET /latest/meta-data/iam/security-credentials/` | Role name list |
 | `GET /latest/meta-data/iam/security-credentials/{role}` | Temporary credentials |
-| `GET /latest/user-data` | UserData script |
+| `GET /latest/meta-data/identity-credentials/ec2/info` | Instance identity role info (`Code`, `LastUpdated`, `AccountId`) |
+| `GET /latest/meta-data/identity-credentials/ec2/security-credentials/ec2-instance` | Instance identity role credentials |
+| `GET /latest/user-data` | Original user-data bytes, including compressed content |
 | `GET /latest/dynamic/instance-identity/document` | Identity document JSON |
 
 IAM credentials are served when the instance has an `IamInstanceProfile.Arn` that resolves to an existing instance profile with one role in the profile's account. The role list uses the role name, which can differ from the profile name. Missing profiles, missing roles, and requests for another role return `404`.
+
+Instance identity credentials are served for every instance, with or without an instance profile, under `identity-credentials/ec2/`, with directory listings at each level. They are a session of the instance identity role, `arn:<partition>:sts::<account>:assumed-role/aws:ec2-instance/<instance-id>` to `GetCallerIdentity`, where `<account>` is the account that launched the instance. As on AWS, no identity policy applies to that role, so with IAM enforcement on they are granted nothing beyond what needs no permission, such as `sts:GetCallerIdentity`. They follow the same lifetime, refresh and revocation rules as role credentials. The SSM Agent requests them first when it registers.
 
 Each registered instance receives its own temporary IAM session. Credentials last one hour and refresh on retrieval during the final five minutes; the previous generation remains valid until expiration. Floci revokes tracked sessions when the instance is unregistered or IMDS shuts down, and discards persisted EC2 sessions when Floci restarts. Restored guests obtain fresh credentials after metadata registration is rebuilt.
 
@@ -212,15 +220,15 @@ Floci seeds the following resources on first use in each region so Terraform, th
 
 | Action | Description |
 |--------|-------------|
-| CreateVpc | Creates a VPC with the requested CIDR block. |
+| CreateVpc | Creates a VPC with the requested CIDR block. `InstanceTenancy` accepts `default` or `dedicated`; `host` is rejected with `InvalidParameterValue`, as on AWS. |
 | DescribeVpcs | Lists or returns stored VPCs. |
 | DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, or an attached internet gateway. Instances, NAT gateways and other subnet-resident resources are not checked. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Lists common AWS interface endpoint services and S3 (gateway and interface) in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
-| CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument` and the per-subnet IPv4 and IPv6 addresses named by `SubnetConfiguration.N`. An `Ipv4` value outside the named subnet's CIDR, or among the first four or the last address AWS reserves in it, is rejected with `InvalidParameterValue`. |
-| DescribeVpcEndpoints | Lists or returns stored VPC endpoints. |
-| ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, and sets or resets the endpoint policy. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` and `IpAddressType` are accepted and ignored. |
+| CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument` and the per-subnet IPv4 and IPv6 addresses named by `SubnetConfiguration.N`. `IpAddressType` defaults to `ipv4`. Interface and gateway address types are stored as metadata. Synthesized endpoint interfaces still carry IPv4 only; IPv6 networking is not emulated. An `Ipv4` value outside the named subnet's CIDR, or among the first four or the last address AWS reserves in it, is rejected with `InvalidParameterValue`. |
+| DescribeVpcEndpoints | Lists or returns stored VPC endpoints, including their IP address type. |
+| ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, sets or resets the endpoint policy, and updates stored `IpAddressType` metadata. Omitting the type preserves its current value; malformed types are rejected before changes are applied. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` is accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
 | DescribeVpnGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
 | DescribeEgressOnlyInternetGateways | Validates filters and pagination parameters and returns an empty set, including for explicit IDs, as AWS does. |
@@ -463,6 +471,27 @@ trimmed the way AWS trims them: modify omits the `tagSet`, and delete omits both
 the subnets. `Ipv6Support` is accepted without checking that the subnets carry IPv6 CIDRs, which
 real AWS rejects; Floci does not model subnet IPv6 allocation.
 
+### Transit Gateway Peering Attachments
+
+| Action | Description |
+|--------|-------------|
+| CreateTransitGatewayPeeringAttachment | Requests a peering between a local transit gateway and a peer one, pending acceptance. |
+| DescribeTransitGatewayPeeringAttachments | Lists or returns peering attachments, from either side's region. |
+| AcceptTransitGatewayPeeringAttachment | Accepts a pending peering attachment from the accepter's region. |
+| DeleteTransitGatewayPeeringAttachment | Deletes a peering attachment from either side. |
+
+The requester's gateway must exist; the peer gateway is recorded as given and not resolved, since
+it may belong to an account this emulator cannot see. One attachment id serves both sides, so a
+cross-region peering is visible from both regions, and the `transit-gateway-id` filter matches
+either side's gateway. Creation reports `pendingAcceptance` (AWS passes through
+`initiatingRequest` first), accepting moves it to `available`, and accepting anything but a pending
+attachment returns `IncorrectState`. Across accounts, only the peer account can see the attachment
+from its side and accept it, and accepting checks that the peer gateway exists in the accepter's
+account and region, returning `InvalidTransitGatewayID.NotFound` otherwise. Each account keeps its
+own tags on the attachment. A pending peering does not stop the peer gateway's owner deleting it;
+that rejects the peering instead. Peering attachments do not yet appear in
+`DescribeTransitGatewayAttachments` and cannot be associated with a route table.
+
 ### Transit Gateway Route Tables
 
 | Action | Description |
@@ -571,6 +600,15 @@ fixed socket/core/vCPU shape rather than one derived from the instance family.
 | DisassociateAddress | Removes an Elastic IP address association. |
 | ReleaseAddress | Releases an Elastic IP address record. |
 
+`ReleaseAddress` automatically disassociates an instance's Elastic IP only in the default VPC.
+In a nondefault VPC it returns `InvalidIPAddress.InUse` without changing the association;
+call `DisassociateAddress` first, as specified by the
+[EC2 API reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ReleaseAddress.html).
+
+Deleting an interface, including deletion on instance termination, disassociates its
+Elastic IP without releasing the allocation. A retained interface keeps its association
+after termination; release still follows that interface's VPC rules.
+
 An allocated Elastic IP's `54.x.x.x` address is invented and routes nowhere, so associating
 it re-points it at the address the instance is actually reachable on — the same value
 DescribeInstances reports. This is a deliberate deviation from AWS, where an EIP's public IP
@@ -585,6 +623,13 @@ allocated address.
 | DescribeAvailabilityZones | Returns the configured local availability zones. |
 | DescribeRegions | Returns the regions known to the local EC2 service. |
 | DescribeAccountAttributes | Returns local account-level EC2 attributes. |
+
+A zone id has AWS's shape, a short region prefix and `-az<n>`: `use1-az1` in `us-east-1`, `apne1-az1`
+in `ap-northeast-1`, `usgw1-az1` in `us-gov-west-1`. On AWS the pairing of a zone name with a zone id
+differs per account; Floci always pairs zone `a` with `az1`, `b` with `az2`, and so on. Subnets, VPC
+flow-log records and EFS mount targets report the same id for the same zone. The ISO and EUSC
+regions, for which AWS publishes no zone id, keep the whole region as the prefix
+(`us-iso-east-1-az1`).
 
 ### Instance Types
 
@@ -717,7 +762,7 @@ A standalone ENI created via `CreateNetworkInterface` can also be handed to `Run
 | DetachVolume | Detaches a volume from an instance, optionally forced; returns the attachment in `detaching` state. |
 
 When `floci.services.ec2.volume-block-devices` is enabled (the default), attached EBS volumes are backed by real Linux loop devices inside running instance containers and synthesized EKS cluster node containers:
-- **Storage mechanism**: Backing sparse raw image files are allocated in Floci storage under `floci-aws-ec2-volumes` (named volume or host path). A privileged helper container (`floci-aws-ec2-volume-helper`, running `floci.services.ec2.volume-helper-image`, default `alpine:3.21`) manages Linux loop devices via `losetup`.
+- **Storage mechanism**: Backing sparse raw image files are allocated in Floci storage under `floci-aws-ec2-volumes` (named volume or host path). A privileged helper container (`floci-aws-ec2-volume-helper`, running `floci.services.ec2.volume-helper-image`, default `alpine:3.21`) manages Linux loop devices via `losetup`. It starts on the first volume operation and is removed when Floci shuts down; the backing files stay in storage.
 - **Target device nodes**: Inside privileged target instance containers, the corresponding device node is created at the requested path (for example `/dev/xvdf` or `/dev/sdf`) using `mknod` or a symlink to the loop device, matching the exact size specified during volume creation. Target containers can format filesystems (such as ext4 or xfs), mount them, and persist data across detach and reattach.
 - **Restart reconciliation**: When an instance container stops and starts, or when Floci restarts, attached volume device nodes are automatically restored inside the target container. Backing raw files remain preserved across reboots in persistent storage.
 - **Graceful degradation**: If Docker is unavailable, the target instance container is not running, or the container is not privileged, volume attachments degrade gracefully to metadata-only tracking without failing the API call.
@@ -752,6 +797,13 @@ Validation matches AWS behavior:
 | DescribeSpotInstanceRequests | Lists spot instance requests, optionally filtered by id. |
 | CancelSpotInstanceRequests | Cancels the named spot instance requests, returning each id with its new state. |
 | DescribeSpotPriceHistory | Returns synthetic spot price history for known instance types across modeled availability zones. |
+
+`RequestSpotInstances` preserves the original base64 user data in the Spot request
+and launched instance. Binary and gzip payloads remain intact when described or
+retrieved through IMDS; script execution uses the same bounded decoder as
+`RunInstances`. Invalid base64, oversized payloads and malformed gzip return
+`InvalidParameterValue` before launch. Older stored Spot requests without the
+original encoding return base64 derived from their saved UTF-8 text.
 
 Spot prices returned by `DescribeSpotPriceHistory` are synthetic and derived deterministically from instance type specifications: `((vcpu * 0.0016) + (memoryGiB * 0.0012)) * (1.0 + (azOffset * 0.03))`, formatted to six decimal places. They bear no relation to real AWS spot prices and are intended for testing cost-aware schedulers rather than spend estimation. Supported filters are `availability-zone`, `availability-zone-id`, `instance-type`, `product-description`, `spot-price`, and `timestamp`. Pagination is supported via `MaxResults` and `NextToken`.
 
@@ -855,6 +907,18 @@ Each VPC is backed by a real Docker network, created lazily when the first insta
 launches. An instance's reported private IP is then an address its container actually holds, drawn
 from the subnet CIDR the caller declared, not a plausible-looking number. Instances in the same
 VPC reach each other at those addresses; instances in different VPCs sit on different bridges.
+
+`CreateVpc` and `CreateSubnet` record declarations without contacting Docker. CIDR collision
+checks and fallback address planning run when a consumer first needs an effective address or
+network attachment. This keeps management calls responsive even when the Docker daemon is slow.
+For overlapping VPC CIDRs, the first VPC whose addresses are needed keeps the declared range;
+later VPCs use the fallback pool. Within one emulator run, allocated addresses remain on the
+same effective range.
+
+When EC2 is enabled, Floci initializes its service, restores persisted state, and seeds the
+configured region's default resources during startup. Other account and region scopes seed on
+first access. Docker reconciliation can lengthen startup, and Docker-backed instance launches
+still depend on daemon responsiveness.
 
 One network per **VPC**, not per subnet: subnets inside a VPC route to each other in AWS, so a
 network per subnet would manufacture a partition AWS does not have. Per-subnet addressing is kept

@@ -16,7 +16,6 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -1067,7 +1066,7 @@ class EsmIntegrationTest {
                             "KAFKA_BOOTSTRAP_SERVERS": ["b-1.example.com:9092", "b-2.example.com:9092"]
                         }
                     },
-                    "Topics": ["orders", "payments"],
+                    "Topics": ["orders"],
                     "StartingPosition": "TRIM_HORIZON"
                 }
                 """.formatted(FUNCTION_NAME))
@@ -1080,7 +1079,7 @@ class EsmIntegrationTest {
             .body("$", not(hasKey("EventSourceArn")))
             .body("SelfManagedEventSource.Endpoints.KAFKA_BOOTSTRAP_SERVERS",
                     hasItems("b-1.example.com:9092", "b-2.example.com:9092"))
-            .body("Topics", hasItems("orders", "payments"))
+            .body("Topics", hasItems("orders"))
             .body("StartingPosition", equalTo("TRIM_HORIZON"))
         .extract()
             .path("UUID");
@@ -1095,7 +1094,7 @@ class EsmIntegrationTest {
             .body("$", not(hasKey("EventSourceArn")))
             .body("SelfManagedEventSource.Endpoints.KAFKA_BOOTSTRAP_SERVERS",
                     hasItems("b-1.example.com:9092", "b-2.example.com:9092"))
-            .body("Topics", hasItems("orders", "payments"))
+            .body("Topics", hasItems("orders"))
             .body("StartingPosition", equalTo("TRIM_HORIZON"));
 
         // Verify DELETE by UUID
@@ -1844,5 +1843,27 @@ class EsmIntegrationTest {
         } finally {
             given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid);
         }
+    }
+    @Test
+    @Order(94)
+    void sqsEventSourceMappingWithoutBatchSizeDefaultsTo10() {
+        // Catches: the per-source BatchSize default also raising SQS mappings from 10 to 100
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s"
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .body("BatchSize", equalTo(10))
+        .extract()
+            .path("UUID");
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
     }
 }

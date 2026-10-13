@@ -23,7 +23,7 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `UpdateEventSourceMapping` | Update a mapping |
 | `DeleteEventSourceMapping` | Remove a mapping |
 | `PublishVersion` | Publish an immutable version |
-| `ListVersionsByFunction` | List all published versions of a function |
+| `ListVersionsByFunction` | List all published versions of a function, `$LATEST` first and then published versions in ascending numeric order |
 | `CreateAlias` | Create a named alias pointing to a version |
 | `GetAlias` | Get alias details |
 | `ListAliases` | List all aliases for a function |
@@ -70,8 +70,34 @@ supported ranges before changing any stored settings. A rejected value returns
 `InvalidParameterValueException` and leaves the function configuration unchanged.
 
 The event invoke configuration is stored and returned as AWS does, and `AWS::Lambda::EventInvokeConfig`
-provisions it from a stack. Asynchronous invocations apply its retry, event age, destination settings,
-and dead-letter queue configurations (`DeadLetterConfig`).
+provisions it from a stack. A SAM function's `EventInvokeConfig` expands into that resource as
+`sam deploy` does: on `$LATEST`, or on the `AutoPublishAlias` alias, with the inline role policy for
+each destination and the SQS queue or SNS topic SAM creates when a destination gives only its `Type`.
+Asynchronous invocations apply its retry, event age, destination settings, and dead-letter queue
+configurations (`DeadLetterConfig`).
+
+### Function policies under IAM enforcement
+
+With [IAM enforcement](iam.md#resource-based-policies) on, the statements `AddPermission` adds take
+part in authorizing calls to the function:
+
+- An invoke of a function named by a full or partial ARN runs the function in the account in the
+  ARN. An invoke of another account's function needs its function policy to allow the caller as
+  well as the caller's own identity policy.
+- `GetFunction`, `GetFunctionConfiguration` and `ListDurableExecutionsByFunction`, given a full ARN
+  with a version or alias, read the function in the account in the ARN, and need its function
+  policy to allow the caller in the same way.
+- Other operations act on the caller's own function of the name the ARN gives, whatever account
+  the ARN names, and are authorized against that function. Floci does not serve them on another
+  account's function, which AWS allows through a function policy.
+- Within one account, a statement naming the caller grants on its own.
+- An invoke is authorized against the version or alias it names, in the function name or in
+  `Qualifier`. A grant added with `Qualifier` covers that version or alias only, and a grant on the
+  function does not cover a qualified invoke. Other operations are authorized against the
+  unqualified function.
+- A statement conditioned on `InvokedViaFunctionUrl` does not admit a direct `Invoke`.
+- `aws:PrincipalOrgID` is not part of the request context, so a grant added with `PrincipalOrgID`
+  admits no caller.
 
 ### Reserved Concurrency
 
@@ -168,7 +194,7 @@ background. Invocations through an ARN (EventBridge, Scheduler, function URLs, d
 durable executions the same way.
 
 The checkpoint protocol under `/2025-12-01` is the real one, so the Durable Execution SDK works
-unchanged for steps, waits, step retries, callbacks and replay. Timers are persisted and fired by a
+unchanged for steps, waits, step retries, callbacks, chained invokes and replay. Timers are persisted and fired by a
 background sweep, so an execution survives a restart of Floci. A function that returns something
 other than the `{Status, Result, Error}` envelope fails its execution with
 `Invalid Status in invocation output.` A function that throws is re-invoked four more times, after
@@ -182,6 +208,13 @@ timeout. A failure sent with an empty request body fails the callback but does n
 function again, as on AWS, so the execution keeps waiting. The SDKs send `{}` when `Error` is
 omitted, which does invoke it.
 
+A chained invoke (`context.invoke`) runs another function with an input of up to 1 MB. A durable
+target needs a version or alias and runs as its own durable execution, and its close completes the
+operation as `SUCCEEDED`, `FAILED`, `TIMED_OUT` or `STOPPED`. Any other function is invoked once,
+and an output over 1 MB fails the operation. A missing function or an unqualified durable one
+fails the operation at once, and a target in another account or Region is rejected at checkpoint.
+Stopping the parent leaves the child running, as on AWS.
+
 `GetDurableExecutionHistory` leaves payloads out unless `IncludeExecutionData=true` is sent. The
 API reference names `true` as the default, but AWS answers this way.
 
@@ -194,7 +227,8 @@ package.
 
 Not emulated yet:
 
-- Chained invokes (`context.invoke`). They are rejected at checkpoint time.
+- The execution role's `lambda:InvokeFunction` permission before a chained invoke. `TenantId` is
+  recorded in the history only.
 - Durable executions started by Step Functions or by an event source mapping. These invoke the
   function as a plain one.
 - Payload encryption. `KMSKeyArn` is stored and returned only.
@@ -345,6 +379,12 @@ returns the qualified one (`...:function:name:2`), as `PublishVersion` does. Wit
 both answer for `$LATEST` and create nothing. `UpdateFunctionConfiguration` has no `Publish`
 parameter in the AWS API and none here.
 
+On a cold launch, `AWS_LAMBDA_FUNCTION_VERSION` contains the executing version:
+`$LATEST` for an unqualified invocation and the published version number for a
+version or alias invocation. This follows the
+[Lambda environment variable contract](https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html#configuration-envvars-runtime)
+and was checked against live AWS in `us-east-1` on October 12, 2026 at 19:49 UTC.
+
 `DeleteFunction` honours `Qualifier` — it removes that published version only, leaving `$LATEST`,
 the other versions and the function's aliases in place; without a qualifier the whole function
 goes. Matching the live service, deleting `$LATEST` by qualifier and naming an alias are both
@@ -388,7 +428,7 @@ passes here and fails on deploy. The content is never mounted at `/opt` either w
 is logged at attach time and again at invoke; publish your own copy of the content locally under a
 name you control if the handler needs it at runtime.
 
-A layer ARN outside the `aws` partition is refused whatever that setting says. Partitions are
+A layer ARN outside the caller's partition is refused whatever that setting says. Partitions are
 isolated, so no resource policy can ever make such a layer readable, and `GetLayerVersionByArn`
 rejects one outright with `InvalidParameterValueException: Invalid layer version ...`.
 
@@ -399,7 +439,6 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 - Layer permissions (`AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
 - Provisioned concurrency (`PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `ListProvisionedConcurrencyConfigs`, `DeleteProvisionedConcurrencyConfig`)
 - `InvokeWithResponseStream`
-- Durable function chained invokes. See Durable Functions
 - Code signing enforcement. A configuration is created, read, updated, deleted and listed, and
   nothing verifies a signature against it, so it never gates a deployment. Attaching one to a
   function is not wired either: there is no `PutFunctionCodeSigningConfig`, so
@@ -761,7 +800,8 @@ is a permanent diff rather than a cosmetic omission.
 `DurableConfig` requires `ExecutionTimeout` on create. A durable function created without
 a `Timeout` gets `min(ExecutionTimeout, 900)`. It always logs in JSON format, and
 `LogFormat: Text` is rejected. On update the members are merged, and a function created
-without `DurableConfig` cannot gain one. See Durable Functions for the execution itself.
+without `DurableConfig` cannot gain one. CloudFormation and Terraform (`durable_config`) replace
+the function to add or remove it. See Durable Functions for the execution itself.
 
 `LogGroup` is validated against AWS's documented constraint: 1-512 characters matching
 `[.\-_/#A-Za-z0-9]+`. `ApplicationLogLevel` and `SystemLogLevel` are accepted with any

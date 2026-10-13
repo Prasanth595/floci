@@ -1,26 +1,5 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
-import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.RequestScopes;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
-import io.github.hectorvent.floci.services.dynamodb.model.ExportDescription;
-import io.github.hectorvent.floci.services.dynamodb.model.ExportSummary;
-import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
-import io.github.hectorvent.floci.services.dynamodb.model.ImportSummary;
-import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
-import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
-import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
-import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
-import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
-import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
-import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
-import io.github.hectorvent.floci.services.s3.S3Service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -28,6 +7,29 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
+import io.github.hectorvent.floci.services.dynamodb.model.ExportDescription;
+import io.github.hectorvent.floci.services.dynamodb.model.ExportSummary;
+import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.ImportSummary;
+import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
+import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
+import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -49,9 +51,9 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -70,7 +72,6 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
-import io.github.hectorvent.floci.core.resource.ExplorerResource;
 
 @ApplicationScoped
 public class DynamoDbService {
@@ -739,7 +740,7 @@ public class DynamoDbService {
     }
 
     /**
-     * Every live item of the table, expired ones dropped. SearchVectors reads the whole table:
+     * Every stored item of the table, including expired items pending TTL deletion. SearchVectors reads the whole table:
      * it has no page boundary and no cursor, so it cannot go through {@link #scan}, which stops
      * at the 1 MB response cap.
      */
@@ -749,9 +750,7 @@ public class DynamoDbService {
         if (items == null) {
             return List.of();
         }
-        return items.values().stream()
-                .filter(item -> !isExpired(item, table))
-                .toList();
+        return List.copyOf(items.values());
     }
 
     /**
@@ -996,10 +995,6 @@ public class DynamoDbService {
             return null;
         }
         JsonNode item = items.get(itemKey);
-        if (item != null && isExpired(item, table)) {
-            LOG.tracev("Got item from {0}: key={1} item=<expired>", canonicalTableName, itemKey);
-            return null;
-        }
         LOG.tracev("Got item from {0}: key={1} item={2}", canonicalTableName, itemKey, item);
         return item;
     }
@@ -1384,9 +1379,6 @@ public class DynamoDbService {
                     .toList();
         }
 
-        // Filter out TTL-expired items
-        results = results.stream().filter(item -> !isExpired(item, table)).toList();
-
         // Sort by the full (possibly composite) sort key, comparing each attribute in key-schema
         // order. Using only the first sort-key attribute would ignore the remaining components
         // (e.g. a "requestStateQuery RANGE, createdAt RANGE" index would never order by createdAt),
@@ -1571,11 +1563,11 @@ public class DynamoDbService {
             totalScanned++;
             scannedItems.add(item);
             lastScanned = item;
-            if (!isExpired(item, table)) {
-                boolean matched = (filterExpression == null
-                        || matchesFilterExpression(item, filterExpression, expressionAttrNames, expressionAttrValues))
-                        && (scanFilter == null || matchesScanFilter(item, scanFilter));
-                if (matched) results.add(item);
+            boolean matched = (filterExpression == null
+                    || matchesFilterExpression(item, filterExpression, expressionAttrNames, expressionAttrValues))
+                    && (scanFilter == null || matchesScanFilter(item, scanFilter));
+            if (matched) {
+                results.add(item);
             }
             // Limit caps SCANNED items (those read), not matched items. DynamoDB does
             // not look ahead when it stops at the Limit boundary: it always surfaces a
@@ -1733,7 +1725,7 @@ public class DynamoDbService {
             return new TransactWriteResult(applyTransactWrite(transactItems, region).writeCapacity(), false);
         }
         String cacheKey = regionResolver.getAccountId() + "::" + region + "::" + clientRequestToken;
-        String requestHash = sha256(rawRequest.toString());
+        String requestHash = Digests.sha256Hex(rawRequest.toString());
         for (;;) {
             long nowNanos = System.nanoTime();
             IdempotencyEntry fresh = new IdempotencyEntry(requestHash, nowNanos, new CompletableFuture<>());
@@ -1821,9 +1813,10 @@ public class DynamoDbService {
             List<TransactionCanceledException.CancellationReason> cancellationReasons = new ArrayList<>();
             boolean hasFailed = false;
             for (JsonNode transactItem : transactItems) {
-                var failReason = transactUpdateValueTooDeep(transactItem);
+                TransactionCanceledException.CancellationReason failReason =
+                        evaluateTransactCondition(transactItem, region, staged);
                 if (failReason == null) {
-                    failReason = evaluateTransactCondition(transactItem, region, staged);
+                    failReason = transactItemValidationFailure(transactItem, region, staged);
                 }
                 if (failReason != null) {
                     hasFailed = true;
@@ -1834,15 +1827,6 @@ public class DynamoDbService {
             }
             if (hasFailed) {
                 throw new TransactionCanceledException(cancellationReasons);
-            }
-
-            for (int i = 0; i < transactItems.size(); i++) {
-                try {
-                    validateTransactItem(transactItems.get(i), region, staged);
-                } catch (KeySchemaMismatchException | ItemNestingExceededException
-                        | UpdatedItemTooLargeException e) {
-                    throw cancelledByMember(transactItems.size(), i, e.getMessage());
-                }
             }
             List<JsonNode> oldImages = stagedImages(memberParticipants, staged);
             for (JsonNode transactItem : transactItems) {
@@ -1974,17 +1958,6 @@ public class DynamoDbService {
         return new TransactParticipant(storageKey, itemKey, tableName);
     }
 
-    // AWS checks the depth of a transact Update's values as part of that member, so a too
-    // deep value cancels the transaction instead of failing the request up front.
-    private TransactionCanceledException.CancellationReason transactUpdateValueTooDeep(JsonNode transactItem) {
-        var values = transactItem.path("Update").get("ExpressionAttributeValues");
-        if (DynamoDbAttributeValueValidator.nestingWithinLimit(values)) {
-            return null;
-        }
-        return new TransactionCanceledException.CancellationReason("ValidationError", null,
-                "Nesting Levels have exceeded supported limits");
-    }
-
     // AWS checks every member's key against the table schema, in order, before it looks for
     // duplicate items or evaluates a condition. The first mismatch cancels with that member's
     // reason alone. An empty key value still fails the whole request.
@@ -2041,6 +2014,17 @@ public class DynamoDbService {
                     : new TransactionCanceledException.CancellationReason("", null));
         }
         return new TransactionCanceledException(reasons);
+    }
+
+    private TransactionCanceledException.CancellationReason transactItemValidationFailure(
+            JsonNode transactItem, String region,
+            Map<String, ConcurrentSkipListMap<String, JsonNode>> staged) {
+        try {
+            validateTransactItem(transactItem, region, staged);
+            return null;
+        } catch (KeySchemaMismatchException | ItemNestingExceededException | UpdatedItemTooLargeException e) {
+            return new TransactionCanceledException.CancellationReason("ValidationError", null, e.getMessage());
+        }
     }
 
     private TransactionCanceledException.CancellationReason evaluateTransactCondition(JsonNode transactItem, String region) {
@@ -2316,7 +2300,8 @@ public class DynamoDbService {
         if (newAttrDefs != null) {
             knownAttrDefs.addAll(newAttrDefs);
         }
-        validateVectorIndexUpdates(table, vectorIndexCreates, vectorIndexDeletes, knownAttrDefs,
+        validateVectorIndexUpdates(table, vectorIndexCreates, vectorIndexDeletes,
+                gsiCreates.size() + gsiDeletes.size(), knownAttrDefs,
                 billingMode != null ? billingMode : table.getBillingMode());
 
         if (readCapacity != null) {
@@ -2372,13 +2357,14 @@ public class DynamoDbService {
      * current lifecycle state.
      *
      * <p>AWS allows one online index operation per table at a time. That limit binds the table,
-     * not the request, so two creates in one request and a create issued while an earlier index
+     * not the request, and GSI creates and deletes count against it too, so two creates in one
+     * request and a create issued while an earlier index
      * still builds are refused the same way. Deleting an index that is still in its resource
      * allocation phase is refused with a different error, and the same delete is accepted once
      * the index reaches backfilling.
      */
     private void validateVectorIndexUpdates(TableDefinition table, List<VectorIndexCreate> creates,
-                                            List<String> deletes,
+                                            List<String> deletes, int gsiOperations,
                                             List<AttributeDefinition> attributeDefinitions,
                                             String billingMode) {
         validateVectorIndexMembers(creates);
@@ -2389,7 +2375,7 @@ public class DynamoDbService {
                     "One or more parameter values were invalid: Vector indexes are only supported "
                     + "for PAY_PER_REQUEST tables", 400);
         }
-        if (creates.isEmpty() && deletes.isEmpty()) {
+        if (creates.isEmpty() && deletes.isEmpty() && gsiOperations == 0) {
             return;
         }
         for (VectorIndexCreate create : creates) {
@@ -2421,7 +2407,8 @@ public class DynamoDbService {
                 .count();
         // Deleting an index that is still backfilling takes over the slot that index already
         // holds, so it does not need one of its own.
-        long onlineOperations = building + creates.size() + deletes.size() - deletesOfBuildingIndexes;
+        long onlineOperations = building + creates.size() + deletes.size() + gsiOperations
+                - deletesOfBuildingIndexes;
         if (onlineOperations > 1) {
             throw new AwsException("LimitExceededException",
                     "Subscriber limit exceeded: Only 1 online index can be created or deleted "
@@ -2775,12 +2762,13 @@ public class DynamoDbService {
                 }
                 deletedForTable++;
                 if (streamService != null) {
-                    streamService.captureEvent("REMOVE", removed, null, scan.table(), scan.region());
+                    streamService.captureEvent("REMOVE", removed, null, scan.table(), scan.region(), true);
                 }
                 if (kinesisForwarder != null) {
                     // Out of request scope here: pass the table owner's account explicitly so the CDC
                     // record lands in the owner's stream, not the default account's same-named stream.
-                    kinesisForwarder.forward("REMOVE", removed, null, scan.table(), scan.region(), scan.accountId());
+                    kinesisForwarder.forward("REMOVE", removed, null, scan.table(), scan.region(), scan.accountId(),
+                            true);
                 }
             }
             if (deletedForTable > 0) {
@@ -4428,7 +4416,7 @@ public class DynamoDbService {
         if (exclusiveStartKey == null || exclusiveStartKey.isNull()) {
             return;
         }
-        DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, false);
+        DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath);
 
         boolean withinBounds = keyConditionExpression != null
                 ? ExpressionEvaluator.matches(keyConditionExpression, exclusiveStartKey,
@@ -4663,23 +4651,6 @@ public class DynamoDbService {
             return HexFormat.of().formatHex(digest);
         } catch (NoSuchAlgorithmException e) {
             return "unknown";
-        }
-    }
-
-    /**
-     * SHA-256 hex digest of a string, used by ClientRequestToken idempotency to compare
-     * request bodies. SHA-256 is required (not MD5) for the dedup contract because a
-     * collision would allow a request with different parameters to be silently treated
-     * as a replay; SHA-256 is supported on every JVM via {@link MessageDigest}.
-     */
-    private static String sha256(String input) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (NoSuchAlgorithmException e) {
-            // SHA-256 is mandated by the JLS to be available on every JVM; this should never trigger.
-            throw new IllegalStateException("SHA-256 is required but not available on this JVM", e);
         }
     }
 

@@ -18,6 +18,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
+import java.sql.Blob;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -38,9 +40,23 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 @ApplicationScoped
 public class RdsDataService implements Resettable {
+
+    /**
+     * The Data API fails an ExecuteStatement whose response is larger than 1 MiB. Only the
+     * serialized records are counted; the small remainder of the body is not.
+     */
+    private static final long MAX_RESPONSE_BYTES = 1024L * 1024L;
+
+    /**
+     * The Data API fails a result set in which any single row the database returns is larger than
+     * 64 KB. A row is measured by its values as the driver returns them, before any JSON escaping or
+     * base64 encoding: see {@link #valueBytes(Object)}.
+     */
+    private static final int MAX_ROW_BYTES = 64 * 1024;
 
     private static final Logger LOG = Logger.getLogger(RdsDataService.class);
 
@@ -106,22 +122,28 @@ public class RdsDataService implements Resettable {
     void shutdown() {
         transactionCleanupExecutor.shutdownNow();
         transactions.forEach((id, tx) -> {
-            synchronized (tx) {
+            tx.lock.lock();
+            try {
                 if (transactions.remove(id, tx)) {
                     rollbackQuietly(tx.connection);
                     tx.close();
                 }
+            } finally {
+                tx.lock.unlock();
             }
         });
     }
 
     public void clear() {
         transactions.forEach((id, tx) -> {
-            synchronized (tx) {
+            tx.lock.lock();
+            try {
                 if (transactions.remove(id, tx)) {
                     rollbackQuietly(tx.connection);
                     tx.close();
                 }
+            } finally {
+                tx.lock.unlock();
             }
         });
         transactions.clear();
@@ -196,9 +218,10 @@ public class RdsDataService implements Resettable {
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
-        synchronized (tx) {
+        validateTransactionResource(tx, resourceArn, region);
+        acquireTransaction(tx);
+        try {
             requireActiveTransaction(transactionId, tx);
-            validateTransactionResource(tx, resourceArn, region);
             if (!transactions.remove(transactionId, tx)) {
                 throw transactionNotFound(transactionId);
             }
@@ -209,6 +232,8 @@ public class RdsDataService implements Resettable {
             } finally {
                 tx.close();
             }
+        } finally {
+            tx.lock.unlock();
         }
         ObjectNode response = objectMapper.createObjectNode();
         response.put("transactionStatus", "Transaction Committed");
@@ -220,9 +245,10 @@ public class RdsDataService implements Resettable {
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
-        synchronized (tx) {
+        validateTransactionResource(tx, resourceArn, region);
+        acquireTransaction(tx);
+        try {
             requireActiveTransaction(transactionId, tx);
-            validateTransactionResource(tx, resourceArn, region);
             if (!transactions.remove(transactionId, tx)) {
                 throw transactionNotFound(transactionId);
             }
@@ -233,6 +259,8 @@ public class RdsDataService implements Resettable {
             } finally {
                 tx.close();
             }
+        } finally {
+            tx.lock.unlock();
         }
         ObjectNode response = objectMapper.createObjectNode();
         response.put("transactionStatus", "Rollback Complete");
@@ -247,11 +275,14 @@ public class RdsDataService implements Resettable {
 
         if (transactionId != null && !transactionId.isBlank()) {
             TransactionContext tx = transaction(transactionId);
-            synchronized (tx) {
+            validateTransactionIdentity(tx, request, region);
+            acquireTransaction(tx);
+            try {
                 requireActiveTransaction(transactionId, tx);
-                validateTransactionIdentity(tx, request, region);
-                tx.refresh(transactionTtl);
                 return work.execute(tx.connection, tx.engine);
+            } finally {
+                tx.refresh(transactionTtl);
+                tx.lock.unlock();
             }
         }
 
@@ -533,14 +564,37 @@ public class RdsDataService implements Resettable {
     private ArrayNode records(ResultSet rs, ResultSetMetaData meta) throws SQLException {
         ArrayNode records = objectMapper.createArrayNode();
         int columnCount = meta.getColumnCount();
+        // Serialized size of the records array: its two brackets plus one comma between rows.
+        long responseBytes = 2;
         while (rs.next()) {
             ArrayNode row = objectMapper.createArrayNode();
+            long rawRowBytes = 0;
             for (int i = 1; i <= columnCount; i++) {
-                row.add(RdsDataFieldMapper.toField(objectMapper, rs.getObject(i), meta.getColumnType(i)));
+                Object value = rs.getObject(i);
+                rawRowBytes += valueBytes(value);
+                row.add(RdsDataFieldMapper.toField(objectMapper, value, meta.getColumnType(i)));
+            }
+            if (rawRowBytes > MAX_ROW_BYTES) {
+                LOG.debugv("Rejecting a result row of {0} bytes", rawRowBytes);
+                throw new AwsException("UnsupportedResultException", "Packet for query is too large", 400);
+            }
+            responseBytes += row.toString().getBytes(StandardCharsets.UTF_8).length + (records.isEmpty() ? 0 : 1);
+            if (responseBytes > MAX_RESPONSE_BYTES) {
+                throw new AwsException("UnsupportedResultException", "Database response exceeded size limit", 400);
             }
             records.add(row);
         }
         return records;
+    }
+
+    /** A column value's size as the driver returns it: the raw length of binary, the UTF-8 length of anything else's text. */
+    static long valueBytes(Object value) throws SQLException {
+        return switch (value) {
+            case null -> 0;
+            case byte[] bytes -> bytes.length;
+            case Blob blob -> blob.length();
+            default -> value.toString().getBytes(StandardCharsets.UTF_8).length;
+        };
     }
 
     private Credentials credentials(JsonNode request, RdsDataResourceResolver.DatabaseTarget target, String region) {
@@ -616,15 +670,24 @@ public class RdsDataService implements Resettable {
         }
     }
 
+    private void acquireTransaction(TransactionContext tx) {
+        if (!tx.lock.tryLock()) {
+            requireActiveTransaction(tx.id, tx);
+            throw new AwsException("DatabaseErrorException", "Transaction is still running a query", 400);
+        }
+    }
+
     private void cleanupExpiredTransactions() {
         Instant now = Instant.now();
         transactions.forEach((id, tx) -> {
-            if (tx.expiresAt.isBefore(now)) {
-                synchronized (tx) {
+            if (tx.expiresAt.isBefore(now) && tx.lock.tryLock()) {
+                try {
                     if (tx.expiresAt.isBefore(now) && transactions.remove(id, tx)) {
                         rollbackQuietly(tx.connection);
                         tx.close();
                     }
+                } finally {
+                    tx.lock.unlock();
                 }
             }
         });
@@ -778,6 +841,7 @@ public class RdsDataService implements Resettable {
         private final String database;
         private final String region;
         private final RdsBackendGate.Lease lease;
+        private final ReentrantLock lock = new ReentrantLock();
         private volatile Instant expiresAt;
 
         private TransactionContext(

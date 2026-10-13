@@ -14,9 +14,9 @@ import software.amazon.awssdk.services.s3.model.Delete;
 import software.amazon.awssdk.services.s3.model.DeleteBucketRequest;
 import software.amazon.awssdk.services.s3.model.DeleteBucketTaggingRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectTaggingRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
-import software.amazon.awssdk.services.s3.model.DeleteObjectTaggingRequest;
 import software.amazon.awssdk.services.s3.model.GetBucketLocationRequest;
 import software.amazon.awssdk.services.s3.model.GetBucketLocationResponse;
 import software.amazon.awssdk.services.s3.model.GetBucketTaggingRequest;
@@ -529,6 +529,18 @@ class S3Test {
             assertThat(response.asUtf8String()).isEqualTo("from AWS");
             assertThat(response.response().contentLength()).isEqualTo(8);
             assertThat(response.response().contentRange()).isEqualTo("bytes 6-13/" + CONTENT.length());
+
+            ResponseBytes<GetObjectResponse> multiRangeResponse = s3.getObjectAsBytes(GetObjectRequest.builder()
+                    .bucket(bucket)
+                    .key(key)
+                    .range("bytes=0-1,3-4,7-9")
+                    .build());
+
+            assertThat(multiRangeResponse.response().sdkHttpResponse().statusCode()).isEqualTo(200);
+            assertThat(multiRangeResponse.asUtf8String()).isEqualTo(CONTENT);
+            assertThat(multiRangeResponse.response().contentLength()).isEqualTo(CONTENT.length());
+            assertThat(multiRangeResponse.response().contentRange()).isNull();
+            assertThat(multiRangeResponse.response().sdkHttpResponse().firstMatchingHeader("Content-Range")).isEmpty();
         } finally {
             try {
                 s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());

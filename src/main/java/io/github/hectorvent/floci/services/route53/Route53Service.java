@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.route53;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.DomainNames;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -468,15 +469,24 @@ public class Route53Service implements Resettable {
 
     // ── Health Checks ─────────────────────────────────────────────────────────
 
-    public synchronized HealthCheck createHealthCheck(String callerReference, HealthCheckConfig cfg) {
+    /**
+     * A caller reference makes the create safe to retry: the same reference with the same settings
+     * (the request's canonical {@code requestSettings}) returns the health check it already created,
+     * and different settings are refused.
+     */
+    public synchronized HealthCheck createHealthCheck(String callerReference, HealthCheckConfig cfg,
+                                                      String requestSettings) {
         for (HealthCheck existing : healthCheckStore.scan(k -> true)) {
             if (existing.getCallerReference().equals(callerReference)) {
+                if (requestSettings.equals(existing.getRequestSettings())) {
+                    return existing;
+                }
                 throw new AwsException("HealthCheckAlreadyExists",
                         "A health check with caller reference " + callerReference + " already exists.", 409);
             }
         }
         String id = UUID.randomUUID().toString();
-        HealthCheck hc = new HealthCheck(id, callerReference, cfg);
+        HealthCheck hc = new HealthCheck(id, callerReference, cfg, requestSettings);
         healthCheckStore.put(id, hc);
         return hc;
     }
@@ -593,7 +603,7 @@ public class Route53Service implements Resettable {
         }
         String normalizedQname = normalizeName(qname).toLowerCase();
         if (privateZoneNameCounts.isEmpty()
-                || privateZoneNameCounts.keySet().stream().noneMatch(z -> normalizedQname.equals(z) || normalizedQname.endsWith("." + z))) {
+                || privateZoneNameCounts.keySet().stream().noneMatch(z -> DomainNames.isWithin(normalizedQname, z))) {
             return false;
         }
         for (OwnedZone owned : allHostedZonesAcrossAccounts()) {
@@ -602,7 +612,7 @@ public class Route53Service implements Resettable {
                 continue;
             }
             String zoneName = normalizeName(zone.getName()).toLowerCase();
-            if (normalizedQname.equals(zoneName) || normalizedQname.endsWith("." + zoneName)) {
+            if (DomainNames.isWithin(normalizedQname, zoneName)) {
                 return true;
             }
         }
@@ -687,7 +697,7 @@ public class Route53Service implements Resettable {
     /** The private zones with the longest name containing {@code normalizedQname}, so a parent zone never answers for a child. */
     private List<OwnedZone> mostSpecificPrivateZones(String normalizedQname) {
         if (privateZoneNameCounts.isEmpty()
-                || privateZoneNameCounts.keySet().stream().noneMatch(z -> normalizedQname.equals(z) || normalizedQname.endsWith("." + z))) {
+                || privateZoneNameCounts.keySet().stream().noneMatch(z -> DomainNames.isWithin(normalizedQname, z))) {
             return List.of();
         }
         List<OwnedZone> matchingZones = new ArrayList<>();
@@ -698,7 +708,7 @@ public class Route53Service implements Resettable {
                 continue;
             }
             String zoneName = normalizeName(zone.getName()).toLowerCase();
-            if (!normalizedQname.equals(zoneName) && !normalizedQname.endsWith("." + zoneName)) {
+            if (!DomainNames.isWithin(normalizedQname, zoneName)) {
                 continue;
             }
             if (zoneName.length() > maxZoneLength) {

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
@@ -43,7 +44,8 @@ import java.util.Optional;
  * <p>Error codes, statuses and ordering follow real S3: a structurally bad header is
  * {@code 400 AuthorizationHeaderMalformed}; a request with no date is {@code 403 AccessDenied};
  * a missing {@code x-amz-content-sha256} is {@code 400 InvalidRequest}; an unregistered key is
- * {@code 403 InvalidAccessKeyId}; a request more than fifteen minutes from server time is
+ * {@code 403 InvalidAccessKeyId}, and a session past its expiry, sent with its own token,
+ * {@code 400 ExpiredToken}; a request more than fifteen minutes from server time is
  * {@code 403 RequestTimeTooSkewed}; a signature that does not verify is
  * {@code 403 SignatureDoesNotMatch}; and a body that does not match its declared hash is
  * {@code 400 XAmzContentSHA256Mismatch}.
@@ -85,26 +87,41 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
     private final PreSignedUrlGenerator presignGenerator;
     private final IamService iamService;
     private final CurrentVertxRequest currentVertxRequest;
-
-    @Context
-    ResourceInfo resourceInfo;
+    private final ResourceInfo resourceInfo;
 
     @Inject
-    public S3HeaderSignatureFilter(S3Service s3Service, PreSignedUrlGenerator presignGenerator,
-                                   IamService iamService, CurrentVertxRequest currentVertxRequest) {
+    public S3HeaderSignatureFilter(S3Service s3Service,
+                                   PreSignedUrlGenerator presignGenerator,
+                                   IamService iamService,
+                                   CurrentVertxRequest currentVertxRequest,
+                                   @Context ResourceInfo resourceInfo) {
         this.s3Service = s3Service;
         this.presignGenerator = presignGenerator;
         this.iamService = iamService;
         this.currentVertxRequest = currentVertxRequest;
+        this.resourceInfo = resourceInfo;
+    }
+
+    S3HeaderSignatureFilter(S3Service s3Service,
+                            PreSignedUrlGenerator presignGenerator,
+                            IamService iamService,
+                            CurrentVertxRequest currentVertxRequest) {
+        this(s3Service, presignGenerator, iamService, currentVertxRequest, null);
     }
 
     @Override
     public void filter(ContainerRequestContext ctx) throws IOException {
-        if (!verifiesSignatures() || !routedToS3()) {
+        if (!S3SignatureFilterScope.routedToS3(resourceInfo)
+                || !S3SignatureFilterScope.verifiesSignatures(s3Service, presignGenerator)) {
             return;
         }
         String authorization = ctx.getHeaderString("Authorization");
-        if (authorization == null || !authorization.startsWith(ALGORITHM + " ")) {
+        if (authorization == null || authorization.isBlank()) {
+            return;
+        }
+        if (!authorization.startsWith(ALGORITHM + " ")) {
+            abort(ctx, 400, "AuthorizationHeaderMalformed",
+                    "The authorization header you provided is invalid.");
             return;
         }
 
@@ -154,9 +171,13 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         }
         declaredHash = declaredHash.trim();
 
-        Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(
-                iamService, accessKeyId, ctx.getHeaderString("X-Amz-Security-Token"));
+        String sessionToken = ctx.getHeaderString("X-Amz-Security-Token");
+        Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(iamService, accessKeyId, sessionToken);
         if (secretKey.isEmpty()) {
+            if (S3PostPolicySigner.isExpiredSession(iamService, accessKeyId, sessionToken)) {
+                abort(ctx, 400, "ExpiredToken", S3PostPolicySigner.EXPIRED_TOKEN_MESSAGE);
+                return;
+            }
             abort(ctx, 403, "InvalidAccessKeyId",
                     "The AWS Access Key Id you provided does not exist in our records.");
             return;
@@ -188,14 +209,6 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         }
     }
 
-    private boolean verifiesSignatures() {
-        return s3Service.isAuthEnforced() || presignGenerator.shouldValidateSignatures();
-    }
-
-    private boolean routedToS3() {
-        return resourceInfo != null && S3Controller.class.equals(resourceInfo.getResourceClass());
-    }
-
     private boolean signatureMatches(ContainerRequestContext ctx, String secretKey, String scopeDate,
                                      String region, String amzDate, String signedHeaders,
                                      String payloadHash, String signature) throws Exception {
@@ -221,7 +234,7 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         String stringToSign = ALGORITHM + "\n"
                 + amzDate + "\n"
                 + scopeDate + "/" + region + "/" + SIGNING_SERVICE + "/" + TERMINATOR + "\n"
-                + SigV4RequestValidator.sha256Hex(canonicalRequest);
+                + Digests.sha256Hex(canonicalRequest);
         byte[] signingKey = SigV4RequestValidator.deriveSigningKey(secretKey, scopeDate, region, SIGNING_SERVICE);
         String expected = SigV4RequestValidator.hexEncode(SigV4RequestValidator.hmacSha256(signingKey, stringToSign));
         return MessageDigest.isEqual(
@@ -258,14 +271,10 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
     private static boolean bodyMatches(ContainerRequestContext ctx, String declaredHash) throws IOException {
         byte[] body = ctx.getEntityStream() != null ? ctx.getEntityStream().readAllBytes() : new byte[0];
         ctx.setEntityStream(new ByteArrayInputStream(body));
-        try {
-            String actual = SigV4RequestValidator.hexEncode(MessageDigest.getInstance("SHA-256").digest(body));
-            return MessageDigest.isEqual(
-                    actual.getBytes(StandardCharsets.UTF_8),
-                    declaredHash.toLowerCase().getBytes(StandardCharsets.UTF_8));
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 is required by SigV4", e);
-        }
+        String actual = SigV4RequestValidator.hexEncode(Digests.sha256(body));
+        return MessageDigest.isEqual(
+                actual.getBytes(StandardCharsets.UTF_8),
+                declaredHash.toLowerCase().getBytes(StandardCharsets.UTF_8));
     }
 
     /**

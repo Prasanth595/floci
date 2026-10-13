@@ -5,15 +5,16 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.services.ssoadmin.model.TrustedTokenIssuer;
-import io.github.hectorvent.floci.services.ssooidc.model.AuthorizationCode;
-import io.github.hectorvent.floci.services.ssooidc.model.DeviceAuthorization;
-import io.github.hectorvent.floci.services.ssooidc.model.RegisteredClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.ssoadmin.SsoAdminService;
 import io.github.hectorvent.floci.services.ssoadmin.model.ApplicationAccessScope;
 import io.github.hectorvent.floci.services.ssoadmin.model.ApplicationGrant;
+import io.github.hectorvent.floci.services.ssoadmin.model.TrustedTokenIssuer;
+import io.github.hectorvent.floci.services.ssooidc.model.AuthorizationCode;
+import io.github.hectorvent.floci.services.ssooidc.model.DeviceAuthorization;
+import io.github.hectorvent.floci.services.ssooidc.model.RegisteredClient;
 import io.github.hectorvent.floci.services.ssooidc.model.TokenSession;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -22,8 +23,8 @@ import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
-import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
@@ -171,8 +172,7 @@ public class SsoOidcController {
             }
         }
         String idToken = localIdToken(applicationArn, requestContext.getAccountId());
-        String identityContext = Base64.getUrlEncoder().withoutPadding().encodeToString(
-                (requestContext.getAccountId() + ":" + applicationArn).getBytes(StandardCharsets.UTF_8));
+        String identityContext = Base64Url.encode(requestContext.getAccountId() + ":" + applicationArn);
         return tokenResponse(session, scopes, issuedTokenType, new String[]{idToken, identityContext});
     }
 
@@ -319,11 +319,8 @@ public class SsoOidcController {
                 .put("aud", applicationArn)
                 .put("iat", now)
                 .put("exp", now + 3600);
-        return base64Url(header.toString()) + "." + base64Url(claims.toString()) + ".";
-    }
-
-    private static String base64Url(String value) {
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(value.getBytes(StandardCharsets.UTF_8));
+        return Base64Url.encode(header.toString()) + "."
+                + Base64Url.encode(claims.toString()) + ".";
     }
 
     private String resolveLocalPrincipal(String requestedPrincipalId) {

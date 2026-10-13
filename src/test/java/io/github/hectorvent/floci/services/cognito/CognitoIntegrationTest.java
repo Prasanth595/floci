@@ -20,29 +20,29 @@ import java.security.KeyFactory;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.security.spec.RSAPublicKeySpec;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Spliterators;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static io.restassured.RestAssured.given;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -718,6 +718,203 @@ class CognitoIntegrationTest {
                 }
                 """.formatted(signUpPoolId, signUpUsername));
         assertEquals("CONFIRMED", confirmedUser.path("UserStatus").asText());
+    }
+
+    @Test
+    void signUpCodeIsSentFromTheEmailConfigurationFrom() throws Exception {
+        verifySesEmailIdentity("noreply@repro.example");
+        String fromUsername = signUpWithEmailConfiguration("EmailConfigurationFromPool", """
+                {
+                  "EmailSendingAccount": "DEVELOPER",
+                  "SourceArn": "arn:aws:ses:us-east-1:000000000000:identity/noreply@repro.example",
+                  "From": "Repro App <noreply@repro.example>"
+                }
+                """);
+
+        // The sender name stays in Source, the From header, while the return path, which the SMTP
+        // relay uses as the envelope sender, is the bare address.
+        given()
+                .when()
+                .get("/_aws/ses")
+                .then()
+                .statusCode(200)
+                .body("messages.findAll { it.Destination?.ToAddresses?.contains('" + fromUsername + "') }",
+                        hasSize(1))
+                .body("messages.find { it.Destination?.ToAddresses?.contains('" + fromUsername + "') }.Source",
+                        equalTo("Repro App <noreply@repro.example>"))
+                .body("messages.find { it.Destination?.ToAddresses?.contains('" + fromUsername + "') }.ReturnPath",
+                        equalTo("noreply@repro.example"));
+    }
+
+    @Test
+    void signUpCodeIsSentFromTheDefaultAddressWhenSesHasNotVerifiedTheSourceArn() throws Exception {
+        String unverified = "noreply-" + UUID.randomUUID() + "@unverified.example";
+        String fromUsername = signUpWithEmailConfiguration("UnverifiedSourceArnPool", """
+                {
+                  "EmailSendingAccount": "DEVELOPER",
+                  "SourceArn": "arn:aws:ses:us-east-1:000000000000:identity/%s",
+                  "From": "Repro App <%s>"
+                }
+                """.formatted(unverified, unverified));
+
+        given()
+                .when()
+                .get("/_aws/ses")
+                .then()
+                .statusCode(200)
+                .body("messages.findAll { it.Destination?.ToAddresses?.contains('" + fromUsername + "') }",
+                        hasSize(1))
+                .body("messages.find { it.Destination?.ToAddresses?.contains('" + fromUsername + "') }.Source",
+                        equalTo("no-reply@verificationemail.com"));
+    }
+
+    @Test
+    void adminCreateUserEmailsAnInvitationWithAWorkingTemporaryPassword() throws Exception {
+        String invitePoolId = cognitoJson("CreateUserPool", """
+                { "PoolName": "InvitationPool" }
+                """).path("UserPool").path("Id").asText();
+        String inviteClientId = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "invitation-client",
+                  "ExplicitAuthFlows": ["ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+                }
+                """.formatted(invitePoolId)).path("UserPoolClient").path("ClientId").asText();
+        String invitee = "invited+" + UUID.randomUUID() + "@example.com";
+
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributes": [{ "Name": "email", "Value": "%s" }],
+                  "DesiredDeliveryMediums": ["EMAIL"]
+                }
+                """.formatted(invitePoolId, invitee, invitee))
+                .then()
+                .statusCode(200)
+                .body("User.UserStatus", equalTo("FORCE_CHANGE_PASSWORD"));
+
+        String toInvitee = "messages.findAll { it.Destination?.ToAddresses?.contains('" + invitee + "') }";
+        String body = given()
+                .when()
+                .get("/_aws/ses")
+                .then()
+                .statusCode(200)
+                .body(toInvitee, hasSize(1))
+                .body(toInvitee + "[0].Subject", equalTo("Your temporary password"))
+                .extract()
+                .path(toInvitee + "[0].Body.text_part");
+        Matcher invitation = Pattern.compile("^Your username is (\\S+) and temporary password is (\\S+)\\.$")
+                .matcher(body);
+        assertTrue(invitation.find(), body);
+        assertEquals(invitee, invitation.group(1));
+
+        cognitoAction("AdminInitiateAuth", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientId": "%s",
+                  "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
+                }
+                """.formatted(invitePoolId, inviteClientId, invitee, invitation.group(2)))
+                .then()
+                .statusCode(200)
+                .body("ChallengeName", equalTo("NEW_PASSWORD_REQUIRED"));
+    }
+
+    @Test
+    void adminCreateUserWithSuppressSendsNoInvitation() throws Exception {
+        String suppressPoolId = cognitoJson("CreateUserPool", """
+                { "PoolName": "SuppressedInvitationPool" }
+                """).path("UserPool").path("Id").asText();
+        String invitee = "suppressed+" + UUID.randomUUID() + "@example.com";
+
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributes": [{ "Name": "email", "Value": "%s" }],
+                  "DesiredDeliveryMediums": ["EMAIL"],
+                  "MessageAction": "SUPPRESS"
+                }
+                """.formatted(suppressPoolId, invitee, invitee))
+                .then()
+                .statusCode(200)
+                .body("User.UserStatus", equalTo("FORCE_CHANGE_PASSWORD"));
+
+        given()
+                .when()
+                .get("/_aws/ses")
+                .then()
+                .statusCode(200)
+                .body("messages.findAll { it.Destination?.ToAddresses?.contains('" + invitee + "') }", hasSize(0));
+    }
+
+    @Test
+    void adminCreateUserRefusesAnUnknownDeliveryMedium() throws Exception {
+        String mediumPoolId = cognitoJson("CreateUserPool", """
+                { "PoolName": "UnknownMediumPool" }
+                """).path("UserPool").path("Id").asText();
+
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "medium-user",
+                  "UserAttributes": [{ "Name": "email", "Value": "medium@example.com" }],
+                  "DesiredDeliveryMediums": ["VOICE"]
+                }
+                """.formatted(mediumPoolId))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", containsString("'desiredDeliveryMediums'"));
+    }
+
+    /** Creates a pool with {@code emailConfiguration}, signs a new user up to it and returns the username. */
+    private static String signUpWithEmailConfiguration(String poolName, String emailConfiguration) throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "%s",
+                  "AutoVerifiedAttributes": ["email"],
+                  "EmailConfiguration": %s
+                }
+                """.formatted(poolName, emailConfiguration));
+        String fromPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "email-configuration-from-client"
+                }
+                """.formatted(fromPoolId));
+        String fromClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
+        String fromUsername = "from+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "Password": "Passw0rd!",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" }
+                  ]
+                }
+                """.formatted(fromClientId, fromUsername, fromUsername))
+                .then()
+                .statusCode(200);
+        return fromUsername;
+    }
+
+    private static void verifySesEmailIdentity(String emailAddress) {
+        given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+                .formParam("Action", "VerifyEmailIdentity")
+                .formParam("EmailAddress", emailAddress)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
     }
 
     @Test

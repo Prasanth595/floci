@@ -3,9 +3,10 @@ package io.github.hectorvent.floci.services.lambda.durable;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend.AccountEntry;
@@ -33,7 +34,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -121,7 +122,10 @@ public class DurableExecutionService implements Resettable {
                               Long startedBefore, boolean reverseOrder, Integer maxItems, String marker) {
     }
 
-    /** The token is null when the batch closed the execution. The SDK reads that as "completed". */
+    /**
+     * The token is null and the operations are empty when the batch closed the execution. The SDK
+     * reads that as "completed".
+     */
     public record CheckpointResult(String checkpointToken, List<DurableOperation> newExecutionState) {
     }
 
@@ -246,14 +250,34 @@ public class DurableExecutionService implements Resettable {
             }
             DurableExecution execution = loadWithCurrentToken(arn, checkpointToken);
             long now = clock.millis();
-            DurableCheckpointApplier.Outcome outcome = DurableCheckpointApplier.apply(execution, updates, now);
+            Map<String, ResolvedDurableTarget> targets = new HashMap<>();
+            DurableCheckpointApplier.Outcome outcome = DurableCheckpointApplier.apply(execution, updates, now,
+                    functionName -> unreachableTarget(execution, functionName, targets));
+            for (Map.Entry<String, AwsException> unreachable : outcome.unreachableChainedInvokes().entrySet()) {
+                completeChainedInvoke(execution, execution.getOperations().get(unreachable.getKey()),
+                        ChainedOutcome.failed(unreachable.getValue()), now, effects);
+            }
+            if (outcome.closed()) {
+                // AWS ends the invocation here and ignores what the handler returns after it.
+                DurableHistory.invocationCompleted(execution, execution.getCurrentInvocationStartedAt(), now,
+                        execution.getCurrentInvocationId(), null);
+                execution.setCurrentInvocationId(null);
+            }
+            // AWS runs a target started in the batch that closes the execution, and ignores its result.
+            List<DurableExecution> children = new ArrayList<>();
+            for (String operationId : outcome.chainedInvokes()) {
+                DurableOperation operation = execution.getOperations().get(operationId);
+                startChainedInvoke(execution, operation, targets.get(operation.getChainedFunctionName()), now,
+                        children, effects);
+            }
             if (!outcome.closed()) {
                 DurableCheckpointApplier.fireDueTimers(execution, now);
             }
             List<DurableOperation> changed = unseenOperations(execution);
             String nextToken = null;
             if (outcome.closed()) {
-                closeBookkeeping(execution, now, effects);
+                close(execution, outcome.closingStatus(), outcome.closingResult(), outcome.closingError(), now,
+                        effects);
             } else {
                 execution.setCheckpointSequence(execution.getCheckpointSequence() + 1);
                 nextToken = DurableTokens.checkpointToken(execution.getExecutionArn(),
@@ -264,7 +288,11 @@ public class DurableExecutionService implements Resettable {
                     : new DurableCheckpointReplay(checkpointToken, clientToken, nextToken, changed));
             execution.setSeenSequence(execution.getChangeSequence());
             save(execution);
-            result = new CheckpointResult(nextToken, changed);
+            // After the parent, so a crash in between leaves no child the parent does not know.
+            for (DurableExecution child : children) {
+                save(child);
+            }
+            result = new CheckpointResult(nextToken, outcome.closed() ? List.of() : changed);
         }
         runEffects(effects);
         return result;
@@ -446,17 +474,27 @@ public class DurableExecutionService implements Resettable {
      */
     public void recoverAfterRestart() {
         int recovered = 0;
+        List<Runnable> lateReports = new ArrayList<>();
         for (AccountEntry<DurableExecution> entry : store.scanAllAccountEntries(key -> true)) {
             List<Runnable> effects = new ArrayList<>();
             synchronized (lockFor(entry.accountId(), entry.key())) {
                 DurableExecution execution = store.getForAccount(entry.accountId(), entry.key()).orElse(null);
-                if (execution == null || execution.isClosed()) {
+                if (execution == null) {
+                    continue;
+                }
+                if (execution.isClosed()) {
+                    // A child that closed just before the restart may not have reached its parent.
+                    reportToParent(execution, lateReports);
+                    resumeChainedInvokes(execution, effects);
+                    save(execution);
+                    runEffects(effects);
                     continue;
                 }
                 execution.setCurrentInvocationId(null);
                 execution.setReinvokeRequested(false);
+                resumeChainedInvokes(execution, effects);
                 // A crash retry keeps its backoff, and the sweeper relaunches it when it is due.
-                if (execution.getNextInvocationAttemptAt() == null) {
+                if (execution.getCurrentInvocationId() == null && execution.getNextInvocationAttemptAt() == null) {
                     trigger(execution, effects);
                 }
                 save(execution);
@@ -464,6 +502,7 @@ public class DurableExecutionService implements Resettable {
             }
             runEffects(effects);
         }
+        runEffects(lateReports);
         if (recovered > 0) {
             LOG.infov("Resumed {0} durable execution(s) after restart", recovered);
         }
@@ -516,6 +555,7 @@ public class DurableExecutionService implements Resettable {
                 return;
             }
             startedAt = clock.millis();
+            execution.setCurrentInvocationStartedAt(startedAt);
             String token = DurableTokens.checkpointToken(execution.getExecutionArn(), invocationId,
                     execution.getCheckpointSequence());
             List<String> updatedOperationIds = unseenOperations(execution).stream().map(DurableOperation::getId).toList();
@@ -537,7 +577,7 @@ public class DurableExecutionService implements Resettable {
             result = new DurableInvocationResult(null, null, "ResourceNotFoundException");
         } else {
             try {
-                result = invoker.invoke(target, payload);
+                result = invoker.invoke(target, payload, invocationId);
             } catch (AwsException e) {
                 result = new DurableInvocationResult(null, DurableWire.functionErrorPayload(
                         DurableErrorObject.of(e.getMessage(), e.getErrorCode())),
@@ -647,8 +687,12 @@ public class DurableExecutionService implements Resettable {
     // ──────────────────────────── state changes ────────────────────────────
 
     private DurableExecution newExecution(StartRequest request, ResolvedDurableTarget target, String name, long now) {
+        return newExecution(request, target, name, UUID.randomUUID().toString(), now);
+    }
+
+    private DurableExecution newExecution(StartRequest request, ResolvedDurableTarget target, String name,
+                                          String executionId, long now) {
         DurableExecution execution = new DurableExecution();
-        String executionId = UUID.randomUUID().toString();
         execution.setExecutionId(executionId);
         execution.setName(name);
         execution.setAccountId(request.accountId());
@@ -694,13 +738,17 @@ public class DurableExecutionService implements Resettable {
             root.setEndTimestamp(now);
             root.setChangeSequence(execution.nextChangeSequence());
         }
-        switch (status) {
+        closeEvent(execution, now);
+        closeBookkeeping(execution, now, effects);
+    }
+
+    private static void closeEvent(DurableExecution execution, long now) {
+        switch (execution.getStatus()) {
             case SUCCEEDED -> DurableHistory.executionSucceeded(execution, now);
             case TIMED_OUT -> DurableHistory.executionTimedOut(execution, now);
             case STOPPED -> DurableHistory.executionEnded(execution, "ExecutionStopped", now);
             default -> DurableHistory.executionEnded(execution, "ExecutionFailed", now);
         }
-        closeBookkeeping(execution, now, effects);
     }
 
     /** What every close shares, whether the applier or the service decided it. */
@@ -715,6 +763,230 @@ public class DurableExecutionService implements Resettable {
                 waiter.complete(execution);
             }
         });
+        reportToParent(execution, effects);
+    }
+
+    // ──────────────────────────── chained invoke ────────────────────────────
+
+    private record ChainedOutcome(DurableOperationStatus status, String result, DurableErrorObject error) {
+
+        static ChainedOutcome failed(AwsException e) {
+            return new ChainedOutcome(DurableOperationStatus.FAILED, null,
+                    DurableErrorObject.of(e.getMessage(), e.getErrorCode()));
+        }
+    }
+
+    /** Call it under the child's lock. The parent is only touched under its own lock, in the effect. */
+    private void reportToParent(DurableExecution child, List<Runnable> effects) {
+        if (child.getParentExecutionArn() == null) {
+            return;
+        }
+        ArnParts parent = parseArn(child.getParentExecutionArn());
+        ChainedOutcome outcome = chainedOutcome(child);
+        String operationId = child.getParentOperationId();
+        String childArn = child.getExecutionArn();
+        effects.add(() -> finishChainedInvoke(parent.accountId(), parent.storeKey(), operationId, childArn, outcome));
+    }
+
+    /** Null when the target can be invoked. The resolved target is kept in {@code targets} for the start. */
+    private AwsException unreachableTarget(DurableExecution execution, String functionName,
+                                           Map<String, ResolvedDurableTarget> targets) {
+        try {
+            targets.put(functionName, resolveChainedTarget(execution, functionName));
+            return null;
+        } catch (AwsException e) {
+            return e;
+        }
+    }
+
+    private void startChainedInvoke(DurableExecution execution, DurableOperation operation,
+                                    ResolvedDurableTarget target, long now, List<DurableExecution> children,
+                                    List<Runnable> effects) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("FunctionName", operation.getChainedFunctionName());
+        if (operation.getChainedTenantId() != null) {
+            details.put("TenantId", operation.getChainedTenantId());
+        }
+        details.put("Input", DurableHistory.payloadWrapper(operation.getInputPayload()));
+        details.put("ExecutedVersion", target.version());
+        if (target.durable()) {
+            DurableExecution child = newChildExecution(execution, operation, target, UUID.randomUUID().toString(),
+                    UUID.randomUUID().toString(), now, effects);
+            operation.setChildExecutionArn(child.getExecutionArn());
+            children.add(child);
+            details.put("DurableExecutionArn", child.getExecutionArn());
+        } else {
+            effects.add(plainChainedInvoke(execution, operation, target));
+        }
+        DurableHistory.operationEvent(execution, operation, "ChainedInvokeStarted", now, details);
+    }
+
+    /** The checkpoint already rejected a target in another account or region. */
+    private ResolvedDurableTarget resolveChainedTarget(DurableExecution execution, String functionName) {
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionName);
+        String accountId = execution.getAccountId();
+        String region = execution.getRegion();
+        ResolvedDurableTarget target;
+        try {
+            target = invoker.resolve(accountId, region, ref.name(), ref.qualifier());
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            String qualifier = ref.qualifier() != null ? ref.qualifier() : "$LATEST";
+            throw new AwsException("ResourceNotFoundException", "Function not found: "
+                    + AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + ref.name() + ":" + qualifier), 404);
+        }
+        if (target.durable() && ref.qualifier() == null) {
+            throw new AwsException("InvalidParameterValueException",
+                    "You cannot invoke a durable function using an unqualified ARN.", 400);
+        }
+        return target;
+    }
+
+    /** The child gets a random name, as on AWS, and reports its close back to the parent operation. */
+    private DurableExecution newChildExecution(DurableExecution parent, DurableOperation operation,
+                                               ResolvedDurableTarget target, String name, String executionId, long now,
+                                               List<Runnable> effects) {
+        StartRequest request = new StartRequest(target.accountId(), target.region(), target.functionName(),
+                target.version(), name, operation.getInputPayload(), false);
+        DurableExecution child = newExecution(request, target, name, executionId, now);
+        child.setParentExecutionArn(parent.getExecutionArn());
+        child.setParentOperationId(operation.getId());
+        trigger(child, effects);
+        return child;
+    }
+
+    private Runnable plainChainedInvoke(DurableExecution parent, DurableOperation operation,
+                                        ResolvedDurableTarget target) {
+        String accountId = parent.getAccountId();
+        String key = storeKey(parent);
+        String operationId = operation.getId();
+        // A plain target gets {} when the update has no Payload. A durable child starts with no input.
+        byte[] payload = (operation.getInputPayload() != null ? operation.getInputPayload() : "{}")
+                .getBytes(StandardCharsets.UTF_8);
+        long launchGeneration = generation.get();
+        return () -> launchExecutor.execute(() -> {
+            ChainedOutcome outcome = invokePlainFunction(target, payload);
+            if (launchGeneration == generation.get()) {
+                finishChainedInvoke(accountId, key, operationId, null, outcome);
+            }
+        });
+    }
+
+    private ChainedOutcome invokePlainFunction(ResolvedDurableTarget target, byte[] payload) {
+        DurableInvocationResult result;
+        try {
+            result = invoker.invoke(target, payload, UUID.randomUUID().toString());
+        } catch (AwsException e) {
+            return ChainedOutcome.failed(e);
+        } catch (RuntimeException e) {
+            LOG.warnv("Chained invoke of {0} failed: {1}", target.functionArn(), e.getMessage());
+            return new ChainedOutcome(DurableOperationStatus.FAILED, null,
+                    DurableErrorObject.of(e.getMessage(), "InvocationError"));
+        }
+        if (result.functionError() != null) {
+            return new ChainedOutcome(DurableOperationStatus.FAILED, null,
+                    errorFromLambdaPayload(result.payload(), result.functionError()));
+        }
+        if (result.payload() != null && DurableCheckpointApplier.MAX_CHAINED_INVOKE_PAYLOAD_BYTES < result.payload().length) {
+            return new ChainedOutcome(DurableOperationStatus.FAILED, null, DurableErrorObject.of(
+                    "CHAINED_INVOKE output payload size must be less than or equal to "
+                            + DurableCheckpointApplier.MAX_CHAINED_INVOKE_PAYLOAD_BYTES + " bytes.", null));
+        }
+        String output = result.payload() == null || result.payload().length == 0 ? null
+                : new String(result.payload(), StandardCharsets.UTF_8);
+        return new ChainedOutcome(DurableOperationStatus.SUCCEEDED, output, null);
+    }
+
+    /** A child's close maps onto the parent operation. A timeout reports the child's ExecutionTimeout. */
+    private static ChainedOutcome chainedOutcome(DurableExecution child) {
+        return switch (child.getStatus()) {
+            case SUCCEEDED -> new ChainedOutcome(DurableOperationStatus.SUCCEEDED, child.getResult(), null);
+            case TIMED_OUT -> new ChainedOutcome(DurableOperationStatus.TIMED_OUT, null, DurableErrorObject.of(
+                    "CHAINED_INVOKE timed out after " + child.getExecutionTimeoutSeconds() + " seconds.",
+                    "ChainedInvoke.Timeout"));
+            case STOPPED -> new ChainedOutcome(DurableOperationStatus.STOPPED, null, child.getError());
+            default -> new ChainedOutcome(DurableOperationStatus.FAILED, null, child.getError());
+        };
+    }
+
+    /** {@code childArn} is the reporting child, which must be the one the operation started. */
+    private void finishChainedInvoke(String accountId, String key, String operationId, String childArn,
+                                     ChainedOutcome outcome) {
+        List<Runnable> effects = new ArrayList<>();
+        synchronized (lockFor(accountId, key)) {
+            DurableExecution execution = store.getForAccount(accountId, key).orElse(null);
+            DurableOperation operation = execution == null ? null : execution.getOperations().get(operationId);
+            if (operation == null || operation.getStatus() != DurableOperationStatus.STARTED
+                    || !Objects.equals(childArn, operation.getChildExecutionArn())) {
+                return;
+            }
+            completeChainedInvoke(execution, operation, outcome, clock.millis(), effects);
+            save(execution);
+        }
+        runEffects(effects);
+    }
+
+    /** A closed execution records the outcome without an event, so a restart does not run the target again. */
+    private void completeChainedInvoke(DurableExecution execution, DurableOperation operation, ChainedOutcome outcome,
+                                       long now, List<Runnable> effects) {
+        operation.setStatus(outcome.status());
+        operation.setResult(outcome.result());
+        operation.setError(outcome.error());
+        operation.setEndTimestamp(now);
+        if (execution.isClosed()) {
+            return;
+        }
+        operation.setChangeSequence(execution.nextChangeSequence());
+        Map<String, Object> details = new LinkedHashMap<>();
+        if (outcome.status() == DurableOperationStatus.SUCCEEDED) {
+            details.put("Result", DurableHistory.payloadWrapper(outcome.result()));
+        } else {
+            details.put("Error", DurableHistory.errorWrapper(outcome.error()));
+        }
+        String eventType = switch (outcome.status()) {
+            case SUCCEEDED -> "ChainedInvokeSucceeded";
+            case TIMED_OUT -> "ChainedInvokeTimedOut";
+            case STOPPED -> "ChainedInvokeStopped";
+            default -> "ChainedInvokeFailed";
+        };
+        DurableHistory.operationEvent(execution, operation, eventType, now, details);
+        trigger(execution, effects);
+    }
+
+    /**
+     * A plain chained invoke in flight was lost with the process, so it runs again. A durable child
+     * the parent recorded but the store lost is started again under the same ARN.
+     */
+    private void resumeChainedInvokes(DurableExecution execution, List<Runnable> effects) {
+        for (DurableOperation operation : execution.getOperations().values()) {
+            if (operation.getType() != DurableOperationType.CHAINED_INVOKE
+                    || operation.getStatus() != DurableOperationStatus.STARTED) {
+                continue;
+            }
+            ArnParts childArn = operation.getChildExecutionArn() == null ? null
+                    : parseArn(operation.getChildExecutionArn());
+            if (childArn != null && store.getForAccount(childArn.accountId(), childArn.storeKey()).isPresent()) {
+                continue;
+            }
+            ResolvedDurableTarget target;
+            try {
+                // The version in the saved ARN, since an alias may point elsewhere by now.
+                target = childArn == null ? resolveChainedTarget(execution, operation.getChainedFunctionName())
+                        : invoker.resolve(childArn.accountId(), childArn.region(), childArn.functionName(),
+                                childArn.version());
+            } catch (AwsException e) {
+                completeChainedInvoke(execution, operation, ChainedOutcome.failed(e), clock.millis(), effects);
+                continue;
+            }
+            if (childArn == null) {
+                effects.add(plainChainedInvoke(execution, operation, target));
+            } else {
+                save(newChildExecution(execution, operation, target, childArn.name(), childArn.executionId(),
+                        clock.millis(), effects));
+            }
+        }
     }
 
     /** Null unless this is the last checkpoint again, with the same ClientToken, and its token is still current. */
@@ -762,10 +1034,10 @@ public class DurableExecutionService implements Resettable {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", NOT_FOUND, 404));
     }
 
+    /** In creation order, as AWS lists them, not in the order they changed. */
     private static List<DurableOperation> unseenOperations(DurableExecution execution) {
         return execution.getOperations().values().stream()
                 .filter(operation -> operation.getChangeSequence() > execution.getSeenSequence())
-                .sorted(Comparator.comparingLong(DurableOperation::getChangeSequence))
                 .toList();
     }
 

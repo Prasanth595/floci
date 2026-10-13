@@ -12,11 +12,14 @@ import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.LoginProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
+import io.github.hectorvent.floci.services.iam.model.OrganizationsAccessReportJob;
+import io.github.hectorvent.floci.services.iam.model.OutboundWebIdentityFederation;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedEntity;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedJob;
+import io.github.hectorvent.floci.services.iam.model.ServiceSpecificCredential;
 import io.github.hectorvent.floci.services.iam.model.SigningCertificate;
 import io.github.hectorvent.floci.services.iam.model.SshPublicKey;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
@@ -30,8 +33,10 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -52,9 +57,13 @@ public class IamQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(IamQueryHandler.class);
 
-    /** {@code MaxItems} on the last-accessed readers: "defaults to 100", valid range 1 to 1000. */
+    /** {@code MaxItems} on the readers that page through {@link #paginate}: "defaults to 100", range 1 to 1000. */
     private static final int DEFAULT_MAX_ITEMS = 100;
     private static final int MAX_MAX_ITEMS = 1000;
+    /** {@code sortKeyType} on {@code GetOrganizationsAccessReport}. */
+    private static final Set<String> SORT_KEYS = Set.of("SERVICE_NAMESPACE_ASCENDING",
+            "SERVICE_NAMESPACE_DESCENDING", "LAST_AUTHENTICATED_TIME_ASCENDING",
+            "LAST_AUTHENTICATED_TIME_DESCENDING");
     /** {@code serviceNamespaceListType}: minimum 1 item, maximum 200. */
     private static final int MAX_SERVICE_NAMESPACES = 200;
     private static final int MAX_TAG_LIST_MEMBERS = 50;
@@ -68,6 +77,7 @@ public class IamQueryHandler {
     private final AccountResolver accountResolver;
     private final SAMLProviderService samlProviderService;
     private final ServiceLastAccessedService serviceLastAccessedService;
+    private final OrganizationsAccessReportService organizationsAccessReportService;
     private final RegionResolver regionResolver;
     private final Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders;
 
@@ -75,6 +85,7 @@ public class IamQueryHandler {
     public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator,
                            AccountResolver accountResolver, SAMLProviderService samlProviderService,
                            ServiceLastAccessedService serviceLastAccessedService,
+                           OrganizationsAccessReportService organizationsAccessReportService,
                            RegionResolver regionResolver,
                            Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders) {
         this.iamService = iamService;
@@ -82,6 +93,7 @@ public class IamQueryHandler {
         this.accountResolver = accountResolver;
         this.samlProviderService = samlProviderService;
         this.serviceLastAccessedService = serviceLastAccessedService;
+        this.organizationsAccessReportService = organizationsAccessReportService;
         this.regionResolver = regionResolver;
         this.serverCertificateReferenceProviders = serverCertificateReferenceProviders;
     }
@@ -97,6 +109,11 @@ public class IamQueryHandler {
             case "DeleteUser" -> handleDeleteUser(params);
             case "ListUsers" -> handleListUsers(params);
             case "UpdateUser" -> handleUpdateUser(params);
+            case "CreateServiceSpecificCredential" -> handleCreateServiceSpecificCredential(params);
+            case "ListServiceSpecificCredentials" -> handleListServiceSpecificCredentials(params, authorization);
+            case "UpdateServiceSpecificCredential" -> handleUpdateServiceSpecificCredential(params, authorization);
+            case "ResetServiceSpecificCredential" -> handleResetServiceSpecificCredential(params, authorization);
+            case "DeleteServiceSpecificCredential" -> handleDeleteServiceSpecificCredential(params, authorization);
             case "UploadSSHPublicKey" -> handleUploadSshPublicKey(params);
             case "GetSSHPublicKey" -> handleGetSshPublicKey(params);
             case "ListSSHPublicKeys" -> handleListSshPublicKeys(params, authorization);
@@ -113,6 +130,7 @@ public class IamQueryHandler {
             case "GetLoginProfile" -> handleGetLoginProfile(params, authorization);
             case "UpdateLoginProfile" -> handleUpdateLoginProfile(params);
             case "DeleteLoginProfile" -> handleDeleteLoginProfile(params, authorization);
+            case "ChangePassword" -> handleChangePassword(params, authorization);
 
             // Multi-factor authentication
             case "CreateVirtualMFADevice" -> handleCreateVirtualMFADevice(params);
@@ -199,6 +217,16 @@ public class IamQueryHandler {
             case "ListPolicies" -> handleListPolicies(params);
             case "ListEntitiesForPolicy" -> handleListEntitiesForPolicy(params);
             case "GetAccountSummary" -> handleGetAccountSummary(params);
+            case "GetAccountProperties" -> handleGetAccountProperties(params);
+            case "PutAccountProperties" -> handlePutAccountProperties(params);
+            case "SetSecurityTokenServicePreferences" ->
+                    handleSetSecurityTokenServicePreferences(params);
+            case "EnableOutboundWebIdentityFederation" ->
+                    handleEnableOutboundWebIdentityFederation(params);
+            case "DisableOutboundWebIdentityFederation" ->
+                    handleDisableOutboundWebIdentityFederation(params);
+            case "GetOutboundWebIdentityFederationInfo" ->
+                    handleGetOutboundWebIdentityFederationInfo(params);
             case "GetAccountAuthorizationDetails" -> handleGetAccountAuthorizationDetails(params);
             case "GenerateCredentialReport" -> handleGenerateCredentialReport(params);
             case "GetCredentialReport" -> handleGetCredentialReport(params);
@@ -283,6 +311,10 @@ public class IamQueryHandler {
             case "GetServiceLastAccessedDetails" -> handleGetServiceLastAccessedDetails(params, authorization);
             case "GetServiceLastAccessedDetailsWithEntities" ->
                     handleGetServiceLastAccessedDetailsWithEntities(params, authorization);
+            case "GenerateOrganizationsAccessReport" ->
+                    handleGenerateOrganizationsAccessReport(params, authorization);
+            case "GetOrganizationsAccessReport" ->
+                    handleGetOrganizationsAccessReport(params, authorization);
             case "ListPoliciesGrantingServiceAccess" -> handleListPoliciesGrantingServiceAccess(params, authorization);
 
             default -> AwsQueryResponse.error("UnsupportedOperation",
@@ -540,6 +572,40 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteLoginProfile", AwsNamespaces.IAM)).build();
     }
 
+    /**
+     * Changes the calling user's console password. The operation takes no {@code UserName}: the
+     * reference says it "changes the password of the IAM user who is calling this operation", and
+     * the CLI reference adds that it "can be called by IAM users only. If this command is called
+     * using AWS account (root) credentials, the command returns an InvalidUserType error". A
+     * signing key that belongs to no stored user is Floci's stand-in for exactly that caller, so
+     * it answers the same way rather than reporting the key as missing.
+     */
+    private Response handleChangePassword(MultivaluedMap<String, String> params,
+                                          String authorization) {
+        // Both members are required, and read through getParam rather than requireParam because
+        // requireParam refuses a blank value where passwordType permits one: the pattern starts
+        // at \u0020, so a password of spaces is a value the model accepts. The shape check
+        // therefore stays with the pattern, which also names which of the two members failed.
+        iamService.changePassword(callingIamUser(authorization),
+                getParam(params, "OldPassword"), getParam(params, "NewPassword"));
+        return Response.ok(
+                AwsQueryResponse.envelopeNoResult("ChangePassword", AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * The IAM user whose access key signed the request, for the one operation that acts on the
+     * caller and gives no way to name anyone else. Unlike {@link #resolveUserName}, a key with no
+     * user behind it is not a missing entity here: the caller is not an IAM user, which is the
+     * case {@code InvalidUserType} is published for.
+     */
+    private String callingIamUser(String authorization) {
+        String accessKeyId = accountResolver.extractAccessKeyId(authorization);
+        return iamService.findUserNameByAccessKeyId(accessKeyId)
+                .orElseThrow(() -> new AwsException("InvalidUserType",
+                        "The request was rejected because the type of user for the transaction "
+                                + "was incorrect.", 400));
+    }
+
     private String loginProfileXml(LoginProfile profile) {
         return new XmlBuilder()
                 .elem("PasswordResetRequired", profile.isPasswordResetRequired())
@@ -765,6 +831,131 @@ public class IamQueryHandler {
             xml.elem("Marker", page.marker());
         }
         return Response.ok(AwsQueryResponse.envelope("ListServerCertificates", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * UserName is required here and optional on the other four, which is a third pattern again:
+     * the signing-certificate operations take it optionally throughout and the SSH ones require it
+     * everywhere but the list.
+     */
+    private Response handleCreateServiceSpecificCredential(
+            MultivaluedMap<String, String> params) {
+        ServiceSpecificCredential credential = iamService.createServiceSpecificCredential(
+                requireParam(params, "UserName"), requireParam(params, "ServiceName"),
+                optionalInt(params, "CredentialAgeDays"));
+        XmlBuilder xml = new XmlBuilder().start("ServiceSpecificCredential")
+                .raw(serviceCredentialXml(credential, true)).end("ServiceSpecificCredential");
+        return Response.ok(AwsQueryResponse.envelope("CreateServiceSpecificCredential",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * The metadata list, which the model defines without either secret. {@code AllUsers} cannot be
+     * given together with {@code UserName}, so naming both is a validation error rather than one
+     * quietly winning.
+     */
+    private Response handleListServiceSpecificCredentials(
+            MultivaluedMap<String, String> params, String authorization) {
+        boolean allUsers = "true".equalsIgnoreCase(getParam(params, "AllUsers"));
+        if (allUsers && getParam(params, "UserName") != null) {
+            throw new AwsException("ValidationError",
+                    "AllUsers cannot be specified together with UserName.", 400);
+        }
+        String userName = allUsers ? null : resolveUserName(params, authorization);
+        Page<ServiceSpecificCredential> page = paginate(
+                iamService.listServiceSpecificCredentials(
+                        userName, getParam(params, "ServiceName"), allUsers), params);
+        XmlBuilder xml = new XmlBuilder().start("ServiceSpecificCredentials");
+        for (ServiceSpecificCredential credential : page.items()) {
+            xml.start("member").raw(serviceCredentialXml(credential, false)).end("member");
+        }
+        xml.end("ServiceSpecificCredentials").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListServiceSpecificCredentials",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleUpdateServiceSpecificCredential(
+            MultivaluedMap<String, String> params, String authorization) {
+        iamService.updateServiceSpecificCredential(resolveUserName(params, authorization),
+                requireParam(params, "ServiceSpecificCredentialId"), getParam(params, "Status"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateServiceSpecificCredential",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /** The reset is the only operation besides the create that returns the secret half. */
+    private Response handleResetServiceSpecificCredential(
+            MultivaluedMap<String, String> params, String authorization) {
+        ServiceSpecificCredential credential = iamService.resetServiceSpecificCredential(
+                resolveUserName(params, authorization),
+                requireParam(params, "ServiceSpecificCredentialId"));
+        XmlBuilder xml = new XmlBuilder().start("ServiceSpecificCredential")
+                .raw(serviceCredentialXml(credential, true)).end("ServiceSpecificCredential");
+        return Response.ok(AwsQueryResponse.envelope("ResetServiceSpecificCredential",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleDeleteServiceSpecificCredential(
+            MultivaluedMap<String, String> params, String authorization) {
+        iamService.deleteServiceSpecificCredential(resolveUserName(params, authorization),
+                requireParam(params, "ServiceSpecificCredentialId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteServiceSpecificCredential",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * A credential, with the secret half only when the operation is one that discloses it. The
+     * metadata shape the list uses is defined without {@code ServicePassword} or
+     * {@code ServiceCredentialSecret}, so omitting them is the shape rather than a precaution.
+     */
+    private String serviceCredentialXml(ServiceSpecificCredential credential, boolean withSecret) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("UserName", credential.getUserName())
+                .elem("ServiceName", credential.getServiceName())
+                .elem("ServiceSpecificCredentialId", credential.getServiceSpecificCredentialId())
+                .elem("Status", iamService.reportedStatus(credential))
+                .elem("CreateDate", isoDate(credential.getCreateDate()));
+        if (credential.getServiceUserName() != null) {
+            xml.elem("ServiceUserName", credential.getServiceUserName());
+        }
+        if (credential.getServiceCredentialAlias() != null) {
+            xml.elem("ServiceCredentialAlias", credential.getServiceCredentialAlias());
+        }
+        if (credential.getExpirationDate() != null) {
+            xml.elem("ExpirationDate", isoDate(credential.getExpirationDate()));
+        }
+        if (withSecret) {
+            if (credential.getServicePassword() != null) {
+                xml.elem("ServicePassword", credential.getServicePassword());
+            }
+            if (credential.getServiceCredentialSecret() != null) {
+                xml.elem("ServiceCredentialSecret", credential.getServiceCredentialSecret());
+            }
+        }
+        return xml.build();
+    }
+
+    /** An optional integer parameter that AWS documents as having to be positive. */
+    /**
+     * An optional integer parameter. Absent means absent, but present and unparseable is a
+     * validation error rather than a silent absence: {@code CredentialAgeDays=} would otherwise
+     * create a credential that never expires, which is the opposite of what the caller asked for.
+     */
+    private Integer optionalInt(MultivaluedMap<String, String> params, String name) {
+        String raw = getParam(params, name);
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value '" + raw + "' at '"
+                            + Character.toLowerCase(name.charAt(0)) + name.substring(1)
+                            + "' failed to satisfy constraint: Member must be an integer", 400);
+        }
     }
 
     /**
@@ -1163,7 +1354,7 @@ public class IamQueryHandler {
     }
 
     private Response handleGetRole(MultivaluedMap<String, String> params) {
-        IamRole role = iamService.getRole(getParam(params, "RoleName"));
+        IamRole role = iamService.getValidatedRole(getParam(params, "RoleName"));
         String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
         return Response.ok(AwsQueryResponse.envelope("GetRole", AwsNamespaces.IAM, result)).build();
     }
@@ -1195,12 +1386,15 @@ public class IamQueryHandler {
     }
 
     private Response handleListRoles(MultivaluedMap<String, String> params) {
-        List<IamRole> roleList = iamService.listRoles(getParam(params, "PathPrefix"));
+        Page<IamRole> page = paginate(iamService.listRoles(getParam(params, "PathPrefix")), params);
         XmlBuilder xml = new XmlBuilder().start("Roles");
-        for (IamRole r : roleList) {
+        for (IamRole r : page.items()) {
             xml.start("member").raw(roleXml(r, false)).end("member");
         }
-        xml.end("Roles").elem("IsTruncated", false);
+        xml.end("Roles").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
         return Response.ok(AwsQueryResponse.envelope("ListRoles", AwsNamespaces.IAM, xml.build())).build();
     }
 
@@ -1212,8 +1406,8 @@ public class IamQueryHandler {
     }
 
     private Response handleUpdateAssumeRolePolicy(MultivaluedMap<String, String> params) {
-        iamService.updateAssumeRolePolicy(getParam(params, "RoleName"),
-                getParam(params, "PolicyDocument"));
+        iamService.updateAssumeRolePolicy(requireParam(params, "RoleName"),
+                requireParam(params, "PolicyDocument"));
         return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateAssumeRolePolicy", AwsNamespaces.IAM)).build();
     }
 
@@ -1261,13 +1455,16 @@ public class IamQueryHandler {
     }
 
     private Response handleListPolicies(MultivaluedMap<String, String> params) {
-        List<IamPolicy> policyList = iamService.listPolicies(
-                getParam(params, "Scope"), getParam(params, "PathPrefix"));
+        Page<IamPolicy> page = paginate(iamService.listPolicies(
+                getParam(params, "Scope"), getParam(params, "PathPrefix")), params);
         XmlBuilder xml = new XmlBuilder().start("Policies");
-        for (IamPolicy p : policyList) {
+        for (IamPolicy p : page.items()) {
             xml.start("member").raw(policyXml(p, false)).end("member");
         }
-        xml.end("Policies").elem("IsTruncated", false);
+        xml.end("Policies").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
         return Response.ok(AwsQueryResponse.envelope("ListPolicies", AwsNamespaces.IAM, xml.build())).build();
     }
 
@@ -1299,6 +1496,69 @@ public class IamQueryHandler {
         }
         xml.end("SummaryMap");
         return Response.ok(AwsQueryResponse.envelope("GetAccountSummary", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleGetAccountProperties(MultivaluedMap<String, String> params) {
+        XmlBuilder xml = new XmlBuilder().start("Properties");
+        for (Map.Entry<String, String> entry : iamService.getAccountProperties().entrySet()) {
+            xml.start("entry").elem("key", entry.getKey())
+                    .elem("value", entry.getValue()).end("entry");
+        }
+        xml.end("Properties");
+        return Response.ok(AwsQueryResponse.envelope("GetAccountProperties",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * The Properties map arrives as {@code Properties.entry.N.key} and
+     * {@code Properties.entry.N.value}, which is how the API Reference spells the member.
+     */
+    private Response handlePutAccountProperties(MultivaluedMap<String, String> params) {
+        Map<String, String> properties = new LinkedHashMap<>();
+        for (int i = 1; ; i++) {
+            String key = getParam(params, "Properties.entry." + i + ".key");
+            if (key == null) {
+                break;
+            }
+            properties.put(key, getParam(params, "Properties.entry." + i + ".value"));
+        }
+        iamService.putAccountProperties(properties);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("PutAccountProperties",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleSetSecurityTokenServicePreferences(
+            MultivaluedMap<String, String> params) {
+        iamService.setSecurityTokenServicePreferences(
+                requireParam(params, "GlobalEndpointTokenVersion"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("SetSecurityTokenServicePreferences",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleEnableOutboundWebIdentityFederation(
+            MultivaluedMap<String, String> params) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("IssuerIdentifier", iamService.enableOutboundWebIdentityFederation());
+        return Response.ok(AwsQueryResponse.envelope("EnableOutboundWebIdentityFederation",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleDisableOutboundWebIdentityFederation(
+            MultivaluedMap<String, String> params) {
+        iamService.disableOutboundWebIdentityFederation();
+        return Response.ok(AwsQueryResponse.envelopeNoResult(
+                "DisableOutboundWebIdentityFederation", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleGetOutboundWebIdentityFederationInfo(
+            MultivaluedMap<String, String> params) {
+        OutboundWebIdentityFederation state = iamService.getOutboundWebIdentityFederationInfo();
+        XmlBuilder xml = new XmlBuilder()
+                .elem("IssuerIdentifier", state.getIssuerIdentifier())
+                // Vending is on whenever the feature is: nothing in the API toggles it apart.
+                .elem("JwtVendingEnabled", true);
+        return Response.ok(AwsQueryResponse.envelope("GetOutboundWebIdentityFederationInfo",
+                AwsNamespaces.IAM, xml.build())).build();
     }
 
     private Response handleGenerateCredentialReport(MultivaluedMap<String, String> params) {
@@ -1815,27 +2075,27 @@ public class IamQueryHandler {
     // =========================================================================
 
     private Response handlePutUserPermissionsBoundary(MultivaluedMap<String, String> params) {
-        String userName = getParam(params, "UserName");
-        String boundaryArn = getParam(params, "PermissionsBoundary");
+        String userName = requireParam(params, "UserName");
+        String boundaryArn = requireParam(params, "PermissionsBoundary");
         iamService.putUserPermissionsBoundary(userName, boundaryArn);
         return Response.ok(AwsQueryResponse.envelope("PutUserPermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
     private Response handleDeleteUserPermissionsBoundary(MultivaluedMap<String, String> params) {
-        String userName = getParam(params, "UserName");
+        String userName = requireParam(params, "UserName");
         iamService.deleteUserPermissionsBoundary(userName);
         return Response.ok(AwsQueryResponse.envelope("DeleteUserPermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
     private Response handlePutRolePermissionsBoundary(MultivaluedMap<String, String> params) {
-        String roleName = getParam(params, "RoleName");
-        String boundaryArn = getParam(params, "PermissionsBoundary");
+        String roleName = requireParam(params, "RoleName");
+        String boundaryArn = requireParam(params, "PermissionsBoundary");
         iamService.putRolePermissionsBoundary(roleName, boundaryArn);
         return Response.ok(AwsQueryResponse.envelope("PutRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
     private Response handleDeleteRolePermissionsBoundary(MultivaluedMap<String, String> params) {
-        String roleName = getParam(params, "RoleName");
+        String roleName = requireParam(params, "RoleName");
         iamService.deleteRolePermissionsBoundary(roleName);
         return Response.ok(AwsQueryResponse.envelope("DeleteRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
@@ -1981,6 +2241,115 @@ public class IamQueryHandler {
     }
 
     /**
+     * Generates the Organizations access report now and returns its job id, mirroring the Access
+     * Advisor generator above. The report is the services the SCPs along the entity path leave
+     * reachable; the reference is explicit that service last accessed data "only applies SCP
+     * logic", so no identity policy, resource policy or permissions boundary enters it.
+     *
+     * <p>{@code ReportGenerationLimitExceeded} is the operation's only modeled error and stays
+     * unreachable here: it reports concurrent generations for the account, and a Floci job is
+     * complete the moment it is created, so two can never overlap.
+     */
+    private Response handleGenerateOrganizationsAccessReport(MultivaluedMap<String, String> params,
+                                                             String authorization) {
+        OrganizationsAccessReportJob job = organizationsAccessReportService.generate(
+                accountResolver.resolve(authorization), requireParam(params, "EntityPath"),
+                params.getFirst("OrganizationsPolicyId"));
+        return Response.ok(AwsQueryResponse.envelope("GenerateOrganizationsAccessReport",
+                AwsNamespaces.IAM,
+                new XmlBuilder().elem("JobId", job.getJobId()).build())).build();
+    }
+
+    /**
+     * Retrieves a generated report. AWS lists a service account principals are allowed to reach
+     * even when it was never used, and its own example gives such a service as a namespace and a
+     * zero count with no region, entity path or last-authenticated time. Floci records no access,
+     * so every entry takes that shape and {@code NumberOfServicesNotAccessed} equals
+     * {@code NumberOfServicesAccessible}.
+     *
+     * <p>A job that failed carries {@code ErrorDetails} and no report, which is where an entity
+     * path naming something outside the organization lands, the operation publishing no
+     * synchronous error for one.
+     */
+    private Response handleGetOrganizationsAccessReport(MultivaluedMap<String, String> params,
+                                                        String authorization) {
+        String jobId = requireParam(params, "JobId");
+        // Read before the lookup, because a value outside the enum is a bad request whether or not
+        // the job exists: validating it after would answer NoSuchEntity for a request AWS rejects.
+        String sortKey = validatedSortKey(params);
+        OrganizationsAccessReportJob job = organizationsAccessReportService.get(
+                accountResolver.resolve(authorization), jobId);
+        XmlBuilder xml = new XmlBuilder()
+                .elem("JobStatus", job.getJobStatus())
+                .elem("JobCreationDate", isoDate(job.getJobCreationDate()))
+                .elem("JobCompletionDate", isoDate(job.getJobCompletionDate()));
+        if (job.getErrorCode() != null) {
+            return Response.ok(AwsQueryResponse.envelope("GetOrganizationsAccessReport",
+                    AwsNamespaces.IAM,
+                    xml.elem("IsTruncated", false)
+                       .start("ErrorDetails")
+                       .elem("Message", job.getErrorMessage())
+                       .elem("Code", job.getErrorCode())
+                       .end("ErrorDetails")
+                       .build())).build();
+        }
+        List<String> namespaces = sortedByKey(job.getServiceNamespaces(), sortKey);
+        Page<String> page = paginate(namespaces, params);
+        xml.elem("NumberOfServicesAccessible", namespaces.size())
+           .elem("NumberOfServicesNotAccessed", namespaces.size())
+           .start("AccessDetails");
+        for (String namespace : page.items()) {
+            // ServiceName carries a display name ("Amazon S3") that Floci has no mapping for, so
+            // the namespace stands in for it, as it does on the last-accessed reader.
+            xml.start("member")
+               .elem("ServiceName", namespace)
+               .elem("ServiceNamespace", namespace)
+               .elem("TotalAuthenticatedEntities", 0)
+               .end("member");
+        }
+        xml.end("AccessDetails").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("GetOrganizationsAccessReport",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * {@code SortKey} if the request carries one the enum permits, null if it carries none. A
+     * request that carries the member is held to the enum whatever it carries: an empty value is
+     * not one of the four, and reading it as an absent member would answer a default-ordered
+     * report to a request AWS rejects.
+     */
+    private static String validatedSortKey(MultivaluedMap<String, String> params) {
+        String sortKey = params.getFirst("SortKey");
+        if (sortKey == null) {
+            return null;
+        }
+        if (!SORT_KEYS.contains(sortKey)) {
+            throw validationError(sortKey, "sortKey", "Member must satisfy enum value set: "
+                    + "[SERVICE_NAMESPACE_ASCENDING, SERVICE_NAMESPACE_DESCENDING, "
+                    + "LAST_AUTHENTICATED_TIME_ASCENDING, LAST_AUTHENTICATED_TIME_DESCENDING]");
+        }
+        return sortKey;
+    }
+
+    /**
+     * Applies {@code SortKey}. The namespace keys sort the list the reference says they do, and
+     * the two time keys leave it in namespace order: sorting by a last-authenticated time no
+     * entry carries would be ordering on nothing, and the reference's default is the namespace
+     * anyway.
+     */
+    private static List<String> sortedByKey(List<String> namespaces, String sortKey) {
+        if (!"SERVICE_NAMESPACE_DESCENDING".equals(sortKey)) {
+            return namespaces;
+        }
+        List<String> descending = new ArrayList<>(namespaces);
+        descending.sort(Comparator.reverseOrder());
+        return descending;
+    }
+
+    /**
      * Lists the entities that could have reached the service through the reported ARN's
      * permissions, which AWS derives from policy content rather than from usage: a group report
      * yields the group's users, a policy report the users and roles it is attached to, and a user
@@ -2090,7 +2459,7 @@ public class IamQueryHandler {
         // rather than answered emptily just because the marker happens to sit past the end.
         int from = markerIndex(params);
         // An omitted MaxItems is not "no limit": the API reference states the count "defaults to
-        // 100" on both readers, so a report wider than that is truncated with a Marker exactly as
+        // 100" on each reader paged here, so a list wider than that is truncated with a Marker as
         // it would be against AWS. Operations that model no MaxItems at all pass through whole.
         int limit = maxItemsModeled ? DEFAULT_MAX_ITEMS : items.size();
         if (maxItemsModeled) {
@@ -2708,7 +3077,8 @@ public class IamQueryHandler {
         String value = params.getFirst(name);
         if (value == null || value.isBlank()) {
             throw new AwsException("ValidationError",
-                    "Value null at '" + Character.toLowerCase(name.charAt(0)) + name.substring(1)
+                    "1 validation error detected: Value null at '"
+                            + Character.toLowerCase(name.charAt(0)) + name.substring(1)
                             + "' failed to satisfy constraint: Member must not be null", 400);
         }
         return value;
@@ -2730,7 +3100,7 @@ public class IamQueryHandler {
 
     private String isoDate(Instant instant) {
         if (instant == null) return "";
-        return DateTimeFormatter.ISO_INSTANT.format(instant);
+        return DateTimeFormatter.ISO_INSTANT.format(instant.truncatedTo(ChronoUnit.MILLIS));
     }
 
     /** For a member AWS types as a blob, which the Query protocol carries base64-encoded. */

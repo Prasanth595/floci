@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AvailabilityZoneIds;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -593,27 +594,13 @@ public class FlowLogService {
         return ports[ThreadLocalRandom.current().nextInt(ports.length)];
     }
 
-    /** Map a region + az letter to a plausible AWS az-id (e.g. us-east-1a -> use1-az1). */
+    /**
+     * The zone id of the ENI's zone, derived exactly as subnets and DescribeAvailabilityZones
+     * derive it ({@link AvailabilityZoneIds}), so a record's {@code az-id} matches the
+     * {@code AvailabilityZoneId} of the subnet it came from, in every region and partition.
+     */
     private static String azId(String region, String az) {
-        String code = switch (region == null ? "" : region) {
-            case "us-east-1" -> "use1";
-            case "us-east-2" -> "use2";
-            case "us-west-1" -> "usw1";
-            case "us-west-2" -> "usw2";
-            case "eu-west-1" -> "euw1";
-            case "eu-central-1" -> "euc1";
-            case "ap-southeast-1" -> "apse1";
-            case "ap-southeast-2" -> "apse2";
-            default -> region == null ? "use1" : region.replaceAll("[^a-z0-9]", "");
-        };
-        int n = 1;
-        if (az != null && !az.isEmpty()) {
-            char last = az.charAt(az.length() - 1);
-            if (last >= 'a' && last <= 'f') {
-                n = (last - 'a') + 1;
-            }
-        }
-        return code + "-az" + n;
+        return region == null ? null : AvailabilityZoneIds.forZoneName(region, az);
     }
 
     private static String nz(String s) {

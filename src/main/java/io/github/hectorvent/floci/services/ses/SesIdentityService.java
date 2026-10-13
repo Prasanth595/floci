@@ -43,7 +43,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * cascade around {@link #delete}.
  */
 @ApplicationScoped
-public class SesIdentityService {
+public class SesIdentityService implements SesTaggable {
+
+    static final String DKIM_SIGNING_HOSTED_ZONE = "dkim.amazonses.com";
 
     private static final Logger LOG = Logger.getLogger(SesIdentityService.class);
 
@@ -170,7 +172,12 @@ public class SesIdentityService {
         return refreshIdentityState(identity, region);
     }
 
-    /** True when the address itself or its parent domain is a verified identity. */
+    /**
+     * True when the address itself, its domain or one of that domain's parents is a verified
+     * identity: "if you create and verify an identity for example.com, you don't need to create
+     * separate identities for a.example.com, a.b.example.com, user@example.com, user@a.example.com".
+     * The walk stops before a bare top-level domain.
+     */
     public boolean isVerifiedSender(String fromEmail, String region) {
         if (fromEmail == null) {
             return false;
@@ -179,11 +186,23 @@ public class SesIdentityService {
             return true;
         }
         int at = fromEmail.indexOf('@');
-        return at >= 0 && at < fromEmail.length() - 1
-                && isIdentityVerified(fromEmail.substring(at + 1), region);
+        if (at < 0 || at == fromEmail.length() - 1) {
+            return false;
+        }
+        String domain = fromEmail.substring(at + 1);
+        while (true) {
+            if (isIdentityVerified(domain, region)) {
+                return true;
+            }
+            int dot = domain.indexOf('.');
+            if (dot < 0 || domain.indexOf('.', dot + 1) < 0) {
+                return false;
+            }
+            domain = domain.substring(dot + 1);
+        }
     }
 
-    private boolean isIdentityVerified(String identity, String region) {
+    boolean isIdentityVerified(String identity, String region) {
         Identity id = getIdentityVerificationAttributes(identity, region);
         return id != null && "Success".equals(id.getVerificationStatus());
     }
@@ -427,10 +446,12 @@ public class SesIdentityService {
                 identityValue, notificationType, enabled);
     }
 
+    @Override
     public List<Tag> listTags(String identityValue, String region) {
         return new ArrayList<>(requireForTags(identityValue, region).getTags());
     }
 
+    @Override
     public void tag(String identityValue, String region, List<Tag> newTags) {
         Identity identity = requireForTags(identityValue, region);
         identity.setTags(SesTags.merge(identity.getTags(), newTags));
@@ -438,6 +459,7 @@ public class SesIdentityService {
         LOG.infov("Tagged SES identity: {0} (region {1}, +{2} tags)", identityValue, region, newTags.size());
     }
 
+    @Override
     public void untag(String identityValue, String region, List<String> tagKeys) {
         Identity identity = requireForTags(identityValue, region);
         Set<String> toRemove = new HashSet<>(tagKeys);
@@ -711,7 +733,7 @@ public class SesIdentityService {
 
     private boolean hasExpectedDkimRecord(String domain, String token) {
         String expectedName = normalizeDnsName(token + "._domainkey." + domain);
-        String expectedValue = normalizeDnsName(token + ".dkim.amazonses.com");
+        String expectedValue = normalizeDnsName(token + "." + DKIM_SIGNING_HOSTED_ZONE);
         for (HostedZone zone : route53Service.listHostedZones(null, Integer.MAX_VALUE)) {
             for (ResourceRecordSet recordSet : route53Service.listResourceRecordSets(zone.getId(), null, null,
                     Integer.MAX_VALUE)) {

@@ -1,15 +1,17 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
-import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -78,7 +80,7 @@ public class LambdaFunctionStore implements Resettable {
     public void save(String region, LambdaFunction fn) {
         // Remove old index entry if URL changed or was removed
         get(region, fn.getFunctionName(), fn.getVersion()).ifPresent(this::deindexFunction);
-        
+
         backend.put(regionKey(region, fn.getFunctionName(), fn.getVersion()), fn);
         indexFunction(fn);
     }
@@ -140,7 +142,17 @@ public class LambdaFunctionStore implements Resettable {
 
     public List<LambdaFunction> listVersions(String region, String functionName) {
         String prefix = "lambda::" + region + "::" + functionName + "::";
-        return backend.scan(key -> key.startsWith(prefix));
+        List<LambdaFunction> versions = new ArrayList<>(backend.scan(key -> key.startsWith(prefix)));
+        versions.sort(Comparator.comparingLong(LambdaFunctionStore::versionRank));
+        return versions;
+    }
+
+    private static long versionRank(LambdaFunction fn) {
+        String version = fn.getVersion();
+        if (version == null || version.isEmpty() || !version.chars().allMatch(Character::isDigit)) {
+            return -1L;
+        }
+        return Long.parseLong(version);
     }
 
     /**

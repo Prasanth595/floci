@@ -1,7 +1,11 @@
 package io.github.hectorvent.floci.services.mwaa;
 
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerExec;
@@ -12,9 +16,6 @@ import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.mwaa.model.Environment;
-import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.exception.NotFoundException;
-import com.github.dockerjava.api.model.ContainerNetwork;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -708,7 +709,7 @@ public class MwaaEnvironmentManager {
     private static String generateSecret(int bytes) {
         byte[] buf = new byte[bytes];
         new SecureRandom().nextBytes(buf);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(buf);
+        return Base64Url.encode(buf);
     }
 
     /** A Fernet key must be 32 url-safe base64-encoded bytes (Airflow's {@code AIRFLOW__CORE__FERNET_KEY}). */

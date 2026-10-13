@@ -89,6 +89,13 @@ class CodeArtifactMavenDockerIntegrationTest {
         given().header("Authorization", "Bearer " + bearerToken)
                 .head("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/" + GAV)
                 .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=spike")
+                .then().statusCode(200).body("package.name", equalTo("spike"))
+                .body("package.namespace", equalTo("com.example"))
+                .body("package.originConfiguration.restrictions.publish", equalTo("ALLOW"));
     }
 
     /**
@@ -147,6 +154,11 @@ class CodeArtifactMavenDockerIntegrationTest {
         given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/maven/" + DOMAIN + "/no-such-repo/does/not/exist.jar")
                 .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=does-not-exist")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test
@@ -395,6 +407,91 @@ class CodeArtifactMavenDockerIntegrationTest {
                 .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
                         + "&namespace=com.example&package=spike&version=1.0.0&asset=does-not-exist.jar")
                 .then().statusCode(404);
+    }
+
+    /**
+     * A throwaway groupId/artifactId, not {@link #GAV}: deleting it exercises Reposilite's real
+     * directory delete (confirmed live before this was built: a single {@code DELETE} on the
+     * group/artifact path removes everything beneath it), and must not disturb the artifact every
+     * other test in this class shares.
+     */
+    @Test
+    @Order(13)
+    void deletePackageRemovesTheWholeReposiliteArtifactDirectory() {
+        byte[] content = "delete-me-bytes".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken).body(content)
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/com/example/deleteme/1.0.0/deleteme-1.0.0.jar")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=deleteme")
+                .then().statusCode(200).body("deletedPackage.package", equalTo("deleteme"));
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/com/example/deleteme/1.0.0/deleteme-1.0.0.jar")
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=deleteme")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    /**
+     * Asserts the delta rather than an absolute total: this class shares one domain across every
+     * ordered test, so other artifacts already contribute to the running total by this point.
+     * {@code assetSizeBytes} used to be hardcoded to {@code 0} regardless of what was actually
+     * published; this is the real Reposilite round trip proving a Maven deploy now counts.
+     */
+    @Test
+    @Order(14)
+    void describeDomainAssetSizeBytesIncreasesByExactlyWhatWasDeployed() {
+        long before = given().header("Authorization", AUTH)
+                .get("/v1/domain?domain=" + DOMAIN)
+                .then().statusCode(200)
+                .extract().jsonPath().getLong("domain.assetSizeBytes");
+
+        byte[] content = "asset-size-accounting-bytes".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken).body(content)
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/com/example/sizecheck/1.0.0/sizecheck-1.0.0.jar")
+                .then().statusCode(200);
+
+        long after = given().header("Authorization", AUTH)
+                .get("/v1/domain?domain=" + DOMAIN)
+                .then().statusCode(200)
+                .extract().jsonPath().getLong("domain.assetSizeBytes");
+
+        assertEquals(before + content.length, after);
+    }
+
+    /**
+     * {@code mvn deploy} always PUTs a {@code maven-metadata.xml} straight to the group/artifact
+     * directory too, with no version segment: {@code com/example/metacheck/maven-metadata.xml} is
+     * only one segment shorter than a real versioned asset path, the same four segments as the
+     * shortest real GAV ({@code group/artifact/version/filename}). It must not be mistaken for
+     * one and misattributed one groupId component too shallow; it is still a real, successful
+     * write, so its bytes still belong in the total.
+     */
+    @Test
+    @Order(15)
+    void describeDomainAssetSizeBytesCountsAGroupLevelMavenMetadataUpload() {
+        long before = given().header("Authorization", AUTH)
+                .get("/v1/domain?domain=" + DOMAIN)
+                .then().statusCode(200)
+                .extract().jsonPath().getLong("domain.assetSizeBytes");
+
+        byte[] metadata = "<metadata><groupId>com.example</groupId></metadata>".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken).body(metadata)
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/com/example/metacheck/maven-metadata.xml")
+                .then().statusCode(200);
+
+        long after = given().header("Authorization", AUTH)
+                .get("/v1/domain?domain=" + DOMAIN)
+                .then().statusCode(200)
+                .extract().jsonPath().getLong("domain.assetSizeBytes");
+
+        assertEquals(before + metadata.length, after);
     }
 
     /**

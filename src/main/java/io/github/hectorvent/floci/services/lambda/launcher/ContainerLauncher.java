@@ -1,16 +1,19 @@
 package io.github.hectorvent.floci.services.lambda.launcher;
 
+import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmd;
+import com.github.dockerjava.api.exception.NotFoundException;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
-import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
@@ -19,36 +22,27 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.exception.NotFoundException;
-import com.github.dockerjava.api.model.WaitResponse;
-import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Typed;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
-
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+import org.jboss.logging.Logger;
 
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -230,7 +224,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         env.add("AWS_LAMBDA_FUNCTION_NAME=" + fn.getFunctionName());
         env.add("AWS_LAMBDA_FUNCTION_MEMORY_SIZE=" + fn.getMemorySize());
         env.add("AWS_LAMBDA_FUNCTION_TIMEOUT=" + fn.getTimeout());
-        env.add("AWS_LAMBDA_FUNCTION_VERSION=$LATEST");
         env.add("AWS_LAMBDA_LOG_GROUP_NAME=" + cwLogGroup);
         env.add("AWS_LAMBDA_LOG_STREAM_NAME=" + cwLogStream);
         if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
@@ -266,6 +259,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 }
             });
         }
+
+        env.removeIf(value -> value.startsWith("AWS_LAMBDA_FUNCTION_VERSION="));
+        env.add("AWS_LAMBDA_FUNCTION_VERSION=" + fn.getVersion());
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
@@ -1169,7 +1165,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private static String namespaceDisambiguator(EmulatorConfig config) {
         String namespace = config.docker() == null || config.docker().resourceNamespace() == null
                 ? "" : config.docker().resourceNamespace().orElse("").trim();
-        return namespace.isEmpty() ? "" : "-" + sha256Hex(namespace).substring(0, 12);
+        return namespace.isEmpty() ? "" : "-" + Digests.sha256Hex(namespace).substring(0, 12);
     }
 
     /** Leading part shared by every code volume (and completion marker) this configuration names. */
@@ -1203,7 +1199,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         if (resourceId.isBlank()) {
             throw new IllegalArgumentException("File system access point ARN must include a resource id");
         }
-        return "efs-" + resourceId + "-" + sha256Hex(accessPointArn);
+        return "efs-" + resourceId + "-" + Digests.sha256Hex(accessPointArn);
     }
 
     /**
@@ -1220,16 +1216,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             return legacyName;
         }
         return ContainerStorageHelper.dockerName(config, token);
-    }
-
-    private static String sha256Hex(String value) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 is required but not available", e);
-        }
     }
 
     @FunctionalInterface
@@ -1389,26 +1375,14 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * invocation waiting out the full function timeout to be told {@code Function.TimedOut}
      * instead of the {@code Runtime.ExitError} AWS reports immediately.
      *
-     * <p>Fires exactly once per container, on whatever exit eventually happens - including an
-     * intentional {@code docker stop} during normal teardown. {@link RuntimeApiServer
-     * #handleRuntimeProcessExited} itself distinguishes a genuine crash from that case (its own
-     * {@code stopped}/{@code faulted} guard), so this method only needs to forward the event;
-     * it does not need to be un-armed on the teardown path.
+     * <p>Fires once per container exit, including an intentional {@code docker stop} during
+     * normal teardown. {@link RuntimeApiServer#handleRuntimeProcessExited} itself distinguishes
+     * a genuine crash from that case (its own {@code stopped}/{@code faulted} guard). The watch
+     * survives its stream timing out on a quiet container; see {@link LambdaExitWatcher}.
      */
     private void watchForUnexpectedExit(DockerClient dockerClient, String containerId,
                                         RuntimeApiServer runtimeApiServer) {
-        try {
-            dockerClient.waitContainerCmd(containerId).exec(new WaitContainerResultCallback() {
-                @Override
-                public void onNext(WaitResponse response) {
-                    super.onNext(response);
-                    Integer statusCode = response.getStatusCode();
-                    runtimeApiServer.handleRuntimeProcessExited(statusCode != null ? statusCode : -1);
-                }
-            });
-        } catch (RuntimeException e) {
-            LOG.debugv(e, "Could not arm exit watcher for container {0}", containerId);
-        }
+        LambdaExitWatcher.watch(dockerClient, containerId, runtimeApiServer::handleRuntimeProcessExited);
     }
 
     private void launchExtensions(DockerClient dockerClient, String containerId, String functionName,

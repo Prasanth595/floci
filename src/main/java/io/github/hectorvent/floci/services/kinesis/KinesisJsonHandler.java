@@ -1,17 +1,18 @@
 package io.github.hectorvent.floci.services.kinesis;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.AwsErrorResponse;
-import io.github.hectorvent.floci.core.common.AwsEventStreamEncoder;
-import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
-import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
-import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsEventStreamEncoder;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisConsumer;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -765,8 +766,7 @@ public class KinesisJsonHandler {
      */
     static String encodeShardToken(String streamName, String lastShardId, long issuedAtEpochMilli) {
         String raw = streamName + "|" + lastShardId + "|" + issuedAtEpochMilli;
-        return Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+        return Base64Url.encode(raw);
     }
 
     ShardToken decodeShardToken(String nextToken) {
