@@ -55,8 +55,11 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         SsmService.validateTagKeys(tags);
         ParameterUpdate previous = null;
         if (ctx.isUpdate()) {
+            // Only a rollback that failed leaves the snapshot behind. Failing here hands it to this
+            // update's rollback, which retries restoring the parameter it describes.
             if (r.getAttributes().containsKey(UPDATE_ATTR)) {
-                throw new AwsException("ResourceConflictException", "Parameter update cleanup is still pending", 400);
+                throw new AwsException("ResourceConflictException",
+                        "The previous update of this parameter has not finished rolling back", 400);
             }
             Parameter prior = ssmService.getParameter(ctx.priorPhysicalId(), ctx.region());
             previous = new ParameterUpdate(ctx.region(), prior.getName(), prior.getValue(), prior.getType(),
@@ -182,13 +185,15 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         return new UpdateCleanupResult(true, true, displaced, 0, null);
     }
 
+    /**
+     * Drops the snapshot once the committed update's cleanup completed or used up its attempts. A
+     * displaced parameter whose delete kept failing is abandoned, as AWS abandons it: a snapshot
+     * kept past the commit would make the next update's rollback delete the live parameter.
+     */
     @Override
     public void clearUpdate(StackResource resource) {
-        // Keep a failed displaced-parameter deletion addressable for a retry or DeleteStack.
-        if (!hasReplacementUpdate(resource)) {
-            resource.getAttributes().remove(UPDATE_ATTR);
-            resource.getAttributes().remove(CLEANUP_ATTEMPTS_ATTR);
-        }
+        resource.getAttributes().remove(UPDATE_ATTR);
+        resource.getAttributes().remove(CLEANUP_ATTEMPTS_ATTR);
     }
 
     private static void remember(StackResource resource, ParameterUpdate previous) {

@@ -103,6 +103,7 @@ class S3CfnProvisionerTest {
                     "{\"BucketName\":\"my-bucket\",\"OwnershipControls\":" + controls + "}"));
         }
         verify(s3, never()).putBucketOwnershipControls(anyString(), anyString());
+        verify(s3, never()).createBucket(anyString(), anyString());
     }
 
     @Test
@@ -731,5 +732,24 @@ class S3CfnProvisionerTest {
         doThrow(new AwsException("AccessDenied", "nope", 403)).when(s3).deleteBucketPolicy("b");
 
         assertThrows(AwsException.class, () -> provisioner.delete("AWS::S3::BucketPolicy", "b", REGION));
+    }
+
+    /** A bucket deleted outside the stack, or by an earlier cleanup attempt, is already where the delete leads. */
+    @Test
+    void deletingABucketThatIsAlreadyGoneIsTolerated() {
+        doThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404))
+                .when(s3).deleteBucket("gone");
+
+        provisioner.delete("AWS::S3::Bucket", "gone", REGION);
+
+        verify(s3).deleteBucket("gone");
+    }
+
+    @Test
+    void deletingANonEmptyBucketStillFails() {
+        doThrow(new AwsException("BucketNotEmpty", "The bucket you tried to delete is not empty.", 409))
+                .when(s3).deleteBucket("full");
+
+        assertThrows(AwsException.class, () -> provisioner.delete("AWS::S3::Bucket", "full", REGION));
     }
 }

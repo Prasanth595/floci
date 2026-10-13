@@ -52,7 +52,8 @@ resource fails. Rollback writes a new SSM version with the prior value; it does 
 history. Tags unrelated to the template are preserved. Changing `Name` creates a replacement and
 keeps the prior parameter until the update commits. `UpdateReplacePolicy: Retain` preserves that
 prior parameter. A name already occupied by an unmanaged parameter is rejected without overwriting
-or adopting it. Failed replacement cleanup remains visible and retryable through stack deletion.
+or adopting it. When the displaced parameter cannot be deleted after three attempts, the update still
+completes, reports `DELETE_FAILED` for it and leaves it in place, as AWS does.
 
 ## StackSets compatibility
 
@@ -437,6 +438,11 @@ always lists both stages, matching AWS.
 `BucketOwnerPreferred`, or `ObjectWriter`. Updates apply the new mode; removing a previously
 declared property removes the controls. An unrelated update preserves controls managed outside
 the template when neither the prior nor the new template declares them.
+
+Changing `BucketName` replaces the bucket. The old bucket is deleted once the update commits,
+unless `UpdateReplacePolicy` is `Retain`; like AWS, a bucket that still holds objects cannot be
+deleted, and the update reports `DELETE_FAILED` for it. A failed update deletes the replacement
+and restores the original bucket.
 
 ## SAM published aliases
 

@@ -16,6 +16,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -57,11 +58,15 @@ class SsmCfnProvisionerTest {
     }
 
     private ProvisionContext updateCtx() {
+        return updateCtx(NAME);
+    }
+
+    private ProvisionContext updateCtx(String priorName) {
         ProvisionContext create = ctx();
-        Parameter prior = new Parameter(NAME, "old", "String");
-        when(ssm.getParameter(NAME, REGION)).thenReturn(prior);
+        Parameter prior = new Parameter(priorName, "old", "String");
+        when(ssm.getParameter(priorName, REGION)).thenReturn(prior);
         return new ProvisionContext(create.engine(), create.region(), create.accountId(),
-                create.stackName(), NAME);
+                create.stackName(), priorName);
     }
 
     private static StackResource parameter(String physicalId, String templateTagKeys) {
@@ -169,17 +174,24 @@ class SsmCfnProvisionerTest {
     }
 
     @Test
-    void failedDisplacedParameterCleanupRemainsAvailableForRetry() {
+    void abandonedDisplacedParameterCleanupDoesNotReachTheNextUpdate() {
         StackResource resource = parameter(NAME, null);
-        provisioner.provision(resource, props().put("Name", NAME + "-new"), updateCtx());
+        String renamed = NAME + "-new";
+        provisioner.provision(resource, props().put("Name", renamed), updateCtx());
         doThrow(new AwsException("AccessDeniedException", "denied", 403)).when(ssm).deleteParameter(NAME, REGION);
         UpdateCleanupResult failed = provisioner.completeUpdate(resource);
         assertFalse(failed.complete());
         assertEquals(NAME, failed.previousPhysicalId());
+
         provisioner.clearUpdate(resource);
-        assertEquals(NAME, provisioner.updateCleanupPhysicalId(resource));
-        doNothing().when(ssm).deleteParameter(NAME, REGION);
-        assertTrue(provisioner.completeUpdate(resource).complete());
+
         assertFalse(provisioner.hasReplacementUpdate(resource));
+        assertNull(provisioner.updateCleanupPhysicalId(resource));
+        provisioner.provision(resource, props().put("Name", renamed).put("Value", "next"), updateCtx(renamed));
+        assertTrue(provisioner.rollbackUpdate(resource));
+        verify(ssm, never()).deleteParameter(renamed, REGION);
+        verify(ssm).putParameter(eq(renamed), eq("old"), eq("String"), any(), eq(true), any(), any(), any(),
+                any(), any(), eq(REGION));
+        assertEquals(renamed, resource.getPhysicalId());
     }
 }
