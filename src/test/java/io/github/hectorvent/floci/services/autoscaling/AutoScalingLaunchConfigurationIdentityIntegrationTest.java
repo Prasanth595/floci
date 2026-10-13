@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -23,10 +24,12 @@ class AutoScalingLaunchConfigurationIdentityIntegrationTest {
     @ValueSource(booleans = {false, true})
     void launchResolvesProfileAndPreservesRequiredMetadata(boolean useArn) {
         String name = "launch-identity-" + UUID.randomUUID();
-        String arn = given().header("Authorization", AUTH.replace("/autoscaling/", "/iam/"))
+        XmlPath profile = given().header("Authorization", AUTH.replace("/autoscaling/", "/iam/"))
                 .formParam("Action", "CreateInstanceProfile").formParam("InstanceProfileName", name)
-                .post("/").then().statusCode(200).extract().path(
-                        "CreateInstanceProfileResponse.CreateInstanceProfileResult.InstanceProfile.Arn");
+                .post("/").then().statusCode(200).extract().xmlPath();
+        String arn = profile.getString("CreateInstanceProfileResponse.CreateInstanceProfileResult.InstanceProfile.Arn");
+        String profileId = profile.getString(
+                "CreateInstanceProfileResponse.CreateInstanceProfileResult.InstanceProfile.InstanceProfileId");
         given().header("Authorization", AUTH).formParam("Action", "CreateLaunchConfiguration")
                 .formParam("LaunchConfigurationName", name).formParam("ImageId", "ami-amazonlinux2023")
                 .formParam("InstanceType", "t3.micro").formParam("IamInstanceProfile", useArn ? arn : name)
@@ -49,6 +52,7 @@ class AutoScalingLaunchConfigurationIdentityIntegrationTest {
         given().header("Authorization", AUTH.replace("/autoscaling/", "/ec2/")).formParam("Action", "DescribeInstances")
                 .formParam("InstanceId.1", instance).post("/").then().statusCode(200)
                 .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.iamInstanceProfile.arn", equalTo(arn))
+                .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.iamInstanceProfile.id", equalTo(profileId))
                 .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.metadataOptions.httpTokens", equalTo("required"))
                 .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.metadataOptions.httpEndpoint", equalTo("enabled"))
                 .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.metadataOptions.httpPutResponseHopLimit", equalTo("2"));
@@ -103,6 +107,41 @@ class AutoScalingLaunchConfigurationIdentityIntegrationTest {
             given().header("Authorization", AUTH).formParam("Action", "DescribeLaunchConfigurations")
                     .formParam("LaunchConfigurationNames.member.1", name).post("/").then().statusCode(200)
                     .body(prefix + ".size()", equalTo(0));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cloudFormationResolvesConditionalMetadataOptions(boolean strict) {
+        String name = "conditional-metadata-" + UUID.randomUUID();
+        String template = """
+                {"Parameters":{"Strict":{"Type":"String"}},
+                "Conditions":{"IsStrict":{"Fn::Equals":[{"Ref":"Strict"},"yes"]}},
+                "Resources":{"Launch":{"Type":"AWS::AutoScaling::LaunchConfiguration",
+                "Properties":{"LaunchConfigurationName":"%s","ImageId":"ami-amazonlinux2023",
+                "InstanceType":"t3.micro","MetadataOptions":{"Fn::If":["IsStrict",
+                {"HttpTokens":"required","HttpPutResponseHopLimit":{"Ref":"AWS::NoValue"}},
+                {"Ref":"AWS::NoValue"}]}}}}}
+                """.formatted(name);
+        given().header("Authorization", AUTH.replace("/autoscaling/", "/cloudformation/"))
+                .formParam("Action", "CreateStack").formParam("StackName", name)
+                .formParam("TemplateBody", template)
+                .formParam("Parameters.member.1.ParameterKey", "Strict")
+                .formParam("Parameters.member.1.ParameterValue", strict ? "yes" : "no")
+                .post("/").then().statusCode(200);
+        String prefix = "DescribeLaunchConfigurationsResponse.DescribeLaunchConfigurationsResult"
+                + ".LaunchConfigurations.member";
+        if (strict) {
+            given().header("Authorization", AUTH).formParam("Action", "DescribeLaunchConfigurations")
+                    .formParam("LaunchConfigurationNames.member.1", name).post("/").then().statusCode(200)
+                    .body(prefix + ".MetadataOptions.HttpTokens", equalTo("required"))
+                    .body(prefix + ".MetadataOptions.HttpEndpoint", equalTo("enabled"))
+                    .body(prefix + ".MetadataOptions.HttpPutResponseHopLimit", equalTo("1"));
+        } else {
+            given().header("Authorization", AUTH).formParam("Action", "DescribeLaunchConfigurations")
+                    .formParam("LaunchConfigurationNames.member.1", name).post("/").then().statusCode(200)
+                    .body(prefix + ".LaunchConfigurationName", equalTo(name))
+                    .body(prefix + ".MetadataOptions.size()", equalTo(0));
         }
     }
 

@@ -128,8 +128,10 @@ uses it to read the instance ID. A failed or empty token response does not
 fall back to a tokenless request.
 
 When `HttpTokens=required`, metadata reads without a valid IMDSv2 token return 401
-before resolving the requested data. `iam/info` returns the attached IAM profile's
-stored ARN and ID rather than an ID derived from the instance.
+before resolving the requested data. `iam/info` returns the ARN and ID that IAM holds
+for the attached profile, and 404 when that profile is missing, has no role or does not
+match the attached ARN. An EKS cluster node, whose profile Floci synthesizes, reports
+the synthesized ARN and a stable ID instead while IAM holds no such profile.
 
 Both IMDSv1 (no token) and IMDSv2 (token-based) flows are supported:
 
@@ -143,7 +145,7 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
   http://169.254.169.254/latest/meta-data/instance-id
 ```
 
-As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A token is valid only on the instance that requested it: presenting it from another instance returns `401`. A request without a token header still uses IMDSv1; Floci does not enforce `HttpTokens=required`.
+As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A token is valid only on the instance that requested it: presenting it from another instance returns `401`. A request without a token header uses IMDSv1 unless the instance's `HttpTokens` is `required`, in which case it returns `401`.
 
 User data is returned as the original base64-decoded bytes, without decompressing gzip content or converting binary data to text. Older records without the original encoding, or records with malformed saved encoding, use their saved UTF-8 text. The response uses `application/octet-stream`, matching the [AWS user-data retrieval contract](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html). Missing or empty data returns `404`; whitespace is preserved. Script execution retains its separate bounded gzip decoding.
 
@@ -732,7 +734,8 @@ Two behaviours worth calling out, because they are what Terraform reads back:
   requests and `CreateFleet` launches, so `aws_launch_template.iam_instance_profile.name` converges.
 - **`NetworkInterfaces` stays a `NetworkInterfaces` block.** Its `Groups` are not hoisted into
   top-level `SecurityGroupIds`; on AWS the two are mutually exclusive. A launch from the template
-  resolves its security groups from whichever of the two is populated.
+  resolves its security groups from whichever of the two is populated, and takes its subnet and
+  `AssociatePublicIpAddress` from the interface at device index 0.
 
 #### Launch template versions
 
@@ -769,13 +772,14 @@ prefix lists, `EnaSrdSpecification`, `PrimaryIpv6` and `EnaQueueCount` are likew
 
 Launches and association changes resolve both names and ARNs against IAM in the
 caller's account. Unknown profiles and foreign-account ARNs fail with
-`InvalidParameterValue` before allocation or association changes. Launches and launch
-template creation reject simultaneous name/ARN selectors with
+`InvalidParameterValue` before allocation or association changes. A launch that names
+both a profile name and an ARN, directly or through its launch template, fails with
 `InvalidParameterCombination`; association replacement uses the ARN when both are
 provided. Launch templates reject malformed profile ARNs at creation with
-`InvalidIamInstanceProfileArn.Malformed`.
-EC2 stores and returns IAM's profile ID, including for launch-template and Auto Scaling
-instances. Persisted instances from older versions omit the unknown ID until the
+`InvalidIamInstanceProfileArn.Malformed` but, as on AWS, store a name and ARN pair as
+given, so the pair fails when an instance launches from the template.
+EC2 stores and returns IAM's profile ID, including for launch-template, EC2 Fleet and
+Auto Scaling instances. Persisted instances from older versions omit the unknown ID until the
 profile is reassociated; looking up the ARN could misidentify a deleted and recreated
 profile. The `client-token` instance filter selects only matching launches.
 
@@ -1106,10 +1110,15 @@ Floci needs the file mounted at the configured container path.
 ### Public IPv4 addresses in mock mode
 
 Mock instances apply `MapPublicIpOnLaunch` unless the primary launch interface explicitly
-sets `AssociatePublicIpAddress`. Direct launches and Auto Scaling launch templates preserve
-both `true` and `false` overrides. An automatically assigned public address remains stable
-while running, is released on stop or termination, and is replaced on restart; the private
-address remains unchanged.
+sets `AssociatePublicIpAddress`. Direct launches, EC2 Fleet launches and Auto Scaling launch
+templates preserve both `true` and `false` overrides. An automatically assigned public address
+appears when the instance reaches `running`, whether DescribeInstances or
+DescribeInstanceStatus observes it first. It remains stable while running, is released on stop
+or termination, and is replaced on restart; the private address remains unchanged.
+
+An associated Elastic IP replaces the automatic address and is kept across a stop.
+Disassociating it from a running instance assigns a new automatic address when the launch
+requested one. A terminated instance has no public address.
 
 A launch template with network interfaces cannot be combined with an instance-level
 `SubnetId`; place the subnet on the primary network interface instead.

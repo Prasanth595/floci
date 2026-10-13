@@ -350,13 +350,19 @@ public class LaunchTemplateData {
         return fromInterfaces;
     }
 
+    /** The interface a launch from this template attaches at device index 0, or null when it names none. */
     @JsonIgnore
-    public Boolean effectiveAssociatePublicIpAddress() {
+    public NetworkInterface primaryNetworkInterface() {
         return networkInterfaces.stream()
                 .filter(networkInterface -> Integer.valueOf(0).equals(networkInterface.getDeviceIndex()))
                 .findFirst()
-                .map(NetworkInterface::getAssociatePublicIpAddress)
                 .orElse(null);
+    }
+
+    @JsonIgnore
+    public Boolean effectiveAssociatePublicIpAddress() {
+        NetworkInterface primary = primaryNetworkInterface();
+        return primary == null ? null : primary.getAssociatePublicIpAddress();
     }
 
     @RegisterForReflection

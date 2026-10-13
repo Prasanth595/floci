@@ -809,9 +809,7 @@ public class Ec2QueryHandler {
             blockDeviceMappings = LaunchTemplateData.BlockDeviceMapping.merge(
                     launchTemplateData.getBlockDeviceMappings(), blockDeviceMappings);
             if (!suppliedInterfaces) {
-                LaunchTemplateData.NetworkInterface primary = launchTemplateData.getNetworkInterfaces().stream()
-                        .filter(networkInterface -> Integer.valueOf(0).equals(networkInterface.getDeviceIndex()))
-                        .findFirst().orElse(null);
+                LaunchTemplateData.NetworkInterface primary = launchTemplateData.primaryNetworkInterface();
                 if (primary != null) {
                     subnetId = firstNonBlank(subnetId, primary.getSubnetId());
                     if (associatePublicIp == null) {
@@ -973,10 +971,10 @@ public class Ec2QueryHandler {
                         launch.instanceTags(),
                         launch.userData(),
                         launch.iamInstanceProfileArn(),
-                        null,
+                        launch.associatePublicIpAddress(),
                         null,
                         0,
-                        launch.availabilityZone(), null, null, launch.encodedUserData(), false,
+                        launch.availabilityZone(), launch.metadataOptions(), null, launch.encodedUserData(), false,
                         null, null, launch.blockDeviceMappings());
                 Instance instance = reservation.getInstances().get(0);
                 launchedInstanceIds.add(instance.getInstanceId());
@@ -1134,6 +1132,8 @@ public class Ec2QueryHandler {
                 template.getUserData(),
                 template.getEncodedUserData(),
                 service.iamInstanceProfileArn(template),
+                template.effectiveAssociatePublicIpAddress(),
+                template.getMetadataOptions(),
                 template.effectiveSecurityGroupIds(),
                 new ArrayList<>(tags.values()),
                 template.getBlockDeviceMappings());
@@ -1181,6 +1181,7 @@ public class Ec2QueryHandler {
     private record FleetLaunch(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
                                String instanceType, String imageId, String subnetId, String availabilityZone,
                                String keyName, String userData, String encodedUserData, String iamInstanceProfileArn,
+                               Boolean associatePublicIpAddress, LaunchTemplateData.MetadataOptions metadataOptions,
                                List<String> securityGroupIds, List<Tag> instanceTags,
                                List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings) {}
 

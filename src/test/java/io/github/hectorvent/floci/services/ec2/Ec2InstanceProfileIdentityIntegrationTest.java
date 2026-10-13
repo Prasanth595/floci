@@ -190,20 +190,37 @@ class Ec2InstanceProfileIdentityIntegrationTest {
     void launchRejectsBothProfileSelectors(boolean template) {
         String name = "profile-selectors-" + UUID.randomUUID().toString().substring(0, 8);
         Profile profile = createProfile(ACCOUNT, name);
+        String token = UUID.randomUUID().toString();
+        String templateId = null;
         try {
-            RequestSpecification request = request(ACCOUNT, "ec2",
-                    template ? "CreateLaunchTemplate" : "RunInstances");
-            String prefix = template ? "LaunchTemplateData." : "";
-            request.formParam(prefix + "ImageId", "ami-0abcdef1234567890")
-                    .formParam(prefix + "InstanceType", "t3.micro")
-                    .formParam(prefix + "IamInstanceProfile.Name", name)
-                    .formParam(prefix + "IamInstanceProfile.Arn", profile.arn());
+            RequestSpecification run = request(ACCOUNT, "ec2", "RunInstances").formParam("ClientToken", token);
             if (template) {
-                request.formParam("LaunchTemplateName", name);
+                // As on AWS, a template is not fully validated when it is created: the pair is
+                // stored, and the launch from it is what fails.
+                templateId = request(ACCOUNT, "ec2", "CreateLaunchTemplate")
+                        .formParam("LaunchTemplateName", name)
+                        .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+                        .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+                        .formParam("LaunchTemplateData.IamInstanceProfile.Name", name)
+                        .formParam("LaunchTemplateData.IamInstanceProfile.Arn", profile.arn())
+                        .post("/").then().statusCode(200)
+                        .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+                run.formParam("LaunchTemplate.LaunchTemplateId", templateId);
+            } else {
+                run.formParam("ImageId", "ami-0abcdef1234567890").formParam("InstanceType", "t3.micro")
+                        .formParam("IamInstanceProfile.Name", name)
+                        .formParam("IamInstanceProfile.Arn", profile.arn());
             }
-            request.post("/").then().statusCode(400)
+            run.post("/").then().statusCode(400)
                     .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
+            request(ACCOUNT, "ec2", "DescribeInstances").formParam("Filter.1.Name", "client-token")
+                    .formParam("Filter.1.Value.1", token).post("/").then().statusCode(200)
+                    .body("DescribeInstancesResponse.reservationSet.item.size()", equalTo(0));
         } finally {
+            if (templateId != null) {
+                request(ACCOUNT, "ec2", "DeleteLaunchTemplate").formParam("LaunchTemplateId", templateId)
+                        .post("/").then().statusCode(200);
+            }
             deleteProfile(ACCOUNT, name);
         }
     }

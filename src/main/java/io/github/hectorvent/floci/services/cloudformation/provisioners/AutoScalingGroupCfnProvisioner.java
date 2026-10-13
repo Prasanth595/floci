@@ -213,17 +213,20 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private LaunchTemplateData.MetadataOptions metadataOptions(JsonNode props, ProvisionContext ctx) {
-        JsonNode node = props.get("MetadataOptions");
-        if (node == null || node.isNull()) {
+        // Resolved as a whole, so an Fn::If can select the block or AWS::NoValue and a member set
+        // to AWS::NoValue is absent rather than blank.
+        JsonNode node = props == null ? null
+                : ctx.engine().resolveNodeOmittingNoValue(props.get("MetadataOptions"));
+        if (node == null || node.isNull() || node.isMissingNode()) {
             return null;
         }
         if (!node.isObject()) {
             throw new AwsException("ValidationError", "MetadataOptions must be an object.", 400);
         }
         LaunchTemplateData.MetadataOptions options = new LaunchTemplateData.MetadataOptions();
-        options.setHttpTokens(ctx.resolveOptional(node, "HttpTokens"));
-        options.setHttpEndpoint(ctx.resolveOptional(node, "HttpEndpoint"));
-        String hops = ctx.resolveOptional(node, "HttpPutResponseHopLimit");
+        options.setHttpTokens(blankToNull(node.path("HttpTokens").asText(null)));
+        options.setHttpEndpoint(blankToNull(node.path("HttpEndpoint").asText(null)));
+        String hops = blankToNull(node.path("HttpPutResponseHopLimit").asText(null));
         if (hops != null) {
             try {
                 options.setHttpPutResponseHopLimit(Integer.valueOf(hops));

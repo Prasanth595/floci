@@ -10,6 +10,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -36,7 +37,9 @@ class Ec2MockPublicAddressIntegrationTest {
             "template,false,true,true", "template,true,false,false",
             "template,true,unset,true", "template,false,unset,false",
             "asg,false,true,true", "asg,true,false,false",
-            "asg,true,unset,true", "asg,false,unset,false"
+            "asg,true,unset,true", "asg,false,unset,false",
+            "fleet,false,true,true", "fleet,true,false,false",
+            "fleet,true,unset,true", "fleet,false,unset,false"
     })
     void publicIpUsesTheSelectedLaunchValueAndSurvivesOnlyTheRunningLifetime(
             String source, boolean subnetDefault, String override, boolean publicExpected) {
@@ -64,18 +67,30 @@ class Ec2MockPublicAddressIntegrationTest {
                     .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
             RequestSpecification version = request("CreateLaunchTemplateVersion", owner)
                     .formParam("LaunchTemplateId", template).formParam("SourceVersion", "1")
-                    .formParam("LaunchTemplateData.InstanceType", "t3.micro");
+                    .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+                    .formParam("LaunchTemplateData.MetadataOptions.HttpTokens", "required");
             if (!"unset".equals(override)) {
                 version.formParam("LaunchTemplateData.NetworkInterface.1.DeviceIndex", 0)
                         .formParam("LaunchTemplateData.NetworkInterface.1.AssociatePublicIpAddress", override);
             }
-            if ("template".equals(source) && !"unset".equals(override)) {
+            if (!"asg".equals(source) && !"unset".equals(override)) {
                 version.formParam("LaunchTemplateData.NetworkInterface.1.SubnetId", subnet);
             }
             version.post("/").then().statusCode(200);
         }
         String instance;
-        if ("asg".equals(source)) {
+        if ("fleet".equals(source)) {
+            RequestSpecification fleet = request("CreateFleet", owner).formParam("Type", "instant")
+                    .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", template)
+                    .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "2")
+                    .formParam("TargetCapacitySpecification.TotalTargetCapacity", 1)
+                    .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand");
+            if ("unset".equals(override)) {
+                fleet.formParam("LaunchTemplateConfig.1.Overrides.1.SubnetId", subnet);
+            }
+            instance = fleet.post("/").then().statusCode(200)
+                    .extract().path("CreateFleetResponse.fleetInstanceSet.item.instanceIds.item");
+        } else if ("asg".equals(source)) {
             request("CreateAutoScalingGroup", owner).formParam("AutoScalingGroupName", "public-address")
                     .formParam("MinSize", 0).formParam("MaxSize", 1).formParam("DesiredCapacity", 1)
                     .formParam("VPCZoneIdentifier", subnet)
@@ -106,7 +121,8 @@ class Ec2MockPublicAddressIntegrationTest {
             instance = launch.post("/").then().statusCode(200)
                     .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
         }
-        ValidatableResponse first = describe(owner, instance);
+        ValidatableResponse first = describe(owner, instance).body(INSTANCE + "subnetId", equalTo(subnet))
+                .body(INSTANCE + "metadataOptions.httpTokens", equalTo(template == null ? "optional" : "required"));
         String privateIp = first.extract().path(INSTANCE + "privateIpAddress");
         String publicIp = first.extract().xmlPath().getString(INSTANCE + "ipAddress");
         assertEquals(publicExpected, !publicIp.isEmpty());
@@ -158,6 +174,72 @@ class Ec2MockPublicAddressIntegrationTest {
                 .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
         request("DeleteLaunchTemplate", owner).formParam("LaunchTemplateId", template)
                 .post("/").then().statusCode(200);
+    }
+
+    @Test
+    void describeInstanceStatusCompletesTheLaunchWithItsAutomaticAddress() {
+        String owner = Long.toString(ACCOUNTS.incrementAndGet());
+        String instance = request("RunInstances", owner).formParam("ImageId", "ami-amazonlinux2023")
+                .formParam("InstanceType", "t3.micro").formParam("MinCount", 1).formParam("MaxCount", 1)
+                .post("/").then().statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        request("DescribeInstanceStatus", owner).formParam("InstanceId.1", instance).post("/").then()
+                .statusCode(200)
+                .body("DescribeInstanceStatusResponse.instanceStatusSet.item.instanceState.name", equalTo("running"));
+
+        String publicIp = describe(owner, instance).extract().xmlPath().getString(INSTANCE + "ipAddress");
+        assertTrue(publicIp.matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"), publicIp);
+        request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void elasticIpReplacesTheAutomaticAddressUntilItIsDisassociated(boolean automatic) {
+        String owner = Long.toString(ACCOUNTS.incrementAndGet());
+        String vpc = request("CreateVpc", owner).formParam("CidrBlock", "10.87.0.0/16")
+                .post("/").then().statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
+        String subnet = request("CreateSubnet", owner).formParam("VpcId", vpc)
+                .formParam("CidrBlock", "10.87.1.0/24").formParam("AvailabilityZone", REGION + "a")
+                .post("/").then().statusCode(200).extract().path("CreateSubnetResponse.subnet.subnetId");
+        request("ModifySubnetAttribute", owner).formParam("SubnetId", subnet)
+                .formParam("MapPublicIpOnLaunch.Value", automatic).post("/").then().statusCode(200);
+        String instance = request("RunInstances", owner).formParam("ImageId", "ami-amazonlinux2023")
+                .formParam("InstanceType", "t3.micro").formParam("MinCount", 1).formParam("MaxCount", 1)
+                .formParam("SubnetId", subnet).post("/").then().statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        String launched = publicIp(owner, instance);
+        assertEquals(automatic, !launched.isEmpty());
+
+        ValidatableResponse allocated = request("AllocateAddress", owner).formParam("Domain", "vpc")
+                .post("/").then().statusCode(200);
+        String allocation = allocated.extract().path("AllocateAddressResponse.allocationId");
+        String elastic = allocated.extract().path("AllocateAddressResponse.publicIp");
+        String association = request("AssociateAddress", owner).formParam("AllocationId", allocation)
+                .formParam("InstanceId", instance).post("/").then().statusCode(200)
+                .extract().path("AssociateAddressResponse.associationId");
+        assertEquals(elastic, publicIp(owner, instance));
+        request("StopInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        assertEquals(elastic, publicIp(owner, instance));
+        request("StartInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        assertEquals(elastic, publicIp(owner, instance));
+
+        request("DisassociateAddress", owner).formParam("AssociationId", association).post("/").then()
+                .statusCode(200);
+        String replacement = publicIp(owner, instance);
+        assertEquals(automatic, !replacement.isEmpty());
+        assertNotEquals(elastic, replacement);
+
+        request("AssociateAddress", owner).formParam("AllocationId", allocation)
+                .formParam("InstanceId", instance).post("/").then().statusCode(200);
+        request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        assertEquals("", publicIp(owner, instance));
+        request("ReleaseAddress", owner).formParam("AllocationId", allocation).post("/").then().statusCode(200);
+        request("DeleteSubnet", owner).formParam("SubnetId", subnet).post("/").then().statusCode(200);
+        request("DeleteVpc", owner).formParam("VpcId", vpc).post("/").then().statusCode(200);
+    }
+
+    private String publicIp(String owner, String instance) {
+        return describe(owner, instance).extract().xmlPath().getString(INSTANCE + "ipAddress");
     }
 
     private ValidatableResponse describe(String owner, String instance) {

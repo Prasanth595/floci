@@ -17,6 +17,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -115,6 +116,88 @@ class Ec2MetadataProfileIntegrationTest {
             iamRequest(authorization, "DeleteRole").formParam("RoleName", roleName)
                     .post("/").then().statusCode(200);
         }
+    }
+
+    @Test
+    void clusterNodeReportsItsSynthesizedProfileUntilIamHoldsOne() throws Exception {
+        String account = "246813579012";
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String roleName = "node-role-" + suffix;
+        String profileName = "cluster-" + suffix + "-node-profile";
+        String profileArn = "arn:aws:iam::" + account + ":instance-profile/" + profileName;
+        String authorization = "AWS4-HMAC-SHA256 Credential=" + account
+                + "/20261008/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=abc";
+        int port;
+        try (ServerSocket socket = new ServerSocket(0)) {
+            port = socket.getLocalPort();
+        }
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ec2().imdsPort()).thenReturn(port);
+        Vertx vertx = Vertx.vertx();
+        Ec2MetadataServer server = new Ec2MetadataServer(vertx, config, iam);
+        Instance node = new Instance();
+        node.setInstanceId("i-0fedcba9876543210");
+        node.setIamInstanceProfileArn(profileArn);
+        node.setIamInstanceProfileId("AIPA0FEDCBA9876543210");
+        String endpoint = "http://127.0.0.1:" + port;
+        boolean roleCreated = false;
+        boolean profileAttached = false;
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            server.start().get(10, TimeUnit.SECONDS);
+            server.registerContainer("127.0.0.1", node.getInstanceId(), node);
+            assertEquals(404, getInfo(client, endpoint, token(client, endpoint)).statusCode());
+
+            server.unregisterInstance(node);
+            server.reconcileClusterNodeAddresses(Set.of("127.0.0.1"), node);
+            HttpResponse<String> synthesized = getInfo(client, endpoint, token(client, endpoint));
+            assertEquals(200, synthesized.statusCode());
+            JsonObject info = new JsonObject(synthesized.body());
+            assertEquals(profileArn, info.getString("InstanceProfileArn"));
+            assertEquals("AIPA0FEDCBA9876543210", info.getString("InstanceProfileId"));
+
+            iamRequest(authorization, "CreateRole").formParam("RoleName", roleName)
+                    .formParam("AssumeRolePolicyDocument", """
+                            {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                            "Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+                            """)
+                    .post("/").then().statusCode(200);
+            roleCreated = true;
+            String iamProfileId = iamRequest(authorization, "CreateInstanceProfile")
+                    .formParam("InstanceProfileName", profileName).post("/").then().statusCode(200)
+                    .extract().path("CreateInstanceProfileResponse.CreateInstanceProfileResult"
+                            + ".InstanceProfile.InstanceProfileId");
+            iamRequest(authorization, "AddRoleToInstanceProfile")
+                    .formParam("InstanceProfileName", profileName).formParam("RoleName", roleName)
+                    .post("/").then().statusCode(200);
+            profileAttached = true;
+            HttpResponse<String> backed = getInfo(client, endpoint, token(client, endpoint));
+            assertEquals(200, backed.statusCode());
+            assertEquals(iamProfileId, new JsonObject(backed.body()).getString("InstanceProfileId"));
+        } finally {
+            server.stop();
+            vertx.close().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+            if (profileAttached) {
+                iamRequest(authorization, "RemoveRoleFromInstanceProfile")
+                        .formParam("InstanceProfileName", profileName).formParam("RoleName", roleName)
+                        .post("/").then().statusCode(200);
+                iamRequest(authorization, "DeleteInstanceProfile")
+                        .formParam("InstanceProfileName", profileName).post("/").then().statusCode(200);
+            }
+            if (roleCreated) {
+                iamRequest(authorization, "DeleteRole").formParam("RoleName", roleName)
+                        .post("/").then().statusCode(200);
+            }
+        }
+    }
+
+    private static String token(HttpClient client, String endpoint) throws Exception {
+        HttpResponse<String> token = client.send(HttpRequest.newBuilder(URI.create(endpoint + "/latest/api/token"))
+                        .timeout(Duration.ofSeconds(5))
+                        .header("X-aws-ec2-metadata-token-ttl-seconds", "60")
+                        .PUT(HttpRequest.BodyPublishers.noBody()).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, token.statusCode());
+        return token.body();
     }
 
     private static RequestSpecification iamRequest(String authorization, String action) {
