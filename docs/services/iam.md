@@ -29,7 +29,7 @@ aws login --remote --endpoint-url http://localhost:4566 --region us-east-1
 The CLI prints the authorize URL and waits for a code. After the consent page, Floci lands on
 `/v1/sessions/confirmation` on the same endpoint, the path AWS Sign-In uses, and shows the
 verification code to paste back. The redirect must point at the endpoint the request arrived on
-or at an AWS Sign-In host; any other origin is refused.
+or at the AWS Sign-In host of a region in the deployment's partition; any other origin is refused.
 
 ## Supported Actions
 
@@ -1266,6 +1266,9 @@ account key carries no identity policies of its own.
 A `Condition` operator can only match a key floci actually places in the request context.
 floci populates:
 
+- `iam:PolicyARN`: the managed policy ARN in the form body for `AttachRolePolicy`,
+  `DetachRolePolicy`, `AttachUserPolicy`, `DetachUserPolicy`, `AttachGroupPolicy` and
+  `DetachGroupPolicy`. The target role, user or group remains the authorized resource.
 - `s3:prefix`, `s3:delimiter`, `s3:max-keys`: from the S3 request parameters.
 - `aws:RequestTag/<key>`: the tags named in the request itself, before they are applied, for
   `ec2:RunInstances` (`TagSpecification.N`), `ec2:CreateTags` (`Tag.N`) and
