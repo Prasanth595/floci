@@ -246,6 +246,15 @@ public final class TestFixtures {
     }
 
     /**
+     * The first availability zone of {@link #region()} ({@code us-east-1a}, {@code cn-north-1a}, ...),
+     * for tests that must place a resource in a zone. A zone literal only exists in one region, so a
+     * hardcoded one fails as soon as the suite runs anywhere else.
+     */
+    public static String availabilityZone() {
+        return REGION.id() + "a";
+    }
+
+    /**
      * The partition of {@link #region()} ({@code aws}, {@code aws-cn}, {@code aws-us-gov}, ...), from
      * the SDK's own region metadata, so a test pins the partition its clients actually sign in. A region
      * the SDK does not know is taken as commercial.
