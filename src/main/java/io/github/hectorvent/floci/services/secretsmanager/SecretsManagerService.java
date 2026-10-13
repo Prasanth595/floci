@@ -1042,6 +1042,16 @@ public class SecretsManagerService implements ResourceProvider {
         // halves of the promotion run inside one critical section for the same reason: a sync
         // landing between them would write the replica back over the copy just promoted.
         synchronized (lockFor(primary != null ? primary.getArn() : replica.getArn())) {
+            // A removal or promotion may have completed while this call waited. Never write the
+            // pre-lock objects back over a deletion or over a newly independent secret.
+            replica = resolveSecret(replica.getArn(), region);
+            if (!replica.isReplica() || !primaryRegionName.equals(replica.getPrimaryRegion())) {
+                throw new AwsException("InvalidRequestException",
+                        "The secret is no longer a replica of the original primary.", 400);
+            }
+            if (primary != null) {
+                primary = resolveSecret(primary.getArn(), primaryRegionName);
+            }
             replica.setPrimaryRegion(null);
             replica.setLastChangedDate(Instant.now());
             putSecret(region, replica);

@@ -125,6 +125,37 @@ class SecretsManagerWriteLockTest {
     }
 
     @Test
+    void queuedPromotionCannotRestoreSecretsAfterManagedRelease() throws Exception {
+        String arn = service.describeSecret(SECRET_NAME, REGION).getArn();
+        service.replicateSecretToRegions(arn,
+                List.of(new SecretsManagerService.ReplicaRegion(REPLICA_REGION, null)), false, REGION);
+        storage.parkOn(REGION + "::" + SECRET_NAME);
+        storage.afterParkedWrite = () -> {
+            service.removeRegionsFromReplication(arn, List.of(REPLICA_REGION), REGION);
+            assertTrue(service.deleteManagedSecretAfter(arn, REGION, () -> { }));
+        };
+        Watched writer = start("primary-writer", () -> service.updateSecret(arn, "updated", null, REGION));
+        Watched promotion = null;
+        try {
+            assertTrue(storage.awaitEntered());
+            promotion = start("queued-promotion", () -> {
+                AwsException missing = assertThrows(AwsException.class,
+                        () -> service.stopReplicationToReplica(SECRET_NAME, REPLICA_REGION));
+                assertEquals("ResourceNotFoundException", missing.getErrorCode());
+            });
+            assertTrue(promotion.awaitBlocked());
+        } finally {
+            storage.release();
+            writer.awaitSuccess();
+            if (promotion != null) {
+                promotion.awaitSuccess();
+            }
+        }
+        assertThrows(AwsException.class, () -> service.describeSecret(arn, REGION));
+        assertThrows(AwsException.class, () -> service.describeSecret(SECRET_NAME, REPLICA_REGION));
+    }
+
+    @Test
     void failedCredentialChangeRetainsTheSecret() {
         String arn = service.describeSecret(SECRET_NAME, REGION).getArn();
         assertThrows(IllegalStateException.class, () -> service.deleteManagedSecretAfter(arn, REGION, () -> {
@@ -250,6 +281,7 @@ class SecretsManagerWriteLockTest {
         private final CountDownLatch entered = new CountDownLatch(1);
         private final CountDownLatch released = new CountDownLatch(1);
         private volatile BiPredicate<String, Secret> parkWhen;
+        private Runnable afterParkedWrite;
 
         void parkOn(String key) {
             parkOn((written, secret) -> written.equals(key));
@@ -280,6 +312,11 @@ class SecretsManagerWriteLockTest {
                 }
             }
             super.put(key, value);
+            Runnable afterWrite = afterParkedWrite;
+            if (afterWrite != null) {
+                afterParkedWrite = null;
+                afterWrite.run();
+            }
         }
     }
 
