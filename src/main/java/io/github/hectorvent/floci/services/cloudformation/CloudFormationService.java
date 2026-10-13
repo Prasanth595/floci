@@ -362,7 +362,7 @@ public class CloudFormationService implements ResourceProvider {
         // template declaring the SAM transform, whether or not that transform succeeded, so
         // gating this call on samTransformFailureReason == null duplicates that check for no
         // effect.
-        validateResourceDependencies(resolvedTemplate, parameters, region, accountId);
+        validateResourceDependencies(resolvedTemplate, parameters, stackName, region, accountId);
 
         // A CREATE change set against a name that already has a stack of any status - including
         // ROLLBACK_COMPLETE - is a real conflict: AWS requires an explicit DeleteStack before a
@@ -625,7 +625,7 @@ public class CloudFormationService implements ResourceProvider {
                     ? resolveConditions(oldTemplate, oldResolvedParams, stack, region, regionResolver.getAccountId())
                     : Map.of();
             Map<String, Boolean> newConditions = resolveConditions(
-                    newTemplate, newResolvedParams, null, region, regionResolver.getAccountId());
+                    newTemplate, newResolvedParams, stack, region, regionResolver.getAccountId());
             Set<String> changedConditions = new HashSet<>();
             newConditions.forEach((name, val) -> {
                 if (!Objects.equals(val, oldConditions.get(name))) {
@@ -2687,6 +2687,19 @@ public class CloudFormationService implements ResourceProvider {
 
     private Map<String, Boolean> resolveConditions(JsonNode template, Map<String, String> params,
                                                    Stack stack, String region, String accountId) {
+        return resolveConditions(template, params, stack.getStackName(), stack.getStackId(), region, accountId);
+    }
+
+    /**
+     * Evaluates the template's {@code Conditions} through the template engine, so an operand can be
+     * any intrinsic a condition allows, {@code Fn::FindInMap} and the pseudo parameters included.
+     * The stack name and id are what {@code AWS::StackName} and {@code AWS::StackId} resolve to, so
+     * every evaluation of one stack's template, preview, preflight or execution, passes the same
+     * ones; only a create's preflight runs before its stack id exists, and passes an empty id.
+     */
+    private Map<String, Boolean> resolveConditions(JsonNode template, Map<String, String> params,
+                                                   String stackName, String stackId, String region,
+                                                   String accountId) {
         Map<String, Boolean> conditions = new HashMap<>();
         JsonNode condNode = template.path("Conditions");
         if (!condNode.isObject()) {
@@ -2694,9 +2707,14 @@ public class CloudFormationService implements ResourceProvider {
         }
         Map<String, JsonNode> mappings = new HashMap<>();
         template.path("Mappings").fields().forEachRemaining(e -> mappings.put(e.getKey(), e.getValue()));
+        // A declared parameter given no value and no Default compares as an empty string, as it did
+        // before conditions went through the engine, which answers an unresolved Ref with its name.
+        // So does AWS::NotificationARNs: Floci keeps no notification ARNs, so the list is empty.
+        Map<String, String> conditionParams = new HashMap<>(params);
+        template.path("Parameters").fieldNames().forEachRemaining(name -> conditionParams.putIfAbsent(name, ""));
+        conditionParams.putIfAbsent("AWS::NotificationARNs", "");
         CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
-                accountId, region, stack == null ? "" : stack.getStackName(),
-                stack == null ? "" : stack.getStackId(), params, Map.of(), Map.of(),
+                accountId, region, stackName, stackId, conditionParams, Map.of(), Map.of(),
                 conditions, mappings, objectMapper, name -> null);
         condNode.fields().forEachRemaining(e -> conditions.put(e.getKey(), false));
         condNode.fields().forEachRemaining(e ->
@@ -2746,7 +2764,7 @@ public class CloudFormationService implements ResourceProvider {
      * graph the execution path resolves correctly.
      */
     private void validateResourceDependencies(String templateBody, Map<String, String> params,
-                                               String region, String accountId) {
+                                               String stackName, String region, String accountId) {
         JsonNode template;
         try {
             template = parseTemplate(templateBody);
@@ -2765,8 +2783,14 @@ public class CloudFormationService implements ResourceProvider {
 
         requireStringConditionReferencesIn(template);
         Map<String, String> resolvedParams = resolveDefaultParameters(template, params);
-        Map<String, Boolean> conditions =
-                resolveConditions(template, resolvedParams, null, region, accountId);
+        // The execution evaluates AWS::StackName and AWS::StackId against the stack, so the preflight
+        // does too: the live stack an update targets, or the name a create is about to take. The
+        // stack lives in the account the change set is created in, a StackSet's target included.
+        Stack live = resolveStack(stackName, region, accountId);
+        boolean updating = live != null && !"DELETE_COMPLETE".equals(live.getStatus());
+        Map<String, Boolean> conditions = updating
+                ? resolveConditions(template, resolvedParams, live, region, accountId)
+                : resolveConditions(template, resolvedParams, stackName, "", region, accountId);
 
         // Throws the ValidationError for either case; the order itself is computed again on execution.
         topologicalSort(resources, conditions);

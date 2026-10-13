@@ -623,6 +623,96 @@ class CloudFormationResourceConditionIntegrationTest {
         }
     }
 
+    /**
+     * The change-set preview, the preflight and the execution all evaluate {@code AWS::StackName}
+     * against the stack. When the preview resolved it to an empty string, a condition true for the
+     * deployed stack read false for the update, and the queue's edit was skipped.
+     */
+    @Test
+    void stackNameConditionHoldsAcrossAnUpdateThatEditsItsResource() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-stackname-condition-" + suffix;
+        String queueName = "stackname-condition-" + suffix;
+        String template = """
+                {
+                  "Conditions": {"IsThisStack": {"Fn::Equals": [{"Ref": "AWS::StackName"}, "%s"]}},
+                  "Resources": {
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue", "Condition": "IsThisStack",
+                      "Properties": {"QueueName": "%s", "VisibilityTimeout": %d}
+                    }
+                  }
+                }
+                """;
+        createStack(stackName, template.formatted(stackName, queueName, 30));
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals("30", visibilityTimeout(queueName));
+
+            updateStack(stackName, template.formatted(stackName, queueName, 60));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals("60", visibilityTimeout(queueName));
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    /**
+     * A declared parameter the stack gives no value and no Default compares as an empty string, as it
+     * did before conditions went through the template engine, which answers an unresolved Ref with
+     * the parameter's own name. So does {@code AWS::NotificationARNs}, which Floci keeps none of.
+     */
+    @Test
+    void aParameterGivenNoValueComparesAsEmptyInACondition() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-empty-parameter-" + suffix;
+        String queueName = "empty-parameter-" + suffix;
+        String template = """
+                {
+                  "Parameters": {"Optional": {"Type": "String"}},
+                  "Conditions": {
+                    "HasOptional": {"Fn::Not": [{"Fn::Equals": [{"Ref": "Optional"}, ""]}]},
+                    "HasNotifications": {"Fn::Not": [{"Fn::Equals": [
+                      {"Fn::Join": [",", {"Ref": "AWS::NotificationARNs"}]}, ""]}]}
+                  },
+                  "Resources": {
+                    "Queue": {"Type": "AWS::SQS::Queue", "Condition": "HasOptional",
+                      "Properties": {"QueueName": "%s"}},
+                    "Notified": {"Type": "AWS::SQS::Queue", "Condition": "HasNotifications",
+                      "Properties": {"QueueName": "%s-notified"}},
+                    "Always": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "%s-always"}}
+                  }
+                }
+                """.formatted(queueName, queueName, queueName);
+        createStack(stackName, template);
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            getQueueUrl(queueName + "-always").then().statusCode(200);
+            getQueueUrl(queueName).then().statusCode(400);
+            getQueueUrl(queueName + "-notified").then().statusCode(400);
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    private static String visibilityTimeout(String queueName) {
+        String queueUrl = getQueueUrl(queueName).then().statusCode(200).extract().xmlPath()
+                .getString("GetQueueUrlResponse.GetQueueUrlResult.QueueUrl");
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("AttributeName.1", "VisibilityTimeout")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath()
+            .getString("**.find { it.Name == 'VisibilityTimeout' }.Value");
+    }
+
     private static io.restassured.response.Response getQueueUrl(String queueName) {
         return given()
             .contentType("application/x-www-form-urlencoded")
