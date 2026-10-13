@@ -4,6 +4,8 @@ import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -231,8 +233,11 @@ public final class EnforcementFixtures {
                 throw new IllegalStateException("S3 fixture purge made no progress for bucket " + bucket);
             }
             for (ObjectVersion version : page) {
-                s3(port, authorization).queryParam("versionId", version.versionId())
-                        .when().delete("/" + bucket + "/" + version.key())
+                String encodedKey = URLEncoder.encode(version.key(), StandardCharsets.UTF_8)
+                        .replace("+", "%20").replace("%2F", "/");
+                s3(port, authorization).urlEncodingEnabled(false)
+                        .queryParam("versionId", version.versionId())
+                        .when().delete("/" + bucket + "/" + encodedKey)
                         .then().statusCode(204);
             }
             previousPage = page;
