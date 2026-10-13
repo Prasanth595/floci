@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -30,6 +31,7 @@ public class ElastiCacheServerlessCfnProvisioner implements CfnResourceProvision
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String SERVERLESS_CACHE = "AWS::ElastiCache::ServerlessCache";
+    private static final String CREATE_ONLY_ATTR = "__FlociCreateOnly";
 
     private final ElastiCacheServerlessService serverlessService;
 
@@ -71,6 +73,7 @@ public class ElastiCacheServerlessCfnProvisioner implements CfnResourceProvision
         }
         putEndpoint(r, "Endpoint", cache.getEndpoint());
         putEndpoint(r, "ReaderEndpoint", cache.getReaderEndpoint());
+        r.getAttributes().put(CREATE_ONLY_ATTR, createOnlyRecord(props, ctx).toString());
         ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
@@ -96,17 +99,10 @@ public class ElastiCacheServerlessCfnProvisioner implements CfnResourceProvision
 
     private ServerlessCache modify(StackResource r, String name, JsonNode props, ProvisionContext ctx) {
         ServerlessCache existing = serverlessService.getServerlessCache(name);
-        Set<String> subnets = new HashSet<>(ctx.resolveStringList(props, "SubnetIds"));
-        Set<String> existingSubnets = existing.getSubnetIds() == null
-                ? Set.of() : new HashSet<>(existing.getSubnetIds());
-        String kms = ctx.resolveOptional(props, "KmsKeyId");
-        String existingKms = existing.getKmsKeyId();
-        // Replacing the cache needs a new name, and the name is create-only too, so there is no way to apply this.
-        if (!subnets.equals(existingSubnets)
-                || !Objects.equals(kms == null || kms.isBlank() ? null : kms,
-                        existingKms == null || existingKms.isBlank() ? null : existingKms)) {
-            throw new AwsException("InvalidParameterValue", "Updating SubnetIds or KmsKeyId of serverless cache "
-                    + name + " requires a new ServerlessCacheName", 400);
+        if (createOnlyPropertiesChanged(r, existing, props, ctx)) {
+            throw new AwsException("ValidationError",
+                    "CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                            + "Rename " + name + " and update the stack again.", 400);
         }
         snapshotBeforeUpdate(r, existing);
         List<String> securityGroupIds = ctx.resolveStringList(props, "SecurityGroupIds");
@@ -236,6 +232,75 @@ public class ElastiCacheServerlessCfnProvisioner implements CfnResourceProvision
         }
         r.getAttributes().put(prefix + ".Address", endpoint.address());
         r.getAttributes().put(prefix + ".Port", String.valueOf(endpoint.port()));
+    }
+
+    private static ObjectNode createOnlyRecord(JsonNode props, ProvisionContext ctx) {
+        ObjectNode record = MAPPER.createObjectNode();
+        if (props == null) {
+            return record;
+        }
+        String kms = ctx.resolveOptional(props, "KmsKeyId");
+        if (kms != null && !kms.isBlank()) {
+            record.put("KmsKeyId", kms.trim());
+        }
+        String connectionType = ctx.resolveOptional(props, "ConnectionType");
+        if (connectionType != null && !connectionType.isBlank()) {
+            record.put("ConnectionType", connectionType.trim());
+        }
+        String networkType = ctx.resolveOptional(props, "NetworkType");
+        if (networkType != null && !networkType.isBlank()) {
+            record.put("NetworkType", networkType.trim());
+        }
+        List<String> subnets = ctx.resolveStringList(props, "SubnetIds");
+        if (!subnets.isEmpty()) {
+            ArrayNode arr = record.putArray("SubnetIds");
+            subnets.stream().sorted().forEach(arr::add);
+        }
+        List<String> snapshots = ctx.resolveStringList(props, "SnapshotArnsToRestore");
+        if (!snapshots.isEmpty()) {
+            ArrayNode arr = record.putArray("SnapshotArnsToRestore");
+            snapshots.forEach(arr::add);
+        }
+        return record;
+    }
+
+    private static boolean createOnlyPropertiesChanged(StackResource r, ServerlessCache existing,
+                                                       JsonNode props, ProvisionContext ctx) {
+        String priorRaw = r.getAttributes().get(CREATE_ONLY_ATTR);
+        if (priorRaw != null && !priorRaw.isBlank()) {
+            try {
+                JsonNode priorNode = MAPPER.readTree(priorRaw);
+                ObjectNode currentNode = createOnlyRecord(props, ctx);
+                return !priorNode.equals(currentNode);
+            } catch (JsonProcessingException e) {
+                // fall through to live check if unreadable
+            }
+        }
+        Set<String> subnets = new HashSet<>(ctx.resolveStringList(props, "SubnetIds"));
+        Set<String> existingSubnets = existing.getSubnetIds() == null
+                ? Set.of() : new HashSet<>(existing.getSubnetIds());
+        if (!subnets.equals(existingSubnets)) {
+            return true;
+        }
+        String kms = ctx.resolveOptional(props, "KmsKeyId");
+        String existingKms = existing.getKmsKeyId();
+        if (!Objects.equals(kms == null || kms.isBlank() ? null : kms.trim(),
+                existingKms == null || existingKms.isBlank() ? null : existingKms.trim())) {
+            return true;
+        }
+        List<String> snapshotArns = ctx.resolveStringList(props, "SnapshotArnsToRestore");
+        if (!snapshotArns.isEmpty()) {
+            return true;
+        }
+        String connectionType = ctx.resolveOptional(props, "ConnectionType");
+        if (connectionType != null && !connectionType.isBlank()) {
+            return true;
+        }
+        String networkType = ctx.resolveOptional(props, "NetworkType");
+        if (networkType != null && !networkType.isBlank()) {
+            return true;
+        }
+        return false;
     }
 
     @Override

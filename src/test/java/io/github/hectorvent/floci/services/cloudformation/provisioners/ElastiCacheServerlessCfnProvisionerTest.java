@@ -121,8 +121,11 @@ class ElastiCacheServerlessCfnProvisionerTest {
         when(serverless.getServerlessCache("sl")).thenReturn(existing);
         StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
 
-        assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r,
+        AwsException error = assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r,
                 props("{\"ServerlessCacheName\":\"sl\",\"Engine\":\"valkey\",\"SubnetIds\":[\"subnet-2\"]}"), ctx("sl")));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                + "Rename sl and update the stack again.", error.getMessage());
         verify(serverless, never()).modifyServerlessCache(any());
     }
 
@@ -134,8 +137,77 @@ class ElastiCacheServerlessCfnProvisionerTest {
         when(serverless.getServerlessCache("sl")).thenReturn(existing);
         StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
 
-        assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r,
+        AwsException error = assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r,
                 props("{\"ServerlessCacheName\":\"sl\",\"Engine\":\"valkey\"}"), ctx("sl")));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                + "Rename sl and update the stack again.", error.getMessage());
+        verify(serverless, never()).modifyServerlessCache(any());
+    }
+
+    @Test
+    void serverlessSnapshotArnsToRestoreChangeIsRejectedInsteadOfIgnored() throws Exception {
+        ServerlessCache existing = new ServerlessCache();
+        existing.setServerlessCacheName("sl");
+        when(serverless.getServerlessCache("sl")).thenReturn(existing);
+        StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
+
+        AwsException error = assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r,
+                props("{\"ServerlessCacheName\":\"sl\",\"Engine\":\"valkey\",\"SnapshotArnsToRestore\":[\"arn:aws:snapshot:1\"]}"),
+                ctx("sl")));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                + "Rename sl and update the stack again.", error.getMessage());
+        verify(serverless, never()).modifyServerlessCache(any());
+    }
+
+    @Test
+    void serverlessConnectionTypeChangeIsRejectedInsteadOfIgnored() throws Exception {
+        ServerlessCache existing = new ServerlessCache();
+        existing.setServerlessCacheName("sl");
+        when(serverless.getServerlessCache("sl")).thenReturn(existing);
+        StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
+
+        AwsException error = assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r,
+                props("{\"ServerlessCacheName\":\"sl\",\"Engine\":\"valkey\",\"ConnectionType\":\"public\"}"),
+                ctx("sl")));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                + "Rename sl and update the stack again.", error.getMessage());
+        verify(serverless, never()).modifyServerlessCache(any());
+    }
+
+    @Test
+    void serverlessNetworkTypeChangeIsRejectedInsteadOfIgnored() throws Exception {
+        ServerlessCache existing = new ServerlessCache();
+        existing.setServerlessCacheName("sl");
+        when(serverless.getServerlessCache("sl")).thenReturn(existing);
+        StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
+
+        AwsException error = assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r,
+                props("{\"ServerlessCacheName\":\"sl\",\"Engine\":\"valkey\",\"NetworkType\":\"ipv6\"}"),
+                ctx("sl")));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                + "Rename sl and update the stack again.", error.getMessage());
+        verify(serverless, never()).modifyServerlessCache(any());
+    }
+
+    @Test
+    void serverlessRecordedCreateOnlyPropertyChangeIsRejected() throws Exception {
+        ServerlessCache existing = new ServerlessCache();
+        existing.setServerlessCacheName("sl");
+        when(serverless.getServerlessCache("sl")).thenReturn(existing);
+        StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
+        r.getAttributes().put("__FlociCreateOnly",
+                "{\"ConnectionType\":\"vpc\",\"NetworkType\":\"ipv4\",\"SnapshotArnsToRestore\":[\"arn:aws:snap-1\"]}");
+
+        AwsException error = assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r,
+                props("{\"ServerlessCacheName\":\"sl\",\"Engine\":\"valkey\",\"ConnectionType\":\"vpc\",\"NetworkType\":\"ipv4\"}"),
+                ctx("sl")));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                + "Rename sl and update the stack again.", error.getMessage());
         verify(serverless, never()).modifyServerlessCache(any());
     }
 

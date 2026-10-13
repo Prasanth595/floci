@@ -44,6 +44,8 @@ class CfnCreateOnlyPropertiesTest {
         assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "SubnetIds"));
         assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "KmsKeyId"));
         assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "SnapshotArnsToRestore"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "ConnectionType"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "NetworkType"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "SecurityGroupIds"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Description"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Tags"));

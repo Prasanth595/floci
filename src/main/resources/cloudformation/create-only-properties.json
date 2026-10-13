@@ -419,7 +419,9 @@
     "ServerlessCacheName",
     "KmsKeyId",
     "SnapshotArnsToRestore",
-    "SubnetIds"
+    "SubnetIds",
+    "ConnectionType",
+    "NetworkType"
   ],
   "AWS::ElasticLoadBalancingV2::Listener": [
     "LoadBalancerArn"
