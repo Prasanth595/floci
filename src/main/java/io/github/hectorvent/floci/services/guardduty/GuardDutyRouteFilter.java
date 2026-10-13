@@ -1,8 +1,7 @@
 package io.github.hectorvent.floci.services.guardduty;
 
 import io.github.hectorvent.floci.core.common.ResolvedServiceCatalog;
-import io.github.hectorvent.floci.core.common.ServiceDescriptor;
-import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
+import io.github.hectorvent.floci.core.common.SignedServiceRoute;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
@@ -21,35 +20,16 @@ public class GuardDutyRouteFilter implements ContainerRequestFilter {
 
     static final String INTERNAL_PREFIX = "/_guardduty";
     static final String PLAN_PATH = "/malware-protection-plan";
-    private static final String GUARDDUTY = "guardduty";
 
-    private final ResolvedServiceCatalog catalog;
+    private final SignedServiceRoute route;
 
     @Inject
     public GuardDutyRouteFilter(ResolvedServiceCatalog catalog) {
-        this.catalog = catalog;
+        this.route = new SignedServiceRoute(catalog, "guardduty", INTERNAL_PREFIX, SignedServiceRoute.under(PLAN_PATH));
     }
 
     @Override
     public void filter(ContainerRequestContext ctx) {
-        String path = ctx.getUriInfo().getPath();
-        String normalizedPath = path.startsWith("/") ? path : "/" + path;
-        if (!normalizedPath.equals(PLAN_PATH)
-                && !normalizedPath.startsWith(PLAN_PATH + "/")) {
-            return;
-        }
-
-        boolean targetsGuardDuty = SigV4CredentialScope.serviceName(ctx.getHeaderString("Authorization"))
-                .flatMap(catalog::byCredentialScope)
-                .map(ServiceDescriptor::externalKey)
-                .filter(GUARDDUTY::equals)
-                .isPresent();
-        if (!targetsGuardDuty) {
-            return;
-        }
-
-        ctx.setRequestUri(ctx.getUriInfo().getRequestUriBuilder()
-                .replacePath(INTERNAL_PREFIX + normalizedPath)
-                .build());
+        route.apply(ctx);
     }
 }

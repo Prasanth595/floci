@@ -57,8 +57,9 @@ The role must be an IAM role ARN. An update is applied all-or-nothing: if any su
 
 Plan tag keys follow GuardDuty's `TagKey` pattern (no `aws:` prefix, no spaces), and the tag
 routes accept a plan's ARN only when it matches the stored plan's exactly, account and partition
-included. The plan routes are served only to requests signed for `guardduty`, so a path-style S3
-request for a bucket named `malware-protection-plan` still reaches S3.
+included. The plan routes are served only to requests signed for `guardduty`, by the `Authorization`
+header or the `X-Amz-Credential` query parameter, so a path-style S3 request for a bucket named
+`malware-protection-plan` still reaches S3.
 
 ## Configuration
 
