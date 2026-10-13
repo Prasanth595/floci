@@ -448,7 +448,13 @@ and restores the original bucket.
 
 `AutoPublishAlias` creates a version and points the generated alias at that version's
 numeric `Version` attribute. CloudFormation resolves the version before creating the
-alias. Later changes to `$LATEST` do not change the alias's published code or configuration.
+alias. Following SAM, the version's logical id is `<Function>Version` followed by ten hex digits
+of a SHA-1 over the function's code, with its template parameter references resolved, and its
+`Environment` and `MemorySize` as written (every property under `AutoPublishAliasAllProperties`,
+and any `AutoPublishCodeSha256`). Editing any of them, or changing a parameter the code uses,
+publishes a new version and moves the alias to it; as in SAM, a parameter that only the
+environment uses does not. Changes made to `$LATEST` outside the stack do not reach the alias's
+published code or configuration.
 
 ## Conditions
 

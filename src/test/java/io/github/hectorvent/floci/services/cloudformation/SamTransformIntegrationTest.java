@@ -224,6 +224,47 @@ class SamTransformIntegrationTest {
     }
 
     @Test
+    @Tag("docker")
+    void samAutoPublishAliasFollowsATemplateCodeChangeToANewVersion() {
+        String stackName = "sam-alias-update-stack";
+        stacksToDelete.add(stackName);
+        String template = """
+            Transform: AWS::Serverless-2016-10-31
+            Resources:
+              Function:
+                Type: AWS::Serverless::Function
+                Properties:
+                  FunctionName: sam-alias-update-func
+                  Handler: index.handler
+                  Runtime: nodejs20.x
+                  AutoPublishAlias: production
+                  InlineCode: "exports.handler = async () => ({ release: '%s' });"
+            """;
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("first")).formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when().post("/").then().statusCode(200);
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("second")).formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when().post("/").then().statusCode(200);
+        waitForStackStatus(stackName, "UPDATE_COMPLETE");
+
+        // The changed code names a new version resource, which publishes version 2, and the alias follows it.
+        given().when().get("/2015-03-31/functions/sam-alias-update-func/aliases/production")
+            .then().statusCode(200).body("FunctionVersion", equalTo("2"));
+        given().contentType("application/json").body("{}")
+        .when().post("/2015-03-31/functions/sam-alias-update-func:production/invocations")
+        .then()
+            .statusCode(200)
+            .header("X-Amz-Function-Error", nullValue())
+            .header("X-Amz-Executed-Version", equalTo("2"))
+            .body("release", equalTo("second"));
+    }
+
+    @Test
     void samAutoPublishAliasKeepsPublishedConfiguration() {
         String stackName = "sam-published-config-stack";
         String function = "sam-published-config-func";
