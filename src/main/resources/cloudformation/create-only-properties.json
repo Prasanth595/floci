@@ -47,11 +47,17 @@
   "AWS::ApiGatewayV2::Api": [
     "ProtocolType"
   ],
+  "AWS::ApiGatewayV2::ApiMapping": [
+    "DomainName"
+  ],
   "AWS::ApiGatewayV2::Authorizer": [
     "ApiId"
   ],
   "AWS::ApiGatewayV2::Deployment": [
     "ApiId"
+  ],
+  "AWS::ApiGatewayV2::DomainName": [
+    "DomainName"
   ],
   "AWS::ApiGatewayV2::Integration": [
     "ApiId"
@@ -198,6 +204,10 @@
   "AWS::Cognito::UserPoolGroup": [
     "UserPoolId",
     "GroupName"
+  ],
+  "AWS::Cognito::UserPoolResourceServer": [
+    "Identifier",
+    "UserPoolId"
   ],
   "AWS::Config::ConfigRule": [
     "ConfigRuleName"

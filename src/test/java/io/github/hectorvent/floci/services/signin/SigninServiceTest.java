@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.signin;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.signin.model.TokenResult;
@@ -8,9 +10,9 @@ import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
@@ -112,6 +114,38 @@ class SigninServiceTest {
         assertInvalidAuthorization(challenge(VERIFIER), SigninService.CROSS_DEVICE_CLIENT,
                 REDIRECT_URI, "state");
         assertInvalidAuthorization(challenge(VERIFIER), CLIENT_ID, "x".repeat(2049), "state");
+    }
+
+    @Test
+    void crossDeviceRedirectIsAcceptedOnTheOriginTheRequestArrivedOn() throws Exception {
+        URI origin = URI.create("http://localhost:4566/");
+
+        crossDeviceAuthorize("http://localhost:4566/v1/sessions/confirmation", origin);
+        crossDeviceAuthorize("http://LOCALHOST:4566/v1/sessions/confirmation", origin);
+        crossDeviceAuthorize("https://floci.example/v1/sessions/confirmation", URI.create("https://floci.example:443/"));
+        crossDeviceAuthorize("https://us-east-1.signin.aws.amazon.com/v1/sessions/confirmation", origin);
+
+        assertInvalidRequest(() -> crossDeviceAuthorize("http://localhost:4567/v1/sessions/confirmation", origin));
+        assertInvalidRequest(() -> crossDeviceAuthorize("https://localhost:4566/v1/sessions/confirmation", origin));
+        assertInvalidRequest(() -> crossDeviceAuthorize("http://example.com:4566/v1/sessions/confirmation", origin));
+        assertInvalidRequest(() -> crossDeviceAuthorize("http://localhost:4566/v1/sessions/other", origin));
+        assertInvalidRequest(() -> crossDeviceAuthorize("http://localhost:4566/v1/sessions/confirmation?x=1", origin));
+        assertInvalidRequest(() -> crossDeviceAuthorize("http://user@localhost:4566/v1/sessions/confirmation", origin));
+        assertInvalidRequest(() -> crossDeviceAuthorize("http://localhost:4566/v1/sessions/confirmation", null));
+        assertInvalidRequest(() -> service.beginAuthorization(CLIENT_ID, challengeUnchecked(VERIFIER), "SHA-256",
+                "http://localhost:4566/v1/sessions/confirmation", "code", "openid", "state", null, origin));
+    }
+
+    @Test
+    void verificationCodeIsTheBase64QueryTheCliDecodes() {
+        String verificationCode = service.verificationCode("the code/+", "state-1");
+
+        String decoded = new String(Base64.getDecoder().decode(verificationCode), StandardCharsets.UTF_8);
+        assertEquals(Map.of("state", "state-1", "code", "the code/+"), query("https://x/?" + decoded));
+        assertInvalidRequest(() -> service.verificationCode(null, "state"));
+        assertInvalidRequest(() -> service.verificationCode("code", ""));
+        assertInvalidRequest(() -> service.verificationCode("c".repeat(513), "state"));
+        assertInvalidRequest(() -> service.verificationCode("code", "s".repeat(129)));
     }
 
     @Test
@@ -402,6 +436,11 @@ class SigninServiceTest {
                 "code", "openid", state, null);
     }
 
+    private String crossDeviceAuthorize(String redirectUri, URI requestOrigin) {
+        return service.beginAuthorization(SigninService.CROSS_DEVICE_CLIENT, challengeUnchecked(VERIFIER),
+                "SHA-256", redirectUri, "code", "openid", "state", null, requestOrigin);
+    }
+
     private TokenResult exchangeCode(String code, String verifier) {
         return service.exchange(CLIENT_ID, "authorization_code", code,
                 REDIRECT_URI, verifier, null, null);
@@ -464,9 +503,7 @@ class SigninServiceTest {
     }
 
     private static String challenge(String verifier) throws Exception {
-        byte[] digest = MessageDigest.getInstance("SHA-256")
-                .digest(verifier.getBytes(StandardCharsets.US_ASCII));
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
+        return Base64Url.encode(Digests.sha256(verifier.getBytes(StandardCharsets.US_ASCII)));
     }
 
     private static Map<String, String> query(String redirect) {
