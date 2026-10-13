@@ -109,6 +109,7 @@ class ContainerLauncherTest {
         when(docker.logMaxFile()).thenReturn("3");
         lenient().when(config.baseUrl()).thenReturn("http://localhost:4566");
         lenient().when(config.port()).thenReturn(4566);
+        lenient().when(config.tls()).thenReturn(mock(EmulatorConfig.TlsConfig.class));
         lenient().when(config.defaultRegion()).thenReturn("us-east-1");
         lenient().when(config.defaultAccountId()).thenReturn("000000000000");
         lenient().when(config.hostname()).thenReturn(Optional.empty());
@@ -131,7 +132,7 @@ class ContainerLauncherTest {
 
         ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
         ContainerReachableEndpoint reachableEndpoint =
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer);
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
         LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
         launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
                 runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
@@ -619,11 +620,10 @@ class ContainerLauncherTest {
     void launchFunction_endpointUsesListenPortNotAdvertisedBaseUrlPort() throws Exception {
         // docker run -p 4811:4566 -e FLOCI_BASE_URL=http://localhost:4811: 4811 exists only on the
         // host. The function container reaches Floci over the Docker network, where it listens on
-        // floci.port (4566), so that is the port AWS_ENDPOINT_URL must carry.
+        // quarkus.http.port (4566, set in setUp), so that is the port AWS_ENDPOINT_URL must carry.
         Path codePath = Files.createDirectory(tempDir.resolve("endpoint-port"));
         // lenient: the fixed code never reads base-url here; the stub sets up the mismatch.
         lenient().when(config.baseUrl()).thenReturn("http://localhost:4811");
-        when(config.port()).thenReturn(4566);
 
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("endpoint-port-fn");
@@ -1689,7 +1689,7 @@ class ContainerLauncherTest {
     void launchFunction_forwardsExtensionOutputToCloudWatchLogs() throws Exception {
         CloudWatchLogsService cloudWatchLogs = mock(CloudWatchLogsService.class);
         ContainerReachableEndpoint reachableEndpoint =
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer);
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
         ContainerLauncher launcherWithRealStreamer = new ContainerLauncher(
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
                 lifecycleManager,
