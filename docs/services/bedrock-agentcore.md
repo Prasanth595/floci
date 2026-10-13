@@ -170,7 +170,7 @@ block is ever produced even when a request supplies `tools`.
   `authorizerConfiguration`, `protocolConfiguration` or `environmentVariables` is cleared on
   it rather than carried over from the previous version.
 - `networkConfiguration.networkMode` must be `PUBLIC` or `VPC` and
-  `protocolConfiguration.serverProtocol` must be `HTTP`, `MCP` or `A2A`; anything else returns
+  `protocolConfiguration.serverProtocol` must be `MCP`, `HTTP`, `A2A` or `AGUI`; anything else returns
   the API's `ValidationException`.
 - Timestamps (`createdAt`, `lastUpdatedAt`) are ISO-8601 strings.
 - Config blobs (`agentRuntimeArtifact`, `networkConfiguration`, …) are otherwise stored opaquely

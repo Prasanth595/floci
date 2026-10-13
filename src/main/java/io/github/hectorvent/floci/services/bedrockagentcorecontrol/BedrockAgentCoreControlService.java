@@ -41,7 +41,7 @@ public class BedrockAgentCoreControlService {
     private static final String ARN_SERVICE = "bedrock-agentcore";
     private static final Pattern NAME_PATTERN = Pattern.compile("[a-zA-Z][a-zA-Z0-9_]{0,47}");
     private static final List<String> NETWORK_MODES = List.of("PUBLIC", "VPC");
-    private static final List<String> SERVER_PROTOCOLS = List.of("HTTP", "MCP", "A2A");
+    private static final List<String> SERVER_PROTOCOLS = List.of("MCP", "HTTP", "A2A", "AGUI");
     private static final String ID_ALPHABET =
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final int MAX_PAGE = 100;

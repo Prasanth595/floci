@@ -139,8 +139,16 @@ class BedrockAgentCoreControlServiceTest {
         AwsException badProtocol = assertThrows(AwsException.class, () -> service.updateAgentRuntime(id, artifact(),
                 network(), "arn:aws:iam::000000000000:role/agent", null, null, null, grpc, REGION));
         assertEquals("1 validation error detected: Value 'GRPC' at 'protocolConfiguration.serverProtocol' failed to "
-                + "satisfy constraint: Member must satisfy enum value set: [HTTP, MCP, A2A]", badProtocol.getMessage());
+                + "satisfy constraint: Member must satisfy enum value set: [MCP, HTTP, A2A, AGUI]", badProtocol.getMessage());
         assertEquals(1, service.getAgentRuntime(id, REGION).getLatestVersion(), "a rejected update publishes nothing");
+    }
+
+    @Test
+    void createAcceptsTheAguiServerProtocol() {
+        ObjectNode agui = mapper.createObjectNode().put("serverProtocol", "AGUI");
+        AgentRuntime rt = service.createAgentRuntime("aguiAgent", artifact(), network(),
+                "arn:aws:iam::000000000000:role/agent", null, null, null, agui, null, REGION);
+        assertEquals("AGUI", service.resolveVersion(rt, "1").getProtocolConfiguration().path("serverProtocol").asText());
     }
 
     @Test

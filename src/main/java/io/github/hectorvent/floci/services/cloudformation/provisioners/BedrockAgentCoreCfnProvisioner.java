@@ -169,7 +169,7 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
                 writeInPlacePrior(r, snapshot);
             }
             JsonNode finalNetwork = network;
-            guarded(r, ctx, false, () -> { }, () -> {
+            CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> {
                 AgentRuntime runtime = configurationChanged
                         ? runtimeService.updateAgentRuntime(prior.getAgentRuntimeId(), artifact, finalNetwork, roleArn,
                                 description, environment, authorizer, protocolConfiguration, region)
@@ -181,8 +181,9 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
             AgentRuntime runtime = runtimeService.createAgentRuntime(name, artifact, network, roleArn, description,
                     environment, authorizer, protocolConfiguration, null, region);
             publishRuntime(r, runtime, region);
-            guarded(r, ctx, true, () -> runtimeService.deleteAgentRuntime(runtime.getAgentRuntimeId(), null, region),
-                    () -> {
+            CfnRollback.guarded(r, ctx, true,
+                    () -> runtimeService.deleteAgentRuntime(runtime.getAgentRuntimeId(), null, region),
+                    () -> undoInPlace(r), () -> {
                         if (!tags.isEmpty()) {
                             runtimeService.tagByArn(region, r.getAttributes().get("AgentRuntimeArn"), tags);
                         }
@@ -255,13 +256,15 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
             endpointPrior.put("targetVersion", existing.getTargetVersion());
             endpointPrior.put("description", existing.getDescription());
             writeInPlacePrior(r, snapshot);
-            guarded(r, ctx, false, () -> { }, () -> publishRuntimeEndpoint(r, prior.runtime(),
-                    runtimeService.updateEndpoint(runtimeId, name, version, description, true, region), region));
+            CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r),
+                    () -> publishRuntimeEndpoint(r, prior.runtime(),
+                            runtimeService.updateEndpoint(runtimeId, name, version, description, true, region), region));
         } else {
             AgentRuntimeEndpoint endpoint = runtimeService.createEndpoint(runtimeId, name, version, description,
                     null, region);
             r.setPhysicalId(runtimeService.endpointArn(endpoint, region));
-            guarded(r, ctx, true, () -> runtimeService.deleteEndpoint(runtimeId, name, null, region),
+            CfnRollback.guarded(r, ctx, true, () -> runtimeService.deleteEndpoint(runtimeId, name, null, region),
+                    () -> undoInPlace(r),
                     () -> publishRuntimeEndpoint(r, runtimeService.getAgentRuntime(runtimeId, region), endpoint, region));
         }
     }
@@ -313,7 +316,7 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
                 snapshot.set("tags", MAPPER.valueToTree(priorTags));
                 writeInPlacePrior(r, snapshot);
             }
-            guarded(r, ctx, false, () -> { }, () -> {
+            CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> {
                 Memory memory = configurationChanged
                         ? memoryService.update(prior.getMemoryId(), description, eventExpiryDuration,
                                 executionRoleArn, true, region)
@@ -526,60 +529,15 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Runs the steps after the entity exists or was found, undoing them when one fails: a created
-     * entity is deleted again, a reused one is put back from its snapshot. The engine only removes
-     * a failed create it can see, and on a failed update it restores the previous resource metadata
-     * and discards the attempted one, snapshot included, so the undo has to happen here.
-     *
-     * <p>A compensation that fails is reported, never hidden. A created entity carries
-     * {@link CfnRollback#ROLLBACK_OWNED_ATTR} while the steps run, so the engine's create rollback
-     * deletes it (and reports that failing) if the undo here could not, and during an update the
-     * entity is also listed in the cleanup record, which the engine carries onto the restored
-     * resource and runs before the next committed update or the stack delete; a reused entity keeps
-     * its snapshot and the reason lands in {@link CfnRollback#UPDATE_ROLLBACK_FAILURE_ATTR}, which
-     * the engine copies onto the committed resource so the rollback walker reports
-     * UPDATE_ROLLBACK_FAILED instead of claiming the prior state is live.
+     * The in-place undo handed to {@link CfnRollback#guarded}: puts a reused entity back from its
+     * snapshot and spends it, leaving it in place when the restore fails so the next rollback can
+     * retry.
      */
-    private void guarded(StackResource r, ProvisionContext ctx, boolean created, Runnable undoCreate, Runnable steps) {
-        if (created) {
-            r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
-        }
-        try {
-            steps.run();
-            r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
-        } catch (RuntimeException e) {
-            if (created) {
-                try {
-                    undoCreate.run();
-                    r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
-                } catch (RuntimeException undo) {
-                    e.addSuppressed(undo);
-                    String reason = "Could not remove " + r.getPhysicalId() + ", created for " + r.getLogicalId()
-                            + " by a failed update: " + undo.getMessage();
-                    LOG.warn(reason);
-                    r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
-                    if (ctx.isUpdate()) {
-                        // The engine restores the previous resource and keeps only what the cleanup
-                        // record carries, so the replacement is listed there for the next cleanup.
-                        ReplacementCleanup.recordOrphan(r, r.getPhysicalId(), r.getResourceType(), ctx.region());
-                    }
-                }
-            } else {
-                String snapshot = r.getAttributes().get(IN_PLACE_PRIOR_ATTR);
-                if (snapshot != null) {
-                    try {
-                        restoreInPlace(r, snapshot);
-                        r.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
-                    } catch (RuntimeException undo) {
-                        e.addSuppressed(undo);
-                        String reason = "Could not restore " + r.getPhysicalId() + " for " + r.getLogicalId()
-                                + " after a failed update: " + undo.getMessage();
-                        LOG.warn(reason);
-                        r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
-                    }
-                }
-            }
-            throw e;
+    private void undoInPlace(StackResource r) {
+        String snapshot = r.getAttributes().get(IN_PLACE_PRIOR_ATTR);
+        if (snapshot != null) {
+            restoreInPlace(r, snapshot);
+            r.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
         }
     }
 
