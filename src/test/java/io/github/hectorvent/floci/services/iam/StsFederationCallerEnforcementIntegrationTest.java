@@ -2,11 +2,11 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
-import io.github.hectorvent.floci.testutil.AwsRequestSigner;
+import io.github.hectorvent.floci.testutil.StsRequests;
+import io.github.hectorvent.floci.testutil.StsRequests.Credentials;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
-import io.restassured.RestAssured;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -14,15 +14,11 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.net.URI;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
@@ -146,16 +142,6 @@ class StsFederationCallerEnforcementIntegrationTest {
     }
 
     private Response request(Credentials caller, String action, Map<String, String> parameters) throws Exception {
-        StringBuilder body = new StringBuilder("Action=").append(action);
-        parameters.forEach((name, value) -> body.append('&').append(name).append('=')
-                .append(URLEncoder.encode(value, StandardCharsets.UTF_8)));
-        URI endpoint = URI.create("http://localhost:" + RestAssured.port + "/");
-        Map<String, String> extra = caller.token() == null ? Map.of() : Map.of("x-amz-security-token", caller.token());
-        Map<String, String> headers = new LinkedHashMap<>(extra);
-        headers.putAll(AwsRequestSigner.signedAs(caller.key(), caller.secret(), "ListUsers".equals(action) ? "iam" : "sts")
-                .headersFor("POST", endpoint, extra, body.toString().getBytes(StandardCharsets.UTF_8)));
-        return given().headers(headers).contentType("application/x-www-form-urlencoded").body(body.toString()).post(endpoint);
+        return StsRequests.request(caller, "ListUsers".equals(action) ? "iam" : "sts", action, parameters);
     }
-
-    private record Credentials(String key, String secret, String token) {}
 }

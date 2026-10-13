@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.testing.ValidateSignaturesProfile;
 import io.github.hectorvent.floci.testutil.AwsRequestSigner;
+import io.github.hectorvent.floci.testutil.StsRequests.Credentials;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
@@ -14,7 +15,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.github.hectorvent.floci.testutil.StsRequests.request;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -203,20 +204,4 @@ class StsSessionTokenCallerIntegrationTest {
         }
     }
 
-    private Response request(Credentials caller, String service, String action, Map<String, String> params)
-            throws Exception {
-        StringBuilder body = new StringBuilder("Action=").append(action);
-        params.forEach((name, value) -> body.append('&').append(name).append('=')
-                .append(URLEncoder.encode(value, StandardCharsets.UTF_8)));
-        URI uri = URI.create("http://localhost:" + RestAssured.port + "/");
-        Map<String, String> extra = caller.token() == null ? Map.of()
-                : Map.of("x-amz-security-token", caller.token());
-        Map<String, String> headers = new LinkedHashMap<>(extra);
-        headers.putAll(AwsRequestSigner.signedAs(caller.key(), caller.secret(), service)
-                .headersFor("POST", uri, extra, body.toString().getBytes(StandardCharsets.UTF_8)));
-        return given().headers(headers).contentType("application/x-www-form-urlencoded")
-                .body(body.toString()).post("/");
-    }
-
-    private record Credentials(String key, String secret, String token) {}
 }

@@ -61,9 +61,10 @@ import java.util.regex.Pattern;
  *   <li>The action cannot be resolved (unknown mapping → permissive)</li>
  *   <li>The action is {@code sts:GetCallerIdentity}, which AWS allows without permissions. The
  *       key itself is still checked.</li>
- *   <li>Authenticated temporary callers of {@code sts:GetFederationToken} reach the handler's
- *       unconditional operation-specific refusal.</li>
  * </ul>
+ *
+ * <p>Authenticated temporary callers of {@code sts:GetFederationToken} are refused here with
+ * the same operation-specific error as the handler, before policy evaluation.
  *
  * <p>Evaluates the caller's identity policies, optional session policy, and optional
  * permissions boundary, as well as applicable resource policies via {@link ResourcePolicyProvider}.
@@ -368,8 +369,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         if ("sts:GetFederationToken".equals(action) && IamService.isTemporaryAccessKey(akid)) {
-            // The handler always refuses temporary callers before issuing credentials. Keep its
-            // operation-specific error after the credential checks, regardless of caller policies.
+            ctx.abortWith(queryXmlAccessDenied(IamService.FEDERATION_TOKEN_SESSION_MESSAGE));
             return;
         }
 

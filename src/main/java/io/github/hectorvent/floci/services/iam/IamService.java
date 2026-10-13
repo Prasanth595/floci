@@ -101,6 +101,9 @@ import java.util.stream.Stream;
 @ApplicationScoped
 public class IamService implements SessionAccountLookup, ResourceProvider {
 
+    public static final String FEDERATION_TOKEN_SESSION_MESSAGE =
+            "Cannot call GetFederationToken with session credentials";
+
     private static final int ROLE_INLINE_POLICY_SIZE_LIMIT = 10_240;
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
