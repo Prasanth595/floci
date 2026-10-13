@@ -4885,23 +4885,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * handle them.
      */
     private void rejectRestrictedVpcCidrAssociation(Vpc vpc, String cidrBlock) {
-        if (!Ipv4Cidrs.isIpv4(cidrBlock) || !Ipv4Cidrs.isIpv4(vpc.getCidrBlock())) {
+        Optional<Cidr4> primary = Cidr4.parse(vpc.getCidrBlock());
+        Optional<Cidr4> requested = Cidr4.parse(cidrBlock);
+        if (primary.isEmpty() || requested.isEmpty()) {
             return;
         }
-        String primaryRange = rfc1918Range(vpc.getCidrBlock());
-        String requestedRange = rfc1918Range(cidrBlock);
+        Optional<Cidr4> primaryRange = primary.get().rfc1918Range();
+        Optional<Cidr4> requestedRange = requested.get().rfc1918Range();
         boolean benchmarking = Ipv4Cidrs.overlaps(cidrBlock, "198.19.0.0/16");
         boolean restricted;
-        if (primaryRange != null) {
-            restricted = (requestedRange != null && !requestedRange.equals(primaryRange))
+        if (primaryRange.isPresent()) {
+            String range = primaryRange.get().toString();
+            restricted = (requestedRange.isPresent() && !requestedRange.equals(primaryRange))
                     || benchmarking
-                    || ("172.16.0.0/12".equals(primaryRange) && Ipv4Cidrs.overlaps(cidrBlock, "172.31.0.0/16"))
-                    || ("10.0.0.0/8".equals(primaryRange) && Ipv4Cidrs.overlaps(cidrBlock, "10.0.0.0/16")
+                    || ("172.16.0.0/12".equals(range) && Ipv4Cidrs.overlaps(cidrBlock, "172.31.0.0/16"))
+                    || ("10.0.0.0/8".equals(range) && Ipv4Cidrs.overlaps(cidrBlock, "10.0.0.0/16")
                             && vpcHasIpv4BlockIn(vpc, "10.0.0.0/15"));
-        } else if (Ipv4Cidrs.overlaps(vpc.getCidrBlock(), "198.19.0.0/16")) {
-            restricted = requestedRange != null;
+        } else if (Ipv4Cidrs.contains("198.19.0.0/16", vpc.getCidrBlock())) {
+            restricted = requestedRange.isPresent();
         } else {
-            restricted = requestedRange != null || benchmarking;
+            restricted = requestedRange.isPresent() || benchmarking;
         }
         if (restricted) {
             throw new AwsException("InvalidVpc.Range", "The CIDR '" + cidrBlock + "' is restricted. Use a CIDR "
@@ -4909,16 +4912,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     + "CIDR. For additional restrictions, see "
                     + "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-cidr-blocks.html", 400);
         }
-    }
-
-    /** The RFC 1918 range {@code cidrBlock} falls in, or null when it is outside all three. */
-    private static String rfc1918Range(String cidrBlock) {
-        for (String range : List.of("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")) {
-            if (Ipv4Cidrs.overlaps(cidrBlock, range)) {
-                return range;
-            }
-        }
-        return null;
     }
 
     private static boolean vpcHasIpv4BlockIn(Vpc vpc, String range) {

@@ -920,6 +920,8 @@ class Ec2ServiceTest {
         restricted.put("198.19.0.0/16", List.of("10.1.0.0/16", "172.16.0.0/16", "192.168.0.0/16"));
         restricted.put("100.64.0.0/16", List.of("10.1.0.0/16", "172.16.0.0/16", "192.168.0.0/16", "198.19.0.0/24"));
         restricted.put("52.0.0.0/16", List.of("10.1.0.0/16", "172.16.0.0/16", "192.168.0.0/16", "198.19.0.0/24"));
+        // A primary that only straddles an RFC 1918 range is not in it, so it is treated as public.
+        restricted.put("0.0.0.0/0", List.of("10.2.0.0/16", "172.16.0.0/16", "192.168.0.0/16", "198.19.0.0/24"));
 
         restricted.forEach((primary, blocks) -> {
             String vpcId = service.createVpc("us-east-1", primary, false).getVpcId();
