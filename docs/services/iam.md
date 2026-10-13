@@ -1336,7 +1336,8 @@ Transactions check each item as `PutItem`, `UpdateItem`, `DeleteItem`, `GetItem`
 `ConditionCheckItem` before executing the request. Each item uses its own table, leading key
 and requested attributes. `dynamodb:EnclosingOperation` identifies `TransactWriteItems` or
 `TransactGetItems`; write items expose `ReturnValuesOnConditionCheckFailure` as
-`dynamodb:ReturnValues`, defaulting to `NONE`. Transaction API names alone do not grant item access.
+`dynamodb:ReturnValues` only when the request supplies a non-null value. An omitted value leaves
+the condition key absent. Transaction API names alone do not grant item access.
 Transaction item authorization uses the effective local table ARN, matching execution.
 A permission on a foreign account table cannot grant access to a same-named local table.
 
