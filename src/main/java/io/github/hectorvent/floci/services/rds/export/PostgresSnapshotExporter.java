@@ -1,0 +1,293 @@
+package io.github.hectorvent.floci.services.rds.export;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
+import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
+import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
+import io.github.hectorvent.floci.services.rds.model.ExportTask;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Exports a PostgreSQL snapshot the way RDS does: the snapshot is restored into a database of its
+ * own, here a container started from the snapshot's image and removed afterwards, and each table
+ * is then read out and written as Parquet by the floci-duck sidecar. PostgreSQL renders every value
+ * the export stores as a string, so the strings are PostgreSQL's own text output.
+ */
+@ApplicationScoped
+public class PostgresSnapshotExporter implements SnapshotExporter {
+
+    private static final Logger LOG = Logger.getLogger(PostgresSnapshotExporter.class);
+
+    private static final String DATABASES_SQL = "SELECT to_json(datname) FROM pg_database "
+            + "WHERE datallowconn AND NOT datistemplate ORDER BY datname";
+
+    // Ordinary and partitioned tables, but not a partition on its own, since reading the parent
+    // reads its partitions. Temporary and unlogged tables are skipped, as RDS skips them.
+    private static final String COLUMNS_SQL = "SELECT json_build_object('schema', n.nspname, "
+            + "'table', c.relname, 'column', a.attname, 'type', t.typname) "
+            + "FROM pg_class c "
+            + "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            + "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
+            + "JOIN pg_type t ON t.oid = a.atttypid "
+            + "WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition AND c.relpersistence = 'p' "
+            + "AND n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_%' "
+            + "ORDER BY n.nspname, c.relname, a.attnum";
+
+    private static final String NDJSON = "application/x-ndjson";
+    private static final String JSON = "application/json";
+
+    private final RdsContainerManager containerManager;
+    private final FlociDuckClient duckClient;
+    private final S3Service s3Service;
+    private final ObjectMapper mapper;
+
+    @Inject
+    public PostgresSnapshotExporter(RdsContainerManager containerManager, FlociDuckClient duckClient,
+                                    S3Service s3Service, ObjectMapper mapper) {
+        this.containerManager = containerManager;
+        this.duckClient = duckClient;
+        this.s3Service = s3Service;
+        this.mapper = mapper;
+    }
+
+    record Table(String database, String schema, String name, List<ExportColumn> columns) {
+
+        String target() {
+            return database + "." + schema + "." + name;
+        }
+    }
+
+    @Override
+    public Outcome export(ExportTask task, SnapshotExportSource source, Progress progress) {
+        String runtimeId = runtimeId(task.getExportTaskIdentifier());
+        RdsContainerHandle handle = containerManager.startForExport(runtimeId, source.image(),
+                source.masterUsername(), source.masterPassword());
+        try {
+            containerManager.restorePostgresSnapshot(handle.getContainerId(), source.masterUsername(),
+                    source.sqlDump());
+            progress.extracting(0);
+            return exportTables(task, source, handle.getContainerId(), progress);
+        } finally {
+            removeContainer(handle, runtimeId);
+        }
+    }
+
+    private Outcome exportTables(ExportTask task, SnapshotExportSource source, String containerId,
+                                 Progress progress) {
+        ExportOnlySelection selection = ExportOnlySelection.of(task.getExportOnly());
+        ExportLayout layout = new ExportLayout(task.getS3Prefix(), task.getExportTaskIdentifier());
+        List<String> warnings = new ArrayList<>();
+        List<Table> tables = new ArrayList<>();
+        for (String database : jsonLines(query(containerId, source, "postgres", DATABASES_SQL))) {
+            if (!selection.includesDatabase(database)) {
+                continue;
+            }
+            for (Table table : tables(containerId, source, database)) {
+                if (!selection.includes(database, table.schema(), table.name())) {
+                    continue;
+                }
+                if (table.name().contains("/") || !table.columns().stream().allMatch(ExportColumn::hasExportableName)) {
+                    warnings.add("The table " + table.target()
+                            + " was skipped because its name or a column name has characters RDS cannot export.");
+                    continue;
+                }
+                tables.add(table);
+            }
+        }
+
+        long bytes = 0;
+        ArrayNode perTableStatus = mapper.createArrayNode();
+        for (int i = 0; i < tables.size(); i++) {
+            if (progress.canceled()) {
+                break;
+            }
+            Table table = tables.get(i);
+            long written = exportTable(task, source, containerId, layout, table);
+            bytes += written;
+            perTableStatus.add(tableStatus(table, written));
+            progress.extracting((i + 1) * 100 / tables.size());
+        }
+        if (!progress.canceled()) {
+            writeInfo(task, layout, perTableStatus, tables.size(), bytes);
+        }
+        return new Outcome(bytes, warnings);
+    }
+
+    private List<Table> tables(String containerId, SnapshotExportSource source, String database) {
+        Map<String, Table> tables = new LinkedHashMap<>();
+        for (String line : query(containerId, source, database, COLUMNS_SQL).split("\n")) {
+            if (line.isBlank()) {
+                continue;
+            }
+            JsonNode row = readTree(line);
+            String schema = row.get("schema").asText();
+            String name = row.get("table").asText();
+            tables.computeIfAbsent(schema + "\u0000" + name,
+                            key -> new Table(database, schema, name, new ArrayList<>()))
+                    .columns()
+                    .add(new ExportColumn(row.get("column").asText(), row.get("type").asText()));
+        }
+        return List.copyOf(tables.values());
+    }
+
+    /**
+     * Writes one table and returns the size of its rows. A table with no rows writes no file, as
+     * RDS writes none for an empty partition.
+     */
+    private long exportTable(ExportTask task, SnapshotExportSource source, String containerId,
+                             ExportLayout layout, Table table) {
+        List<String> extract = new ArrayList<>();
+        List<String> write = new ArrayList<>();
+        List<String> types = new ArrayList<>();
+        for (ExportColumn column : table.columns()) {
+            extract.add(column.extractExpression() + " AS " + ExportColumn.quoteIdentifier(column.name()));
+            write.add(column.writeExpression());
+            types.add("'" + escapeLiteral(column.name()) + "': '" + column.stagedType() + "'");
+        }
+        String select = "SELECT row_to_json(r) FROM (SELECT " + String.join(", ", extract) + " FROM "
+                + ExportColumn.quoteIdentifier(table.schema()) + "." + ExportColumn.quoteIdentifier(table.name())
+                + ") r";
+        String output = query(containerId, source, table.database(), select);
+        if (output.isBlank()) {
+            return 0;
+        }
+        byte[] rows = output.getBytes(StandardCharsets.UTF_8);
+
+        String bucket = task.getS3Bucket();
+        String stagingKey = layout.stagingKey();
+        String dataKey = layout.dataFileKey(table.database(), table.schema(), table.name());
+        s3Service.putObject(bucket, stagingKey, rows, NDJSON, Map.of());
+        try {
+            // floci-duck's /execute wraps its sql field in a CSV export, so the Parquet COPY goes
+            // in setup_sql and no output path is given, as FirehoseParquetConverter does.
+            String copy = "COPY (SELECT " + String.join(", ", write) + " FROM read_json('"
+                    + escapeLiteral("s3://" + bucket + "/" + stagingKey)
+                    + "', format='newline_delimited', columns={" + String.join(", ", types) + "})) TO '"
+                    + escapeLiteral("s3://" + bucket + "/" + dataKey)
+                    + "' (FORMAT PARQUET, COMPRESSION GZIP)";
+            duckClient.execute("SELECT 1 AS ok", copy, null, task.getAccountId());
+        } finally {
+            deleteQuietly(bucket, stagingKey);
+        }
+        return rows.length;
+    }
+
+    private ObjectNode tableStatus(Table table, long bytes) {
+        ObjectNode status = mapper.createObjectNode();
+        status.put("target", table.target());
+        status.put("status", ExportTask.STATUS_COMPLETE);
+        status.put("sizeGB", bytes / 1_073_741_824.0);
+        ArrayNode mappings = status.putObject("schemaMetadata").putArray("originalTypeMappings");
+        for (ExportColumn column : table.columns()) {
+            mappings.addObject()
+                    .put("columnName", column.name())
+                    .put("originalType", column.pgType())
+                    .put("expectedExportedType", column.parquetTypeName());
+        }
+        return status;
+    }
+
+    /**
+     * The task's own record next to its data: its description, and the status of every table it
+     * wrote. Readers that follow the RDS advice to read everything under a table's prefix never
+     * see these, as they sit above the tables.
+     */
+    private void writeInfo(ExportTask task, ExportLayout layout, ArrayNode perTableStatus, int tableCount,
+                           long bytes) {
+        ObjectNode info = mapper.createObjectNode();
+        info.put("exportTaskIdentifier", task.getExportTaskIdentifier());
+        info.put("sourceArn", task.getSourceArn());
+        info.set("exportOnly", mapper.valueToTree(task.getExportOnly()));
+        info.put("snapshotTime", String.valueOf(task.getSnapshotTime()));
+        info.put("taskStartTime", String.valueOf(task.getTaskStartTime()));
+        info.put("taskEndTime", Instant.now().toString());
+        info.put("s3Bucket", task.getS3Bucket());
+        info.put("s3Prefix", task.getS3Prefix() == null ? "" : task.getS3Prefix());
+        info.put("exportedFilesPath", layout.taskRoot());
+        info.put("iamRoleArn", task.getIamRoleArn());
+        info.put("kmsKeyId", task.getKmsKeyId());
+        info.put("status", ExportTask.STATUS_COMPLETE);
+        info.put("percentProgress", 100);
+        info.put("totalExportedDataInGB", bytes / 1_073_741_824.0);
+        putJson(task.getS3Bucket(), layout.exportInfoKey(), info);
+
+        ObjectNode tablesInfo = mapper.createObjectNode();
+        tablesInfo.set("perTableStatus", perTableStatus);
+        putJson(task.getS3Bucket(), layout.tablesInfoKey(Math.max(tableCount, 1)), tablesInfo);
+    }
+
+    private void putJson(String bucket, String key, JsonNode body) {
+        try {
+            s3Service.putObject(bucket, key, mapper.writeValueAsBytes(body), JSON, Map.of());
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private String query(String containerId, SnapshotExportSource source, String database, String sql) {
+        return containerManager.queryPostgres(containerId, source.masterUsername(), database, sql);
+    }
+
+    private List<String> jsonLines(String output) {
+        List<String> values = new ArrayList<>();
+        for (String line : output.split("\n")) {
+            if (!line.isBlank()) {
+                values.add(readTree(line).asText());
+            }
+        }
+        return values;
+    }
+
+    private JsonNode readTree(String json) {
+        try {
+            return mapper.readTree(json);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    @Override
+    public void discard(String exportTaskIdentifier) {
+        containerManager.discardExport(runtimeId(exportTaskIdentifier));
+    }
+
+    private void removeContainer(RdsContainerHandle handle, String runtimeId) {
+        try {
+            containerManager.stop(handle);
+            containerManager.discardExport(runtimeId);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the export container {0}", runtimeId);
+        }
+    }
+
+    private static String runtimeId(String exportTaskIdentifier) {
+        return "export-" + exportTaskIdentifier;
+    }
+
+    private void deleteQuietly(String bucket, String key) {
+        try {
+            s3Service.deleteObject(bucket, key);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the staged export rows s3://{0}/{1}", bucket, key);
+        }
+    }
+
+    private static String escapeLiteral(String raw) {
+        return raw.replace("'", "''");
+    }
+}
