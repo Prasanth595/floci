@@ -80,7 +80,10 @@ ordinary desired-capacity reconciliation does not bypass the pause. Explicit
 increases can proceed while only `InstanceRefresh` is suspended. Paused original
 instances keep their target-group registrations until replacement resumes.
 Explicitly detached instances leave refresh ownership and are not adopted again
-when the refresh resumes.
+when the refresh resumes. Recovery of an accepted EC2 launch keeps the source
+identity recorded for that attempt even if the group configuration has changed.
+Older attempts without a recorded source use the available EC2 instance metadata
+without assigning the current launch template to the recovered instance.
 
 This does not implement rolling health-percentage limits, checkpoints, rollback,
 or cancellation. Refreshes saved by older versions without replacement ownership

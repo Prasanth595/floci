@@ -10,6 +10,10 @@ public class InstanceRefreshReplacement {
     private String replacementInstanceId;
     private String launchClientToken;
     private String phase = "Selected";
+    private InstanceRefreshLaunch launch;
+
+    public InstanceRefreshLaunch getLaunch() { return launch; }
+    public void setLaunch(InstanceRefreshLaunch value) { launch = value; }
 
     public String getPhase() { return phase; }
     public void setPhase(String value) { phase = value; }

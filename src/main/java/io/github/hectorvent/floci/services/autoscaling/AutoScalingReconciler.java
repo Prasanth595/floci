@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefresh;
+import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefreshLaunch;
 import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefreshReplacement;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
@@ -213,7 +214,7 @@ public class AutoScalingReconciler {
             }
             replacement.setPhase("AwaitingReplacement");
             asgService.saveInstanceRefresh(refresh);
-            List<String> launched = launchInstances(asg, 1, replacement.getLaunchClientToken());
+            List<String> launched = launchInstances(asg, 1, refresh, replacement);
             if (!launched.isEmpty()) {
                 replacement.setReplacementInstanceId(launched.getFirst());
                 replacement.setPhase("Warming");
@@ -525,6 +526,7 @@ public class AutoScalingReconciler {
         if (saveFailure != null) {
             throw saveFailure;
         }
+
     }
 
     private List<Instance> findRefreshLaunch(AutoScalingGroup asg, String clientToken) {
@@ -536,24 +538,33 @@ public class AutoScalingReconciler {
                 .toList();
     }
 
-    private List<String> launchInstances(AutoScalingGroup asg, int count, String clientToken) {
-        LaunchSource launchSource = resolveLaunchSource(asg);
-        if (launchSource == null) {
+    private List<String> launchInstances(AutoScalingGroup asg, int count, InstanceRefresh refresh,
+                                         InstanceRefreshReplacement replacement) {
+        String clientToken = replacement == null ? null : replacement.getLaunchClientToken();
+        List<Instance> existing = clientToken == null ? List.of() : findRefreshLaunch(asg, clientToken);
+        LaunchSource launchSource = existing.isEmpty() ? resolveLaunchSource(asg) : null;
+        if (existing.isEmpty() && launchSource == null) {
             LOG.warnv("ASG {0}: no launch source found, cannot scale out", asg.getAutoScalingGroupName());
             return List.of();
         }
-        LOG.infov("ASG {0}: scaling out by {1}", asg.getAutoScalingGroupName(), count);
-        LaunchPlacement placement = leastPopulatedPlacement(asg, launchPlacements(asg));
+
         try {
-            Reservation reservation = null;
-            if (clientToken != null) {
-                List<Instance> existing = findRefreshLaunch(asg, clientToken);
-                if (!existing.isEmpty()) {
-                    reservation = new Reservation();
-                    reservation.setInstances(existing);
+            Reservation reservation;
+            InstanceRefreshLaunch metadata = replacement == null ? null : replacement.getLaunch();
+            if (!existing.isEmpty()) {
+                reservation = new Reservation();
+                reservation.setInstances(existing);
+            } else {
+                LaunchPlacement placement = leastPopulatedPlacement(asg, launchPlacements(asg));
+                String az = placement.availabilityZone();
+                metadata = new InstanceRefreshLaunch(launchSource.launchConfigurationName(),
+                        launchSource.launchTemplateId(), launchSource.launchTemplateName(),
+                        launchSource.launchTemplateVersion(), launchSource.instanceType(), az);
+                if (replacement != null) {
+                    replacement.setLaunch(metadata);
+                    asgService.saveInstanceRefresh(refresh);
                 }
-            }
-            if (reservation == null) {
+                LOG.infov("ASG {0}: scaling out by {1}", asg.getAutoScalingGroupName(), count);
                 reservation = ec2Service.runInstances(
                         asg.getRegion(),
                         launchSource.imageId(),
@@ -580,15 +591,23 @@ public class AutoScalingReconciler {
                 }
                 AsgInstance asgInst = new AsgInstance();
                 asgInst.setInstanceId(ec2Inst.getInstanceId());
-                asgInst.setAvailabilityZone(ec2Inst.getPlacement() != null
-                        ? ec2Inst.getPlacement().getAvailabilityZone() : placement.availabilityZone());
+
                 asgInst.setLifecycleState("Pending");
                 asgInst.setHealthStatus("Healthy");
-                asgInst.setLaunchConfigurationName(launchSource.launchConfigurationName());
-                asgInst.setLaunchTemplateId(launchSource.launchTemplateId());
-                asgInst.setLaunchTemplateName(launchSource.launchTemplateName());
-                asgInst.setLaunchTemplateVersion(launchSource.launchTemplateVersion());
-                asgInst.setInstanceType(launchSource.instanceType());
+                if (metadata != null) {
+                    asgInst.setAvailabilityZone(metadata.availabilityZone());
+                    asgInst.setLaunchConfigurationName(metadata.launchConfigurationName());
+                    asgInst.setLaunchTemplateId(metadata.launchTemplateId());
+                    asgInst.setLaunchTemplateName(metadata.launchTemplateName());
+                    asgInst.setLaunchTemplateVersion(metadata.launchTemplateVersion());
+                    asgInst.setInstanceType(metadata.instanceType());
+                } else {
+                    // Older attempts have no saved source identity; do not invent one from current settings.
+                    asgInst.setInstanceType(ec2Inst.getInstanceType());
+                    if (ec2Inst.getPlacement() != null) {
+                        asgInst.setAvailabilityZone(ec2Inst.getPlacement().getAvailabilityZone());
+                    }
+                }
                 asg.getInstances().add(asgInst);
                 launchedInstanceIds.add(ec2Inst.getInstanceId());
                 LOG.infov("ASG {0}: launched instance {1} (Pending)",

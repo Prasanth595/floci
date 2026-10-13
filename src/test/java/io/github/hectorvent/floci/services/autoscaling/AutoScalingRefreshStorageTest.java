@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
@@ -425,6 +426,76 @@ class AutoScalingRefreshStorageTest {
                     any(), anyList(), any(), any(), any());
         }
         assertEquals("Successful", restored.getStatus());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"persistent,false", "persistent,true", "hybrid,false", "hybrid,true", "wal,false", "wal,true"})
+    void recoveredLaunchRetainsAttemptSourceAfterGroupChanges(String mode, boolean sourceDeleted) throws IOException {
+        setUp(mode);
+        List<Reservation> launched = new ArrayList<>();
+        when(ec2.describeInstances(REGION, List.of(), null)).thenAnswer(invocation -> List.copyOf(launched));
+        when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
+                anyList(), any(), any(), any())).thenAnswer(invocation -> {
+                    Reservation accepted = reservation("i-accepted");
+                    accepted.getInstances().getFirst().setClientToken(invocation.getArgument(8));
+                    accepted.getInstances().getFirst().setInstanceType("t3.micro");
+                    accepted.getInstances().getFirst().setPlacement(new Placement("us-east-1a"));
+                    launched.add(accepted);
+                    throw new IllegalStateException("EC2 accepted launch but response was lost");
+                });
+        service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        reconciler.reconcile(group);
+        assertTrue(group.getInstances().isEmpty());
+        assertEquals(1, launched.size());
+        group.setLaunchTemplateId("lt-changed");
+        group.setAvailabilityZones(List.of("us-east-1b"));
+        service.saveAutoScalingGroupIfPresent(group);
+        LaunchTemplate changed = new LaunchTemplate();
+        changed.setLaunchTemplateId("lt-changed");
+        changed.setLatestVersionNumber("2");
+        changed.getData().setImageId("ami-changed");
+        changed.getData().setInstanceType("m5.large");
+        when(ec2.describeLaunchTemplates(eq(REGION), anyList(), anyList(), anyMap()))
+                .thenReturn(sourceDeleted ? List.of() : List.of(changed));
+        when(ec2.describeLaunchTemplateVersions(eq(REGION), eq("lt-changed"), isNull(), anyList()))
+                .thenReturn(sourceDeleted ? List.of() : List.of(changed));
+        restart(mode);
+        reconciler.reconcile(group);
+        assertEquals(List.of("i-accepted"), group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+        AsgInstance recovered = group.getInstances().getFirst();
+        assertAll(() -> assertEquals("lt-original", recovered.getLaunchTemplateId()),
+                () -> assertEquals("1", recovered.getLaunchTemplateVersion()),
+                () -> assertEquals("t3.micro", recovered.getInstanceType()),
+                () -> assertEquals("us-east-1a", recovered.getAvailabilityZone()));
+        verify(ec2, times(1)).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
+                any(), anyList(), any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void legacyRecoveredLaunchUsesOnlyKnownEc2Metadata(String mode) throws IOException {
+        setUp(mode);
+        InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        Reservation launched = reservation("i-legacy");
+        Instance instance = launched.getInstances().getFirst();
+        instance.setClientToken(refresh.getReplacements().getFirst().getLaunchClientToken());
+        instance.setInstanceType("m5.large");
+        instance.setPlacement(new Placement("us-east-1b"));
+        when(ec2.describeInstances(REGION, List.of(), null)).thenReturn(List.of(launched));
+        group.getInstances().clear();
+        service.saveAutoScalingGroupIfPresent(group);
+        restart(mode);
+        reconciler.reconcile(group);
+        AsgInstance recovered = group.getInstances().getFirst();
+        assertAll(() -> assertEquals("i-legacy", recovered.getInstanceId()),
+                () -> assertEquals("m5.large", recovered.getInstanceType()),
+                () -> assertEquals("us-east-1b", recovered.getAvailabilityZone()),
+                () -> assertNull(recovered.getLaunchConfigurationName()),
+                () -> assertNull(recovered.getLaunchTemplateId()),
+                () -> assertNull(recovered.getLaunchTemplateName()),
+                () -> assertNull(recovered.getLaunchTemplateVersion()));
+        verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
+                any(), anyList(), any(), any(), any());
     }
 
     private static Reservation reservation(String id) {
