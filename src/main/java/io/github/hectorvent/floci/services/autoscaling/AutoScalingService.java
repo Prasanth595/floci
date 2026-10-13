@@ -468,11 +468,12 @@ public class AutoScalingService {
                         });
             }
             groups.remove(key);
+            instanceRefreshes.entrySet().removeIf(e -> region.equals(e.getValue().getRegion())
+                    && name.equals(e.getValue().getAutoScalingGroupName()));
         }
         // clean up associated hooks and policies
         hooks.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
         policies.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
-        instanceRefreshes.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
         scheduledActions.entrySet().removeIf(e -> region.equals(e.getValue().getRegion())
                 && name.equals(e.getValue().getAutoScalingGroupName()));
         warmPools.remove(warmPoolKey(region, name));
@@ -683,16 +684,19 @@ public class AutoScalingService {
 
     public void detachInstances(String region, String name, List<String> instanceIds,
                                  boolean decrementDesiredCapacity) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        List<String> detached = asg.getInstances().stream().map(AsgInstance::getInstanceId)
-                .filter(instanceIds::contains).toList();
-        releaseRefreshOwnership(asg, detached);
-        asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
-        if (decrementDesiredCapacity) {
-            int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - instanceIds.size());
-            asg.setDesiredCapacity(newDesired);
+        String key = asgKey(region, name);
+        synchronized (lockFor(key)) {
+            AutoScalingGroup asg = requireGroup(region, name);
+            List<String> detached = asg.getInstances().stream().map(AsgInstance::getInstanceId)
+                    .filter(instanceIds::contains).toList();
+            releaseRefreshOwnership(asg, detached);
+            asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
+            if (decrementDesiredCapacity) {
+                int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - instanceIds.size());
+                asg.setDesiredCapacity(newDesired);
+            }
+            groups.put(key, asg);
         }
-        groups.put(asgKey(region, name), asg);
     }
 
     public void terminateInstanceInAutoScalingGroup(String region, String instanceId,
@@ -703,16 +707,24 @@ public class AutoScalingService {
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ValidationError",
                         "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
-        releaseRefreshOwnership(asg, List.of(instanceId));
-        asg.getInstances().stream()
-                .filter(i -> instanceId.equals(i.getInstanceId()))
-                .findFirst()
-                .ifPresent(i -> i.setLifecycleState("Terminating"));
-        if (decrementDesiredCapacity) {
-            int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - 1);
-            asg.setDesiredCapacity(newDesired);
+        String key = asgKey(region, asg.getAutoScalingGroupName());
+        synchronized (lockFor(key)) {
+            if (groups.get(key) != asg) {
+                throw new AwsException("ValidationError",
+                        "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400);
+            }
+            AsgInstance instance = asg.getInstances().stream()
+                    .filter(i -> instanceId.equals(i.getInstanceId())).findFirst()
+                    .orElseThrow(() -> new AwsException("ValidationError",
+                            "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
+            releaseRefreshOwnership(asg, List.of(instanceId));
+            instance.setLifecycleState("Terminating");
+            if (decrementDesiredCapacity) {
+                int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - 1);
+                asg.setDesiredCapacity(newDesired);
+            }
+            groups.put(key, asg);
         }
-        groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
     }
 
     private void releaseRefreshOwnership(AutoScalingGroup asg, List<String> instanceIds) {

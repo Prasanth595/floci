@@ -36,6 +36,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -665,6 +666,210 @@ class AutoScalingRefreshStorageTest {
                 assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
             }
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"persistent,true", "persistent,false", "hybrid,true", "hybrid,false", "wal,true", "wal,false"})
+    @SuppressWarnings("unchecked")
+    void explicitRemovalWaitsForRefreshOwnershipPublication(String mode, boolean detach) throws Exception {
+        setUp(mode);
+        service.suspendProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
+        Field field = AutoScalingService.class.getDeclaredField("instanceRefreshes");
+        field.setAccessible(true);
+        Map<String, InstanceRefresh> original = (Map<String, InstanceRefresh>) field.get(service);
+        Map<String, InstanceRefresh> intercepted = spy(original);
+        CountDownLatch selected = new CountDownLatch(1);
+        CountDownLatch publish = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            selected.countDown();
+            assertTrue(publish.await(5, TimeUnit.SECONDS));
+            return original.put(invocation.getArgument(0), invocation.getArgument(1));
+        }).when(intercepted).put(anyString(), any(InstanceRefresh.class));
+        field.set(service, intercepted);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        Future<?> starting = executor.submit(() ->
+                service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh()));
+        Future<?> removing = null;
+        try {
+            assertTrue(selected.await(5, TimeUnit.SECONDS));
+            CountDownLatch removalStarted = new CountDownLatch(1);
+            removing = executor.submit(() -> {
+                removalStarted.countDown();
+                if (detach) {
+                    service.detachInstances(REGION, "suspended-group", List.of("i-original"), true);
+                } else {
+                    service.terminateInstanceInAutoScalingGroup(REGION, "i-original", true);
+                }
+            });
+            assertTrue(removalStarted.await(5, TimeUnit.SECONDS));
+            try {
+                removing.get(250, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException expected) {
+                // Removal may wait for the shared group monitor before releasing ownership.
+            }
+        } finally {
+            publish.countDown();
+            try {
+                starting.get(5, TimeUnit.SECONDS);
+                if (removing != null) {
+                    removing.get(5, TimeUnit.SECONDS);
+                }
+            } finally {
+                field.set(service, original);
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+            }
+        }
+        InstanceRefresh refresh = service.activeInstanceRefresh(group);
+        assertNotNull(refresh);
+        assertTrue(refresh.getReplacements().isEmpty(), "Explicit removal retained refresh ownership");
+        restart(mode);
+        reconciler.reconcile(group);
+        assertTrue(group.getInstances().isEmpty());
+        if (detach) {
+            verify(ec2, never()).terminateInstances(anyString(), anyList());
+        } else {
+            verify(ec2).terminateInstances(REGION, List.of("i-original"));
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"persistent,true", "persistent,false", "hybrid,true", "hybrid,false", "wal,true", "wal,false"})
+    void detachWaitsForReplacementIdentityPublication(String mode, boolean decrement) throws Exception {
+        setUp(mode);
+        InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        service = spy(service);
+        reconciler = new AutoScalingReconciler(service, ec2, mock(ElbV2Service.class));
+        CountDownLatch launched = new CountDownLatch(1);
+        CountDownLatch publish = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            if (group.getInstances().stream().anyMatch(i -> "i-replacement".equals(i.getInstanceId()))
+                    && refresh.getReplacements().getFirst().getReplacementInstanceId() == null) {
+                launched.countDown();
+                assertTrue(publish.await(5, TimeUnit.SECONDS));
+            }
+            return invocation.callRealMethod();
+        }).when(service).saveAutoScalingGroupIfPresent(group);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        Future<?> reconciling = executor.submit(() -> reconciler.reconcile(group));
+        Future<?> detaching = null;
+        try {
+            assertTrue(launched.await(5, TimeUnit.SECONDS));
+            CountDownLatch detachStarted = new CountDownLatch(1);
+            detaching = executor.submit(() -> {
+                detachStarted.countDown();
+                service.detachInstances(REGION, "suspended-group", List.of("i-replacement"), decrement);
+            });
+            assertTrue(detachStarted.await(5, TimeUnit.SECONDS));
+            try {
+                detaching.get(250, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException expected) {
+                // Detach may wait until the replacement ID is published under the group monitor.
+            }
+        } finally {
+            publish.countDown();
+            try {
+                reconciling.get(5, TimeUnit.SECONDS);
+                if (detaching != null) {
+                    detaching.get(5, TimeUnit.SECONDS);
+                }
+            } finally {
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+            }
+        }
+        assertTrue(group.getInstances().isEmpty());
+        assertTrue(refresh.getReplacements().isEmpty(), "Detached replacement retained refresh ownership");
+        restart(mode);
+        assertTrue(service.activeInstanceRefresh(group).getReplacements().isEmpty());
+        assertEquals(decrement ? 0 : 1, group.getDesiredCapacity());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void deletingSameNameOtherRegionPreservesPausedRefresh(String mode) throws IOException {
+        setUp(mode);
+        String otherRegion = "us-west-2";
+        LaunchTemplate template = new LaunchTemplate();
+        template.setLaunchTemplateId("lt-original");
+        template.getData().setImageId("ami-original");
+        when(ec2.describeLaunchTemplateVersions(eq(otherRegion), eq("lt-original"), isNull(), anyList()))
+                .thenReturn(List.of(template));
+        service.createAutoScalingGroup(otherRegion, "suspended-group", null, "lt-original", null, "1", null,
+                0, 3, 1, 300, List.of("us-west-2a"), List.of(), List.of(), List.of(), "EC2", 0,
+                List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
+        AutoScalingGroup other = service.describeAutoScalingGroups(otherRegion, List.of("suspended-group"))
+                .getFirst();
+        AsgInstance member = new AsgInstance();
+        member.setInstanceId("i-west");
+        member.setLifecycleState("InService");
+        other.getInstances().add(member);
+        service.saveAutoScalingGroupIfPresent(other);
+        service.suspendProcesses(otherRegion, "suspended-group", List.of("InstanceRefresh"));
+        InstanceRefresh refresh = service.startInstanceRefresh(otherRegion, "suspended-group", new InstanceRefresh());
+        service.deleteAutoScalingGroup(REGION, "suspended-group", true);
+        assertSame(refresh, service.activeInstanceRefresh(other), "Peer deletion erased refresh ownership");
+        when(ec2.describeInstances(eq(otherRegion), anyList(), isNull())).thenReturn(List.of(reservation("i-west")));
+        reconciler.reconcile(other);
+        verify(ec2, never()).terminateInstances(eq(otherRegion), anyList());
+        assertEquals(List.of("i-west"), other.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    @SuppressWarnings("unchecked")
+    void groupRecreationWaitsForOldRefreshCleanup(String mode) throws Exception {
+        setUp(mode);
+        Field field = AutoScalingService.class.getDeclaredField("instanceRefreshes");
+        field.setAccessible(true);
+        Map<String, InstanceRefresh> original = (Map<String, InstanceRefresh>) field.get(service);
+        Map<String, InstanceRefresh> intercepted = spy(original);
+        CountDownLatch cleanup = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        AtomicBoolean firstCleanup = new AtomicBoolean(true);
+        doAnswer(invocation -> {
+            if (firstCleanup.compareAndSet(true, false)) {
+                cleanup.countDown();
+                assertTrue(finish.await(5, TimeUnit.SECONDS));
+            }
+            return original.entrySet();
+        }).when(intercepted).entrySet();
+        field.set(service, intercepted);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        Future<?> deleting = executor.submit(() -> service.deleteAutoScalingGroup(REGION, "suspended-group", true));
+        Future<InstanceRefresh> recreating = null;
+        InstanceRefresh replacement;
+        try {
+            assertTrue(cleanup.await(5, TimeUnit.SECONDS));
+            CountDownLatch creationStarted = new CountDownLatch(1);
+            recreating = executor.submit(() -> {
+                creationStarted.countDown();
+                service.createAutoScalingGroup(REGION, "suspended-group", null, "lt-original", null, "1", null,
+                        0, 3, 0, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(), "EC2", 0,
+                        List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
+                return service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+            });
+            assertTrue(creationStarted.await(5, TimeUnit.SECONDS));
+            try {
+                recreating.get(250, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException expected) {
+                // Recreating the same group may wait for the old generation's refresh cleanup.
+            }
+        } finally {
+            finish.countDown();
+            try {
+                deleting.get(5, TimeUnit.SECONDS);
+                replacement = recreating == null ? null : recreating.get(5, TimeUnit.SECONDS);
+            } finally {
+                field.set(service, original);
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+            }
+        }
+        assertNotNull(replacement);
+        assertEquals(List.of(replacement.getInstanceRefreshId()), service.describeInstanceRefreshes(
+                REGION, "suspended-group", null, null, null).instanceRefreshes().stream()
+                .map(InstanceRefresh::getInstanceRefreshId).toList());
     }
 
     private static Reservation reservation(String id) {
