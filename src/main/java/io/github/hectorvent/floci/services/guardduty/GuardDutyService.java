@@ -68,6 +68,12 @@ public class GuardDutyService {
     private static final int MAX_PLAN_OBJECT_PREFIXES = 5;
     private static final int MAX_PLAN_OBJECT_PREFIX_LENGTH = 1024;
     private static final int MAX_PLAN_TAGS = 200;
+    /**
+     * GuardDuty's documented TagKey pattern, {@code ^(?!aws:)[a-zA-Z+-=._:/]+$}, kept verbatim: the
+     * {@code +-=} range spans the digits and {@code , - . / : ; <}, so a space, {@code @} or
+     * {@code #} is rejected while a digit is not.
+     */
+    private static final Pattern PLAN_TAG_KEY_PATTERN = Pattern.compile("^(?!aws:)[a-zA-Z+-=._:/]+$");
     /** The documented default page size of ListMalwareProtectionPlans. */
     private static final int PLAN_PAGE_SIZE = 100;
     private static final String PLAN_TOKEN_PREFIX = "guardduty:v1:plan:";
@@ -585,7 +591,7 @@ public class GuardDutyService {
 
     /** The tag rules of a Malware Protection plan, shared by creation and the tag routes. */
     private static void requireValidPlanTag(String key, String value) {
-        if (key.isEmpty() || key.length() > 128 || key.startsWith("aws:")) {
+        if (key.length() > 128 || !PLAN_TAG_KEY_PATTERN.matcher(key).matches()) {
             throw badRequest("tags contains an invalid key: " + key);
         }
         if (value.length() > 256) {
@@ -601,8 +607,18 @@ public class GuardDutyService {
         }
     }
 
-    private MalwareProtectionPlan planFromArn(String arn) {
-        return malwareProtectionPlanStore.get(parsePlanArn(arn).key()).orElseThrow(GuardDutyService::planNotFound);
+    /**
+     * Resolves the plan a tag route names. The store is keyed by region and id alone, so the whole
+     * supplied ARN must equal the stored plan's: a matching id under another partition, service or
+     * account does not identify this plan.
+     */
+    private MalwareProtectionPlan planFromArn(String arn, DetectorRef ref) {
+        MalwareProtectionPlan plan = malwareProtectionPlanStore.get(ref.key())
+                .orElseThrow(GuardDutyService::planNotFound);
+        if (!arn.equals(plan.getArn())) {
+            throw planNotFound();
+        }
+        return plan;
     }
 
     private static DetectorRef parsePlanArn(String arn) {
@@ -620,7 +636,7 @@ public class GuardDutyService {
 
     public Map<String, String> listTags(String arn) {
         if (isMalwareProtectionPlanArn(arn)) {
-            MalwareProtectionPlan plan = planFromArn(arn);
+            MalwareProtectionPlan plan = planFromArn(arn, parsePlanArn(arn));
             return plan.getTags() == null ? Map.of() : plan.getTags();
         }
         Detector detector = detectorFromArn(arn);
@@ -630,8 +646,7 @@ public class GuardDutyService {
     public synchronized void tagResource(String arn, Map<String, String> tags) {
         if (isMalwareProtectionPlanArn(arn)) {
             DetectorRef ref = parsePlanArn(arn);
-            MalwareProtectionPlan plan = malwareProtectionPlanStore.get(ref.key())
-                    .orElseThrow(GuardDutyService::planNotFound);
+            MalwareProtectionPlan plan = planFromArn(arn, ref);
             tags.forEach(GuardDutyService::requireValidPlanTag);
             Map<String, String> merged = new LinkedHashMap<>();
             if (plan.getTags() != null) {
@@ -659,8 +674,7 @@ public class GuardDutyService {
     public synchronized void untagResource(String arn, List<String> tagKeys) {
         if (isMalwareProtectionPlanArn(arn)) {
             DetectorRef ref = parsePlanArn(arn);
-            MalwareProtectionPlan plan = malwareProtectionPlanStore.get(ref.key())
-                    .orElseThrow(GuardDutyService::planNotFound);
+            MalwareProtectionPlan plan = planFromArn(arn, ref);
             if (plan.getTags() == null) {
                 return;
             }

@@ -220,7 +220,7 @@ public class GuardDutyController {
     }
 
     @POST
-    @Path("/malware-protection-plan")
+    @Path(GuardDutyRouteFilter.INTERNAL_PREFIX + GuardDutyRouteFilter.PLAN_PATH)
     public Response createMalwareProtectionPlan(@Context HttpHeaders headers, String body) {
         MalwareProtectionPlan plan = service.createMalwareProtectionPlan(
                 regionResolver.resolveRegion(headers), regionResolver.getAccountId(), parse(body));
@@ -230,7 +230,7 @@ public class GuardDutyController {
     }
 
     @GET
-    @Path("/malware-protection-plan")
+    @Path(GuardDutyRouteFilter.INTERNAL_PREFIX + GuardDutyRouteFilter.PLAN_PATH)
     public Response listMalwareProtectionPlans(
             @Context HttpHeaders headers, @QueryParam("nextToken") String nextToken) {
         GuardDutyService.Page<MalwareProtectionPlan> page =
@@ -247,7 +247,7 @@ public class GuardDutyController {
     }
 
     @GET
-    @Path("/malware-protection-plan/{malwareProtectionPlanId}")
+    @Path(GuardDutyRouteFilter.INTERNAL_PREFIX + GuardDutyRouteFilter.PLAN_PATH + "/{malwareProtectionPlanId}")
     public Response getMalwareProtectionPlan(
             @Context HttpHeaders headers, @PathParam("malwareProtectionPlanId") String planId) {
         MalwareProtectionPlan plan = service.getMalwareProtectionPlan(regionResolver.resolveRegion(headers), planId);
@@ -275,7 +275,7 @@ public class GuardDutyController {
     }
 
     @PATCH
-    @Path("/malware-protection-plan/{malwareProtectionPlanId}")
+    @Path(GuardDutyRouteFilter.INTERNAL_PREFIX + GuardDutyRouteFilter.PLAN_PATH + "/{malwareProtectionPlanId}")
     public Response updateMalwareProtectionPlan(
             @Context HttpHeaders headers, @PathParam("malwareProtectionPlanId") String planId, String body) {
         service.updateMalwareProtectionPlan(regionResolver.resolveRegion(headers), planId, parse(body));
@@ -283,7 +283,7 @@ public class GuardDutyController {
     }
 
     @DELETE
-    @Path("/malware-protection-plan/{malwareProtectionPlanId}")
+    @Path(GuardDutyRouteFilter.INTERNAL_PREFIX + GuardDutyRouteFilter.PLAN_PATH + "/{malwareProtectionPlanId}")
     public Response deleteMalwareProtectionPlan(
             @Context HttpHeaders headers, @PathParam("malwareProtectionPlanId") String planId) {
         service.deleteMalwareProtectionPlan(regionResolver.resolveRegion(headers), planId);
