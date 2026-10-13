@@ -918,6 +918,8 @@ public class NativeDynamoDbJsonHandler {
      *       {@code Exists: false} asks for plain absence.</li>
      *   <li>{@code Exists: false} forbids a {@code Value}: an attribute cannot be expected to
      *       hold a value while also being expected to be absent.</li>
+     *   <li>A comparison accepts either {@code Value} or {@code AttributeValueList}, but
+     *       never both, and must have the operator's required number of operands.</li>
      * </ul>
      * DynamoDB reports only the first offending entry, so validation stops at the first error.
      */
@@ -948,6 +950,37 @@ public class NativeDynamoDbJsonHandler {
                 throw legacyExpectedValidationError(
                         "Value cannot be used when Exists is false for Attribute: " + attrName);
             }
+            if (hasValue && condition.has("AttributeValueList")) {
+                throw legacyExpectedValidationError(
+                        "Value and AttributeValueList cannot be used together for Attribute: " + attrName);
+            }
+            if (hasComparisonOperator) {
+                validateLegacyComparisonOperands(attrName, condition);
+            }
+        }
+    }
+
+    private void validateLegacyComparisonOperands(String attrName, JsonNode condition) {
+        String operator = condition.get("ComparisonOperator").asText();
+        int required = switch (operator) {
+            case "NULL", "NOT_NULL" -> 0;
+            case "EQ", "NE", "LE", "LT", "GE", "GT", "CONTAINS", "NOT_CONTAINS", "BEGINS_WITH" -> 1;
+            case "BETWEEN" -> 2;
+            case "IN" -> -1;
+            default -> throw legacyExpectedValidationError("Invalid comparison operator");
+        };
+        boolean hasValue = condition.has("Value");
+        boolean hasList = condition.has("AttributeValueList");
+        if (required != 0 && !hasValue && !hasList) {
+            throw legacyExpectedValidationError(
+                    "Value or AttributeValueList must be used with ComparisonOperator: "
+                            + operator + " for Attribute: " + attrName);
+        }
+        // AWS accepts ComparisonOperator + Value as a single operand, including IN.
+        int count = hasValue ? 1 : hasList ? condition.get("AttributeValueList").size() : 0;
+        if (required == -1 ? count == 0 : count != required) {
+            throw legacyExpectedValidationError(
+                    "Invalid number of argument(s) for the " + operator + " ComparisonOperator");
         }
     }
 

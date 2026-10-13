@@ -55,6 +55,7 @@ order:
   - AWS::Logs
   - AWS::WAFv2
   - AWS::Config
+  - AWS::BedrockAgentCore
   - AWS::CloudFormation
   - AWS::CloudTrail
   - Custom
@@ -87,7 +88,7 @@ type_order:
   AWS::RDS:
     [DBInstance, DBCluster, DBSubnetGroup, DBParameterGroup, DBClusterParameterGroup]
   AWS::ElastiCache:
-    [CacheCluster, SubnetGroup]
+    [CacheCluster, SubnetGroup, User, UserGroup]
   AWS::Redshift:
     [Cluster, ClusterParameterGroup, ClusterSubnetGroup, ClusterSecurityGroup]
   AWS::RedshiftServerless:
@@ -109,6 +110,7 @@ type_order:
   AWS::Cognito: [UserPool, UserPoolClient]
   AWS::Events: [Rule, EventBus, EventBusPolicy]
   AWS::CloudFormation: [CustomResource]
+  AWS::BedrockAgentCore: [Runtime, RuntimeEndpoint, Memory]
 
 # Namespace -> the service name shown in the Service column.
 service_labels:
@@ -119,6 +121,7 @@ service_labels:
   AWS::AutoScaling: Auto Scaling
   AWS::Batch: Batch
   AWS::Backup: Backup
+  AWS::BedrockAgentCore: Bedrock AgentCore
   AWS::CDK: CDK
   AWS::CertificateManager: ACM
   AWS::CloudFormation: CloudFormation
@@ -169,11 +172,14 @@ notes:
   AWS::Lambda::Function: Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket
   AWS::Lambda::EventSourceMapping: 'SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored'
   AWS::Lambda::Alias: also what SAM's `AutoPublishAlias` expands into
+  AWS::Lambda::EventInvokeConfig: also what a SAM function's `EventInvokeConfig` expands into
   AWS::EC2::SecurityGroup: inline `SecurityGroupIngress`/`SecurityGroupEgress` supported
   AWS::ApplicationAutoScaling::ScalableTarget: '`ScheduledActions` are accepted and not run; Floci has no scheduled scaling'
   AWS::RDS::DBInstance: starts a real container
   AWS::RDS::DBCluster: starts a real container
   AWS::ElastiCache::CacheCluster: 'starts a real container; modifying an existing cluster in place is not supported'
+  AWS::ElastiCache::User: Tags are ignored
+  AWS::ElastiCache::UserGroup: Tags are ignored
   AWS::Redshift::ClusterSecurityGroup: accepted; no EC2-Classic security group model
   AWS::Redshift::Cluster: single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported
   AWS::RedshiftServerless::Namespace: 'ManageAdminPassword is accepted and not applied; GetAtt uses the dotted Namespace.* form'
@@ -188,6 +194,9 @@ notes:
   AWS::Cognito::UserPool: '`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`'
   AWS::Events::Archive: '`KmsKeyIdentifier` is ignored'
   AWS::CloudFront::Function: '`KeyValueStoreAssociations` is ignored'
+  AWS::BedrockAgentCore::Runtime: 'Ref returns the AgentRuntimeId; CapacityProviderConfiguration, FilesystemConfigurations, LifecycleConfiguration, PlatformVersion and RequestHeaderConfiguration are accepted and not stored'
+  AWS::BedrockAgentCore::RuntimeEndpoint: 'Ref returns the endpoint ARN; Tags are accepted and not stored'
+  AWS::BedrockAgentCore::Memory: 'Ref returns the memory ARN; MemoryStrategies, IndexedKeys, NamespaceKeys and StreamDeliveryResources are accepted and not stored'
 
 # Trailing prose appended to a row after its type list, for behaviour that belongs to the service
 # rather than to one type.

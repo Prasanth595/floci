@@ -57,7 +57,7 @@ public class IamQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(IamQueryHandler.class);
 
-    /** {@code MaxItems} on the last-accessed readers: "defaults to 100", valid range 1 to 1000. */
+    /** {@code MaxItems} on the readers that page through {@link #paginate}: "defaults to 100", range 1 to 1000. */
     private static final int DEFAULT_MAX_ITEMS = 100;
     private static final int MAX_MAX_ITEMS = 1000;
     /** {@code sortKeyType} on {@code GetOrganizationsAccessReport}. */
@@ -130,6 +130,7 @@ public class IamQueryHandler {
             case "GetLoginProfile" -> handleGetLoginProfile(params, authorization);
             case "UpdateLoginProfile" -> handleUpdateLoginProfile(params);
             case "DeleteLoginProfile" -> handleDeleteLoginProfile(params, authorization);
+            case "ChangePassword" -> handleChangePassword(params, authorization);
 
             // Multi-factor authentication
             case "CreateVirtualMFADevice" -> handleCreateVirtualMFADevice(params);
@@ -569,6 +570,40 @@ public class IamQueryHandler {
         String userName = resolveUserName(params, authorization);
         iamService.deleteLoginProfile(userName);
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteLoginProfile", AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * Changes the calling user's console password. The operation takes no {@code UserName}: the
+     * reference says it "changes the password of the IAM user who is calling this operation", and
+     * the CLI reference adds that it "can be called by IAM users only. If this command is called
+     * using AWS account (root) credentials, the command returns an InvalidUserType error". A
+     * signing key that belongs to no stored user is Floci's stand-in for exactly that caller, so
+     * it answers the same way rather than reporting the key as missing.
+     */
+    private Response handleChangePassword(MultivaluedMap<String, String> params,
+                                          String authorization) {
+        // Both members are required, and read through getParam rather than requireParam because
+        // requireParam refuses a blank value where passwordType permits one: the pattern starts
+        // at \u0020, so a password of spaces is a value the model accepts. The shape check
+        // therefore stays with the pattern, which also names which of the two members failed.
+        iamService.changePassword(callingIamUser(authorization),
+                getParam(params, "OldPassword"), getParam(params, "NewPassword"));
+        return Response.ok(
+                AwsQueryResponse.envelopeNoResult("ChangePassword", AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * The IAM user whose access key signed the request, for the one operation that acts on the
+     * caller and gives no way to name anyone else. Unlike {@link #resolveUserName}, a key with no
+     * user behind it is not a missing entity here: the caller is not an IAM user, which is the
+     * case {@code InvalidUserType} is published for.
+     */
+    private String callingIamUser(String authorization) {
+        String accessKeyId = accountResolver.extractAccessKeyId(authorization);
+        return iamService.findUserNameByAccessKeyId(accessKeyId)
+                .orElseThrow(() -> new AwsException("InvalidUserType",
+                        "The request was rejected because the type of user for the transaction "
+                                + "was incorrect.", 400));
     }
 
     private String loginProfileXml(LoginProfile profile) {
@@ -1351,12 +1386,15 @@ public class IamQueryHandler {
     }
 
     private Response handleListRoles(MultivaluedMap<String, String> params) {
-        List<IamRole> roleList = iamService.listRoles(getParam(params, "PathPrefix"));
+        Page<IamRole> page = paginate(iamService.listRoles(getParam(params, "PathPrefix")), params);
         XmlBuilder xml = new XmlBuilder().start("Roles");
-        for (IamRole r : roleList) {
+        for (IamRole r : page.items()) {
             xml.start("member").raw(roleXml(r, false)).end("member");
         }
-        xml.end("Roles").elem("IsTruncated", false);
+        xml.end("Roles").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
         return Response.ok(AwsQueryResponse.envelope("ListRoles", AwsNamespaces.IAM, xml.build())).build();
     }
 
@@ -1417,13 +1455,16 @@ public class IamQueryHandler {
     }
 
     private Response handleListPolicies(MultivaluedMap<String, String> params) {
-        List<IamPolicy> policyList = iamService.listPolicies(
-                getParam(params, "Scope"), getParam(params, "PathPrefix"));
+        Page<IamPolicy> page = paginate(iamService.listPolicies(
+                getParam(params, "Scope"), getParam(params, "PathPrefix")), params);
         XmlBuilder xml = new XmlBuilder().start("Policies");
-        for (IamPolicy p : policyList) {
+        for (IamPolicy p : page.items()) {
             xml.start("member").raw(policyXml(p, false)).end("member");
         }
-        xml.end("Policies").elem("IsTruncated", false);
+        xml.end("Policies").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
         return Response.ok(AwsQueryResponse.envelope("ListPolicies", AwsNamespaces.IAM, xml.build())).build();
     }
 
@@ -2418,7 +2459,7 @@ public class IamQueryHandler {
         // rather than answered emptily just because the marker happens to sit past the end.
         int from = markerIndex(params);
         // An omitted MaxItems is not "no limit": the API reference states the count "defaults to
-        // 100" on both readers, so a report wider than that is truncated with a Marker exactly as
+        // 100" on each reader paged here, so a list wider than that is truncated with a Marker as
         // it would be against AWS. Operations that model no MaxItems at all pass through whole.
         int limit = maxItemsModeled ? DEFAULT_MAX_ITEMS : items.size();
         if (maxItemsModeled) {

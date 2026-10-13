@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClientSecret;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
+import io.github.hectorvent.floci.services.cognito.model.WebAuthnConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -144,6 +145,10 @@ public class CognitoJsonHandler {
             case "DeleteUserPoolClientSecret" -> handleDeleteUserPoolClientSecret(request);
             case "AdminSetUserMFAPreference" -> handleAdminSetUserMFAPreference(request);
             case "SetUserMFAPreference" -> handleSetUserMFAPreference(request);
+            case "StartWebAuthnRegistration" -> handleStartWebAuthnRegistration(request);
+            case "CompleteWebAuthnRegistration" -> handleCompleteWebAuthnRegistration(request);
+            case "ListWebAuthnCredentials" -> handleListWebAuthnCredentials(request);
+            case "DeleteWebAuthnCredential" -> handleDeleteWebAuthnCredential(request);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -231,14 +236,29 @@ public class CognitoJsonHandler {
                 request.path("UserPoolId").asText(),
                 request.hasNonNull("MfaConfiguration") ? request.path("MfaConfiguration").asText() : null,
                 softwareToken.hasNonNull("Enabled") ? softwareToken.path("Enabled").asBoolean() : null,
-                otherFactorConfigured);
+                otherFactorConfigured,
+                webAuthnConfiguration(request.path("WebAuthnConfiguration")));
         return Response.ok(buildMfaConfigResponse(pool)).build();
+    }
+
+    private static WebAuthnConfiguration webAuthnConfiguration(JsonNode node) {
+        if (!node.isObject()) {
+            return null;
+        }
+        WebAuthnConfiguration configuration = new WebAuthnConfiguration();
+        configuration.setRelyingPartyId(node.hasNonNull("RelyingPartyId") ? node.path("RelyingPartyId").asText() : null);
+        configuration.setUserVerification(
+                node.hasNonNull("UserVerification") ? node.path("UserVerification").asText() : null);
+        configuration.setFactorConfiguration(
+                node.hasNonNull("FactorConfiguration") ? node.path("FactorConfiguration").asText() : null);
+        return configuration;
     }
 
     /**
      * Shared by Get and Set, which answer with the same members. SoftwareTokenMfaConfiguration
-     * is omitted while unset, matching the live service, which returns only the factors that
-     * have been configured.
+     * and WebAuthnConfiguration are omitted while unset, matching the live service, which returns
+     * only the factors that have been configured. A stored WebAuthnConfiguration reports
+     * UserVerification as {@code preferred} when it was not given, the AWS default.
      */
     private ObjectNode buildMfaConfigResponse(UserPool pool) {
         ObjectNode response = objectMapper.createObjectNode();
@@ -247,6 +267,17 @@ public class CognitoJsonHandler {
                     .put("Enabled", pool.getSoftwareTokenMfaEnabled());
         }
         response.put("MfaConfiguration", pool.getMfaConfiguration());
+        WebAuthnConfiguration webAuthn = pool.getWebAuthnConfiguration();
+        if (webAuthn != null) {
+            ObjectNode node = response.putObject("WebAuthnConfiguration");
+            if (webAuthn.getFactorConfiguration() != null) {
+                node.put("FactorConfiguration", webAuthn.getFactorConfiguration());
+            }
+            if (webAuthn.getRelyingPartyId() != null) {
+                node.put("RelyingPartyId", webAuthn.getRelyingPartyId());
+            }
+            node.put("UserVerification", CognitoService.webAuthnUserVerification(pool));
+        }
         return response;
     }
 
@@ -614,8 +645,9 @@ public class CognitoJsonHandler {
                 : request.path("MessageAction").asText(null);
         Map<String, String> validationData = new HashMap<>();
         request.path("ValidationData").forEach(a -> validationData.put(a.path("Name").asText(), a.path("Value").asText()));
-        Map<String, String> clientMetadata = new HashMap<>();
-        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
+        Map<String, String> clientMetadata = clientMetadata(request);
+        List<String> desiredDeliveryMediums = new ArrayList<>();
+        request.path("DesiredDeliveryMediums").forEach(m -> desiredDeliveryMediums.add(m.asText()));
 
         CognitoUser user = service.adminCreateUser(
                 request.path("UserPoolId").asText(),
@@ -624,6 +656,7 @@ public class CognitoJsonHandler {
                 tempPassword,
                 messageAction,
                 request.path("ForceAliasCreation").asBoolean(false),
+                desiredDeliveryMediums,
                 validationData,
                 clientMetadata
         );
@@ -884,8 +917,7 @@ public class CognitoJsonHandler {
     private Response handleInitiateAuth(JsonNode request) {
         Map<String, String> params = new HashMap<>();
         request.path("AuthParameters").fields().forEachRemaining(e -> params.put(e.getKey(), e.getValue().asText()));
-        Map<String, String> clientMetadata = new HashMap<>();
-        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
+        Map<String, String> clientMetadata = clientMetadata(request);
 
         Map<String, Object> result = service.initiateAuth(
                 request.path("ClientId").asText(),
@@ -899,8 +931,7 @@ public class CognitoJsonHandler {
     private Response handleAdminInitiateAuth(JsonNode request) {
         Map<String, String> params = new HashMap<>();
         request.path("AuthParameters").fields().forEachRemaining(e -> params.put(e.getKey(), e.getValue().asText()));
-        Map<String, String> clientMetadata = new HashMap<>();
-        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
+        Map<String, String> clientMetadata = clientMetadata(request);
 
         Map<String, Object> result = service.adminInitiateAuth(
                 request.path("UserPoolId").asText(),
@@ -915,8 +946,7 @@ public class CognitoJsonHandler {
     private Response handleRespondToAuthChallenge(JsonNode request) {
         Map<String, String> responses = new HashMap<>();
         request.path("ChallengeResponses").fields().forEachRemaining(e -> responses.put(e.getKey(), e.getValue().asText()));
-        Map<String, String> clientMetadata = new HashMap<>();
-        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
+        Map<String, String> clientMetadata = clientMetadata(request);
 
         Map<String, Object> result = service.respondToAuthChallenge(
                 request.path("ClientId").asText(),
@@ -931,8 +961,7 @@ public class CognitoJsonHandler {
     private Response handleAdminRespondToAuthChallenge(JsonNode request) {
         Map<String, String> responses = new HashMap<>();
         request.path("ChallengeResponses").fields().forEachRemaining(e -> responses.put(e.getKey(), e.getValue().asText()));
-        Map<String, String> clientMetadata = new HashMap<>();
-        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
+        Map<String, String> clientMetadata = clientMetadata(request);
 
         Map<String, Object> result = service.adminRespondToAuthChallenge(
                 request.path("UserPoolId").asText(),
@@ -984,8 +1013,7 @@ public class CognitoJsonHandler {
     }
 
     private Response handleConfirmSignUp(JsonNode request) {
-        Map<String, String> clientMetadata = new HashMap<>();
-        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
+        Map<String, String> clientMetadata = clientMetadata(request);
         service.confirmSignUp(
                 request.path("ClientId").asText(),
                 request.path("Username").asText(),
@@ -1009,8 +1037,7 @@ public class CognitoJsonHandler {
     }
 
     private Response handleAdminConfirmSignUp(JsonNode request) {
-        Map<String, String> clientMetadata = new HashMap<>();
-        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
+        Map<String, String> clientMetadata = clientMetadata(request);
         service.adminConfirmSignUp(
                 request.path("UserPoolId").asText(),
                 request.path("Username").asText(),
@@ -1042,8 +1069,7 @@ public class CognitoJsonHandler {
     }
 
     private Response handleConfirmForgotPassword(JsonNode request) {
-        Map<String, String> clientMetadata = new HashMap<>();
-        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
+        Map<String, String> clientMetadata = clientMetadata(request);
         service.confirmForgotPassword(
                 request.path("ClientId").asText(),
                 request.path("Username").asText(),
@@ -1323,6 +1349,11 @@ public class CognitoJsonHandler {
         return node;
     }
 
+    private Map<String, String> clientMetadata(JsonNode request) {
+        Map<String, String> metadata = readStringMap(request, "ClientMetadata");
+        return metadata != null ? metadata : new HashMap<>();
+    }
+
     private Map<String, String> readStringMap(JsonNode request, String member) {
         JsonNode node = request.get(member);
         if (node == null || !node.isObject()) {
@@ -1534,7 +1565,8 @@ public class CognitoJsonHandler {
                 request.path("UserPoolId").asText(),
                 request.path("Username").asText(),
                 mfaSettingsUpdate(request.path("EmailMfaSettings")),
-                mfaSettingsUpdate(request.path("SoftwareTokenMfaSettings")));
+                mfaSettingsUpdate(request.path("SoftwareTokenMfaSettings")),
+                webAuthnMfaEnabled(request));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -1542,7 +1574,8 @@ public class CognitoJsonHandler {
         service.setUserMFAPreference(
                 request.path("AccessToken").asText(),
                 mfaSettingsUpdate(request.path("EmailMfaSettings")),
-                mfaSettingsUpdate(request.path("SoftwareTokenMfaSettings")));
+                mfaSettingsUpdate(request.path("SoftwareTokenMfaSettings")),
+                webAuthnMfaEnabled(request));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -1550,6 +1583,46 @@ public class CognitoJsonHandler {
         return new CognitoService.MfaSettingsUpdate(
                 settings.has("Enabled") ? settings.path("Enabled").asBoolean() : null,
                 settings.has("PreferredMfa") ? settings.path("PreferredMfa").asBoolean() : null);
+    }
+
+    /** {@code WebAuthnMfaSettings.Enabled}, or null when the request leaves passkey MFA as it is. */
+    private static Boolean webAuthnMfaEnabled(JsonNode request) {
+        JsonNode settings = request.path("WebAuthnMfaSettings");
+        return settings.has("Enabled") ? settings.path("Enabled").asBoolean() : null;
+    }
+
+    private Response handleStartWebAuthnRegistration(JsonNode request) {
+        return Response.ok(objectMapper.valueToTree(
+                service.startWebAuthnRegistration(request.path("AccessToken").asText()))).build();
+    }
+
+    /**
+     * {@code Credential} is a document, so the SDKs send the {@code RegistrationResponseJSON} as a
+     * JSON object; a client that sends it as a JSON string is accepted too.
+     */
+    private Response handleCompleteWebAuthnRegistration(JsonNode request) {
+        JsonNode credential = request.path("Credential");
+        if (credential.isTextual()) {
+            try {
+                credential = objectMapper.readTree(credential.asText());
+            } catch (Exception e) {
+                throw new AwsException("InvalidParameterException", "Credential is not valid JSON", 400);
+            }
+        }
+        service.completeWebAuthnRegistration(request.path("AccessToken").asText(), credential);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListWebAuthnCredentials(JsonNode request) {
+        return Response.ok(objectMapper.valueToTree(service.listWebAuthnCredentials(
+                request.path("AccessToken").asText(),
+                request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null,
+                request.hasNonNull("NextToken") ? request.path("NextToken").asText() : null))).build();
+    }
+
+    private Response handleDeleteWebAuthnCredential(JsonNode request) {
+        service.deleteWebAuthnCredential(request.path("AccessToken").asText(), request.path("CredentialId").asText());
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
 }
