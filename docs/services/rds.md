@@ -588,7 +588,9 @@ cross-Region replicas, the request succeeds but retains the cluster password and
 `MasterUserSecret` metadata, as Aurora does. Remove the secret's replicas and retry to
 release password management. Other requested cluster settings still apply.
 
-Floci coordinates the replication check and credential change with Secrets Manager deletion.
+Floci reserves the secret while changing backend credentials, without holding a shared
+Secrets Manager lock during backend I/O. Replication and deletion requests for that secret
+fail while release is in progress; unrelated secrets remain available.
 A failed backend password rotation retains the managed secret and stored credentials.
 If Secrets Manager support is unavailable, opt-out fails before changing cluster state.
 This does not provide a transaction across database backends and persistent storage.

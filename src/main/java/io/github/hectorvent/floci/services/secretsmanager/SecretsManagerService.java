@@ -39,6 +39,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -77,6 +78,8 @@ public class SecretsManagerService implements ResourceProvider {
     // stripe only contend; no lock is held while a rotation Lambda runs.
     private static final int ROTATION_LOCK_STRIPE_COUNT = 32;
     private final Object[] rotationLockStripes = newLockStripes(ROTATION_LOCK_STRIPE_COUNT);
+    // Entries exist only while a service owner changes backend credentials outside the stripe.
+    private final Set<String> managedReleases = ConcurrentHashMap.newKeySet();
 
     private static Object[] newLockStripes(int count) {
         Object[] stripes = new Object[count];
@@ -659,14 +662,15 @@ public class SecretsManagerService implements ResourceProvider {
     public record Filter(String key, List<String> values) {}
 
     /**
-     * Releases a managed secret after its owner successfully changes credentials. The caller
-     * supplies the full stored ARN. Replication eligibility, the owner's action and deletion
-     * share the secret monitor so a concurrent replication cannot strand old credentials.
+     * Reserves release under the secret monitor, then changes backend credentials without holding
+     * a shared stripe. Replication and deletion refuse a reserved secret until the action finishes.
      * Returns false without running the action when replicas prevent deletion.
      */
     public boolean deleteManagedSecretAfter(String secretArn, String region, Runnable changeCredentials) {
+        boolean secretExists = true;
         synchronized (lockFor(secretArn)) {
-            Secret secret;
+            throwIfManagedRelease(secretArn);
+            Secret secret = null;
             try {
                 secret = resolveSecret(secretArn, region);
             } catch (AwsException e) {
@@ -674,16 +678,35 @@ public class SecretsManagerService implements ResourceProvider {
                     throw e;
                 }
                 // An already removed secret does not prevent its owner from releasing management.
-                changeCredentials.run();
-                return true;
+                secretExists = false;
             }
-            throwIfReplica(secret);
-            if (secret.getReplicationStatus() != null && !secret.getReplicationStatus().isEmpty()) {
-                return false;
+            if (secret != null) {
+                throwIfReplica(secret);
+                if (secret.getReplicationStatus() != null && !secret.getReplicationStatus().isEmpty()) {
+                    return false;
+                }
             }
+            managedReleases.add(secretArn);
+        }
+        boolean credentialsChanged = false;
+        try {
             changeCredentials.run();
-            deleteSecret(secretArn, null, true, region);
+            credentialsChanged = true;
             return true;
+        } finally {
+            synchronized (lockFor(secretArn)) {
+                managedReleases.remove(secretArn);
+                if (credentialsChanged && secretExists) {
+                    deleteSecret(secretArn, null, true, region);
+                }
+            }
+        }
+    }
+
+    private void throwIfManagedRelease(String secretArn) {
+        if (managedReleases.contains(secretArn)) {
+            throw new AwsException("InvalidRequestException",
+                    "The secret's managed credentials are being released. Try again after the release completes.", 400);
         }
     }
 
@@ -705,6 +728,7 @@ public class SecretsManagerService implements ResourceProvider {
         Secret resolved = resolveSecret(secretId, region);
         synchronized (lockFor(resolved.getArn())) {
             Secret secret = resolveSecret(resolved.getArn(), region);
+            throwIfManagedRelease(secret.getArn());
             throwIfReplica(secret);
             // AWS: "You can't delete a primary secret that is replicated to other Regions. You must
             // first delete the replicas." Deleting it here would strand every replica with no primary
@@ -900,6 +924,7 @@ public class SecretsManagerService implements ResourceProvider {
         Secret resolved = resolveSecret(secretId, region);
         synchronized (lockFor(resolved.getArn())) {
             Secret primary = resolveSecret(resolved.getArn(), region);
+            throwIfManagedRelease(primary.getArn());
             throwIfPendingDeletion(primary);
             throwIfReplica(primary);
             List<Secret.ReplicaStatus> statuses = primary.getReplicationStatus() != null
@@ -999,6 +1024,7 @@ public class SecretsManagerService implements ResourceProvider {
         Secret resolved = resolveSecret(secretId, region);
         synchronized (lockFor(resolved.getArn())) {
             Secret primary = resolveSecret(resolved.getArn(), region);
+            throwIfManagedRelease(primary.getArn());
             throwIfReplica(primary);
             List<Secret.ReplicaStatus> statuses = primary.getReplicationStatus() != null
                     ? new ArrayList<>(primary.getReplicationStatus()) : new ArrayList<>();
@@ -1051,7 +1077,9 @@ public class SecretsManagerService implements ResourceProvider {
             }
             if (primary != null) {
                 primary = resolveSecret(primary.getArn(), primaryRegionName);
+                throwIfManagedRelease(primary.getArn());
             }
+            throwIfManagedRelease(replica.getArn());
             replica.setPrimaryRegion(null);
             replica.setLastChangedDate(Instant.now());
             putSecret(region, replica);
