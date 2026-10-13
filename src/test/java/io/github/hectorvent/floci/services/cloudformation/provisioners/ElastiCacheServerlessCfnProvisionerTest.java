@@ -120,6 +120,7 @@ class ElastiCacheServerlessCfnProvisionerTest {
         existing.setSubnetIds(List.of("subnet-1"));
         when(serverless.getServerlessCache("sl")).thenReturn(existing);
         StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
+        r.getAttributes().put("__FlociCreateOnly", "{\"SubnetIds\":[\"subnet-1\"]}");
 
         AwsException error = assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r,
                 props("{\"ServerlessCacheName\":\"sl\",\"Engine\":\"valkey\",\"SubnetIds\":[\"subnet-2\"]}"), ctx("sl")));
@@ -136,6 +137,7 @@ class ElastiCacheServerlessCfnProvisionerTest {
         existing.setKmsKeyId("key-1");
         when(serverless.getServerlessCache("sl")).thenReturn(existing);
         StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
+        r.getAttributes().put("__FlociCreateOnly", "{\"KmsKeyId\":\"key-1\"}");
 
         AwsException error = assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r,
                 props("{\"ServerlessCacheName\":\"sl\",\"Engine\":\"valkey\"}"), ctx("sl")));
@@ -151,6 +153,7 @@ class ElastiCacheServerlessCfnProvisionerTest {
         existing.setServerlessCacheName("sl");
         when(serverless.getServerlessCache("sl")).thenReturn(existing);
         StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
+        r.getAttributes().put("__FlociCreateOnly", "{}");
 
         AwsException error = assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r,
                 props("{\"ServerlessCacheName\":\"sl\",\"Engine\":\"valkey\",\"SnapshotArnsToRestore\":[\"arn:aws:snapshot:1\"]}"),
@@ -167,6 +170,7 @@ class ElastiCacheServerlessCfnProvisionerTest {
         existing.setServerlessCacheName("sl");
         when(serverless.getServerlessCache("sl")).thenReturn(existing);
         StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
+        r.getAttributes().put("__FlociCreateOnly", "{\"ConnectionType\":\"vpc\"}");
 
         AwsException error = assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r,
                 props("{\"ServerlessCacheName\":\"sl\",\"Engine\":\"valkey\",\"ConnectionType\":\"public\"}"),
@@ -183,6 +187,7 @@ class ElastiCacheServerlessCfnProvisionerTest {
         existing.setServerlessCacheName("sl");
         when(serverless.getServerlessCache("sl")).thenReturn(existing);
         StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
+        r.getAttributes().put("__FlociCreateOnly", "{\"NetworkType\":\"ipv4\"}");
 
         AwsException error = assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r,
                 props("{\"ServerlessCacheName\":\"sl\",\"Engine\":\"valkey\",\"NetworkType\":\"ipv6\"}"),
@@ -191,6 +196,38 @@ class ElastiCacheServerlessCfnProvisionerTest {
         assertEquals("CloudFormation cannot update a stack when a custom-named resource requires replacing. "
                 + "Rename sl and update the stack again.", error.getMessage());
         verify(serverless, never()).modifyServerlessCache(any());
+    }
+
+    @Test
+    void serverlessUpdatePreservingCreateOnlySucceedsWhileChangingCreateOnlyIsRejected() throws Exception {
+        ServerlessCache cache = new ServerlessCache();
+        cache.setServerlessCacheName("sl");
+        cache.setArn("arn:aws:elasticache:us-east-1:000000000000:serverlesscache:sl");
+        cache.setStatus("available");
+        cache.setDescription("initial");
+        when(serverless.createServerlessCache(any())).thenReturn(cache);
+        when(serverless.getServerlessCache("sl")).thenReturn(cache);
+        when(serverless.modifyServerlessCache(any())).thenReturn(cache);
+        when(serverless.replaceTags(eq("sl"), any())).thenReturn(cache);
+        StackResource r = resource("AWS::ElastiCache::ServerlessCache", "Sl");
+
+        serverlessProvisioner.provision(r, props("""
+                {"ServerlessCacheName":"sl","Engine":"valkey","ConnectionType":"vpc","Description":"initial"}
+                """), ctx(null));
+        assertEquals("sl", r.getPhysicalId());
+        assertEquals("{\"ConnectionType\":\"vpc\"}", r.getAttributes().get("__FlociCreateOnly"));
+
+        serverlessProvisioner.provision(r, props("""
+                {"ServerlessCacheName":"sl","Engine":"valkey","ConnectionType":"vpc","Description":"updated"}
+                """), ctx("sl"));
+        verify(serverless).modifyServerlessCache(any());
+
+        AwsException error = assertThrows(AwsException.class, () -> serverlessProvisioner.provision(r, props("""
+                {"ServerlessCacheName":"sl","Engine":"valkey","ConnectionType":"public","Description":"updated"}
+                """), ctx("sl")));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                + "Rename sl and update the stack again.", error.getMessage());
     }
 
     @Test
