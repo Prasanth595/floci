@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
+import io.github.hectorvent.floci.services.applicationautoscaling.ApplicationAutoScalingService;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.backup.BackupService;
@@ -19,7 +20,9 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewa
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayRestApiCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayUsagePlanCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayV2CfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayV2DomainCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AppSyncCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.ApplicationAutoScalingCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingGroupCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingScalingPolicyCfnProvisioner;
@@ -187,6 +190,7 @@ final class CfnProvisionerFixture {
         private EventBridgeService eventBridgeService;
         private ApiGatewayService apiGatewayService;
         private ApiGatewayV2Service apiGatewayV2Service;
+        private ApplicationAutoScalingService applicationAutoScalingService;
         private EcrService ecrService;
         private PipesService pipesService;
         private CognitoService cognitoService;
@@ -357,8 +361,12 @@ final class CfnProvisionerFixture {
                 discovered.add(new ApiGatewayApiKeyCfnProvisioner(apiGatewayService));
                 discovered.add(new ApiGatewayUsagePlanCfnProvisioner(apiGatewayService));
                 discovered.add(new ApiGatewayDomainCfnProvisioner(apiGatewayService));
+                discovered.add(new ApiGatewayV2DomainCfnProvisioner(apiGatewayService));
                 discovered.add(new ApiGatewayGatewayResponseCfnProvisioner(apiGatewayService));
                 discovered.add(new ApiGatewayRestApiCfnProvisioner(apiGatewayService, s3Service, objectMapper));
+            }
+            if (applicationAutoScalingService != null) {
+                discovered.add(new ApplicationAutoScalingCfnProvisioner(applicationAutoScalingService, objectMapper));
             }
             if (apiGatewayV2Service != null) {
                 discovered.add(new ApiGatewayV2CfnProvisioner(apiGatewayV2Service, s3Service, objectMapper));
@@ -515,6 +523,11 @@ final class CfnProvisionerFixture {
 
         public Builder apiGateway(ApiGatewayService v) {
             this.apiGatewayService = v;
+            return this;
+        }
+
+        public Builder applicationAutoScaling(ApplicationAutoScalingService v) {
+            this.applicationAutoScalingService = v;
             return this;
         }
 

@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -36,7 +38,6 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -572,7 +573,7 @@ public class CodeArtifactService implements Resettable {
                     "The maximum asset file size is 5 Gigabytes.", 402,
                     resourceFields(assetName, "asset"));
         }
-        String actualSha256 = sha256Hex(assetContent);
+        String actualSha256 = Digests.sha256Hex(assetContent);
         if (!assetSha256.equalsIgnoreCase(actualSha256)) {
             throw validation("assetSHA256 does not match the SHA-256 hash of the uploaded content.");
         }
@@ -685,6 +686,11 @@ public class CodeArtifactService implements Resettable {
         requireNonBlank(repository, "repository");
         requireNonBlank(packageName, "package");
         requireNonBlank(version, "packageVersion");
+        validatePackageToken("package", packageName);
+        validatePackageToken("packageVersion", version);
+        if (namespace != null) {
+            validatePackageToken("namespace", namespace);
+        }
         String owner = effectiveOwner(domainOwner);
         String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
         return packageVersions.getForAccount(owner, key)
@@ -934,6 +940,11 @@ public class CodeArtifactService implements Resettable {
         requireNonBlank(packageName, "package");
         requireNonBlank(version, "packageVersion");
         requireNonBlank(assetName, "asset");
+        validatePackageToken("package", packageName);
+        validatePackageToken("packageVersion", version);
+        if (namespace != null) {
+            validatePackageToken("namespace", namespace);
+        }
         String owner = effectiveOwner(domainOwner);
 
         // Maven, npm, and pypi are metadata-free passthroughs straight to their own sidecar
@@ -994,7 +1005,7 @@ public class CodeArtifactService implements Resettable {
         }
         String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
         String revisionKey = repoId + "/" + (namespace == null ? "" : namespace) + "/" + packageName + "/" + version;
-        String revision = sha256Hex(revisionKey.getBytes(StandardCharsets.UTF_8));
+        String revision = Digests.sha256Hex(revisionKey.getBytes(StandardCharsets.UTF_8));
         if (packageVersionRevision != null && !packageVersionRevision.equals(revision)) {
             throw notFound("Package version '" + version + "' was not found at revision '"
                     + packageVersionRevision + "'.", version, "package-version");
@@ -1066,7 +1077,7 @@ public class CodeArtifactService implements Resettable {
     private static String generateAuthorizationToken() {
         byte[] bytes = new byte[TOKEN_RANDOM_BYTES];
         new SecureRandom().nextBytes(bytes);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        return Base64Url.encode(bytes);
     }
 
     // -------------------------------------------------------------------- tags
@@ -1339,7 +1350,7 @@ public class CodeArtifactService implements Resettable {
                                          String expectedSha256) {
         if (inMemory) {
             byte[] existing = memoryAssetStore.get(assetStoreKey(owner, packageVersionKey, assetName));
-            return existing != null && expectedSha256.equalsIgnoreCase(sha256Hex(existing));
+            return existing != null && expectedSha256.equalsIgnoreCase(Digests.sha256Hex(existing));
         }
         Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
         try (InputStream in = Files.newInputStream(filePath)) {
@@ -1418,8 +1429,8 @@ public class CodeArtifactService implements Resettable {
      */
     private Path resolveAssetPath(String owner, String packageVersionKey, String assetName) {
         return assetRoot.resolve(owner)
-                .resolve(sha256Hex(packageVersionKey.getBytes(StandardCharsets.UTF_8)))
-                .resolve(sha256Hex(assetName.getBytes(StandardCharsets.UTF_8)));
+                .resolve(Digests.sha256Hex(packageVersionKey.getBytes(StandardCharsets.UTF_8)))
+                .resolve(Digests.sha256Hex(assetName.getBytes(StandardCharsets.UTF_8)));
     }
 
     private void deleteAssetRoot() {
@@ -1482,14 +1493,6 @@ public class CodeArtifactService implements Resettable {
         return hashes;
     }
 
-    private static String sha256Hex(byte[] content) {
-        try {
-            return SigV4RequestValidator.sha256Hex(content);
-        } catch (Exception e) {
-            throw new IllegalStateException("JVM does not support SHA-256", e);
-        }
-    }
-
     private static byte[] digest(String algorithm, byte[] content) {
         try {
             return MessageDigest.getInstance(algorithm).digest(content);
@@ -1509,13 +1512,57 @@ public class CodeArtifactService implements Resettable {
     private static String packageVersionKey(String region, String domain, String repository, String format,
                                              String namespace, String packageName, String version) {
         return region + "::" + domain + "::" + repository + "::" + format + "::"
-                + (namespace == null ? "" : namespace) + "::" + packageName + "::" + version;
+                + escapeKeySegment(namespace) + "::" + escapeKeySegment(packageName) + "::"
+                + escapeKeySegment(version);
     }
 
     private static String packageKey(String region, String domain, String repository, String format,
                                       String namespace, String packageName) {
         return region + "::" + domain + "::" + repository + "::" + format + "::"
-                + (namespace == null ? "" : namespace) + "::" + packageName;
+                + escapeKeySegment(namespace) + "::" + escapeKeySegment(packageName);
+    }
+
+    /**
+     * Escapes a namespace/package/version segment before it goes into a {@code ::}-joined storage
+     * key. {@code region}/{@code domain}/{@code repository}/{@code format} never need this: they're
+     * each validated against a pattern that already excludes {@code :}. Namespace, package name, and
+     * version are different, {@link #PACKAGE_TOKEN} only excludes {@code #}, {@code /}, and
+     * whitespace, so {@code ::} itself is a legal character sequence in any of them. Without
+     * escaping, namespace {@code "a::b"} + package {@code "c"} and namespace {@code "a"} + package
+     * {@code "b::c"} join to the identical key, so one package's stored origin configuration (or
+     * published version) silently answers for the other.
+     *
+     * <p>{@code #} is the escape introducer, not {@code \}: every {@code \} becomes {@code #b} and
+     * every {@code :} becomes {@code #c}. {@code #} is itself one of the three characters
+     * {@link #PACKAGE_TOKEN} (and AWS's own {@code PackageName}/{@code PackageNamespace} wire
+     * pattern) forbids, so no namespace/package/version ever validated through this service, before
+     * or after this method existed, can contain one. An escaped segment therefore never collides
+     * with a pre-existing stored key built from a segment that happened to contain a literal
+     * backslash: that old raw key cannot contain {@code #}, and this method's output only does when
+     * it actually escaped something. For the overwhelming majority of packages, whose
+     * namespace/name/version never contain a backslash or colon, this returns the input unchanged,
+     * so the key built from those segments is byte-identical to the one built before this method
+     * existed.
+     */
+    private static String escapeKeySegment(String value) {
+        if (value == null) {
+            return "";
+        }
+        if (value.indexOf(':') < 0 && value.indexOf('\\') < 0) {
+            return value;
+        }
+        StringBuilder escaped = new StringBuilder(value.length() + 4);
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\\') {
+                escaped.append("#b");
+            } else if (c == ':') {
+                escaped.append("#c");
+            } else {
+                escaped.append(c);
+            }
+        }
+        return escaped.toString();
     }
 
     private static AwsException validation(String message) {

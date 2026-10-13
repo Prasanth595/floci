@@ -1113,6 +1113,16 @@ class S3IntegrationTest {
                 .header("Content-Length", equalTo("20"))
                 .header("x-amz-checksum-crc64nvme", notNullValue());
             given()
+                .header("Range", "bytes=0-")
+                .header("x-amz-checksum-mode", "ENABLED")
+            .when()
+                .head("/head-range-bucket/greeting.txt")
+            .then()
+                .statusCode(200)
+                .header("Content-Length", equalTo("20"))
+                .header("x-amz-checksum-crc64nvme", notNullValue())
+                .header("x-amz-checksum-type", equalTo("FULL_OBJECT"));
+            given()
                 .header("Range", "bytes=50-")
             .when()
                 .head("/head-range-bucket/greeting.txt")
@@ -1188,54 +1198,81 @@ class S3IntegrationTest {
             .body(hasXPath("/Error/Message", equalTo("The requested range is not satisfiable")))
             .body(hasXPath("/Error/RangeRequested", equalTo("bytes=50-100")))
             .body(hasXPath("/Error/ActualObjectSize", equalTo("20")));
+
+        // A suffix of no bytes cannot be satisfied either.
+        given()
+            .header("Range", "bytes=-0")
+        .when()
+            .get("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(416)
+            .header("Content-Range", equalTo("bytes */20"))
+            .body(hasXPath("/Error/Code", equalTo("InvalidRange")))
+            .body(hasXPath("/Error/RangeRequested", equalTo("bytes=-0")));
     }
 
     @Test
     @Order(31)
-    void getObjectWithMalformedRangeNoDash() {
-        given()
-            .header("Range", "bytes=0")
-        .when()
-            .get("/test-bucket/greeting.txt")
-        .then()
-            .statusCode(416)
-            .body(containsString("InvalidRange"));
+    void getObjectIgnoresARangeThatIsNotOneValidRange() {
+        // S3 answers each of these as a GetObject without a Range, with the whole object and 200.
+        for (String invalid : List.of("bytes=0", "bytes=-", "bytes=abc-def", "bytes=-1-4", "bytes=1-0",
+                "bytes=-1-", "bytes=0--1", "bytes=0-1,3-4,7-9", "0-1")) {
+            given()
+                .header("Range", invalid)
+            .when()
+                .get("/test-bucket/greeting.txt")
+            .then()
+                .statusCode(200)
+                .header("Content-Length", equalTo("20"))
+                .header("Content-Range", nullValue())
+                .header("Accept-Ranges", equalTo("bytes"))
+                .body(equalTo("Hello World from S3!"));
+        }
     }
 
     @Test
     @Order(32)
-    void getObjectWithMalformedRangeEmptySuffix() {
-        given()
-            .header("Range", "bytes=-")
+    void getObjectRangeCoveringTheWholeObjectCarriesItsChecksum() {
+        String wholeChecksum = given()
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/greeting.txt")
         .then()
-            .statusCode(416)
-            .body(containsString("InvalidRange"));
-    }
+            .statusCode(200)
+            .extract().header("x-amz-checksum-crc64nvme");
+        assertNotNull(wholeChecksum);
 
-    @Test
-    @Order(33)
-    void getObjectWithMalformedRangeNonNumeric() {
+        // The whole of an object stored in one request is its one part, so a range covering it gets
+        // the object's checksum, as a range aligned with a single part gets that part's.
+        for (String whole : List.of("bytes=0-19", "bytes=0-100", "bytes=-50", "bytes=0-")) {
+            given()
+                .header("Range", whole)
+                .header("x-amz-checksum-mode", "ENABLED")
+            .when()
+                .get("/test-bucket/greeting.txt")
+            .then()
+                .statusCode(206)
+                .header("Content-Range", equalTo("bytes 0-19/20"))
+                .header("x-amz-checksum-crc64nvme", equalTo(wholeChecksum))
+                .header("x-amz-checksum-type", equalTo("FULL_OBJECT"))
+                .body(equalTo("Hello World from S3!"));
+        }
         given()
-            .header("Range", "bytes=abc-def")
+            .header("Range", "bytes=0-19")
         .when()
             .get("/test-bucket/greeting.txt")
         .then()
-            .statusCode(416)
-            .body(containsString("InvalidRange"));
-    }
-
-    @Test
-    @Order(34)
-    void getObjectWithMalformedRangeNegativeStart() {
+            .statusCode(206)
+            .header("x-amz-checksum-crc64nvme", nullValue());
         given()
-            .header("Range", "bytes=-1-4")
+            .header("Range", "bytes=0-18")
+            .header("x-amz-checksum-mode", "ENABLED")
         .when()
             .get("/test-bucket/greeting.txt")
         .then()
-            .statusCode(416)
-            .body(containsString("InvalidRange"));
+            .statusCode(206)
+            .header("x-amz-checksum-crc64nvme", nullValue())
+            .header("x-amz-checksum-type", nullValue());
     }
 
     @Test

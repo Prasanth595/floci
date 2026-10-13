@@ -618,7 +618,7 @@ public class CloudFrontServingController {
                 closeUnsent(read);
                 yield rangeNotSatisfiable(obj.getSize());
             }
-            case WHOLE, INVALID -> new OriginResponse(
+            case WHOLE -> new OriginResponse(
                     200, contentType(obj), null, read.body(), obj.getSize(), s3ObjectHeaders(obj));
         };
     }
@@ -634,7 +634,7 @@ public class CloudFrontServingController {
             case PART -> new OriginResponse(
                     200, contentType(meta), null, resolution.range().length(), s3ObjectHeaders(meta));
             case NOT_SATISFIABLE -> rangeNotSatisfiable(meta.getSize());
-            case WHOLE, INVALID -> new OriginResponse(
+            case WHOLE -> new OriginResponse(
                     200, contentType(meta), null, meta.getSize(), s3ObjectHeaders(meta));
         };
     }

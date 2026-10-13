@@ -80,7 +80,8 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
             resource.getAttributes().remove("Arn");
         }
         ProvisionContext cleanupContext = new ProvisionContext(ctx.engine(), ctx.region(), ctx.accountId(),
-                ctx.stackName(), priorIsStub ? priorPhysicalId : prior == null ? null : encode(prior), ctx.progress());
+                ctx.stackName(), priorIsStub ? priorPhysicalId : prior == null ? null : encode(prior),
+                ctx.progress(), ctx.priorProperties());
         withProjection(resource, projected -> {
             ReplacementCleanup.record(projected, cleanupContext, attributesBefore);
             return null;

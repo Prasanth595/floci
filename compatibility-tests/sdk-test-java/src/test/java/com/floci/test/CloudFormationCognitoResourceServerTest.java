@@ -22,7 +22,6 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.ResourceSer
 import software.amazon.awssdk.services.cognitoidentityprovider.model.ResourceServerType;
 
 import java.util.List;
-import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -433,7 +432,7 @@ class CloudFormationCognitoResourceServerTest {
     }
 
     private void awaitStatus(String expected) throws InterruptedException {
-        await(() -> {
+        TestFixtures.await(() -> {
             Stack stack = cfn.describeStacks(r -> r.stackName(stackId)).stacks().get(0);
             String status = stack.stackStatusAsString();
             if (expected.equals(status)) {
@@ -444,7 +443,7 @@ class CloudFormationCognitoResourceServerTest {
                         + stack.stackStatusReason() + failedEvents());
             }
             return false;
-        }, expected);
+        }, stackName, expected, TIMEOUT_NANOS, TestFixtures.isRealAws() ? 2_000 : 100);
     }
 
     private String failedEvents() {
@@ -460,7 +459,7 @@ class CloudFormationCognitoResourceServerTest {
             return;
         }
         cfn.deleteStack(r -> r.stackName(stackId));
-        await(() -> {
+        TestFixtures.await(() -> {
             try {
                 List<Stack> stacks = cfn.describeStacks(r -> r.stackName(stackId)).stacks();
                 if (stacks.isEmpty()) {
@@ -478,19 +477,9 @@ class CloudFormationCognitoResourceServerTest {
                 }
                 throw e;
             }
-        }, "stack deletion");
+        }, stackName, "stack deletion", TIMEOUT_NANOS, TestFixtures.isRealAws() ? 2_000 : 100);
         stackId = null;
     }
 
-    private void await(BooleanSupplier condition, String expected) throws InterruptedException {
-        long deadline = System.nanoTime() + TIMEOUT_NANOS;
-        long pollMillis = TestFixtures.isRealAws() ? 2_000 : 100;
-        while (System.nanoTime() < deadline) {
-            if (condition.getAsBoolean()) {
-                return;
-            }
-            Thread.sleep(pollMillis);
-        }
-        throw new AssertionError(stackName + " timed out waiting for " + expected);
-    }
+
 }

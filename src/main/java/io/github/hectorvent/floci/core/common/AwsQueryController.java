@@ -113,6 +113,7 @@ public class AwsQueryController {
             "TagSAMLProvider", "UntagSAMLProvider", "ListSAMLProviderTags",
             "GenerateServiceLastAccessedDetails", "GetServiceLastAccessedDetails",
             "GetServiceLastAccessedDetailsWithEntities", "ListPoliciesGrantingServiceAccess",
+            "GenerateOrganizationsAccessReport", "GetOrganizationsAccessReport",
             "UploadServerCertificate", "GetServerCertificate", "UpdateServerCertificate",
             "DeleteServerCertificate", "ListServerCertificates",
             "TagServerCertificate", "UntagServerCertificate", "ListServerCertificateTags",
@@ -161,7 +162,8 @@ public class AwsQueryController {
             "DescribeScalingActivities",
             "DescribeAutoScalingNotificationTypes", "DescribeTerminationPolicyTypes",
             "DescribeAdjustmentTypes", "DescribeAccountLimits",
-            "DescribeLifecycleHookTypes", "DescribeMetricCollectionTypes"
+            "DescribeLifecycleHookTypes", "DescribeMetricCollectionTypes",
+            "EnableMetricsCollection", "DisableMetricsCollection"
     );
 
     private static final Set<String> ELB_V2_ACTIONS = Set.of(

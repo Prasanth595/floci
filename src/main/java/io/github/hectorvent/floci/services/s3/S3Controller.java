@@ -79,6 +79,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
@@ -847,6 +848,7 @@ public class S3Controller {
                     return handleUploadPartCopy(
                             copySource, bucket, key, uploadId, partNumber, httpHeaders, authorization);
                 }
+                requireDeclaredSizeWithin(httpHeaders, contentEncoding, contentSha256, S3Service.MAX_PART_SIZE);
                 Part part = s3Service.storePart(bucket, key, uploadId, partNumber,
                         decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
                         uploadChecksums(httpHeaders, uriInfo),
@@ -890,6 +892,7 @@ public class S3Controller {
             String sseCustomerKeyMd5 = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5");
             String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
             s3Service.authorizePutObject(bucket, key, authorization);
+            requireDeclaredSizeWithin(httpHeaders, contentEncoding, contentSha256, S3Service.MAX_PUT_OBJECT_SIZE);
             S3Object obj = s3Service.putObject(bucket, key,
                     decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
                     uploadChecksums(httpHeaders, uriInfo), contentType, extractUserMetadata(httpHeaders, uriInfo),
@@ -1126,7 +1129,7 @@ public class S3Controller {
             emitCloudTrailEvent("GetObject", bucket, key, 0L, totalSize, null, null);
             return fullObjectResponse(obj, body, overrides, includeChecksum);
         }
-        if (resolution.outcome() != ByteRange.Outcome.PART) {
+        if (resolution.outcome() == ByteRange.Outcome.NOT_SATISFIABLE) {
             emitCloudTrailEvent("GetObject", bucket, key, 0L, 0L,
                     "InvalidRange", ByteRange.NOT_SATISFIABLE_MESSAGE);
             return invalidRangeResponse(rangeHeader, totalSize);
@@ -1150,9 +1153,22 @@ public class S3Controller {
         if (obj.getVersionId() != null) {
             resp.header("x-amz-version-id", obj.getVersionId());
         }
-        // includeChecksum=false: the stored checksum covers the whole object, not this range.
-        appendObjectHeaders(resp, obj, overrides, false);
+        appendObjectHeaders(resp, obj, overrides, includeChecksum && rangeCarriesObjectChecksum(range, obj));
         return resp.build();
+    }
+
+    /**
+     * Whether the stored checksum is the checksum of {@code range}: S3 returns a part's checksum for a
+     * range aligned with a single part, and the whole of an object stored in one request, or completed
+     * from one part, is that part, whose checksum a full-object checksum of the object is. A composite
+     * checksum is not that of any one part, nor is a checksum of an object of several parts, so their
+     * ranges get none.
+     */
+    private static boolean rangeCarriesObjectChecksum(ByteRange range, S3Object obj) {
+        S3Checksum checksum = obj.getChecksum();
+        return range.first() == 0 && range.last() == obj.getSize() - 1
+                && (obj.getParts() == null || obj.getParts().size() <= 1)
+                && checksum != null && checksum.getChecksumType() != ChecksumType.COMPOSITE;
     }
 
     private Response websiteObjectResponse(S3Service.ObjectRead read, ResponseHeaderOverrides overrides) {
@@ -1249,14 +1265,14 @@ public class S3Controller {
             // "If the Range is satisfiable, only the ContentLength is affected in the response. If the
             // Range is not satisfiable, S3 returns a 416." A Range that is not one valid range is ignored.
             long contentLength = obj.getSize();
-            boolean ranged = false;
+            boolean checksumDescribesRange = true;
             String rangeHeader = httpHeaders.getHeaderString("Range");
             if (ByteRange.inBytes(rangeHeader) && ByteRange.rangeApplies(
                     httpHeaders.getHeaderString("If-Range"), obj.getETag(), obj.getLastModified())) {
                 ByteRange.Resolution resolution = ByteRange.resolve(rangeHeader, obj.getSize());
                 if (resolution.outcome() == ByteRange.Outcome.PART) {
                     contentLength = resolution.range().length();
-                    ranged = true;
+                    checksumDescribesRange = rangeCarriesObjectChecksum(resolution.range(), obj);
                 } else if (resolution.outcome() == ByteRange.Outcome.NOT_SATISFIABLE) {
                     emitCloudTrailEvent("HeadObject", bucket, key, 0L, 0L,
                             "InvalidRange", ByteRange.NOT_SATISFIABLE_MESSAGE);
@@ -1272,8 +1288,8 @@ public class S3Controller {
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
-            // As on a ranged GetObject, the stored checksum covers the whole object, not the range.
-            boolean includeChecksum = !ranged
+            // As on a ranged GetObject, the stored checksum is sent only for a range it describes.
+            boolean includeChecksum = checksumDescribesRange
                     && "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, uriInfo, "x-amz-checksum-mode"));
             appendObjectHeaders(resp, obj, overrides, includeChecksum);
             emitCloudTrailEvent("HeadObject", bucket, key, 0L, obj.getSize(), null, null);
@@ -1347,6 +1363,9 @@ public class S3Controller {
                 .header("Access-Control-Allow-Origin", cors.allowedOrigin())
                 .header("Access-Control-Allow-Methods", String.join(", ", cors.allowedMethods()));
 
+        if (!"*".equals(cors.allowedOrigin())) {
+            builder.header("Access-Control-Allow-Credentials", "true");
+        }
         if (cors.maxAgeSeconds() > 0) {
             builder.header("Access-Control-Max-Age", cors.maxAgeSeconds());
         }
@@ -1591,20 +1610,33 @@ public class S3Controller {
         S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                 s3Service.isAuthEnforced(), httpHeaders, uriInfo);
         s3Service.authorizeSignedRequest(authorization);
+        // A blank header counts as absent, as it does in IamEnforcementFilter.filter(), so a presigned
+        // request cannot shed its query credential, and with it every per-key check, by adding one.
+        String authorizationHeader = httpHeaders.getHeaderString("Authorization");
+        if (authorizationHeader != null && authorizationHeader.isBlank()) {
+            authorizationHeader = null;
+        }
+        String iamCredential = IamEnforcementFilter.requestAuthorization(
+                authorizationHeader, uriInfo.getQueryParameters());
         List<XmlParser.KeyVersion> authorizedEntries = new ArrayList<>();
         List<S3Service.DeleteError> authorizationErrors = new ArrayList<>();
         for (XmlParser.KeyVersion entry : entries) {
             try {
+                authorizeDeleteEntryIdentity(iamCredential, bucket, entry);
                 s3Service.authorizeDeleteObject(bucket, entry.key(), entry.versionId(), authorization);
                 authorizeDeleteETagRead(bucket, entry.key(), entry.eTag(), authorization);
                 if (bypass && s3Service.isGovernanceRetentionActive(
                         bucket, entry.key(), entry.versionId())) {
+                    // The bypass is a permission of its own, so IAM evaluates it against the caller's
+                    // policies as it does the delete, not only the bucket-policy check that follows.
+                    authorizeEntryIdentity(iamCredential, "s3:BypassGovernanceRetention", bucket, entry.key());
                     s3Service.authorizeObjectWrite(bucket, entry.key(),
                             "s3:BypassGovernanceRetention", authorization);
                 }
                 authorizedEntries.add(entry);
             } catch (AwsException e) {
-                authorizationErrors.add(new S3Service.DeleteError(entry.key(), e.getErrorCode(), e.getMessage()));
+                authorizationErrors.add(new S3Service.DeleteError(
+                        entry.key(), entry.versionId(), e.getErrorCode(), e.getMessage()));
             }
         }
 
@@ -1629,35 +1661,75 @@ public class S3Controller {
             }
         }
         for (S3Service.DeleteError e : authorizationErrors) {
-            builder.start("Error")
-                   .elem("Key", e.key())
-                   .elem("Code", e.code())
-                   .elem("Message", e.message())
-                   .end("Error");
+            appendDeleteError(builder, e);
         }
         for (S3Service.DeleteError e : result.errors()) {
-            builder.start("Error")
-                   .elem("Key", e.key())
-                   .elem("Code", e.code())
-                   .elem("Message", e.message())
-                   .end("Error");
+            appendDeleteError(builder, e);
         }
         builder.end("DeleteResult");
         return Response.ok(builder.build()).type(MediaType.APPLICATION_XML).build();
+    }
+
+    // An entry naming a version reports it back, so a batch naming several versions of one key
+    // says which of them failed.
+    private static void appendDeleteError(XmlBuilder builder, S3Service.DeleteError error) {
+        builder.start("Error").elem("Key", error.key());
+        if (error.versionId() != null) {
+            builder.elem("VersionId", error.versionId());
+        }
+        builder.elem("Code", error.code())
+               .elem("Message", error.message())
+               .end("Error");
     }
 
     // A conditional delete against an ETag reveals whether the object still has it, so S3 requires
     // s3:GetObject as well as s3:DeleteObject. The existence check (If-Match: *) needs only the delete.
     private void authorizeDeleteETagRead(String bucket, String key, String ifMatch,
                                          S3Service.RequestAuthorization authorization) {
-        if (ifMatch == null) {
-            return;
-        }
-        String value = ifMatch.trim();
-        if (value.equals("*") || value.equals("\"*\"")) {
+        if (!isETagCondition(ifMatch)) {
             return;
         }
         s3Service.authorizeGetObject(bucket, key, null, authorization);
+    }
+
+    private static boolean isETagCondition(String ifMatch) {
+        if (ifMatch == null) {
+            return false;
+        }
+        String value = ifMatch.trim();
+        return !value.equals("*") && !value.equals("\"*\"");
+    }
+
+    /**
+     * Evaluates the caller's identity policies for one DeleteObjects entry, which IamEnforcementFilter
+     * cannot do: S3 has no s3:DeleteObjects action, the keys arrive only in the request body, and a
+     * denial answers that one key with an {@code <Error>} rather than refusing the whole request.
+     * Each entry needs s3:DeleteObject, or s3:DeleteObjectVersion when it names a version, plus
+     * s3:GetObject when it carries an ETag condition.
+     *
+     * <p>No resource-policy decision is passed, so the filter resolves the bucket policy itself, with
+     * its own global condition keys, as it does for a single-key delete. S3's error for a denied entry
+     * reads "Access Denied", not the filter's message for a whole-request denial.
+     */
+    private void authorizeDeleteEntryIdentity(String iamCredential, String bucket, XmlParser.KeyVersion entry) {
+        String action = entry.versionId() == null ? "s3:DeleteObject" : "s3:DeleteObjectVersion";
+        authorizeEntryIdentity(iamCredential, action, bucket, entry.key());
+        if (isETagCondition(entry.eTag())) {
+            authorizeEntryIdentity(iamCredential, "s3:GetObject", bucket, entry.key());
+        }
+    }
+
+    /** Evaluates one action on one DeleteObjects entry's object, answering a denial as S3 does per key. */
+    private void authorizeEntryIdentity(String iamCredential, String action, String bucket, String key) {
+        String resource = S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key);
+        try {
+            iamEnforcementFilter.authorizeAdditionalResource(iamCredential, action, resource);
+        } catch (AwsException e) {
+            if ("AccessDenied".equals(e.getErrorCode())) {
+                throw new AwsException("AccessDenied", "Access Denied", 403);
+            }
+            throw e;
+        }
     }
 
     private Response handleListParts(String bucket, String key, String uploadId,
@@ -2094,27 +2166,55 @@ public class S3Controller {
      * The object data of an upload body, read as it arrives. A streaming payload, and any aws-chunked
      * body that declares {@code x-amz-trailer}, is decoded from its framing on the way through so the
      * trailing checksum can be checked. A Content-Encoding naming aws-chunked without either of those
-     * does not guarantee framing, so that body is read whole and kept as sent when it does not decode.
+     * does not guarantee framing, so that body is read whole, failing with EntityTooLarge past the most
+     * one array holds, and kept as sent when it does not decode.
      */
     private InputStream decodedBody(InputStream body, String contentEncoding, String contentSha256,
                                     String trailer) {
         InputStream raw = body != null ? body : InputStream.nullInputStream();
-        boolean awsChunked = contentEncoding != null
-                && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked");
+        boolean awsChunked = namesAwsChunked(contentEncoding);
         if (declaresStreamingPayload(contentSha256) || (awsChunked && trailer != null && !trailer.isBlank())) {
             return new AwsChunkedInputStream(raw, trailerChecksumAlgorithm(trailer));
         }
         if (awsChunked) {
-            return new ByteArrayInputStream(decodeAwsChunked(readWholeBody(raw), contentEncoding, contentSha256));
+            byte[] whole = S3Service.readWithin(raw, S3Service.MAX_IN_MEMORY_OBJECT_SIZE, readSoFar -> LOG.warnv(
+                    "Rejecting an aws-chunked body of more than {0} bytes: sent without a streaming x-amz-content-sha256 or an x-amz-trailer, it is read whole to be decoded",
+                    S3Service.MAX_IN_MEMORY_OBJECT_SIZE));
+            return new ByteArrayInputStream(decodeAwsChunked(whole, contentEncoding, contentSha256));
         }
         return raw;
+    }
+
+    /**
+     * Rejects an upload that declares more data than {@code maxSize} before any of it is read. An
+     * aws-chunked body declares its data in {@code x-amz-decoded-content-length}, since its
+     * Content-Length also counts the framing. A body that declares no size, or a size that is not a
+     * number, is held to the limit as it is read.
+     */
+    static void requireDeclaredSizeWithin(HttpHeaders httpHeaders, String contentEncoding, String contentSha256,
+                                          long maxSize) {
+        boolean awsChunked = declaresStreamingPayload(contentSha256) || namesAwsChunked(contentEncoding);
+        String declared = httpHeaders.getHeaderString(awsChunked ? "x-amz-decoded-content-length" : "Content-Length");
+        if (declared == null) {
+            return;
+        }
+        long size;
+        try {
+            size = Long.parseLong(declared.trim());
+        } catch (NumberFormatException ignored) {
+            // Not a size, so nothing is known before the body is read, which is held to the limit as it arrives.
+            return;
+        }
+        if (size > maxSize) {
+            throw S3Service.entityTooLarge(size, maxSize);
+        }
     }
 
     private static String trailerHeader(HttpHeaders httpHeaders, UriInfo uriInfo) {
         return resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-trailer");
     }
 
-    /** The whole of a body that is small by nature, such as a subresource's XML, or must be read whole to be decoded. */
+    /** The whole of a body that is small by nature, such as a subresource's XML. */
     private static byte[] readWholeBody(InputStream body) {
         if (body == null) {
             return new byte[0];
@@ -2132,8 +2232,7 @@ public class S3Controller {
      */
     private byte[] decodeAwsChunked(byte[] body, String contentEncoding, String contentSha256) {
         boolean declaresStreamingPayload = declaresStreamingPayload(contentSha256);
-        boolean isAwsChunked = declaresStreamingPayload || (contentEncoding != null
-                && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked"));
+        boolean isAwsChunked = declaresStreamingPayload || namesAwsChunked(contentEncoding);
         if (!isAwsChunked) {
             return body;
         }
@@ -2186,6 +2285,11 @@ public class S3Controller {
             LOG.debugv("Failed to decode aws-chunked body, using raw: {0}", e.getMessage());
             return body;
         }
+    }
+
+    /** Whether a Content-Encoding names aws-chunked, alone or with other codings. */
+    private static boolean namesAwsChunked(String contentEncoding) {
+        return contentEncoding != null && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked");
     }
 
     /** Whether x-amz-content-sha256 declares a streaming payload, which is always aws-chunked. */
@@ -2720,9 +2824,9 @@ public class S3Controller {
         appendLockHeaders(resp, obj);
     }
 
-    // includeChecksum must be false for partial (206) responses: obj.getChecksum() is the
-    // whole-object checksum, which does not match the range bytes returned. SDKs that
-    // validate it against the received body fail. Real S3 omits it on ranged responses.
+    // includeChecksum must be false for a range the stored checksum does not describe:
+    // obj.getChecksum() is the whole-object checksum, which does not match the range bytes
+    // returned. SDKs that validate it against the received body fail. Real S3 omits it there.
     private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj, ResponseHeaderOverrides overrides,
                                      boolean includeChecksum) {
         if (obj.getStorageClass() != null) {
@@ -3332,8 +3436,15 @@ public class S3Controller {
             xmlBuilder.elem("Condition", condition);
         }
         // S3 InvalidArgument responses carry ArgumentName and ArgumentValue so the SDK can
-        // surface which input was rejected. They travel through AwsException.extendedData.
+        // surface which input was rejected, and EntityTooSmall and EntityTooLarge the proposed and
+        // allowed sizes. They travel through AwsException.extendedData.
         if (e.getExtendedData() != null) {
+            for (String sizeField : List.of("ProposedSize", "MinSizeAllowed", "MaxSizeAllowed")) {
+                Object size = e.getExtendedData().get(sizeField);
+                if (size != null) {
+                    xmlBuilder.elem(sizeField, size.toString());
+                }
+            }
             Object resource = e.getExtendedData().get("Resource");
             if (resource != null) {
                 xmlBuilder.elem("Resource", resource.toString());
@@ -3665,8 +3776,11 @@ public class S3Controller {
         }
 
         String accessKeyId = credential.split("/", 2)[0];
-        Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(
-                iamService, accessKeyId, fields.get("x-amz-security-token"));
+        String sessionToken = fields.get("x-amz-security-token");
+        Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(iamService, accessKeyId, sessionToken);
+        if (secretKey.isEmpty() && S3PostPolicySigner.isExpiredSession(iamService, accessKeyId, sessionToken)) {
+            throw new AwsException("ExpiredToken", S3PostPolicySigner.EXPIRED_TOKEN_MESSAGE, 400);
+        }
         if (secretKey.isEmpty()
                 || !S3PostPolicySigner.verifySignature(policy, credential, signature, secretKey.get())) {
             throw new AwsException("SignatureDoesNotMatch",
@@ -3677,7 +3791,7 @@ public class S3Controller {
         // Route through the same bucket-policy/ACL check every other S3 write path uses, so this
         // path automatically inherits any future strengthening there too.
         s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject",
-                new S3Service.RequestAuthorization(true, accessKeyId, fields.get("x-amz-security-token")));
+                new S3Service.RequestAuthorization(true, accessKeyId, sessionToken));
 
         validatePolicyExpiration(policy);
         validatePolicyConditions(policy, bucket, fields, contentLength);
@@ -3742,9 +3856,7 @@ public class S3Controller {
                 actualValue = fields.get(lookupKey);
             }
             if (actualValue == null || !actualValue.equals(expectedValue)) {
-                throw new AwsException("AccessDenied",
-                        "Invalid according to Policy: Policy Condition failed: "
-                                + "[\"eq\", \"$" + fieldName + "\", \"" + expectedValue + "\"]", 403);
+                throw policyConditionFailed("[\"eq\", \"$" + fieldName + "\", \"" + expectedValue + "\"]");
             }
         }
     }
@@ -3756,11 +3868,13 @@ public class S3Controller {
         }
         String operator = condition.get(0).asText().toLowerCase(Locale.ROOT);
         if ("content-length-range".equals(operator)) {
-            long min = condition.get(1).asLong();
-            long max = condition.get(2).asLong();
-            if (contentLength < min || contentLength > max) {
-                throw new AwsException("EntityTooLarge",
-                        "Your proposed upload exceeds the maximum allowed size.", 400);
+            long min = contentLengthBound(condition, 1);
+            long max = contentLengthBound(condition, 2);
+            if (contentLength < min) {
+                throw S3Service.entityTooSmall(contentLength, min);
+            }
+            if (contentLength > max) {
+                throw S3Service.entityTooLarge(contentLength, max);
             }
         } else if ("eq".equals(operator)) {
             String fieldRef = condition.get(1).asText();
@@ -3768,9 +3882,7 @@ public class S3Controller {
             String fieldName = fieldRef.startsWith("$") ? fieldRef.substring(1) : fieldRef;
             String actualValue = resolveFieldValue(fieldName.toLowerCase(Locale.ROOT), bucket, fields);
             if (actualValue == null || !actualValue.equals(expectedValue)) {
-                throw new AwsException("AccessDenied",
-                        "Invalid according to Policy: Policy Condition failed: "
-                                + "[\"eq\", \"$" + fieldName + "\", \"" + expectedValue + "\"]", 403);
+                throw policyConditionFailed("[\"eq\", \"$" + fieldName + "\", \"" + expectedValue + "\"]");
             }
         } else if ("starts-with".equals(operator)) {
             String fieldRef = condition.get(1).asText();
@@ -3778,11 +3890,43 @@ public class S3Controller {
             String fieldName = fieldRef.startsWith("$") ? fieldRef.substring(1) : fieldRef;
             String actualValue = resolveFieldValue(fieldName.toLowerCase(Locale.ROOT), bucket, fields);
             if (actualValue == null || !actualValue.startsWith(prefix)) {
-                throw new AwsException("AccessDenied",
-                        "Invalid according to Policy: Policy Condition failed: "
-                                + "[\"starts-with\", \"$" + fieldName + "\", \"" + prefix + "\"]", 403);
+                throw policyConditionFailed("[\"starts-with\", \"$" + fieldName + "\", \"" + prefix + "\"]");
             }
         }
+    }
+
+    /**
+     * One bound of a content-length-range condition: a number that fits in a long, any fraction dropped,
+     * or a string holding a whole number that does. Any other bound fails the condition, as S3 answers
+     * {@code ["content-length-range", "test", "10"]}.
+     */
+    private static long contentLengthBound(JsonNode condition, int index) {
+        JsonNode bound = condition.get(index);
+        if (bound.isNumber() && bound.canConvertToLong()) {
+            return bound.longValue();
+        }
+        if (bound.isTextual()) {
+            try {
+                return Long.parseLong(bound.textValue());
+            } catch (NumberFormatException e) {
+                throw policyConditionFailed(policyConditionText(condition));
+            }
+        }
+        throw policyConditionFailed(policyConditionText(condition));
+    }
+
+    /** A policy condition as S3 quotes it in an error: its elements as JSON, comma-separated. */
+    private static String policyConditionText(JsonNode condition) {
+        StringJoiner elements = new StringJoiner(", ", "[", "]");
+        for (JsonNode element : condition) {
+            elements.add(element.toString());
+        }
+        return elements.toString();
+    }
+
+    private static AwsException policyConditionFailed(String condition) {
+        return new AwsException("AccessDenied",
+                "Invalid according to Policy: Policy Condition failed: " + condition, 403);
     }
 
     private static String resolveFieldValue(String fieldName, String bucket, Map<String, String> fields) {
@@ -4218,8 +4362,7 @@ public class S3Controller {
         if (contentSha256 != null && contentSha256.startsWith("STREAMING-")) {
             return true;
         }
-        String contentEncoding = httpHeaders.getHeaderString("Content-Encoding");
-        if (contentEncoding != null && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked")) {
+        if (namesAwsChunked(httpHeaders.getHeaderString("Content-Encoding"))) {
             return true;
         }
         if (httpHeaders.getHeaderString("x-amz-decoded-content-length") != null

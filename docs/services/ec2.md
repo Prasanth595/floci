@@ -220,7 +220,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 
 | Action | Description |
 |--------|-------------|
-| CreateVpc | Creates a VPC with the requested CIDR block. |
+| CreateVpc | Creates a VPC with the requested CIDR block. `InstanceTenancy` accepts `default` or `dedicated`; `host` is rejected with `InvalidParameterValue`, as on AWS. |
 | DescribeVpcs | Lists or returns stored VPCs. |
 | DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, or an attached internet gateway. Instances, NAT gateways and other subnet-resident resources are not checked. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
@@ -615,6 +615,13 @@ allocated address.
 | DescribeRegions | Returns the regions known to the local EC2 service. |
 | DescribeAccountAttributes | Returns local account-level EC2 attributes. |
 
+A zone id has AWS's shape, a short region prefix and `-az<n>`: `use1-az1` in `us-east-1`, `apne1-az1`
+in `ap-northeast-1`, `usgw1-az1` in `us-gov-west-1`. On AWS the pairing of a zone name with a zone id
+differs per account; Floci always pairs zone `a` with `az1`, `b` with `az2`, and so on. Subnets, VPC
+flow-log records and EFS mount targets report the same id for the same zone. The ISO and EUSC
+regions, for which AWS publishes no zone id, keep the whole region as the prefix
+(`us-iso-east-1-az1`).
+
 ### Instance Types
 
 | Action | Description |
@@ -781,6 +788,13 @@ Validation matches AWS behavior:
 | DescribeSpotInstanceRequests | Lists spot instance requests, optionally filtered by id. |
 | CancelSpotInstanceRequests | Cancels the named spot instance requests, returning each id with its new state. |
 | DescribeSpotPriceHistory | Returns synthetic spot price history for known instance types across modeled availability zones. |
+
+`RequestSpotInstances` preserves the original base64 user data in the Spot request
+and launched instance. Binary and gzip payloads remain intact when described or
+retrieved through IMDS; script execution uses the same bounded decoder as
+`RunInstances`. Invalid base64, oversized payloads and malformed gzip return
+`InvalidParameterValue` before launch. Older stored Spot requests without the
+original encoding return base64 derived from their saved UTF-8 text.
 
 Spot prices returned by `DescribeSpotPriceHistory` are synthetic and derived deterministically from instance type specifications: `((vcpu * 0.0016) + (memoryGiB * 0.0012)) * (1.0 + (azOffset * 0.03))`, formatted to six decimal places. They bear no relation to real AWS spot prices and are intended for testing cost-aware schedulers rather than spend estimation. Supported filters are `availability-zone`, `availability-zone-id`, `instance-type`, `product-description`, `spot-price`, and `timestamp`. Pagination is supported via `MaxResults` and `NextToken`.
 
