@@ -91,6 +91,18 @@ class DynamoDbTtlVisibilityIntegrationTest {
     }
 
     @Test
+    void legacyTtlQueryFilterUsesTheFilteredCount() {
+        String request = """
+                {"TableName":"%s","KeyConditions":{"pk":{"ComparisonOperator":"EQ",
+                 "AttributeValueList":[{"S":"expired"}]}},
+                 "QueryFilter":{"ttl":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"%d"}]}},
+                 "Select":"COUNT"}
+                """.formatted(tableName, now);
+        call("Query", request).statusCode(200)
+                .body("Count", equalTo(0)).body("ScannedCount", equalTo(1)).body("Items", nullValue());
+    }
+
+    @Test
     void scanReturnsExpiredItemsAndPreservesExplicitFiltersAndPagination() {
         call("Scan", "{\"TableName\":\"%s\"}".formatted(tableName))
                 .statusCode(200).body("Count", equalTo(2)).body("ScannedCount", equalTo(2));
