@@ -420,6 +420,47 @@ class RdsServiceTest {
     }
 
     @Test
+    void memberPasswordModificationPreservesSameNamedResourcesInOtherAccountsAndRegions() {
+        InMemoryStorage<String, DbInstance> rawInstances = new InMemoryStorage<>();
+        InMemoryStorage<String, DbCluster> rawClusters = new InMemoryStorage<>();
+        String accountA = "111111111111";
+        String accountB = "222222222222";
+        RdsService serviceA = new RdsService(containerManager, proxyManager, ec2Service,
+                new RegionResolver("us-east-1", accountA), config,
+                new AccountAwareStorageBackend<>(rawInstances, null, accountA),
+                new AccountAwareStorageBackend<>(rawClusters, null, accountA),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        RdsService serviceB = new RdsService(containerManager, proxyManager, ec2Service,
+                new RegionResolver("us-east-1", accountB), config,
+                new AccountAwareStorageBackend<>(rawInstances, null, accountB),
+                new AccountAwareStorageBackend<>(rawClusters, null, accountB),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        for (RdsService service : List.of(serviceA, serviceB)) {
+            for (String region : List.of("us-east-1", "us-west-2")) {
+                service.createDbCluster("shared-cluster", "aurora-postgresql", "16.3",
+                        "admin", "password", "dbname", false, null, null, null, false, region);
+                service.createDbInstance("shared-member", "aurora-postgresql", "16.3",
+                        null, null, "dbname", "db.r5.large", 20, false, null, null,
+                        "shared-cluster", null, false, false, null, Map.of(), List.of(), region);
+            }
+        }
+        clearInvocations(proxyManager);
+
+        serviceA.modifyDbInstance("shared-member", "MemberOnlyPassword!", true, "us-east-1");
+        for (String account : List.of(accountA, accountB)) {
+            for (String region : List.of("us-east-1", "us-west-2")) {
+                DbInstance member = rawInstances.get(account + "/" + region + "::shared-member").orElseThrow();
+                DbCluster cluster = rawClusters.get(account + "/" + region + "::shared-cluster").orElseThrow();
+                assertEquals("password", member.getMasterPassword());
+                assertEquals("password", cluster.getMasterPassword());
+                assertEquals(account.equals(accountA) && region.equals("us-east-1"),
+                        member.isIamDatabaseAuthenticationEnabled());
+                assertFalse(cluster.isIamDatabaseAuthenticationEnabled());
+            }
+        }
+    }
+
+    @Test
     void modifyClusterCredentialsAndIamKeepOtherAccountsAndRegionsUnchanged() {
         InMemoryStorage<String, DbInstance> rawInstances = new InMemoryStorage<>();
         InMemoryStorage<String, DbCluster> rawClusters = new InMemoryStorage<>();
@@ -2620,6 +2661,29 @@ class RdsServiceTest {
         assertEquals("mydb", result.iterator().next().getDbInstanceIdentifier());
         assertTrue(rdsService.listDbInstancesByDbiResourceIds(
                 List.of(instance.getDbiResourceId().toLowerCase())).isEmpty());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"aurora-postgresql,false", "aurora-postgresql,true", "aurora-mysql,false", "aurora-mysql,true"})
+    void memberPasswordModificationPreservesClusterPasswordAndOtherChanges(String engine, boolean mockMode) {
+        when(config.services().rds().mock()).thenReturn(mockMode);
+        DbCluster cluster = rdsService.createDbCluster("cluster-owner", engine, null,
+                "admin", "ClusterPassword!", "dbname", false, null);
+        DbInstance member = rdsService.createDbInstance("member-modify", engine, null,
+                null, null, "dbname", "db.r5.large", 20, false, null, null, "cluster-owner");
+        DbInstance sibling = rdsService.createDbInstance("member-sibling", engine, null,
+                null, null, "dbname", "db.r5.large", 20, false, null, null, "cluster-owner");
+        clearInvocations(containerManager, proxyManager);
+        DbInstance modified = rdsService.modifyDbInstance("member-modify", "MemberOnlyPassword!", true, null);
+        assertEquals("ClusterPassword!", modified.getMasterPassword());
+        assertEquals("ClusterPassword!", rdsService.getDbInstance("member-modify").getMasterPassword());
+        assertEquals("ClusterPassword!", cluster.getMasterPassword());
+        assertEquals("ClusterPassword!", sibling.getMasterPassword());
+        assertTrue(modified.isIamDatabaseAuthenticationEnabled());
+        assertFalse(sibling.isIamDatabaseAuthenticationEnabled());
+        verify(containerManager, never()).rotateMasterPassword(
+                anyString(), anyString(), any(), anyString(), anyString(), anyString());
+        verify(proxyManager, never()).updateMasterPassword(anyString(), anyString());
     }
 
     @Test

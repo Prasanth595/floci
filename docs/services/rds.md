@@ -760,6 +760,10 @@ Managed master secrets belong to the cluster; `ManageMasterUserPassword` on a me
 does not create a separate member secret. When a cluster record lacks a credential,
 the member retains its normalized default for that field.
 
+`ModifyDBInstance` preserves the cluster-owned master password when
+`MasterUserPassword` is supplied for a member; other supported instance settings
+still apply. Change the cluster password with `ModifyDBCluster`.
+
 Accepted cluster password changes update stored member credentials even when the
 cluster has no backend or runs in mock mode. An unchanged password does not update
 relays. Rotating an initialized data volume requires a running backend; changing

@@ -103,4 +103,34 @@ class RdsMemberCredentialsTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"aurora-postgresql", "aurora-mysql"})
+    @DisplayName("Member-only password settings preserve other instance modifications")
+    void memberPasswordSettingDoesNotPreventOtherChangesOrReboot(String engine) {
+        String cluster = TestFixtures.uniqueName("member-modify");
+        String member = cluster + "-member";
+        try (RdsClient rds = TestFixtures.rdsClient()) {
+            try {
+                rds.createDBCluster(request -> request.dbClusterIdentifier(cluster).engine(engine)
+                        .masterUsername("clusteradmin").masterUserPassword("ClusterPassword!"));
+                rds.createDBInstance(request -> request.dbInstanceIdentifier(member).dbClusterIdentifier(cluster)
+                        .engine(engine).dbInstanceClass("db.serverless"));
+                DBInstance modified = rds.modifyDBInstance(request -> request.dbInstanceIdentifier(member)
+                        .masterUserPassword("MemberOnlyPassword!").publiclyAccessible(true)).dbInstance();
+                assertThat(modified.masterUsername()).isEqualTo("clusteradmin");
+                assertThat(modified.publiclyAccessible()).isTrue();
+                assertThat(rds.rebootDBInstance(request -> request.dbInstanceIdentifier(member))
+                        .dbInstance().masterUsername()).isEqualTo("clusteradmin");
+                assertThat(rds.describeDBInstances(request -> request.dbInstanceIdentifier(member))
+                        .dbInstances().get(0).publiclyAccessible()).isTrue();
+            } finally {
+                try {
+                    rds.deleteDBInstance(request -> request.dbInstanceIdentifier(member).skipFinalSnapshot(true));
+                } finally {
+                    rds.deleteDBCluster(request -> request.dbClusterIdentifier(cluster).skipFinalSnapshot(true));
+                }
+            }
+        }
+    }
+
 }

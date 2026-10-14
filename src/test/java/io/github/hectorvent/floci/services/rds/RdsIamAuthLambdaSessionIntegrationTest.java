@@ -252,6 +252,50 @@ class RdsIamAuthLambdaSessionIntegrationTest {
     }
 
     @Test
+    void memberPasswordModificationKeepsClusterLoginBeforeAndAfterReboot() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String cluster = "modify-owner-" + suffix;
+        String member = "modify-member-" + suffix;
+        String accessKey = "ASIA" + suffix.toUpperCase();
+        try {
+            rds("CreateDBCluster").formParam("DBClusterIdentifier", cluster)
+                    .formParam("Engine", "aurora-postgresql").formParam("MasterUsername", MASTER_USER)
+                    .formParam("MasterUserPassword", MASTER_PASSWORD).formParam("DatabaseName", DATABASE)
+                    .formParam("EnableIAMDatabaseAuthentication", "true")
+                    .when().post("/").then().statusCode(200);
+            int port = rds("CreateDBInstance").formParam("DBInstanceIdentifier", member)
+                    .formParam("DBClusterIdentifier", cluster).formParam("DBInstanceClass", "db.serverless")
+                    .formParam("Engine", "aurora-postgresql").formParam("DBName", DATABASE)
+                    .when().post("/").then().statusCode(200).extract().xmlPath()
+                    .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+            iamService.registerLambdaExecutionRoleSession(ACCOUNT_ID, accessKey, SESSION_SECRET, SESSION_TOKEN,
+                    "arn:aws:iam::" + ACCOUNT_ID + ":role/connect-with-iam");
+            awaitPasswordReady(port);
+            String token = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, MASTER_USER,
+                    accessKey, SESSION_SECRET, Instant.now().minusSeconds(60), 900, SESSION_TOKEN);
+            assertCurrentUser(port, token);
+            rds("ModifyDBInstance").formParam("DBInstanceIdentifier", member)
+                    .formParam("MasterUserPassword", "MemberOnlyPassword!")
+                    .formParam("PubliclyAccessible", "true").when().post("/").then().statusCode(200)
+                    .body(containsString("<PubliclyAccessible>true</PubliclyAccessible>"));
+            assertCurrentUser(port, MASTER_PASSWORD);
+            assertCurrentUser(port, token);
+            assertThrows(SQLException.class, () -> connect(port, "MemberOnlyPassword!").close());
+            rds("RebootDBInstance").formParam("DBInstanceIdentifier", member)
+                    .when().post("/").then().statusCode(200);
+            assertCurrentUser(port, MASTER_PASSWORD);
+            assertCurrentUser(port, token);
+            assertThrows(SQLException.class, () -> connect(port, "MemberOnlyPassword!").close());
+        } finally {
+            iamService.unregisterSession(ACCOUNT_ID, accessKey);
+            rds("DeleteDBInstance").formParam("DBInstanceIdentifier", member)
+                    .formParam("SkipFinalSnapshot", "true").when().post("/");
+            rds("DeleteDBCluster").formParam("DBClusterIdentifier", cluster)
+                    .formParam("SkipFinalSnapshot", "true").when().post("/");
+        }
+    }
+
+    @Test
     void memberUsesTheClusterManagedSecretBeforeAndAfterReboot() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
         String clusterId = "managed-cluster-" + suffix;
