@@ -9714,6 +9714,11 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
+    /** The same checks without a feature check, for a caller that does not know the engine yet. */
+    public void validateClusterRoleAssociations(String clusterId, List<DbRoleAssociation> roles) {
+        validateClusterRoleAssociations(clusterId, null, roles);
+    }
+
     private static String blankToNull(String value) {
         return isBlank(value) ? null : value;
     }
