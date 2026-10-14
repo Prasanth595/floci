@@ -498,9 +498,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private void deleteBucketLocked(String bucketName) {
-        // Check if bucket is empty
-        List<S3Object> objects = listObjects(bucketName, null, null, 1);
-        if (!objects.isEmpty()) {
+        if (!objectStore.scan(key -> key.startsWith(bucketPrefix(bucketName))).isEmpty()) {
             throw new AwsException("BucketNotEmpty",
                     "The bucket you tried to delete is not empty.", 409);
         }
@@ -1416,18 +1414,23 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         String account = accessKeyId.matches("\\d{12}") ? accessKeyId : ownerId();
         String rootArn = regionResolver.buildGlobalArn("iam", account, "root");
-        return Optional.of(new CallerArns(rootArn, rootArn));
+        return Optional.of(new CallerArns(rootArn, rootArn, CallerArns.TYPE_ACCOUNT, account, null));
     }
 
     /**
      * The request context a bucket policy is evaluated with here: the caller is an IAM principal,
-     * never a service, and for a role session {@code aws:PrincipalArn} is the role's ARN.
+     * never a service, and the keys that say who is calling are the ones
+     * {@link CallerArns#putPrincipalKeys} writes, so a bucket policy sees the same principal
+     * whether S3 evaluates it or the enforcement filter does. For a role session
+     * {@code aws:PrincipalArn} is the role's ARN.
      */
     private static Map<String, List<String>> bucketPolicyContext(CallerArns caller) {
-        return caller != null
-                ? Map.of("aws:PrincipalArn", List.of(caller.principalArn()),
-                        "aws:PrincipalIsAWSService", List.of("false"))
-                : Map.of("aws:PrincipalIsAWSService", List.of("false"));
+        Map<String, List<String>> context = new HashMap<>();
+        context.put("aws:PrincipalIsAWSService", List.of("false"));
+        if (caller != null) {
+            caller.putPrincipalKeys(context);
+        }
+        return Map.copyOf(context);
     }
 
     private boolean isSameAccountAsBucketOwner(String accessKeyId, String principalArn, String bucketOwnerAccount) {
@@ -4895,20 +4898,38 @@ public class S3Service implements Resettable, ResourceProvider {
         bucketStore.put(bucketName, bucket);
     }
 
+    /**
+     * What AWS reports for a bucket nobody configured: since April 2023 every new bucket starts with
+     * all four Block Public Access settings on. This is only what GetPublicAccessBlock answers. The
+     * bucket stores no configuration, so enforcement on the write paths is unchanged.
+     */
+    static final String DEFAULT_PUBLIC_ACCESS_BLOCK_XML = new XmlBuilder()
+            .start("PublicAccessBlockConfiguration", AwsNamespaces.S3)
+            .elem("BlockPublicAcls", true)
+            .elem("IgnorePublicAcls", true)
+            .elem("BlockPublicPolicy", true)
+            .elem("RestrictPublicBuckets", true)
+            .end("PublicAccessBlockConfiguration")
+            .build();
+
     public String getPublicAccessBlock(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        if (bucket.getPublicAccessBlockConfiguration() == null) {
+        if (bucket.getPublicAccessBlockConfiguration() != null) {
+            return bucket.getPublicAccessBlockConfiguration();
+        }
+        if (bucket.isPublicAccessBlockDeleted()) {
             throw new AwsException("NoSuchPublicAccessBlockConfiguration",
                     "The public access block configuration was not found", 404);
         }
-        return bucket.getPublicAccessBlockConfiguration();
+        return DEFAULT_PUBLIC_ACCESS_BLOCK_XML;
     }
 
     public void putPublicAccessBlock(String bucketName, String xml) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         bucket.setPublicAccessBlockConfiguration(xml);
+        bucket.setPublicAccessBlockDeleted(false);
         bucketStore.put(bucketName, bucket);
     }
 
@@ -4916,6 +4937,7 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         bucket.setPublicAccessBlockConfiguration(null);
+        bucket.setPublicAccessBlockDeleted(true);
         bucketStore.put(bucketName, bucket);
     }
 
@@ -6031,6 +6053,10 @@ public class S3Service implements Resettable, ResourceProvider {
                 putObjectForAccount(accountId, latestKey, object);
             }
         }
+    }
+
+    private String bucketPrefix(String bucketName) {
+        return bucketName + "/";
     }
 
     private String objectKey(String bucketName, String key) {

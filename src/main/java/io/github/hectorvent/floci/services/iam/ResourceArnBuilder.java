@@ -443,7 +443,7 @@ public class ResourceArnBuilder {
         if (accessKeyId == null || accessKeyId.isBlank() || iamService == null) {
             return List.of("*");
         }
-        return iamService.get().findUserNameByAccessKeyId(accessKeyId)
+        return iamService.get().findAccessKeyOwnerInThisAccount(accessKeyId)
                 .flatMap(userName -> storedIamEntity("user", userName, accountId))
                 .map(stored -> List.of(stored.arn()))
                 .orElse(List.of("*"));
@@ -828,7 +828,7 @@ public class ResourceArnBuilder {
         return io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.extractTable(statement);
     }
 
-    private String toDynamoDbTableArn(String tableName, String region, String accountId) {
+    public static String toDynamoDbTableArn(String tableName, String region, String accountId) {
         if (AwsArnUtils.isArnFor(tableName, "dynamodb")) {
             return tableName;
         }

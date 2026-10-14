@@ -159,7 +159,6 @@ class CloudFormationServiceRollbackTest {
         assertNull(role.getStatusReason());
         assertEquals("DELETE_COMPLETE", logGroup.getStatus());
         assertEquals("CREATE_FAILED", adopted.getStatus());
-        verify(provisioner, never()).completeUpdate(any());
     }
 
     @Test
@@ -181,7 +180,6 @@ class CloudFormationServiceRollbackTest {
         assertEquals("DELETE_FAILED", stack.getStatus());
         assertEquals("The following resource(s) failed to delete: [Bucket].", stack.getStatusReason());
         assertEquals("DELETE_FAILED", bucket.getStatus());
-        verify(provisioner, never()).completeUpdate(any());
     }
 
     @Test

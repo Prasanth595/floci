@@ -49,6 +49,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
+import io.github.hectorvent.floci.services.rds.model.DbRoleAssociation;
 import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.EventSubscription;
@@ -75,6 +76,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -845,7 +847,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         (user, pw) -> validateDbPasswordForScope(
                                 accountId, instanceRegion, id, user, pw),
                         proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
-                                instanceRegion, accountId, instance.getDbiResourceId()));
+                                instanceRegion, accountId, dbUserResourceId(instance)));
             } catch (RuntimeException | Error e) {
                 try {
                     deleteInstanceForScope(accountId, effectiveRegion, id);
@@ -3098,30 +3100,133 @@ public class RdsService implements Resettable, ResourceProvider {
                 + "] does not exist, is not enabled or you do not have permissions to access it.", 400);
     }
 
+    /**
+     * The orderable classes the engine catalogue lists, narrowed by engine, version and class. The
+     * version matches exactly or as a prefix ending at a dot, so {@code 8.0} still finds the MySQL
+     * 8.0 rows now that the catalogue names {@code 8.0.36}.
+     */
     public List<Map<String, String>> describeOrderableDbInstanceOptions(String engine,
                                                                         String engineVersion,
                                                                         String dbInstanceClass) {
-        List<Map<String, String>> options = List.of(
-                Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t3.micro"),
-                Map.of("engine", "postgres", "engineVersion", "16.14", "dbInstanceClass", "db.t3.micro"),
-                Map.of("engine", "postgres", "engineVersion", "18.1", "dbInstanceClass", "db.t3.micro"),
-                Map.of("engine", "postgres", "engineVersion", "18.1", "dbInstanceClass", "db.m8g.large"),
-                Map.of("engine", "postgres", "engineVersion", "18.4", "dbInstanceClass", "db.m8g.large"),
-                Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t4g.micro"),
-                Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t4g.small"),
-                Map.of("engine", "postgres", "engineVersion", "16.14", "dbInstanceClass", "db.t4g.small"),
-                Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t4g.medium"),
-                Map.of("engine", "mysql", "engineVersion", "8.0", "dbInstanceClass", "db.t3.micro"),
-                Map.of("engine", "mariadb", "engineVersion", "11", "dbInstanceClass", "db.t3.micro"),
-                Map.of("engine", "sqlserver-se", "engineVersion", "15.00", "dbInstanceClass", "db.t3.micro")
-        );
+        List<Map<String, String>> options = new ArrayList<>();
+        for (RdsEngineCatalog.EngineVersion version : RdsEngineCatalog.VERSIONS) {
+            for (String instanceClass : version.instanceClasses()) {
+                options.add(Map.of("engine", version.engine(), "engineVersion", version.version(),
+                        "dbInstanceClass", instanceClass));
+            }
+        }
         return options.stream()
                 .filter(option -> engine == null || engine.isBlank() || engine.equalsIgnoreCase(option.get("engine")))
                 .filter(option -> engineVersion == null || engineVersion.isBlank()
-                        || engineVersion.equalsIgnoreCase(option.get("engineVersion")))
+                        || RdsEngineCatalog.versionMatches(option.get("engineVersion"), engineVersion))
                 .filter(option -> dbInstanceClass == null || dbInstanceClass.isBlank()
                         || dbInstanceClass.equalsIgnoreCase(option.get("dbInstanceClass")))
                 .toList();
+    }
+
+    // ── Catalogue reads ───────────────────────────────────────────────────────
+
+    // The largest allocation, in GiB, the RDS user guide gives for general purpose storage.
+    private static final int MAX_STORAGE_GIB = 65_536;
+    private static final int MAX_SQLSERVER_STORAGE_GIB = 16_384;
+
+    public record EngineVersionPage(List<RdsEngineCatalog.EngineVersion> versions, String marker) {}
+
+    /**
+     * The catalogue's engine versions, narrowed by engine, version (exact, or a major version such
+     * as {@code 16}), family and the documented filters. Every version is available, so
+     * {@code IncludeAll} changes nothing. With {@code DefaultOnly}, each engine (or engine and major
+     * version, when the request names a version) contributes its default: the flagged one, or the
+     * latest of that major version.
+     */
+    public EngineVersionPage describeDbEngineVersions(String engine, String engineVersion, String family,
+                                                      boolean defaultOnly, Map<String, List<String>> filters,
+                                                      Integer maxRecords, String marker) {
+        requireValidMaxRecords(maxRecords);
+        List<RdsEngineCatalog.EngineVersion> matching = RdsEngineCatalog.VERSIONS.stream()
+                .filter(v -> isBlank(engine) || v.engine().equalsIgnoreCase(engine))
+                .filter(v -> isBlank(engineVersion) || RdsEngineCatalog.versionMatches(v.version(), engineVersion))
+                .filter(v -> isBlank(family) || v.family().equalsIgnoreCase(family))
+                .filter(v -> matchesFilter(filters, "engine", v.engine()))
+                .filter(v -> matchesFilter(filters, "db-parameter-group-family", v.family()))
+                .filter(v -> filterValues(filters, "engine-version").isEmpty()
+                        || filterValues(filters, "engine-version").stream()
+                                .anyMatch(w -> RdsEngineCatalog.versionMatches(v.version(), w)))
+                .filter(v -> filterValues(filters, "engine-mode").isEmpty()
+                        || v.engineModes().stream().anyMatch(m -> matchesFilter(filters, "engine-mode", m)))
+                .filter(v -> matchesFilter(filters, "status", "available"))
+                .toList();
+        if (defaultOnly) {
+            boolean byMajor = !isBlank(engineVersion);
+            Map<String, RdsEngineCatalog.EngineVersion> defaults = new LinkedHashMap<>();
+            for (RdsEngineCatalog.EngineVersion v : matching) {
+                String group = byMajor ? v.engine() + "/" + v.majorVersion() : v.engine();
+                RdsEngineCatalog.EngineVersion current = defaults.get(group);
+                if (current == null || (!current.isDefault() && (v.isDefault()
+                        || RdsEngineCatalog.compareVersions(v.version(), current.version()) > 0))) {
+                    defaults.put(group, v);
+                }
+            }
+            matching = List.copyOf(defaults.values());
+        }
+        OffsetPage<RdsEngineCatalog.EngineVersion> page = offsetPage(matching, maxRecords, marker);
+        return new EngineVersionPage(page.items(), page.marker());
+    }
+
+    private static List<String> filterValues(Map<String, List<String>> filters, String name) {
+        List<String> values = filters != null ? filters.get(name) : null;
+        return values != null ? values : List.of();
+    }
+
+    /**
+     * Checks a family for DescribeEngineDefaultParameters and DescribeEngineDefaultClusterParameters.
+     * Floci's default parameter groups hold no parameters (DescribeDBParameters lists only values set
+     * on a group), so a known family's defaults are an empty list.
+     */
+    public List<Map<String, String>> describeEngineDefaultParameters(String family) {
+        if (isBlank(family)) {
+            throw new AwsException("InvalidParameterValue", "DBParameterGroupFamily is required.", 400);
+        }
+        if (!RdsEngineCatalog.knowsFamily(family)) {
+            throw new AwsException("InvalidParameterValue",
+                    "DBParameterGroupFamily " + family + " is not supported.", 400);
+        }
+        return List.of();
+    }
+
+    /** What ModifyDBInstance can change about an instance's storage: its type and the sizes it can take. */
+    public record StorageModification(String storageType, List<SizeRange> sizes) {}
+
+    public record SizeRange(int from, int to) {}
+
+    /**
+     * The storage an instance can move to: its storage type and the sizes ModifyDBInstance stores as
+     * asked. Storage only grows. For PostgreSQL, MySQL and MariaDB an increase under 10% is rounded
+     * up to 10%, so the sizes are the current one (no change) and from 10% more up to the engine's
+     * maximum; SQL Server takes any larger size. An Aurora instance has no storage of its own to
+     * modify, so it has none.
+     */
+    public List<StorageModification> describeValidDbInstanceModifications(String id, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        if (isBlank(id)) {
+            throw new AwsException("InvalidParameterValue", "DBInstanceIdentifier is required.", 400);
+        }
+        DbInstance instance = getDbInstance(id, effectiveRegion);
+        if (instance.getStatus() != null && instance.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "DB instance " + id + " is not in available state.", 400);
+        }
+        if (!isBlank(instance.getDbClusterIdentifier())) {
+            return List.of();
+        }
+        int maximum = instance.getEngine() == DatabaseEngine.SQLSERVER ? MAX_SQLSERVER_STORAGE_GIB : MAX_STORAGE_GIB;
+        int current = Math.min(instance.getAllocatedStorage(), maximum);
+        int smallestIncrease = instance.getEngine() == DatabaseEngine.SQLSERVER
+                ? current + 1 : Math.ceilDiv(current * 11, 10);
+        List<SizeRange> sizes = smallestIncrease <= maximum
+                ? List.of(new SizeRange(current, current), new SizeRange(smallestIncrease, maximum))
+                : List.of(new SizeRange(current, current));
+        return List.of(new StorageModification(DbInstance.DEFAULT_STORAGE_TYPE, sizes));
     }
 
     // ── Stop, start and reboot ────────────────────────────────────────────────
@@ -3505,7 +3610,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         (user, pw) -> validateDbPasswordForScope(
                                 accountId, instanceRegion, id, user, pw),
                         proxyBinding(instance.getEngine(), instance.getEndpoint().address(),
-                                instance.getEndpoint().port(), instanceRegion, accountId, instance.getDbiResourceId()));
+                                instance.getEndpoint().port(), instanceRegion, accountId, dbUserResourceId(instance)));
             } else {
                 // No backing container: created or last rebooted while no daemon was reachable.
                 instance = ensureInstanceBackend(id, effectiveRegion);
@@ -3514,6 +3619,18 @@ public class RdsService implements Resettable, ResourceProvider {
 
         LOG.infov("DB instance {0} rebooted", id);
         return instance;
+    }
+
+    private String dbUserResourceId(DbInstance instance) {
+        String clusterId = instance.getDbClusterIdentifier();
+        if (clusterId != null && !clusterId.isBlank()) {
+            DbCluster cluster = findClusterForScope(accountIdFromArn(instance.getDbInstanceArn()),
+                    regionFromArn(instance.getDbInstanceArn()), clusterId);
+            if (cluster != null) {
+                return cluster.getDbClusterResourceId();
+            }
+        }
+        return instance.getDbiResourceId();
     }
 
     /**
@@ -3613,7 +3730,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     (user, pw) -> validateDbPasswordForScope(
                             accountId, instanceRegion, id, user, pw),
                     proxyBinding(instance.getEngine(), relayEndpoint.address(),
-                            relayEndpoint.port(), instanceRegion, accountId, instance.getDbiResourceId()));
+                            relayEndpoint.port(), instanceRegion, accountId, dbUserResourceId(instance)));
         } catch (RuntimeException e) {
             if (allocatedRelayPort) {
                 releaseProxyPort(relayPort);
@@ -4483,20 +4600,33 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveSecretKmsKeyId = Boolean.TRUE.equals(manageMasterUserPassword)
                 && cluster.getMasterUserSecretArn() == null
                 ? resolveManagedSecretKmsKeyId(masterUserSecretKmsKeyId, effectiveRegion) : null;
-        boolean passwordRotated = false;
-        if (newPassword != null && !newPassword.isBlank()) {
-            String oldPassword = cluster.getMasterPassword();
-            boolean backendRunning = !config.services().rds().mock()
-                    && cluster.getContainerId() != null;
-            passwordRotated = backendRunning && !newPassword.equals(oldPassword);
-            // Propagate the rotation into the running backend DB before overwriting the stored
-            // password — the last moment the old credential (which the backend still holds) is
-            // known — mirroring the ModifyDBInstance path.
-            if (passwordRotated) {
+        boolean hasNewPassword = newPassword != null && !newPassword.isBlank();
+        String oldPassword = cluster.getMasterPassword();
+        boolean rotateBackend = hasNewPassword && !config.services().rds().mock()
+                && cluster.getContainerId() != null && !newPassword.equals(oldPassword);
+        Runnable changeCredentials = () -> {
+            // Keep the old credential and secret until the running backend accepts the change.
+            if (rotateBackend) {
                 containerManager.rotateMasterPassword(
                         cluster.getDockerVolumeName(), cluster.getContainerId(),
                         cluster.getEngine(), cluster.getMasterUsername(), oldPassword, newPassword);
             }
+        };
+        boolean releasesManagedSecret = Boolean.FALSE.equals(manageMasterUserPassword)
+                && cluster.getMasterUserSecretArn() != null;
+        boolean credentialsChanged = true;
+        if (releasesManagedSecret) {
+            if (secretsManagerService == null) {
+                throw new AwsException("InvalidParameterCombination",
+                        "ManageMasterUserPassword requires Secrets Manager support.", 400);
+            }
+            credentialsChanged = secretsManagerService.deleteManagedSecretAfter(
+                    cluster.getMasterUserSecretArn(), effectiveRegion, changeCredentials);
+        } else {
+            changeCredentials.run();
+        }
+        boolean passwordRotated = credentialsChanged && rotateBackend;
+        if (credentialsChanged && hasNewPassword) {
             cluster.setMasterPassword(newPassword);
         }
         if (iamEnabled != null) {
@@ -4507,8 +4637,12 @@ public class RdsService implements Resettable, ResourceProvider {
                 cluster.setMasterPassword(generatedMasterPassword());
             }
             attachManagedMasterUserSecret(cluster, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
-        } else if (Boolean.FALSE.equals(manageMasterUserPassword) && cluster.getMasterUserSecretArn() != null) {
-            detachManagedMasterUserSecret(cluster, effectiveRegion);
+        } else if (releasesManagedSecret) {
+            if (credentialsChanged) {
+                cluster.setMasterUserSecretArn(null);
+                cluster.setMasterUserSecretStatus(null);
+                cluster.setMasterUserSecretKmsKeyId(null);
+            }
         } else if (cluster.getMasterUserSecretArn() != null
                 && masterUserSecretKmsKeyId != null
                 && !masterUserSecretKmsKeyId.equals(cluster.getMasterUserSecretKmsKeyId())) {
@@ -4601,7 +4735,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     // ── Global clusters (Aurora global databases) ─────────────────────────────
 
-    private static final Set<String> GLOBAL_CLUSTER_ENGINES = Set.of("aurora-mysql", "aurora-postgresql");
+    static final Set<String> GLOBAL_CLUSTER_ENGINES = Set.of("aurora-mysql", "aurora-postgresql");
 
     /**
      * Creates an Aurora global database, empty or with an existing cluster (named by ARN or, in
@@ -4663,7 +4797,7 @@ public class RdsService implements Resettable, ResourceProvider {
             requireGlobalClusterEngine(engine, null);
             global.setEngine(engine.toLowerCase(Locale.ROOT));
             global.setEngineVersion(hasText(engineVersion)
-                    ? engineVersion : defaultGlobalEngineVersion(global.getEngine()));
+                    ? engineVersion : RdsEngineCatalog.defaultVersion(global.getEngine()));
             global.setDatabaseName(hasText(databaseName) ? databaseName : null);
             global.setStorageEncrypted(Boolean.TRUE.equals(storageEncrypted));
         }
@@ -5114,9 +5248,6 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
-    private static String defaultGlobalEngineVersion(String engine) {
-        return "aurora-mysql".equals(engine) ? "8.0.mysql_aurora.3.05.2" : "16.3";
-    }
 
     private static boolean sameMajorVersion(String current, String requested) {
         if (current == null || requested == null) {
@@ -6817,17 +6948,14 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
-    private String expectedClusterParameterGroupFamily(String engineParam, String engineVersion) {
+    String expectedClusterParameterGroupFamily(String engineParam, String engineVersion) {
         String normalizedEngine = effectiveEngineName(engineParam).toLowerCase();
         String effectiveVersion = engineVersion;
         if (effectiveVersion == null || effectiveVersion.isBlank()) {
-            effectiveVersion = switch (normalizedEngine) {
-                case "postgres", "aurora-postgresql" -> "16.3";
-                case "mysql", "aurora", "aurora-mysql" -> "8.0.36";
-                case "mariadb" -> "11.2";
-                case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web" -> "15.00";
-                default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
-            };
+            effectiveVersion = RdsEngineCatalog.defaultVersion(normalizedEngine);
+            if (effectiveVersion == null) {
+                throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+            }
         }
 
         Matcher matcher = IMAGE_TAG_VERSION_PATTERN.matcher(effectiveVersion.trim());
@@ -7838,7 +7966,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                     accountId, instanceRegion,
                                     instance.getDbInstanceIdentifier(), user, pw),
                             proxyBinding(instance.getEngine(), instance.getEndpoint().address(), instance.getEndpoint().port(),
-                                    instanceRegion, accountId, instance.getDbiResourceId()));
+                                    instanceRegion, accountId, dbUserResourceId(instance)));
                 }
                 instance.setStatus(DbInstanceStatus.AVAILABLE);
                 putInstanceForScope(accountId, instanceRegion,
@@ -9205,6 +9333,35 @@ public class RdsService implements Resettable, ResourceProvider {
     private static final int MAX_MAX_RECORDS = 100;
     private static final int DEFAULT_MAX_RECORDS = 100;
 
+    private static void requireValidMaxRecords(Integer maxRecords) {
+        if (maxRecords != null && (maxRecords < MIN_MAX_RECORDS || maxRecords > MAX_MAX_RECORDS)) {
+            throw new AwsException("InvalidParameterValue",
+                    "MaxRecords must be between " + MIN_MAX_RECORDS + " and " + MAX_MAX_RECORDS + ".", 400);
+        }
+    }
+
+    private record OffsetPage<T>(List<T> items, String marker) {}
+
+    /**
+     * One page of a list whose marker is the offset of the page's first item, as
+     * DescribeDBEngineVersions and DescribeDBClusterEndpoints page. The next marker is null on the
+     * last page.
+     */
+    private static <T> OffsetPage<T> offsetPage(List<T> matching, Integer maxRecords, String marker) {
+        int from = 0;
+        if (!isBlank(marker)) {
+            try {
+                from = Integer.parseInt(marker);
+            } catch (NumberFormatException e) {
+                throw new AwsException("InvalidParameterValue", "Invalid marker: " + marker, 400);
+            }
+        }
+        int limit = maxRecords == null ? DEFAULT_MAX_RECORDS : maxRecords;
+        int start = Math.min(Math.max(from, 0), matching.size());
+        int to = Math.min(matching.size(), start + limit);
+        return new OffsetPage<>(matching.subList(start, to), to < matching.size() ? Integer.toString(to) : null);
+    }
+
     /**
      * Nothing is published to the topic. The subscription is stored and reported back so a client
      * can manage it, and no RDS event reaches SNS through it.
@@ -9360,10 +9517,7 @@ public class RdsService implements Resettable, ResourceProvider {
         // Ahead of the named-subscription shortcut, so a bad page size is rejected whether or not
         // the request also names a subscription. Request validation does not depend on which branch
         // serves the read.
-        if (maxRecords != null && (maxRecords < MIN_MAX_RECORDS || maxRecords > MAX_MAX_RECORDS)) {
-            throw new AwsException("InvalidParameterValue",
-                    "MaxRecords must be between " + MIN_MAX_RECORDS + " and " + MAX_MAX_RECORDS + ".", 400);
-        }
+        requireValidMaxRecords(maxRecords);
         if (subscriptionName != null && !subscriptionName.isBlank()) {
             return new EventSubscriptionPage(
                     List.of(requireEventSubscription(region, subscriptionName)), null);
@@ -9414,6 +9568,166 @@ public class RdsService implements Resettable, ResourceProvider {
             eventSubscriptions.put(eventSubscriptionKey(region, name), subscription);
         }
         return subscription;
+    }
+
+    // ── IAM role associations ─────────────────────────────────────────────────
+
+    /**
+     * Associates an IAM role with a DB cluster. A cluster names each role once, so the same role
+     * twice is refused ({@code DBClusterRoleAlreadyExists} covers the role ARN only). The role is
+     * {@code ACTIVE} at once and is not looked up in IAM.
+     */
+    public synchronized DbCluster addRoleToDbCluster(String region, String clusterId, String roleArn,
+                                                     String featureName) {
+        requireParameter(clusterId, "DBClusterIdentifier");
+        requireParameter(roleArn, "RoleArn");
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        requireAvailableCluster(cluster, clusterId);
+        requireRoleNotAssociated(cluster, clusterId, roleArn);
+        cluster.getAssociatedRoles().add(new DbRoleAssociation(roleArn, blankToNull(featureName)));
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        LOG.infov("Role {0} associated with DB cluster {1}", roleArn, clusterId);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    /**
+     * Gives a cluster {@code CreateDBCluster} just made the roles the request named, all in one
+     * step: either every role is associated or none is. The handler deletes the new cluster when
+     * this refuses, so a failed create leaves nothing behind.
+     */
+    public synchronized DbCluster addRolesToNewDbCluster(String region, String clusterId,
+                                                         List<DbRoleAssociation> roles) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        requireAvailableCluster(cluster, clusterId);
+        for (DbRoleAssociation role : roles) {
+            requireRoleNotAssociated(cluster, clusterId, role.getRoleArn());
+        }
+        for (DbRoleAssociation role : roles) {
+            cluster.getAssociatedRoles().add(new DbRoleAssociation(role.getRoleArn(),
+                    blankToNull(role.getFeatureName())));
+        }
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    private static void requireRoleNotAssociated(DbCluster cluster, String clusterId, String roleArn) {
+        for (DbRoleAssociation existing : cluster.getAssociatedRoles()) {
+            if (existing.getRoleArn().equals(roleArn)) {
+                throw new AwsException("DBClusterRoleAlreadyExists", "Role ARN " + roleArn
+                        + " is already associated with DB cluster " + clusterId + ".", 400);
+            }
+        }
+    }
+
+    /**
+     * Removes a role from a DB cluster. When a feature name is given, the role must be associated
+     * for that feature.
+     */
+    public synchronized DbCluster removeRoleFromDbCluster(String region, String clusterId, String roleArn,
+                                                          String featureName) {
+        requireParameter(clusterId, "DBClusterIdentifier");
+        requireParameter(roleArn, "RoleArn");
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        requireAvailableCluster(cluster, clusterId);
+        String feature = blankToNull(featureName);
+        boolean removed = cluster.getAssociatedRoles().removeIf(existing -> existing.getRoleArn().equals(roleArn)
+                && (feature == null || feature.equals(existing.getFeatureName())));
+        if (!removed) {
+            throw new AwsException("DBClusterRoleNotFound", "Role ARN " + roleArn
+                    + (feature == null ? "" : " for feature " + feature)
+                    + " is not associated with DB cluster " + clusterId + ".", 404);
+        }
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        LOG.infov("Role {0} disassociated from DB cluster {1}", roleArn, clusterId);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    /**
+     * Associates an IAM role with a DB instance for one feature. The role and the feature are each
+     * associated at most once, so either one already present is refused.
+     */
+    public synchronized DbInstance addRoleToDbInstance(String region, String instanceId, String roleArn,
+                                                       String featureName) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireParameter(roleArn, "RoleArn");
+        requireParameter(featureName, "FeatureName");
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
+        requireAvailableInstance(instance, instanceId);
+        for (DbRoleAssociation existing : instance.getAssociatedRoles()) {
+            if (existing.getRoleArn().equals(roleArn) || featureName.equals(existing.getFeatureName())) {
+                throw new AwsException("DBInstanceRoleAlreadyExists", "Role ARN " + existing.getRoleArn()
+                        + " is already associated with DB instance " + instanceId + " for feature "
+                        + existing.getFeatureName() + ".", 400);
+            }
+        }
+        instance.getAssociatedRoles().add(new DbRoleAssociation(roleArn, featureName));
+        putInstanceForScope(currentAccountId(), effectiveRegion, instanceId, instance);
+        LOG.infov("Role {0} associated with DB instance {1} for feature {2}", roleArn, instanceId, featureName);
+        return RESPONSE_COPIER.convertValue(instance, DbInstance.class);
+    }
+
+    /** Removes a role from a DB instance; the role must be associated for the feature named. */
+    public synchronized DbInstance removeRoleFromDbInstance(String region, String instanceId, String roleArn,
+                                                            String featureName) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireParameter(roleArn, "RoleArn");
+        requireParameter(featureName, "FeatureName");
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
+        requireAvailableInstance(instance, instanceId);
+        boolean removed = instance.getAssociatedRoles().removeIf(existing -> existing.getRoleArn().equals(roleArn)
+                && featureName.equals(existing.getFeatureName()));
+        if (!removed) {
+            throw new AwsException("DBInstanceRoleNotFound", "Role ARN " + roleArn
+                    + " is not associated with DB instance " + instanceId + " for feature " + featureName + ".", 404);
+        }
+        putInstanceForScope(currentAccountId(), effectiveRegion, instanceId, instance);
+        LOG.infov("Role {0} disassociated from DB instance {1}", roleArn, instanceId);
+        return RESPONSE_COPIER.convertValue(instance, DbInstance.class);
+    }
+
+    /**
+     * Checks the roles a {@code CreateDBCluster} request names before the cluster exists, by the
+     * rules {@link #addRoleToDbCluster} applies one at a time, so a list that would be refused part
+     * way through refuses the create instead of leaving a cluster with half its roles.
+     */
+    public void validateClusterRoleAssociations(String clusterId, List<DbRoleAssociation> roles) {
+        Set<String> roleArns = new HashSet<>();
+        for (DbRoleAssociation role : roles) {
+            requireParameter(role.getRoleArn(), "AssociatedRoles.RoleArn");
+            if (!roleArns.add(role.getRoleArn())) {
+                throw new AwsException("DBClusterRoleAlreadyExists", "Role ARN " + role.getRoleArn()
+                        + " is named more than once for DB cluster " + clusterId + ".", 400);
+            }
+        }
+    }
+
+    private static String blankToNull(String value) {
+        return isBlank(value) ? null : value;
+    }
+
+    private static void requireParameter(String value, String name) {
+        if (isBlank(value)) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter " + name + ".", 400);
+        }
+    }
+
+    private static void requireAvailableCluster(DbCluster cluster, String clusterId) {
+        if (cluster.getStatus() != null && cluster.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidDBClusterStateFault",
+                    "DB cluster " + clusterId + " is not in available state.", 400);
+        }
+    }
+
+    private static void requireAvailableInstance(DbInstance instance, String instanceId) {
+        if (instance.getStatus() != null && instance.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "DB instance " + instanceId + " is not in available state.", 400);
+        }
     }
 
     // ── Cluster endpoints ─────────────────────────────────────────────────────
@@ -9521,10 +9835,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                                                        Map<String, List<String>> filters,
                                                                        Integer maxRecords, String marker) {
         String effectiveRegion = effectiveRegion(region);
-        if (maxRecords != null && (maxRecords < MIN_MAX_RECORDS || maxRecords > MAX_MAX_RECORDS)) {
-            throw new AwsException("InvalidParameterValue",
-                    "MaxRecords must be between " + MIN_MAX_RECORDS + " and " + MAX_MAX_RECORDS + ".", 400);
-        }
+        requireValidMaxRecords(maxRecords);
         List<DbCluster> scope = !isBlank(clusterId)
                 ? List.of(getDbCluster(clusterId, effectiveRegion))
                 : listDbClusters(null, effectiveRegion).stream()
@@ -9553,19 +9864,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 .filter(e -> matchesFilter(filters, "db-cluster-endpoint-id", e.getDbClusterEndpointIdentifier()))
                 .filter(e -> matchesFilter(filters, "db-cluster-endpoint-status", e.getStatus()))
                 .toList();
-        int from = 0;
-        if (!isBlank(marker)) {
-            try {
-                from = Integer.parseInt(marker);
-            } catch (NumberFormatException e) {
-                throw new AwsException("InvalidParameterValue", "Invalid marker: " + marker, 400);
-            }
-        }
-        int limit = maxRecords == null ? DEFAULT_MAX_RECORDS : maxRecords;
-        int start = Math.min(Math.max(from, 0), matching.size());
-        int to = Math.min(matching.size(), start + limit);
-        return new ClusterEndpointPage(matching.subList(start, to),
-                to < matching.size() ? Integer.toString(to) : null);
+        OffsetPage<DbClusterEndpoint> page = offsetPage(matching, maxRecords, marker);
+        return new ClusterEndpointPage(page.items(), page.marker());
     }
 
     private static void requireAuroraCluster(DbCluster cluster) {

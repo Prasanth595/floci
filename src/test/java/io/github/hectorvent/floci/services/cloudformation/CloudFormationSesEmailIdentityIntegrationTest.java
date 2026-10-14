@@ -17,6 +17,7 @@ import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -69,12 +70,21 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
+    @BeforeEach
+    void resetClock() {
+        clock.reset();
+    }
+
     @AfterEach
     void cleanUp() {
-        if (stack != null) {
-            cfn("DeleteStack", null).then().statusCode(200);
-            await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
-                    assertEquals(400, cfn("DescribeStacks", null).statusCode()));
+        try {
+            if (stack != null) {
+                cfn("DeleteStack", null).then().statusCode(200);
+                await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                        assertEquals(400, cfn("DescribeStacks", null).statusCode()));
+            }
+        } finally {
+            clock.reset();
         }
     }
 

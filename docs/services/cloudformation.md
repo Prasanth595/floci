@@ -160,7 +160,7 @@ cross-resource references.
 | ECS | `Cluster`, `TaskDefinition`, `Service`, `CapacityProvider`, `ClusterCapacityProviderAssociations` |
 | EKS | `Cluster`, `Nodegroup` |
 | RDS | `DBInstance` (starts a real container), `DBCluster` (starts a real container), `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBProxy`, `DBProxyTargetGroup` |
-| ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `SubnetGroup`, `User` (Tags are ignored), `UserGroup` (Tags are ignored) |
+| ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `SubnetGroup`, `User` (Tags are ignored), `UserGroup` (Tags are ignored), `ServerlessCache` (GetAtt uses the dotted Endpoint.* and ReaderEndpoint.* form) |
 | Redshift | `Cluster` (single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported), `ClusterParameterGroup`, `ClusterSubnetGroup`, `ClusterSecurityGroup` (accepted; no EC2-Classic security group model) |
 | Redshift Serverless | `Namespace` (ManageAdminPassword is accepted and not applied; GetAtt uses the dotted Namespace.* form), `Workgroup` (starts a real container; one workgroup per namespace; capacity, VPC and price-performance settings are stored only; snapshot restore properties are ignored; GetAtt uses the dotted Workgroup.* form) |
 | EC2 | `VPC`, `Subnet`, `SecurityGroup` (inline `SecurityGroupIngress`/`SecurityGroupEgress` supported), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `VPCEndpoint`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog` |
@@ -182,6 +182,7 @@ cross-resource references.
 | EventBridge Scheduler | `ScheduleGroup` |
 | Transfer Family | `Server` (management plane only; Ref returns the server ARN; Arn, ServerId and State attributes supported; AS2 managed egress IPs are not modeled; Domain replacement and IdentityProviderType changes are not supported), `User` (management plane only; Ref returns the user ARN; Arn attribute supported; Policy and PosixProfile are not supported; a ServerId or UserName change replaces the user) |
 | Backup | `BackupVault` |
+| GuardDuty | `MalwareProtectionPlan` (management plane only: no scan runs, so the plan stays ACTIVE; Ref returns the plan id; a BucketName change is rejected) |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
@@ -218,11 +219,12 @@ must not pass over a resource it never got.
 replacement when `EmailIdentity` changes. Change-set previews also mark the replacement and its
 `Ref` dependents.
 
-If a failed update cannot restore the identity snapshot, a subsequent update that provisions the
-identity retries that restoration before changing or replacing it. An update that skips the
-identity cannot discard the pending snapshot: it stays in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`
-and rejects further updates. `DeleteStack` can delete the current managed identity without first
-restoring its snapshot. Cleanup keeps displaced-identity records while deletion attempts remain.
+If a failed update cannot restore the identity snapshot, a subsequent update retries restoration
+before changing the identity or completing an update that only changes outputs or other resources.
+Successful restoration leaves the identity in `UPDATE_COMPLETE`; a failed retry rolls back the
+update and keeps the snapshot for another attempt. `DeleteStack` can delete the current managed
+identity without first restoring its snapshot. Cleanup keeps displaced-identity records while
+deletion attempts remain.
 After three cleanup attempts, an exhausted entry is removed from stack management and a later
 `DeleteStack` does not retry it. Committed update cleanup uses the same three-attempt limit.
 This does not implement `ContinueUpdateRollback`.

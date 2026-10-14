@@ -278,6 +278,80 @@ class RdsServiceTest {
                 binding.getValue());
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "aurora-postgresql, create", "aurora-postgresql, reboot", "aurora-postgresql, retry",
+            "aurora-mysql, create", "aurora-mysql, reboot", "aurora-mysql, retry"
+    })
+    void memberIamBindingUsesClusterResourceIdAcrossRuntimePaths(String engine, String path) {
+        if ("retry".equals(path)) {
+            when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                    .thenReturn(null);
+        }
+        DbCluster cluster = rdsService.createDbCluster("iam-cluster", engine, null,
+                "admin", "password", "dbname", true, null);
+        clearInvocations(proxyManager);
+        DbInstance member = rdsService.createDbInstance("iam-member", engine, null,
+                "admin", "password", "dbname", "db.serverless",
+                0, true, null, null, "iam-cluster");
+        if (!"create".equals(path)) {
+            clearInvocations(proxyManager);
+            if ("reboot".equals(path)) {
+                rdsService.rebootDbInstance("iam-member");
+            } else {
+                when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                        .thenReturn(new RdsContainerHandle("late-container", cluster.getDbClusterArn(),
+                                "iam-cluster", "127.0.0.1", 15432));
+                rdsService.ensureInstanceBackend("iam-member", "us-east-1");
+            }
+        }
+        ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+        verify(proxyManager).startProxy(eq("rds-resource:" + member.getDbInstanceArn()),
+                any(), eq(true), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), binding.capture());
+        assertEquals(cluster.getDbClusterResourceId(), binding.getValue().resourceId());
+        assertNotEquals(member.getDbiResourceId(), binding.getValue().resourceId());
+        assertEquals("123456789012", binding.getValue().accountId());
+        assertEquals("us-east-1", binding.getValue().region());
+    }
+
+    @Test
+    void restoredMemberIamBindingsResolveSameNamedClustersByStoredAccountAndRegion() {
+        String defaultAccount = "123456789012";
+        InMemoryStorage<String, DbCluster> rawClusters = new InMemoryStorage<>();
+        InMemoryStorage<String, DbInstance> rawInstances = new InMemoryStorage<>();
+        int port = 7000;
+        for (String account : List.of(defaultAccount, "999999999999")) {
+            for (String region : List.of("us-east-1", "us-west-2")) {
+                DbCluster cluster = persistedCluster(account, "password", port++);
+                cluster.setDbClusterArn("arn:aws:rds:" + region + ":" + account + ":cluster:cluster1");
+                cluster.setDbClusterResourceId("cluster-" + account + "-" + region);
+                DbInstance member = persistedInstance("member", account, "password", port++);
+                member.setDbInstanceArn("arn:aws:rds:" + region + ":" + account + ":db:member");
+                member.setDbiResourceId("db-" + account + "-" + region);
+                member.setDbClusterIdentifier("cluster1");
+                member.setIamDatabaseAuthenticationEnabled(true);
+                cluster.getDbClusterMembers().add("member");
+                rawClusters.put(account + "/" + region + "::cluster1", cluster);
+                rawInstances.put(account + "/" + region + "::member", member);
+            }
+        }
+        RdsService service = newService(containerManager, proxyManager,
+                new AccountAwareStorageBackend<>(rawInstances, null, defaultAccount),
+                new AccountAwareStorageBackend<>(rawClusters, null, defaultAccount),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        service.restorePersistedRuntime();
+        for (String account : List.of(defaultAccount, "999999999999")) {
+            for (String region : List.of("us-east-1", "us-west-2")) {
+                ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+                verify(proxyManager).startProxy(eq("rds-resource:arn:aws:rds:" + region + ":" + account + ":db:member"),
+                        any(), eq(true), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), binding.capture());
+                assertEquals("cluster-" + account + "-" + region, binding.getValue().resourceId());
+                assertEquals(account, binding.getValue().accountId());
+                assertEquals(region, binding.getValue().region());
+            }
+        }
+    }
+
     @Test
     void createDbInstanceLeavesPostgresIamTokensUnboundWhenTheBindingIsTurnedOff() {
         when(rdsConfig.iamTokenEndpointBinding()).thenReturn(false);
@@ -1438,6 +1512,177 @@ class RdsServiceTest {
         verify(secretsManager).deleteSecret(eq(secretArn), any(), anyBoolean(), eq("us-east-1"));
     }
 
+    @ParameterizedTest
+    @CsvSource({"aurora-postgresql,16.3,true", "aurora-mysql,8.0,true",
+            "aurora-postgresql,16.3,false", "aurora-mysql,8.0,false"})
+    void replicatedClusterOptOutPreservesCredentials(String engine, String version, boolean mockMode) {
+        when(rdsConfig.mock()).thenReturn(mockMode);
+        SecretsManagerService secrets = realSecretsForOptOut();
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secrets);
+        DbCluster cluster = service.createDbCluster("optout", engine, version,
+                "admin", null, "dbname", false, null, null, null, false, "us-east-1",
+                null, null, null, true, null);
+        String oldPassword = cluster.getMasterPassword();
+        String arn = cluster.getMasterUserSecretArn();
+        String key = cluster.getMasterUserSecretKmsKeyId();
+        DbInstance member = service.createDbInstance("optout-member", engine, version,
+                "admin", oldPassword, "dbname", "db.r5.large", 20, false, null, null, "optout");
+        secrets.replicateSecretToRegions(arn,
+                List.of(new SecretsManagerService.ReplicaRegion("us-west-2", null)), false, "us-east-1");
+        String secretValue = secrets.getSecretValue(arn, null, null, "us-east-1").getSecretString();
+        clearInvocations(containerManager, proxyManager);
+
+        DbCluster modified = service.modifyDbCluster("optout", "replacement-password", true,
+                null, null, null, false, null, "us-east-1");
+
+        assertAll(
+                () -> assertEquals(oldPassword, modified.getMasterPassword()),
+                () -> assertTrue(modified.isIamDatabaseAuthenticationEnabled()),
+                () -> assertEquals(oldPassword, member.getMasterPassword()),
+                () -> assertEquals(arn, modified.getMasterUserSecretArn()),
+                () -> assertEquals("active", modified.getMasterUserSecretStatus()),
+                () -> assertEquals(key, modified.getMasterUserSecretKmsKeyId()),
+                () -> assertEquals(secretValue, secrets.getSecretValue(arn, null, null, "us-east-1").getSecretString()),
+                () -> verify(containerManager, never()).rotateMasterPassword(any(), any(), any(), any(), any(), any()),
+                () -> verify(proxyManager, never()).updateMasterPassword(any(), any()));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"aurora-postgresql,16.3", "aurora-mysql,8.0"})
+    void clusterOptOutRotationFailureRetainsManagedSecret(String engine, String version) {
+        SecretsManagerService secrets = realSecretsForOptOut();
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secrets);
+        DbCluster cluster = service.createDbCluster("optout-fail", engine, version,
+                "admin", null, "dbname", false, null, null, null, false, "us-east-1",
+                null, null, null, true, null);
+        String oldPassword = cluster.getMasterPassword();
+        String arn = cluster.getMasterUserSecretArn();
+        String key = cluster.getMasterUserSecretKmsKeyId();
+        String secretValue = secrets.getSecretValue(arn, null, null, "us-east-1").getSecretString();
+        doThrow(new IllegalStateException("backend rotation failed"))
+                .when(containerManager).rotateMasterPassword(any(), any(), any(), any(), any(), any());
+        clearInvocations(proxyManager);
+
+        assertThrows(IllegalStateException.class, () -> service.modifyDbCluster("optout-fail",
+                "replacement-password", null, null, null, null, false, null, "us-east-1"));
+
+        assertAll(
+                () -> assertEquals(oldPassword, cluster.getMasterPassword()),
+                () -> assertEquals(arn, cluster.getMasterUserSecretArn()),
+                () -> assertEquals("active", cluster.getMasterUserSecretStatus()),
+                () -> assertEquals(key, cluster.getMasterUserSecretKmsKeyId()),
+                () -> assertEquals(secretValue, secrets.getSecretValue(arn, null, null, "us-east-1").getSecretString()),
+                () -> verify(proxyManager, never()).updateMasterPassword(any(), any()));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"aurora-postgresql,16.3,true", "aurora-mysql,8.0,true",
+            "aurora-postgresql,16.3,false", "aurora-mysql,8.0,false"})
+    void clusterOptOutRetryDeletesSecretAfterReplicationRemoved(String engine, String version, boolean mockMode) {
+        when(rdsConfig.mock()).thenReturn(mockMode);
+        SecretsManagerService secrets = realSecretsForOptOut();
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secrets);
+        DbCluster cluster = service.createDbCluster("optout-retry", engine, version,
+                "admin", null, "dbname", false, null, null, null, false, "us-east-1",
+                null, null, null, true, null);
+        String arn = cluster.getMasterUserSecretArn();
+        String oldPassword = cluster.getMasterPassword();
+        DbInstance member = service.createDbInstance("retry-member", engine, version,
+                "admin", oldPassword, "dbname", "db.r5.large", 20, false, null, null, "optout-retry");
+        secrets.replicateSecretToRegions(arn,
+                List.of(new SecretsManagerService.ReplicaRegion("us-west-2", null)), false, "us-east-1");
+        service.modifyDbCluster("optout-retry", "replacement-password", null,
+                null, null, null, false, null, "us-east-1");
+        secrets.removeRegionsFromReplication(arn, List.of("us-west-2"), "us-east-1");
+
+        DbCluster modified = service.modifyDbCluster("optout-retry", "replacement-password", null,
+                null, null, null, false, null, "us-east-1");
+
+        assertAll(
+                () -> assertNull(modified.getMasterUserSecretArn()),
+                () -> assertNull(modified.getMasterUserSecretStatus()),
+                () -> assertNull(modified.getMasterUserSecretKmsKeyId()),
+                () -> assertEquals("replacement-password", modified.getMasterPassword()),
+                () -> assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                        () -> secrets.getSecretValue(arn, null, null, "us-east-1")).getErrorCode()));
+        if (!mockMode) {
+            assertEquals("replacement-password", member.getMasterPassword());
+            verify(containerManager).rotateMasterPassword(cluster.getDockerVolumeName(), cluster.getContainerId(),
+                    cluster.getEngine(), cluster.getMasterUsername(), oldPassword, "replacement-password");
+            verify(proxyManager).updateMasterPassword("rds-resource:" + cluster.getDbClusterArn(), "replacement-password");
+            verify(proxyManager).updateMasterPassword("rds-resource:" + member.getDbInstanceArn(), "replacement-password");
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"aurora-postgresql,16.3,true", "aurora-mysql,8.0,true",
+            "aurora-postgresql,16.3,false", "aurora-mysql,8.0,false"})
+    void clusterOptOutWithoutSecretsManagerFailsBeforeChangingState(String engine, String version, boolean mockMode) {
+        when(rdsConfig.mock()).thenReturn(mockMode);
+        DbCluster cluster = rdsService.createDbCluster("missing-secrets", engine, version,
+                "admin", "original-password", "dbname", false, null, null, null, false, "us-east-1");
+        String arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!missing-secrets";
+        cluster.setMasterUserSecretArn(arn);
+        cluster.setMasterUserSecretStatus("active");
+        cluster.setMasterUserSecretKmsKeyId("managed-key");
+        DbInstance member = rdsService.createDbInstance("missing-secrets-member", engine, version,
+                "admin", "original-password", "dbname", "db.r5.large", 20, false, null, null, "missing-secrets");
+        clearInvocations(containerManager, proxyManager);
+
+        AwsException error = assertThrows(AwsException.class, () -> rdsService.modifyDbCluster(
+                "missing-secrets", "replacement-password", true, 0.5, 8.0, null,
+                false, null, "us-east-1"));
+
+        assertAll(
+                () -> assertEquals("InvalidParameterCombination", error.getErrorCode()),
+                () -> assertEquals(400, error.getHttpStatus()),
+                () -> assertEquals("original-password", cluster.getMasterPassword()),
+                () -> assertEquals("original-password", member.getMasterPassword()),
+                () -> assertEquals(arn, cluster.getMasterUserSecretArn()),
+                () -> assertEquals("active", cluster.getMasterUserSecretStatus()),
+                () -> assertEquals("managed-key", cluster.getMasterUserSecretKmsKeyId()),
+                () -> assertFalse(cluster.isIamDatabaseAuthenticationEnabled()),
+                () -> assertNull(cluster.getServerlessV2MinCapacity()),
+                () -> assertNull(cluster.getServerlessV2MaxCapacity()),
+                () -> assertSame(cluster, rdsService.getDbCluster("missing-secrets", "us-east-1")),
+                () -> verifyNoInteractions(containerManager, proxyManager));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"aurora-postgresql,16.3,true", "aurora-mysql,8.0,true",
+            "aurora-postgresql,16.3,false", "aurora-mysql,8.0,false"})
+    void unmanagedClusterPasswordChangeDoesNotRequireSecretsManager(String engine, String version, boolean mockMode) {
+        when(rdsConfig.mock()).thenReturn(mockMode);
+        DbCluster cluster = rdsService.createDbCluster("unmanaged-optout", engine, version,
+                "admin", "original-password", "dbname", false, null, null, null, false, "us-east-1");
+        clearInvocations(containerManager, proxyManager);
+
+        rdsService.modifyDbCluster("unmanaged-optout", "replacement-password", true,
+                null, null, null, false, null, "us-east-1");
+
+        assertEquals("replacement-password", cluster.getMasterPassword());
+        assertTrue(cluster.isIamDatabaseAuthenticationEnabled());
+        assertNull(cluster.getMasterUserSecretArn());
+        verify(containerManager, times(mockMode ? 0 : 1))
+                .rotateMasterPassword(any(), any(), any(), any(), eq("original-password"), eq("replacement-password"));
+    }
+
+    private SecretsManagerService realSecretsForOptOut() {
+        StorageFactory factory = mock(StorageFactory.class);
+        when(factory.<Secret>create(eq("secretsmanager"), any(), any()))
+                .thenReturn(AccountAwareStorageBackend.inMemory("123456789012"));
+        EmulatorConfig.SecretsManagerServiceConfig secretsConfig = mock(EmulatorConfig.SecretsManagerServiceConfig.class);
+        when(config.services().secretsmanager()).thenReturn(secretsConfig);
+        when(secretsConfig.defaultRecoveryWindowDays()).thenReturn(30);
+        return new SecretsManagerService(factory, config, regionResolver, null, new ObjectMapper(), null);
+    }
+
     @Test
     void modifyDbClusterRekeysExistingManagedSecret() {
         when(config.services().rds().mock()).thenReturn(true);
@@ -2223,6 +2468,35 @@ class RdsServiceTest {
         verify(containerManager, never()).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(),
                 any(), anyInt(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void engineCatalogueFamiliesMatchTheFamilyCreateComputes() {
+        for (RdsEngineCatalog.EngineVersion version : RdsEngineCatalog.VERSIONS) {
+            assertEquals(rdsService.expectedClusterParameterGroupFamily(version.engine(), version.version()),
+                    version.family(), version.engine() + " " + version.version());
+        }
+    }
+
+    @Test
+    void engineCatalogueOffersEveryOrderableVersionAndOneDefaultPerEngine() {
+        for (Map<String, String> option : rdsService.describeOrderableDbInstanceOptions(null, null, null)) {
+            assertEquals(1, rdsService.describeDbEngineVersions(option.get("engine"), option.get("engineVersion"),
+                    null, false, Map.of(), null, null).versions().stream()
+                    .filter(v -> v.version().equals(option.get("engineVersion"))).count());
+        }
+        Map<String, Long> defaults = RdsEngineCatalog.VERSIONS.stream()
+                .filter(RdsEngineCatalog.EngineVersion::isDefault)
+                .collect(Collectors.groupingBy(RdsEngineCatalog.EngineVersion::engine, Collectors.counting()));
+        RdsEngineCatalog.VERSIONS.forEach(v -> assertEquals(1L, defaults.get(v.engine()), v.engine()));
+    }
+
+    @Test
+    void engineVersionsSortNumericallyForUpgradeTargets() {
+        RdsEngineCatalog.EngineVersion pg163 = RdsEngineCatalog.VERSIONS.stream()
+                .filter(v -> v.engine().equals("postgres") && v.version().equals("16.3")).findFirst().orElseThrow();
+        assertEquals(List.of("16.14", "17.4", "18.1", "18.4"),
+                RdsEngineCatalog.upgradeTargets(pg163).stream().map(RdsEngineCatalog.EngineVersion::version).toList());
     }
 
     @Test
