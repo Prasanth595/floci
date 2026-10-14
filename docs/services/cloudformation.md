@@ -344,8 +344,9 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
 `AWS::RDS::DBCluster` and `AWS::RDS::DBInstance` apply `AssociatedRoles` through the same checks as
 `AddRoleToDBCluster` / `AddRoleToDBInstance` (see [RDS IAM role associations](rds.md#iam-role-associations)):
 
-- On create, the roles are associated with the new cluster or instance. A list RDS refuses (a role named twice, a missing `RoleArn`, or an instance role without `FeatureName`) fails the resource, and the new database is deleted again.
-- On `UpdateStack` (no interruption, as in AWS), the roles the template gained are added, and the roles the previous template declared and the new one drops are removed. A role associated outside the stack is kept.
+- `Fn::If` may select the whole list or a single entry, and `AWS::NoValue` leaves it out. A value that is not a list of roles is a `ValidationError`.
+- On create, the roles are associated with the new cluster or instance. A list RDS refuses (a missing `RoleArn`, an instance role without `FeatureName`, or a cluster role named twice) fails the resource, and the new database is deleted again. As in AWS, an instance role or feature the list repeats is skipped, not refused. A renamed instance keeps its predecessor until the new one has its roles.
+- On `UpdateStack` (no interruption, as in AWS), a cluster's list is checked first, then the roles the template gained are added, and the roles the previous template declared and the new one drops are removed. A role associated outside the stack is kept while the template leaves it out; declaring it fails the update with `DBClusterRoleAlreadyExists`, as in AWS. A rolled-back cluster replacement restores the record of which roles the stack declared.
 - An Aurora cluster member (`AWS::RDS::DBInstance` with `DBClusterIdentifier`) cannot carry `AssociatedRoles`: the schema documents the property as not applicable there, since the cluster manages its roles. The resource fails with a `ValidationError` pointing at the cluster's `AssociatedRoles`.
 
 ## Account-Aware Provisioning

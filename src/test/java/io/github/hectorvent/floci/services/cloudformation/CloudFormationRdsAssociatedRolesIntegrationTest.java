@@ -116,6 +116,126 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
         }
     }
 
+    @Test
+    void conditionsAroundTheListAndItsEntriesAreResolved() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-roles-if-" + suffix;
+        String listCluster = "cfn-roles-if-list-" + suffix;
+        String entryCluster = "cfn-roles-if-entry-" + suffix;
+        try {
+            stack("CreateStack", stackName, """
+                    {"Conditions": {"Yes": {"Fn::Equals": ["a", "a"]}, "No": {"Fn::Equals": ["a", "b"]}},
+                     "Resources": {
+                      "ListCluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                        "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                        "MasterUsername": "dbadmin", "MasterUserPassword": "password123",
+                        "AssociatedRoles": {"Fn::If": ["Yes", [{"RoleArn": "%s", "FeatureName": "s3Export"}],
+                                                       {"Ref": "AWS::NoValue"}]}}},
+                      "EntryCluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                        "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                        "MasterUsername": "dbadmin", "MasterUserPassword": "password123",
+                        "AssociatedRoles": [
+                          {"Fn::If": ["Yes", {"RoleArn": "%s", "FeatureName": "Lambda"}, {"Ref": "AWS::NoValue"}]},
+                          {"Fn::If": ["No", {"RoleArn": "%s"}, {"Ref": "AWS::NoValue"}]}]}}}}
+                    """.formatted(listCluster, EXPORT_ROLE, entryCluster, LAMBDA_ROLE, MANUAL_ROLE));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(List.of(EXPORT_ROLE), clusterRoles(listCluster));
+            assertEquals(List.of(LAMBDA_ROLE), clusterRoles(entryCluster));
+        } finally {
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @Test
+    void anUpdateWithAMalformedOrRepeatedListKeepsTheRoles() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-roles-bad-update-" + suffix;
+        String clusterId = "cfn-roles-bad-update-" + suffix;
+        String cluster = """
+                {"Resources": {"Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                  "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "password123",
+                  "AssociatedRoles": %s}}}}
+                """;
+        try {
+            stack("CreateStack", stackName, cluster.formatted(clusterId,
+                    "[{\"RoleArn\": \"%s\", \"FeatureName\": \"s3Export\"}]".formatted(EXPORT_ROLE)));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+
+            // A value that is not a list is refused, not read as "no roles".
+            stack("UpdateStack", stackName, cluster.formatted(clusterId, "\"%s\"".formatted(LAMBDA_ROLE)));
+            assertTrue(CfnStackWaits.awaitTerminal(stackName).status().startsWith("UPDATE_ROLLBACK"));
+            assertEquals(List.of(EXPORT_ROLE), clusterRoles(clusterId));
+
+            // A role named twice is refused on an update as on a create, before anything changes.
+            stack("UpdateStack", stackName, cluster.formatted(clusterId,
+                    "[{\"RoleArn\": \"%s\"}, {\"RoleArn\": \"%s\"}]".formatted(LAMBDA_ROLE, LAMBDA_ROLE)));
+            assertTrue(CfnStackWaits.awaitTerminal(stackName).status().startsWith("UPDATE_ROLLBACK"));
+            assertEquals(List.of(EXPORT_ROLE), clusterRoles(clusterId));
+        } finally {
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @Test
+    void aRepeatedInstanceRoleIsSkippedAsAwsDoes() {
+        // AWS's DBInstance handler ignores DBInstanceRoleAlreadyExists, so a repeated role or
+        // feature does not fail the resource.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-roles-instance-twice-" + suffix;
+        String instanceId = "cfn-roles-instance-twice-" + suffix;
+        try {
+            stack("CreateStack", stackName, """
+                    {"Resources": {"Database": {"Type": "AWS::RDS::DBInstance", "Properties": {
+                      "DBInstanceIdentifier": "%s", "Engine": "postgres", "DBInstanceClass": "db.t3.micro",
+                      "MasterUsername": "dbadmin", "MasterUserPassword": "password123", "AllocatedStorage": 20,
+                      "AssociatedRoles": [{"RoleArn": "%s", "FeatureName": "Lambda"},
+                                          {"RoleArn": "%s", "FeatureName": "Lambda"},
+                                          {"RoleArn": "%s", "FeatureName": "Lambda"}]}}}}
+                    """.formatted(instanceId, LAMBDA_ROLE, LAMBDA_ROLE, EXPORT_ROLE));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(List.of(LAMBDA_ROLE), instanceRoles(instanceId));
+        } finally {
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @Test
+    void declaringARoleAttachedByHandFailsTheClusterUpdate() {
+        // On AWS a cluster update that newly declares a role already attached outside the stack
+        // fails with DBClusterRoleAlreadyExists.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-roles-hand-" + suffix;
+        String clusterId = "cfn-roles-hand-" + suffix;
+        String cluster = """
+                {"Resources": {"Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                  "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "password123",
+                  "AssociatedRoles": %s}}}}
+                """;
+        try {
+            stack("CreateStack", stackName, cluster.formatted(clusterId,
+                    "[{\"RoleArn\": \"%s\"}]".formatted(EXPORT_ROLE)));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            rds("AddRoleToDBCluster").formParam("DBClusterIdentifier", clusterId)
+                    .formParam("RoleArn", MANUAL_ROLE)
+            .when().post("/").then().statusCode(200);
+
+            stack("UpdateStack", stackName, cluster.formatted(clusterId,
+                    "[{\"RoleArn\": \"%s\"}, {\"RoleArn\": \"%s\"}]".formatted(EXPORT_ROLE, MANUAL_ROLE)));
+            assertTrue(CfnStackWaits.awaitTerminal(stackName).status().startsWith("UPDATE_ROLLBACK"));
+            String events = stack("DescribeStackEvents", stackName, null);
+            assertTrue(events.contains("already associated"), events);
+            assertThat(clusterRoles(clusterId), containsInAnyOrder(EXPORT_ROLE, MANUAL_ROLE));
+        } finally {
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
     private static String template(String clusterId, String instanceId, String clusterRoles) {
         return """
                 {"Resources": {

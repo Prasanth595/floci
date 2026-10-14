@@ -93,6 +93,11 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * the template no longer does, so a role associated outside the stack is left in place.
      */
     static final String ASSOCIATED_ROLES_ATTR = "__FlociAssociatedRoles";
+    /**
+     * The roles record an update overwrote, kept until the update commits so a rollback that puts
+     * the prior cluster back puts its record back too; an empty value means there was none.
+     */
+    static final String ASSOCIATED_ROLES_PRIOR_ATTR = "__FlociAssociatedRolesPrior";
 
     private final RdsService rdsService;
     private final CfnDynamicReferences dynamicReferences;
@@ -172,6 +177,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void clearUpdate(StackResource resource) {
         resource.getAttributes().remove(DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR);
+        resource.getAttributes().remove(ASSOCIATED_ROLES_PRIOR_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
@@ -191,6 +197,14 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 resource.getAttributes().remove(DB_CLUSTER_CREATE_ONLY_ATTR);
             } else {
                 resource.getAttributes().put(DB_CLUSTER_CREATE_ONLY_ATTR, priorRecord);
+            }
+        }
+        String priorRoles = resource.getAttributes().remove(ASSOCIATED_ROLES_PRIOR_ATTR);
+        if (priorRoles != null) {
+            if (priorRoles.isEmpty()) {
+                resource.getAttributes().remove(ASSOCIATED_ROLES_ATTR);
+            } else {
+                resource.getAttributes().put(ASSOCIATED_ROLES_ATTR, priorRoles);
             }
         }
         return replaced;
@@ -355,9 +369,13 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     resolveOptional(props, "DBSubnetGroupName", engine),
                     resolveOptional(props, "DBClusterIdentifier", engine),
                     null, false, false, null, Map.of(), region);
+        }
+        // The roles go on before a renamed instance's predecessor is deleted, so a refused list
+        // deletes only the new instance and the stack still has the old one to roll back to.
+        instance = reconcileInstanceRoles(r, instance, roles, created, ctx.isUpdate(), region);
+        if (created) {
             deleteRenamedResource(priorPhysicalId, id, rdsService::deleteDbInstance, "DB instance");
         }
-        instance = reconcileInstanceRoles(r, instance, roles, created, region);
         r.setPhysicalId(instance.getDbInstanceIdentifier());
         r.getAttributes().put("DBInstanceIdentifier", instance.getDbInstanceIdentifier());
         if (instance.getEndpoint() != null) {
@@ -420,6 +438,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             cluster = null;
         }
         List<DbRoleAssociation> roles = parseAssociatedRoles(props, engine);
+        if (!roles.isEmpty()) {
+            rdsService.validateClusterRoleAssociations(id, roles);
+        }
         boolean created = cluster == null;
         if (cluster != null) {
             cluster = rdsService.modifyDbCluster(
@@ -447,7 +468,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
                     false, null, engineMode, storageEncrypted);
         }
-        cluster = reconcileClusterRoles(r, cluster, roles, created, region);
+        cluster = reconcileClusterRoles(r, cluster, roles, created, ctx.isUpdate(), region);
         r.setPhysicalId(cluster.getDbClusterIdentifier());
         r.getAttributes().put("DBClusterIdentifier", cluster.getDbClusterIdentifier());
         if (cluster.getEndpoint() != null) {
@@ -469,18 +490,39 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
-    /** The template's {@code AssociatedRoles}, in order; an absent property is an empty list. */
+    /**
+     * The template's {@code AssociatedRoles}, in order, with {@code Fn::If} resolved around the list
+     * and its entries. An absent property, or one that resolves to {@code AWS::NoValue}, is an empty
+     * list; any other value that is not a list of objects is a {@code ValidationError}, so a
+     * malformed property never reads as "no roles" and removes the ones the stack declared.
+     */
     private List<DbRoleAssociation> parseAssociatedRoles(JsonNode props, CloudFormationTemplateEngine engine) {
         List<DbRoleAssociation> roles = new ArrayList<>();
-        JsonNode list = props != null ? props.get("AssociatedRoles") : null;
-        if (list == null || !list.isArray()) {
+        if (props == null || !props.has("AssociatedRoles")) {
             return roles;
         }
+        JsonNode list = engine.resolveNodeOmittingNoValue(props.get("AssociatedRoles"));
+        if (list == null || list.isMissingNode()) {
+            return roles;
+        }
+        if (!list.isArray()) {
+            throw new AwsException("ValidationError", "AssociatedRoles must be a list of roles.", 400);
+        }
         for (JsonNode role : list) {
-            roles.add(new DbRoleAssociation(resolveOptional(role, "RoleArn", engine),
-                    resolveOptional(role, "FeatureName", engine)));
+            if (role == null || role.isMissingNode()) {
+                continue;
+            }
+            if (!role.isObject()) {
+                throw new AwsException("ValidationError",
+                        "Each AssociatedRoles entry must be an object with a RoleArn.", 400);
+            }
+            roles.add(new DbRoleAssociation(textOrNull(role.get("RoleArn")), textOrNull(role.get("FeatureName"))));
         }
         return roles;
+    }
+
+    private static String textOrNull(JsonNode node) {
+        return node == null || node.isNull() || node.isMissingNode() ? null : node.asText();
     }
 
     /**
@@ -490,7 +532,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * this template adds are associated.
      */
     private DbCluster reconcileClusterRoles(StackResource r, DbCluster cluster, List<DbRoleAssociation> roles,
-                                            boolean created, String region) {
+                                            boolean created, boolean update, String region) {
         String id = cluster.getDbClusterIdentifier();
         if (created) {
             if (!roles.isEmpty()) {
@@ -510,24 +552,28 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                             dropped.getFeatureName());
                 }
             }
+            // A role the last template already declared is left as it is. One the template newly
+            // declares is always added, so a role attached by hand first fails the update with
+            // DBClusterRoleAlreadyExists, as it does on AWS.
+            List<DbRoleAssociation> declared = readAssociatedRoles(r.getAttributes().get(ASSOCIATED_ROLES_ATTR));
             for (DbRoleAssociation role : roles) {
-                if (!containsRole(cluster.getAssociatedRoles(), role)) {
+                if (!containsRole(declared, role) || !containsRole(cluster.getAssociatedRoles(), role)) {
                     cluster = rdsService.addRoleToDbCluster(region, id, role.getRoleArn(), role.getFeatureName());
                 }
             }
         }
-        recordAssociatedRoles(r, roles);
+        recordAssociatedRoles(r, roles, update);
         return cluster;
     }
 
     /** As {@link #reconcileClusterRoles}, for an instance; each role is added on its own. */
     private DbInstance reconcileInstanceRoles(StackResource r, DbInstance instance, List<DbRoleAssociation> roles,
-                                              boolean created, String region) {
+                                              boolean created, boolean update, String region) {
         String id = instance.getDbInstanceIdentifier();
         if (created) {
             try {
                 for (DbRoleAssociation role : roles) {
-                    instance = rdsService.addRoleToDbInstance(region, id, role.getRoleArn(), role.getFeatureName());
+                    instance = addInstanceRole(instance, id, role, region);
                 }
             } catch (AwsException e) {
                 rdsService.deleteDbInstance(id, region);
@@ -543,12 +589,28 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             }
             for (DbRoleAssociation role : roles) {
                 if (!containsRole(instance.getAssociatedRoles(), role)) {
-                    instance = rdsService.addRoleToDbInstance(region, id, role.getRoleArn(), role.getFeatureName());
+                    instance = addInstanceRole(instance, id, role, region);
                 }
             }
         }
-        recordAssociatedRoles(r, roles);
+        recordAssociatedRoles(r, roles, update);
         return instance;
+    }
+
+    /**
+     * Associates one instance role. AWS's {@code AWS::RDS::DBInstance} handler ignores
+     * {@code DBInstanceRoleAlreadyExists}, so a role or feature the list repeats, or one already on
+     * the instance, is skipped rather than failing the resource.
+     */
+    private DbInstance addInstanceRole(DbInstance instance, String id, DbRoleAssociation role, String region) {
+        try {
+            return rdsService.addRoleToDbInstance(region, id, role.getRoleArn(), role.getFeatureName());
+        } catch (AwsException e) {
+            if ("DBInstanceRoleAlreadyExists".equals(e.getErrorCode())) {
+                return instance;
+            }
+            throw e;
+        }
     }
 
     /** The roles the last template declared that this one does not. */
@@ -572,7 +634,11 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         return value == null || value.isBlank() ? null : value;
     }
 
-    private static void recordAssociatedRoles(StackResource r, List<DbRoleAssociation> roles) {
+    private static void recordAssociatedRoles(StackResource r, List<DbRoleAssociation> roles, boolean update) {
+        String priorRecord = r.getAttributes().get(ASSOCIATED_ROLES_ATTR);
+        if (update && !r.getAttributes().containsKey(ASSOCIATED_ROLES_PRIOR_ATTR)) {
+            r.getAttributes().put(ASSOCIATED_ROLES_PRIOR_ATTR, priorRecord == null ? "" : priorRecord);
+        }
         ArrayNode record = MAPPER.createArrayNode();
         for (DbRoleAssociation role : roles) {
             ObjectNode entry = record.addObject().put("RoleArn", role.getRoleArn());
