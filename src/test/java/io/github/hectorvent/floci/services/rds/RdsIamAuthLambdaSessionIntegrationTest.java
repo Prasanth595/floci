@@ -206,7 +206,7 @@ class RdsIamAuthLambdaSessionIntegrationTest {
         });
     }
 
-    private static void assertIamAuthentication(int port, String accessKeyId, boolean enabled) throws SQLException {
+    private static void assertIamAuthentication(int port, String accessKeyId, boolean enabled) throws Exception {
         String token = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, MASTER_USER,
                 accessKeyId, SESSION_SECRET, Instant.now().minusSeconds(60), 900, SESSION_TOKEN);
         if (enabled) {
