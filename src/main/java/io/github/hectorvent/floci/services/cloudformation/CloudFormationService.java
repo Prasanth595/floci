@@ -2713,9 +2713,14 @@ public class CloudFormationService implements ResourceProvider {
         Map<String, String> conditionParams = new HashMap<>(params);
         template.path("Parameters").fieldNames().forEachRemaining(name -> conditionParams.putIfAbsent(name, ""));
         conditionParams.putIfAbsent("AWS::NotificationARNs", "");
+        // AWS allows only Ref, Fn::FindInMap and condition functions inside a condition, so an import
+        // there is a template error, whether or not the export exists.
         CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
                 accountId, region, stackName, stackId, conditionParams, Map.of(), Map.of(),
-                conditions, mappings, objectMapper, name -> null);
+                conditions, mappings, objectMapper, name -> {
+                    throw new AwsException("ValidationError",
+                            "Template error: Fn::ImportValue is not supported in Conditions", 400);
+                });
         condNode.fields().forEachRemaining(e -> conditions.put(e.getKey(), false));
         condNode.fields().forEachRemaining(e ->
                 conditions.put(e.getKey(), evaluateCondition(e.getValue(), conditions, engine)));

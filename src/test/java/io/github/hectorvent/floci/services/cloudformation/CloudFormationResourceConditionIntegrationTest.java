@@ -659,6 +659,42 @@ class CloudFormationResourceConditionIntegrationTest {
     }
 
     /**
+     * AWS allows only Ref, Fn::FindInMap and condition functions inside a condition, so a template
+     * that uses Fn::ImportValue there is rejected. The reason must say so, not claim the export it
+     * names is missing when the exporting stack has it.
+     */
+    @Test
+    void importValueInAConditionIsRejectedAsUnsupported() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String exporter = "cfn-cond-exporter-" + suffix;
+        String exportName = "cfn-cond-export-" + suffix;
+        createStack(exporter, """
+                {"Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "%s"}}},
+                 "Outputs": {"Flag": {"Value": "on", "Export": {"Name": "%s"}}}}
+                """.formatted("cond-export-queue-" + suffix, exportName));
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(exporter).status());
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack")
+                .formParam("StackName", "cfn-cond-importer-" + suffix)
+                .formParam("TemplateBody", """
+                        {"Conditions": {"IsOn": {"Fn::Equals": [{"Fn::ImportValue": "%s"}, "on"]}},
+                         "Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Condition": "IsOn"}}}
+                        """.formatted(exportName))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", containsString("Fn::ImportValue is not supported in Conditions"));
+        } finally {
+            deleteStack(exporter);
+            CfnStackWaits.awaitStackDeleted(exporter);
+        }
+    }
+
+    /**
      * A declared parameter the stack gives no value and no Default compares as an empty string, as it
      * did before conditions went through the template engine, which answers an unresolved Ref with
      * the parameter's own name. So does {@code AWS::NotificationARNs}, which Floci keeps none of.
