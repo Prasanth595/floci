@@ -17,7 +17,10 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
@@ -25,6 +28,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -62,8 +66,9 @@ class EcsExecChannelDockerIntegrationTest {
                 "Docker daemon must be available for the ECS Exec channel test");
     }
 
-    @Test
-    void aClientDrivingTheProtocolGetsTheCommandsOutput() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aClientDrivingTheProtocolGetsTheCommandsOutput(boolean interactive) throws Exception {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
@@ -89,7 +94,8 @@ class EcsExecChannelDockerIntegrationTest {
             ExecSession session = sessions.create(task.getTaskArn(),
                     "arn:aws:ecs:us-east-1:000000000000:cluster/exec-cluster", "app",
                     "arn:aws:ecs:us-east-1:000000000000:container/exec/app", runtimeId,
-                    List.of("/bin/sh", "-c", "echo exec-channel-ok"), false);
+                    List.of("/bin/sh", "-c", "printf '\\000\\001\\002\\003\\377\\376'; "
+                            + "head -c 5000 /dev/zero; printf 'exec-channel-ok'"), interactive);
 
             PluginClient client = new PluginClient(vertx, session);
             try {
@@ -104,9 +110,16 @@ class EcsExecChannelDockerIntegrationTest {
 
                 client.sendHandshakeResponse();
 
-                String output = client.readUntil("exec-channel-ok");
-                assertTrue(output.contains("exec-channel-ok"),
-                        "the command's output must reach the channel, got: " + output);
+                byte[] suffixBytes = "exec-channel-ok".getBytes(StandardCharsets.UTF_8);
+                byte[] expected = new byte[6 + 5000 + suffixBytes.length];
+                expected[1] = 1;
+                expected[2] = 2;
+                expected[3] = 3;
+                expected[4] = (byte) 0xff;
+                expected[5] = (byte) 0xfe;
+                System.arraycopy(suffixBytes, 0, expected, 5006, suffixBytes.length);
+                assertArrayEquals(expected, client.readOutput(),
+                        "binary output must survive Docker decoding and asynchronous channel writes");
             } finally {
                 client.close();
             }
@@ -218,6 +231,25 @@ class EcsExecChannelDockerIntegrationTest {
             AgentMessage message = received.poll(30, TimeUnit.SECONDS);
             assertNotNull(message, "the agent must send a frame");
             return message;
+        }
+
+        byte[] readOutput() throws InterruptedException {
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (System.nanoTime() < deadline) {
+                AgentMessage message = received.poll(1, TimeUnit.SECONDS);
+                if (message == null) {
+                    continue;
+                }
+                if (AgentMessage.CHANNEL_CLOSED.equals(message.messageType())) {
+                    return output.toByteArray();
+                }
+                if (AgentMessage.OUTPUT_STREAM_DATA.equals(message.messageType())
+                        && message.payloadType() == AgentMessage.PAYLOAD_OUTPUT) {
+                    output.writeBytes(message.payload());
+                }
+            }
+            throw new AssertionError("the command must finish and close its channel");
         }
 
         /** Collects output frames until the expected text shows up or the channel goes quiet. */
