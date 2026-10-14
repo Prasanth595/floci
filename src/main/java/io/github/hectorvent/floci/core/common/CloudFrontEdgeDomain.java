@@ -5,8 +5,8 @@ import java.util.UUID;
 /**
  * The CloudFront distribution AWS puts in front of a custom domain, an edge-optimized API Gateway
  * domain or an AppSync custom domain: a distribution domain name on the CloudFront suffix of the
- * region's partition (or the configured one), and the CloudFront hosted zone of the region's partition, which a Route 53 alias record
- * targets. The zone is null in a partition without CloudFront.
+ * partition (or the configured one), and the partition's CloudFront hosted zone, which a Route 53
+ * alias record targets. The zone is null in a partition without CloudFront.
  *
  * @param domainName   the distribution domain name, {@code d<13 hex>.<suffix>}
  * @param hostedZoneId the partition's CloudFront hosted zone, or null where there is none
@@ -14,10 +14,13 @@ import java.util.UUID;
 public record CloudFrontEdgeDomain(String domainName, String hostedZoneId) {
 
     /**
+     * @param partition        the partition the domain is created in, as the caller's
+     *                         {@link RegionResolver#partitionForRegion} resolves it, so a region no
+     *                         partition publishes falls to the deployment's partition, not the
+     *                         commercial one
      * @param configuredSuffix {@code floci.services.cloudfront.domain-suffix}, or null when unset
      */
-    public static CloudFrontEdgeDomain create(String region, String configuredSuffix) {
-        String partition = AwsPartitions.forRegionOrCommercial(region).id();
+    public static CloudFrontEdgeDomain create(String partition, String configuredSuffix) {
         String distributionId = "d" + UUID.randomUUID().toString().replace("-", "").substring(0, 13);
         String hostedZoneId = AwsRegionFacts.cloudFrontHostedZoneId(partition).orElse(null);
         return new CloudFrontEdgeDomain(distributionId + "." + domainSuffix(configuredSuffix, partition), hostedZoneId);

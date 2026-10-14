@@ -111,6 +111,8 @@ CLOUDFRONT_SUFFIX_SENTENCES = {
 # One sentence per region, each naming the region by the description partitions.json carries. The
 # page writes "Route 53" with a no-break space.
 APIGATEWAY_REGIONAL_ZONE_PAGE = "gov/govcloud-abp.md"
+# The page states a zone for every region of this partition, so a run that finds fewer is refused.
+APIGATEWAY_REGIONAL_ZONE_PARTITION = "aws-us-gov"
 APIGATEWAY_REGIONAL_ZONE_SENTENCE = re.compile(
     r"The Amazon Route\s53 Hosted Zone ID for the regional endpoint in the (AWS GovCloud \([A-Za-z-]+\)) Region"
     r" is (Z[0-9A-Z]+)\.")
@@ -247,7 +249,7 @@ def parse_cloudfront_suffixes(botocore_data: Path, guides: Path) -> dict[str, st
 
 
 def parse_apigateway_regional_zones(text: str, partitions_doc: dict) -> dict[str, str]:
-    """region id -> hosted zone, for each region the GovCloud API Gateway page states one for."""
+    """region id -> hosted zone for every GovCloud region, from the GovCloud API Gateway page."""
     by_description = {r["description"]: r["id"] for p in partitions_doc["partitions"] for r in p["regions"]
                       if r.get("description")}
     zones: dict[str, str] = {}
@@ -260,7 +262,16 @@ def parse_apigateway_regional_zones(text: str, partitions_doc: dict) -> dict[str
             raise ValueError(f"{APIGATEWAY_REGIONAL_ZONE_PAGE}: two regional hosted zones for {region}")
     if not zones:
         raise ValueError(f"{APIGATEWAY_REGIONAL_ZONE_PAGE}: no regional endpoint hosted zone sentence found")
+    missing = sorted(apigateway_zone_regions(partitions_doc) - zones.keys())
+    if missing:
+        raise ValueError(f"{APIGATEWAY_REGIONAL_ZONE_PAGE}: no regional endpoint hosted zone for {', '.join(missing)}")
     return zones
+
+
+def apigateway_zone_regions(partitions_doc: dict) -> set[str]:
+    """The regions the GovCloud API Gateway page must state a regional hosted zone for."""
+    return {region["id"] for partition in partitions_doc["partitions"]
+            if partition["id"] == APIGATEWAY_REGIONAL_ZONE_PARTITION for region in partition["regions"]}
 
 
 def guides_present(guides: Path) -> bool:
@@ -403,6 +414,11 @@ def self_check(path: Path, partitions_path: Path = PARTITIONS) -> list[str]:
             problems.append(f"{path}: {partition['id']}.vpcEndpointServiceNamePrefix should be {expected!r}")
         if partition["id"] in CONSOLE_HOST_SENTENCES and "consoleHost" not in entry:
             problems.append(f"{path}: {partition['id']}.consoleHost is missing")
+        if partition["id"] in {"aws"} | CLOUDFRONT_SUFFIX_SENTENCES.keys() and "cloudfrontDomainSuffix" not in entry:
+            problems.append(f"{path}: {partition['id']}.cloudfrontDomainSuffix is missing")
+    for region in sorted(apigateway_zone_regions({"partitions": partitions_doc})):
+        if "apiGatewayRegionalHostedZoneId" not in document["regions"].get(region, {}):
+            problems.append(f"{path}: {region}.apiGatewayRegionalHostedZoneId is missing")
     known = {region["id"] for partition in partitions_doc for region in partition["regions"]}
     for region in document["regions"]:
         if region not in known:

@@ -761,7 +761,8 @@ public class AppSyncService {
      * Gateway domain gets.
      */
     private void applyCloudFrontFront(DomainName dn, String region) {
-        CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(region, configuredCloudFrontDomainSuffix);
+        CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(regionResolver.partitionForRegion(region),
+                configuredCloudFrontDomainSuffix);
         dn.setAppsyncDomainName(edge.domainName());
         dn.setHostedZoneId(edge.hostedZoneId());
     }

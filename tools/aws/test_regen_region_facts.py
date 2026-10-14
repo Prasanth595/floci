@@ -255,6 +255,13 @@ def test_api_gateway_regional_zones_resolve_the_region_by_its_description():
         r.parse_apigateway_regional_zones(GUIDE_GOVCLOUD_APIGATEWAY.replace("(US-West)", "(US-North)"), PARTITIONS)
     with pytest.raises(ValueError, match="two regional hosted zones for us-gov-east-1"):
         r.parse_apigateway_regional_zones(GUIDE_GOVCLOUD_APIGATEWAY.replace("(US-West)", "(US-East)"), PARTITIONS)
+    # a page that loses one region's sentence is refused rather than dropping that zone
+    west_only = GUIDE_GOVCLOUD_APIGATEWAY.replace(
+        " The Amazon Route\u00a053 Hosted Zone ID for the regional endpoint in the AWS GovCloud (US-East)"
+        " Region is Z3SE9ATJYCRCZJ.", "")
+    assert "(US-West)" in west_only and "(US-East)" not in west_only
+    with pytest.raises(ValueError, match="no regional endpoint hosted zone for us-gov-east-1"):
+        r.parse_apigateway_regional_zones(west_only, PARTITIONS)
 
 
 def test_build_merges_sources_with_terraform_winning_the_s3_conflicts(tmp_path):
@@ -359,6 +366,12 @@ def test_self_check_holds_the_values_to_what_partitions_json_publishes(tmp_path)
         "missing China console host": lambda d: d["partitions"]["aws-cn"].pop("consoleHost"),
         "missing GovCloud console host": lambda d: d["partitions"]["aws-us-gov"].pop("consoleHost"),
         "missing commercial console host": lambda d: d["partitions"]["aws"].pop("consoleHost"),
+        "missing commercial CloudFront suffix": lambda d: d["partitions"]["aws"].pop("cloudfrontDomainSuffix"),
+        "missing China CloudFront suffix": lambda d: d["partitions"]["aws-cn"].pop("cloudfrontDomainSuffix"),
+        "missing us-gov-west-1 API Gateway zone": lambda d: d["regions"]["us-gov-west-1"].pop(
+            "apiGatewayRegionalHostedZoneId"),
+        "missing us-gov-east-1 API Gateway zone": lambda d: d["regions"]["us-gov-east-1"].pop(
+            "apiGatewayRegionalHostedZoneId"),
         "CloudFront suffix that is a whole name": lambda d: d["partitions"][partition].update(
             cloudfrontDomainSuffix="d111111abcdef8.cloudfront.net"),
         "API Gateway zone that is not a zone id": lambda d: d["regions"][region].update(

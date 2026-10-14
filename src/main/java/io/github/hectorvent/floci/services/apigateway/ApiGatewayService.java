@@ -2176,7 +2176,7 @@ public class ApiGatewayService implements ResourceProvider {
             domain.setDistributionDomainName(null);
             domain.setDistributionHostedZoneId(null);
         } else if (domain.getDistributionDomainName() == null) {
-            CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(region,
+            CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(regionResolver.partitionForRegion(region),
                     config.services().cloudfront().domainSuffix().orElse(null));
             domain.setDistributionDomainName(edge.domainName());
             domain.setDistributionHostedZoneId(edge.hostedZoneId());
