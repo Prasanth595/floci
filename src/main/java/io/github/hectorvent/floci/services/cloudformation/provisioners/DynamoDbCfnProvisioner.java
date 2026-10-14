@@ -125,6 +125,9 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
                 r.getLogicalId(), TABLE_NAME_MAX_LENGTH, false);
         JsonNode ttlSpec = props != null ? engine.resolveNode(props.get("TimeToLiveSpecification")) : null;
         boolean ttlDeclared = ttlSpec != null && ttlSpec.isObject();
+        // A stack that never declared TTL leaves it alone, as AWS does, so TTL set outside the stack
+        // survives an update; removing a block the previous template declared turns TTL off.
+        boolean ttlManaged = ttlDeclared || ctx.previouslyDeclared("TimeToLiveSpecification");
         TimeToLive desiredTtl = ttlDeclared ? declaredTimeToLive(ttlSpec, engine) : TIME_TO_LIVE_OFF;
 
         List<KeySchemaElement> keySchema = new ArrayList<>();
@@ -213,9 +216,9 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         }
 
         try {
-            // TTL is read when the template declares it or an in-place update may have removed it, so
-            // UpdateTimeToLive is called only when something differs. A rename of an enabled TTL
-            // attribute fails here, and the rollback snapshot is taken here, before anything changes.
+            // TTL is read when the template declares it, and on an in-place update for the rollback
+            // snapshot, so UpdateTimeToLive is called only when something differs. A rename of an
+            // enabled TTL attribute fails here, and the snapshot is taken here, before anything changes.
             // A table this attempt created has no prior state to snapshot; a failure deletes it instead.
             boolean inPlaceUpdate = !created && ctx.reusesPriorEntity(tableName);
             TimeToLive currentTtl = null;
@@ -251,7 +254,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
 
             // TimeToLiveSpecification is reconciled like the stream: declaring it enabled turns TTL on
             // for the attribute, and Enabled false or a block removed on an update turns it off.
-            if (currentTtl != null) {
+            if (ttlManaged && currentTtl != null) {
                 reconcileTimeToLive(scope, tableName, currentTtl, desiredTtl);
             }
 
@@ -274,26 +277,37 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             // A table this attempt created would outlive the failure otherwise: the create rollback
             // deletes only a resource that carries its physical id, and a replacing update puts the
             // previous resource back. An adopted table, or one an in-place update changes, is kept.
+            // DeletionPolicy Retain does not keep it: AWS validates the tags and the stream inside
+            // CreateTable, so on AWS such a failure leaves no table to retain.
             if (created) {
-                deleteCreatedTable(r, scope, tableName);
+                deleteCreatedTable(r, scope, tableName, ctx.isUpdate(), failure);
             }
             throw failure;
         }
     }
 
     /**
-     * Deletes the table a failed provision created. A delete that fails leaves the table owned by
-     * the resource, so the stack's create rollback retries it.
+     * Deletes the table a failed provision created. A delete that fails on create leaves the table
+     * owned by the resource, so the stack's create rollback retries it. On a replacing update the
+     * engine puts the previous resource back and never learns this table, so the failure is
+     * reported as a rollback failure that names it.
      */
-    private void deleteCreatedTable(StackResource r, Scope scope, String tableName) {
+    private void deleteCreatedTable(StackResource r, Scope scope, String tableName, boolean update,
+                                    RuntimeException failure) {
         try {
             CfnDeletes.safeDelete("DynamoDB table", tableName,
                     () -> dynamoDb.tables().deleteTable(scope, tableName), "ResourceNotFoundException");
         } catch (RuntimeException cleanupFailure) {
-            LOG.warnv("Could not delete DynamoDB table {0} created by the failed provision of {1}: {2}",
-                    tableName, r.getLogicalId(), cleanupFailure.getMessage());
-            r.setPhysicalId(tableName);
-            r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+            failure.addSuppressed(cleanupFailure);
+            String reason = "Could not delete DynamoDB table " + tableName + ", created for "
+                    + r.getLogicalId() + " by a failed provision: " + cleanupFailure.getMessage();
+            LOG.warnv("{0}", reason);
+            if (update) {
+                r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
+            } else {
+                r.setPhysicalId(tableName);
+                r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+            }
         }
     }
 
@@ -317,11 +331,22 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * {@code Enabled} may arrive as the string {@code "true"}, so it goes through the engine. The
-     * failure carries the handler message and error code AWS CloudFormation reports.
+     * {@code Enabled} is required and may arrive as the string {@code "true"}, so it goes through
+     * the engine. Both checks run before the table is created, as AWS validates the template
+     * before any resource exists. The failures carry the error code AWS CloudFormation reports.
      */
     private static TimeToLive declaredTimeToLive(JsonNode spec, CloudFormationTemplateEngine engine) {
-        boolean enabled = spec.has("Enabled") && Boolean.parseBoolean(engine.resolve(spec.get("Enabled")));
+        JsonNode enabledNode = spec.get("Enabled");
+        if (enabledNode == null || enabledNode.isNull()) {
+            throw new AwsException("InvalidRequest",
+                    "Model validation failed (#/TimeToLiveSpecification: required key [Enabled] not found)", 400);
+        }
+        String enabledText = engine.resolve(enabledNode);
+        if (!"true".equalsIgnoreCase(enabledText) && !"false".equalsIgnoreCase(enabledText)) {
+            throw new AwsException("InvalidRequest", "Model validation failed (#/TimeToLiveSpecification/Enabled:"
+                    + " expected type: Boolean, found: String)", 400);
+        }
+        boolean enabled = Boolean.parseBoolean(enabledText);
         String attributeName = spec.has("AttributeName") ? engine.resolve(spec.get("AttributeName")) : null;
         if (enabled && (attributeName == null || attributeName.isBlank())) {
             throw new AwsException("InvalidRequest", "Invalid request provided: AttributeName property of"

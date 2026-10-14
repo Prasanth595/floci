@@ -57,6 +57,8 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
             ",\n\"TimeToLiveSpecification\": {\"AttributeName\": \"deleteAfter\", \"Enabled\": true}";
     private static final String TTL_WITHOUT_ATTRIBUTE =
             ",\n\"TimeToLiveSpecification\": {\"Enabled\": true}";
+    private static final String TTL_WITHOUT_ENABLED =
+            ",\n\"TimeToLiveSpecification\": {\"AttributeName\": \"expiresAt\"}";
     private static final String STREAMED =
             ",\n\"StreamSpecification\": {\"StreamViewType\": \"NEW_AND_OLD_IMAGES\"}";
 
@@ -241,6 +243,46 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
         describeStackEvents(stack).body(containsString("<ResourceStatusReason>Invalid request provided: AttributeName"
                 + " property of TimeToLiveSpecification is required when TTL status is enabled or when enabling"
                 + " TTL.</ResourceStatusReason>"));
+        dynamoDb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(400)
+            .body("__type", containsString("ResourceNotFoundException"));
+
+        deleteStack(stack);
+    }
+
+    /** As measured on AWS: an update leaves alone TTL enabled outside a stack that never declared it. */
+    @Test
+    void timeToLiveSetOutsideAStackThatNeverDeclaredItSurvivesATagOnlyUpdate() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-ddb-ttl-oob-" + suffix;
+        String table = "ttl-oob-table-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev", "", ""));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        dynamoDb("UpdateTimeToLive", "{\"TableName\": \"" + table + "\", \"TimeToLiveSpecification\":"
+                + " {\"AttributeName\": \"expiresAt\", \"Enabled\": true}}").statusCode(200);
+
+        cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(table, "prod", "", ""));
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        describeTimeToLive(table)
+            .body("TimeToLiveDescription.TimeToLiveStatus", equalTo("ENABLED"))
+            .body("TimeToLiveDescription.AttributeName", equalTo("expiresAt"));
+
+        deleteStack(stack);
+    }
+
+    /** The registry schema requires Enabled, so the block is rejected before a table exists. */
+    @Test
+    void aTimeToLiveBlockWithoutEnabledFailsTheCreateAndLeavesNoTable() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-ddb-ttl-noen-" + suffix;
+        String table = "ttl-noen-table-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev", TTL_WITHOUT_ENABLED, ""));
+        assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+        describeStackEvents(stack).body(containsString("<ResourceStatusReason>Model validation failed"
+                + " (#/TimeToLiveSpecification: required key [Enabled] not found)</ResourceStatusReason>"));
         dynamoDb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
             .statusCode(400)
             .body("__type", containsString("ResourceNotFoundException"));

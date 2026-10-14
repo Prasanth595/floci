@@ -75,6 +75,13 @@ class DynamoDbCfnProvisionerTest {
                 create.stackName(), priorPhysicalId);
     }
 
+    /** The update path, with the properties the previous template declared. */
+    private ProvisionContext updateCtx(String priorPhysicalId, String priorProperties) throws Exception {
+        ProvisionContext create = ctx();
+        return new ProvisionContext(create.engine(), create.region(), create.accountId(),
+                create.stackName(), priorPhysicalId, event -> { }, props(priorProperties));
+    }
+
     private StackResource resource(String type, String logicalId) {
         StackResource r = new StackResource();
         r.setLogicalId(logicalId);
@@ -412,9 +419,51 @@ class DynamoDbCfnProvisionerTest {
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
         r.setPhysicalId(TABLE_NAME);
 
-        provisioner.provision(r, props("{\"TableName\":\"orders\"}"), updateCtx(TABLE_NAME));
+        provisioner.provision(r, props("{\"TableName\":\"orders\"}"), updateCtx(TABLE_NAME, TTL_PROPS));
 
         verify(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", false, "us-east-1");
+    }
+
+    /** As measured on AWS: TTL enabled outside a stack that never declared it survives a tag-only update. */
+    @Test
+    void updateOfAStackThatNeverDeclaredTimeToLiveLeavesItAlone() throws Exception {
+        existingTable(withTimeToLive(table(false), "expiresAt"));
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+
+        provisioner.provision(r, props("{\"TableName\":\"orders\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}]}"),
+                updateCtx(TABLE_NAME, "{\"TableName\":\"orders\"}"));
+
+        verify(dynamoDb, never()).updateTimeToLive(anyString(), any(), anyBoolean(), anyString());
+    }
+
+    @Test
+    void timeToLiveWithoutEnabledFailsModelValidationBeforeTheTableIsCreated() throws Exception {
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        JsonNode props = props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":{\"AttributeName\":\"exp\"}}");
+        ProvisionContext ctx = ctx();
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        assertEquals("InvalidRequest", e.getErrorCode());
+        assertEquals("Model validation failed (#/TimeToLiveSpecification: required key [Enabled] not found)",
+                e.getMessage());
+        verifyNoInteractions(dynamoDb);
+    }
+
+    @Test
+    void timeToLiveWithANonBooleanEnabledFailsModelValidationBeforeTheTableIsCreated() throws Exception {
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        JsonNode props = props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":"
+                + "{\"AttributeName\":\"exp\",\"Enabled\":\"tru\"}}");
+        ProvisionContext ctx = ctx();
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        assertEquals("InvalidRequest", e.getErrorCode());
+        assertEquals("Model validation failed (#/TimeToLiveSpecification/Enabled: expected type: Boolean,"
+                + " found: String)", e.getMessage());
+        verifyNoInteractions(dynamoDb);
     }
 
     /** CloudFormation renames a TTL attribute by disabling it in one update and enabling the new one in a later one. */
@@ -550,6 +599,29 @@ class DynamoDbCfnProvisionerTest {
         assertEquals("LimitExceededException", e.getErrorCode());
         assertEquals(TABLE_NAME, r.getPhysicalId());
         assertEquals("true", r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    /**
+     * The engine puts the previous resource back after a failed update and never learns the new
+     * table, so a cleanup that fails there is reported as a rollback failure naming it.
+     */
+    @Test
+    void replacingUpdateWhoseCleanupFailsReportsTheTableAsARollbackFailure() throws Exception {
+        createdTableWhoseTimeToLiveCallFails();
+        doThrow(new AwsException("InternalServerError", "delete failed", 500))
+                .when(dynamoDb).deleteTable(TABLE_NAME, "us-east-1");
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId("orders-v1");
+        JsonNode props = props(TTL_PROPS);
+        ProvisionContext ctx = updateCtx("orders-v1");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        assertEquals("LimitExceededException", e.getErrorCode());
+        assertEquals(1, e.getSuppressed().length);
+        String reason = r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR);
+        assertTrue(reason != null && reason.contains(TABLE_NAME) && reason.contains("delete failed"), reason);
+        assertFalse(r.getAttributes().containsKey(CfnRollback.ROLLBACK_OWNED_ATTR));
     }
 
     /**
