@@ -14,7 +14,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
-import java.time.Instant;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -34,8 +33,6 @@ import static org.mockito.Mockito.when;
 class RedshiftServerlessAdministrationHandlerTest {
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT_ID = "123456789012";
-    private static final String CERTIFICATE_ARN =
-            "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555";
 
     private final ObjectMapper mapper = new ObjectMapper();
     private RedshiftServerlessJsonHandler handler;
@@ -46,7 +43,7 @@ class RedshiftServerlessAdministrationHandlerTest {
     void setUp() {
         StorageFactory storageFactory = mock(StorageFactory.class);
         for (String file : List.of("namespaces", "workgroups", "snapshots", "usagelimits", "resourcepolicies",
-                "endpointaccess", "snapshotcopyconfigurations", "scheduledactions", "customdomains")) {
+                "endpointaccess")) {
             when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-" + file + ".json"),
                 any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
@@ -71,7 +68,8 @@ class RedshiftServerlessAdministrationHandlerTest {
         handler = new RedshiftServerlessJsonHandler(serverlessService, mapper, mock(RedshiftIamDbUserResolver.class),
                 new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, serverlessService),
                 new RedshiftServerlessAdminJsonHandler(mapper,
-                        new RedshiftServerlessResourcePolicyService(storageFactory, serverlessService, mapper)));
+                        new RedshiftServerlessResourcePolicyService(storageFactory, serverlessService, mapper),
+                        new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, serverlessService)));
     }
 
     @Test
@@ -141,6 +139,90 @@ class RedshiftServerlessAdministrationHandlerTest {
     }
 
     @Test
+    void endpointAccessFollowsTheApiModelAndTheWorkgroupLifecycle() {
+        workgroup("ep-ns", "ep-wg");
+
+        JsonNode created = ok("CreateEndpointAccess", "{\"endpointName\":\"ep-one\",\"workgroupName\":\"ep-wg\","
+                + "\"subnetIds\":[\"subnet-a\",\"subnet-b\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}").get("endpoint");
+        assertEquals("ep-one", created.get("endpointName").textValue());
+        assertEquals("ep-wg", created.get("workgroupName").textValue());
+        assertEquals("ACTIVE", created.get("endpointStatus").textValue());
+        assertEquals("localhost", created.get("address").textValue());
+        assertEquals(7100, created.get("port").intValue());
+        assertTrue(created.get("endpointCreateTime").textValue().matches("\\d{4}-\\d{2}-\\d{2}T.*Z"));
+        assertTrue(created.get("endpointArn").textValue().contains(":managedvpcendpoint/"));
+        assertEquals(2, created.get("subnetIds").size());
+        assertEquals(2, created.get("vpcEndpoint").get("networkInterfaces").size());
+        assertEquals("subnet-a", created.get("vpcEndpoint").get("networkInterfaces").get(0).get("subnetId").textValue());
+        assertEquals("sg-1", created.get("vpcSecurityGroups").get(0).get("vpcSecurityGroupId").textValue());
+        assertEquals("active", created.get("vpcSecurityGroups").get(0).get("status").textValue());
+
+        assertEquals("ConflictException", errorType("CreateEndpointAccess",
+                "{\"endpointName\":\"ep-one\",\"workgroupName\":\"ep-wg\",\"subnetIds\":[\"subnet-a\"],"
+                        + "\"vpcSecurityGroupIds\":[\"sg-1\"]}"));
+        assertEquals("ValidationException", errorType("CreateEndpointAccess",
+                "{\"endpointName\":\"ep-two\",\"workgroupName\":\"ep-wg\"}"));
+        assertEquals("ResourceNotFoundException", errorType("CreateEndpointAccess",
+                "{\"endpointName\":\"ep-two\",\"workgroupName\":\"nope\",\"subnetIds\":[\"subnet-a\"],"
+                        + "\"vpcSecurityGroupIds\":[\"sg-1\"]}"));
+
+        JsonNode updated = ok("UpdateEndpointAccess",
+                "{\"endpointName\":\"ep-one\",\"vpcSecurityGroupIds\":[\"sg-2\",\"sg-3\"]}").get("endpoint");
+        assertEquals(2, updated.get("vpcSecurityGroups").size());
+        assertEquals(1, ok("ListEndpointAccess", "{\"workgroupName\":\"ep-wg\"}").get("endpoints").size());
+        assertEquals(0, ok("ListEndpointAccess", "{\"workgroupName\":\"other\"}").get("endpoints").size());
+        assertEquals(0, ok("ListEndpointAccess", "{\"vpcId\":\"vpc-1\"}").get("endpoints").size());
+
+        assertEquals("DELETING", ok("DeleteEndpointAccess", "{\"endpointName\":\"ep-one\"}")
+                .get("endpoint").get("endpointStatus").textValue());
+        assertEquals("ResourceNotFoundException", errorType("GetEndpointAccess", "{\"endpointName\":\"ep-one\"}"));
+
+        ok("CreateEndpointAccess", "{\"endpointName\":\"ep-gone\",\"workgroupName\":\"ep-wg\","
+                + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}");
+        serverlessService.findWorkgroup("ep-wg", REGION).orElseThrow()
+                .setEndpoint(new Endpoint("192.168.1.10", 8200));
+        JsonNode refreshed = ok("GetEndpointAccess", "{\"endpointName\":\"ep-gone\"}").get("endpoint");
+        assertEquals("192.168.1.10", refreshed.get("address").textValue());
+        assertEquals(8200, refreshed.get("port").intValue());
+        JsonNode refreshedList = ok("ListEndpointAccess", "{\"workgroupName\":\"ep-wg\"}").get("endpoints");
+        assertEquals("192.168.1.10", refreshedList.get(0).get("address").textValue());
+        assertEquals(8200, refreshedList.get(0).get("port").intValue());
+
+        ok("DeleteWorkgroup", "{\"workgroupName\":\"ep-wg\"}");
+        assertEquals("ResourceNotFoundException", errorType("GetEndpointAccess", "{\"endpointName\":\"ep-gone\"}"));
+    }
+
+    @Test
+    void endpointSecurityGroupsAreOptional() {
+        workgroup("optional-ns", "optional-wg");
+        JsonNode omitted = ok("CreateEndpointAccess",
+                "{\"endpointName\":\"optional\",\"workgroupName\":\"optional-wg\",\"subnetIds\":[\"subnet-a\"]}")
+                .get("endpoint");
+        assertEquals(0, omitted.get("vpcSecurityGroups").size());
+        JsonNode empty = ok("CreateEndpointAccess",
+                "{\"endpointName\":\"empty\",\"workgroupName\":\"optional-wg\",\"subnetIds\":[\"subnet-a\"],"
+                        + "\"vpcSecurityGroupIds\":[]}").get("endpoint");
+        assertEquals(0, empty.get("vpcSecurityGroups").size());
+    }
+
+    @Test
+    void endpointNamesFollowAwsConstraints() {
+        workgroup("names-ns", "names-wg");
+        for (String name : List.of("", "1endpoint", "-endpoint", "end--point", "endpoint-", "end_point",
+                "a".repeat(31))) {
+            assertEquals("ValidationException", errorType("CreateEndpointAccess",
+                    "{\"endpointName\":\"" + name + "\",\"workgroupName\":\"names-wg\","
+                            + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}"), name);
+        }
+        for (String name : List.of("A", "Endpoint-123", "a".repeat(30))) {
+            assertEquals(name, ok("CreateEndpointAccess",
+                    "{\"endpointName\":\"" + name + "\",\"workgroupName\":\"names-wg\","
+                            + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}")
+                    .get("endpoint").get("endpointName").textValue());
+        }
+    }
+
+    @Test
     void tracksAreTheTwoAwsReleaseTracks() {
         JsonNode track = ok("GetTrack", "{\"trackName\":\"trailing\"}").get("track");
         assertEquals("trailing", track.get("trackName").textValue());
@@ -200,6 +282,21 @@ class RedshiftServerlessAdministrationHandlerTest {
                 errorType("CreateReservation", "{\"capacity\":\"nope\",\"offeringId\":\"o-1\"}"));
         assertEquals("ValidationException",
                 errorType("CreateReservation", "{\"capacity\":128,\"offeringId\":\"o-1\",\"clientToken\":123}"));
+    }
+
+    @Test
+    void aWorkgroupRecreatedUnderTheSameNameDoesNotInheritEndpoints() {
+        workgroup("recreate-wg-ns", "recreate-wg");
+        ok("CreateEndpointAccess", "{\"endpointName\":\"old-ep\",\"workgroupName\":\"recreate-wg\","
+                + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}");
+
+        ok("DeleteWorkgroup", "{\"workgroupName\":\"recreate-wg\"}");
+        ok("CreateWorkgroup", "{\"workgroupName\":\"recreate-wg\",\"namespaceName\":\"recreate-wg-ns\"}");
+
+        assertEquals("ResourceNotFoundException", errorType("GetEndpointAccess", "{\"endpointName\":\"old-ep\"}"));
+        assertEquals(0, ok("ListEndpointAccess", "{\"workgroupName\":\"recreate-wg\"}").get("endpoints").size());
+        ok("CreateEndpointAccess", "{\"endpointName\":\"old-ep\",\"workgroupName\":\"recreate-wg\","
+                + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}");
     }
 
     @Test

@@ -593,6 +593,34 @@ class RedshiftServerlessIntegrationTest {
                 .then();
     }
 
+    @Test
+    void endpointAccessRoundTripsOverTheWire() {
+        call("CreateNamespace", "{\"namespaceName\":\"endpoint-ns\",\"adminUsername\":\"admin\"}").statusCode(200);
+        call("CreateWorkgroup", "{\"workgroupName\":\"endpoint-wg\",\"namespaceName\":\"endpoint-ns\"}").statusCode(200);
+
+        call("CreateEndpointAccess", "{\"endpointName\":\"admin-ep\",\"workgroupName\":\"endpoint-wg\","
+                + "\"subnetIds\":[\"subnet-a\"]}")
+                .statusCode(200)
+                .body("endpoint.endpointName", equalTo("admin-ep"))
+                .body("endpoint.endpointStatus", equalTo("ACTIVE"))
+                .body("endpoint.endpointCreateTime", matchesPattern("\\d{4}-\\d{2}-\\d{2}T.*Z"))
+                .body("endpoint.vpcSecurityGroups", hasSize(0))
+                .body("endpoint.vpcEndpoint.networkInterfaces[0].subnetId", equalTo("subnet-a"));
+        call("CreateEndpointAccess", "{\"endpointName\":\"admin--ep\",\"workgroupName\":\"endpoint-wg\","
+                + "\"subnetIds\":[\"subnet-a\"]}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        call("CreateEndpointAccess", "{\"endpointName\":\"other-ep\",\"workgroupName\":\"endpoint-wg\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        call("ListEndpointAccess", "{\"workgroupName\":\"endpoint-wg\"}")
+                .statusCode(200)
+                .body("endpoints.endpointName", hasItem("admin-ep"));
+        call("DeleteEndpointAccess", "{\"endpointName\":\"admin-ep\"}")
+                .statusCode(200)
+                .body("endpoint.endpointStatus", equalTo("DELETING"));
+    }
+
     private static io.restassured.response.ValidatableResponse call(String action, String body) {
         return given()
                 .header("X-Amz-Target", TARGET_PREFIX + action)

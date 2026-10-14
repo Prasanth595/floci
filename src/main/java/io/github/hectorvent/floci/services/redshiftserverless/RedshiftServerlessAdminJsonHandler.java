@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.services.redshiftserverless.model.EndpointAccess;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ResourcePolicy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -26,13 +27,16 @@ public class RedshiftServerlessAdminJsonHandler {
     private static final List<String> TRACK_NAMES = RedshiftServerlessService.TRACK_NAMES;
 
     private final ObjectMapper objectMapper;
+    private final RedshiftServerlessEndpointAccessService endpointAccess;
     private final RedshiftServerlessResourcePolicyService resourcePolicies;
 
     @Inject
     public RedshiftServerlessAdminJsonHandler(ObjectMapper objectMapper,
-                                              RedshiftServerlessResourcePolicyService resourcePolicies) {
+                                              RedshiftServerlessResourcePolicyService resourcePolicies,
+                                              RedshiftServerlessEndpointAccessService endpointAccess) {
         this.objectMapper = objectMapper;
         this.resourcePolicies = resourcePolicies;
+        this.endpointAccess = endpointAccess;
     }
 
     Supplier<Response> operation(String action, JsonNode request, String region) {
@@ -54,6 +58,19 @@ public class RedshiftServerlessAdminJsonHandler {
             case "GetReservation" -> () -> getReservation(request);
             case "GetReservationOffering" -> () -> getReservationOffering(request);
             case "CreateReservation" -> () -> createReservation(request);
+            case "CreateEndpointAccess" -> () -> endpointResponse(endpointAccess.createEndpointAccess(
+                    ServerlessSupport.text(request, "endpointName"), ServerlessSupport.text(request, "workgroupName"),
+                    ServerlessSupport.stringList(request, "subnetIds"),
+                    ServerlessSupport.stringList(request, "vpcSecurityGroupIds"),
+                    ServerlessSupport.text(request, "ownerAccount"), region));
+            case "GetEndpointAccess" -> () -> endpointResponse(endpointAccess.getEndpointAccess(
+                    ServerlessSupport.text(request, "endpointName"), region));
+            case "ListEndpointAccess" -> () -> listEndpoints(request, region);
+            case "UpdateEndpointAccess" -> () -> endpointResponse(endpointAccess.updateEndpointAccess(
+                    ServerlessSupport.text(request, "endpointName"),
+                    ServerlessSupport.stringList(request, "vpcSecurityGroupIds"), region));
+            case "DeleteEndpointAccess" -> () -> endpointResponse(endpointAccess.deleteEndpointAccess(
+                    ServerlessSupport.text(request, "endpointName"), region));
             default -> null;
         };
     }
@@ -86,6 +103,57 @@ public class RedshiftServerlessAdminJsonHandler {
         return Response.ok(response).build();
     }
 
+    // ── Endpoint access ────────────────────────────────────────────────────
+
+    private Response listEndpoints(JsonNode request, String region) {
+        PaginatedResult<EndpointAccess> page = endpointAccess.listEndpointAccess(
+                ServerlessSupport.text(request, "workgroupName"), ServerlessSupport.text(request, "vpcId"),
+                ServerlessSupport.text(request, "ownerAccount"), region, ServerlessSupport.maxResults(request),
+                ServerlessSupport.text(request, "nextToken"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("endpoints");
+        page.items().forEach(endpoint -> items.add(endpointNode(endpoint)));
+        putNextToken(response, page);
+        return Response.ok(response).build();
+    }
+
+    private Response endpointResponse(EndpointAccess endpoint) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("endpoint", endpointNode(endpoint));
+        return Response.ok(response).build();
+    }
+
+    /** No VPC is modelled, so {@code vpcEndpoint.vpcId} is left out rather than invented. */
+    private ObjectNode endpointNode(EndpointAccess endpoint) {
+        ObjectNode node = objectMapper.createObjectNode();
+        if (endpoint.getAddress() != null) {
+            node.put("address", endpoint.getAddress());
+        }
+        node.put("endpointArn", endpoint.getEndpointArn());
+        node.put("endpointCreateTime", ServerlessSupport.ISO_8601.format(endpoint.getCreateTime()));
+        node.put("endpointName", endpoint.getEndpointName());
+        node.put("endpointStatus", endpoint.getStatus());
+        node.put("port", endpoint.getPort());
+        ArrayNode subnets = node.putArray("subnetIds");
+        endpoint.getSubnetIds().forEach(subnets::add);
+        ObjectNode vpcEndpoint = node.putObject("vpcEndpoint");
+        vpcEndpoint.put("vpcEndpointId", endpoint.getVpcEndpointId());
+        ArrayNode interfaces = vpcEndpoint.putArray("networkInterfaces");
+        for (int i = 0; i < endpoint.getSubnetIds().size() && i < endpoint.getNetworkInterfaceIds().size(); i++) {
+            ObjectNode networkInterface = interfaces.addObject();
+            networkInterface.put("networkInterfaceId", endpoint.getNetworkInterfaceIds().get(i));
+            networkInterface.put("subnetId", endpoint.getSubnetIds().get(i));
+        }
+        ArrayNode groups = node.putArray("vpcSecurityGroups");
+        for (String groupId : endpoint.getVpcSecurityGroupIds()) {
+            ObjectNode group = groups.addObject();
+            group.put("vpcSecurityGroupId", groupId);
+            group.put("status", "active");
+        }
+        node.put("workgroupName", endpoint.getWorkgroupName());
+        return node;
+    }
+
     // ── Tracks, managed workgroups and reservations ────────────────────────
 
     /**
@@ -108,9 +176,7 @@ public class RedshiftServerlessAdminJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("tracks");
         page.items().forEach(name -> items.add(trackNode(name)));
-        if (page.nextToken() != null) {
-            response.put("nextToken", page.nextToken());
-        }
+        putNextToken(response, page);
         return Response.ok(response).build();
     }
 
@@ -131,5 +197,13 @@ public class RedshiftServerlessAdminJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.putArray(listName);
         return Response.ok(response).build();
+    }
+
+    // ── Shared ─────────────────────────────────────────────────────────────
+
+    private static void putNextToken(ObjectNode response, PaginatedResult<?> page) {
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
     }
 }
