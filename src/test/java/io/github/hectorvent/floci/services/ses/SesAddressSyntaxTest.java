@@ -7,7 +7,6 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The address forms of {@link SesAddressSyntax#violation(String)}. The four messages and the
@@ -160,15 +159,19 @@ class SesAddressSyntaxTest {
     }
 
     @Test
-    void javaMailStringEncodesAMostlyAsciiNameAsQAndSplitsALongName() {
+    void javaMailStringEncodesAMostlyAsciiNameAsQAndHalvesALongName() {
         assertEquals("=?UTF-8?Q?Alice_=E5=B1=B1=E7=94=B0?= <probe.example.invalid>",
                 SesAddressSyntax.javaMailString("Alice 山田 <probe.example.invalid>"));
-        String encoded = SesAddressSyntax.javaMailString("山田".repeat(20) + " <probe.example.invalid>");
-        String[] words = encoded.substring(0, encoded.indexOf(" <")).split(" ");
-        assertTrue(words.length > 1, encoded);
-        for (String word : words) {
-            assertTrue(word.startsWith("=?UTF-8?B?") && word.endsWith("?=") && word.length() <= 75, word);
-        }
+        String word = "=?UTF-8?B?5bGx55Sw5bGx55Sw5bGx55Sw5bGx55Sw5bGx55Sw?=";
+        assertEquals(String.join(" ", word, word, word, word) + " <probe.example.invalid>",
+                SesAddressSyntax.javaMailString("山田".repeat(20) + " <probe.example.invalid>"));
+    }
+
+    @Test
+    void javaMailStringDropsABlankDisplayName() {
+        assertEquals("probe.example.invalid", SesAddressSyntax.javaMailString("\"\" <probe.example.invalid>"));
+        assertEquals("Alice <probe.example.invalid>",
+                SesAddressSyntax.javaMailString("\" \" <probe.example.invalid> (Alice)"));
     }
 
     @Test

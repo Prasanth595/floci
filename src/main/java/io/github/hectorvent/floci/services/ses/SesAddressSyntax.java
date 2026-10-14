@@ -4,12 +4,8 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.EmailContent;
 import io.github.hectorvent.floci.services.ses.model.SendEmailRequest;
-import org.apache.james.mime4j.codec.EncoderUtil;
-import org.apache.james.mime4j.codec.EncoderUtil.Encoding;
-import org.apache.james.mime4j.codec.EncoderUtil.Usage;
 import org.apache.james.mime4j.dom.Message;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.Consumer;
@@ -114,12 +110,12 @@ final class SesAddressSyntax {
 
     /**
      * A mailbox as JavaMail's {@code InternetAddress.toString()} writes it once parsed: the display
-     * name, or else the first comment, unquoted and quoted again only when it holds a special
-     * character, then the addr-spec in angle brackets; a bare addr-spec keeps no brackets unless it
-     * holds a special character. A raw non-ASCII name comes out as UTF-8 encoded-words and an
-     * encoded-word stays as written (probe-confirmed for a short all non-ASCII name, which is one B
-     * encoded-word). The rest follows JavaMail and is assumed: B when at least half the characters
-     * are non-ASCII and Q otherwise, split into space-separated words of at most 75 characters.
+     * name, or else the first comment, unquoted, dropped when blank, and quoted again only when it
+     * holds a special character, then the addr-spec in angle brackets; a bare addr-spec keeps no
+     * brackets unless it holds a special character. A raw non-ASCII name comes out as
+     * {@link SesEncodedWord} writes it and an encoded-word stays as written (probe-confirmed for a
+     * short all non-ASCII name, which is one B encoded-word; longer and mixed names follow JavaMail
+     * and are assumed).
      */
     static String javaMailString(String mailbox) {
         String addrSpec = addrSpec(mailbox);
@@ -135,9 +131,9 @@ final class SesAddressSyntax {
         String withoutComments = stripped.text().trim();
         int open = SesSendAddresses.lastUnquotedAngle(withoutComments);
         if (open >= 0 && withoutComments.endsWith(">")) {
-            String phrase = withoutComments.substring(0, open).trim();
-            if (!phrase.isEmpty()) {
-                return unquote(phrase);
+            String phrase = unquote(withoutComments.substring(0, open).trim());
+            if (!phrase.isBlank()) {
+                return phrase;
             }
         }
         String comment = stripped.firstComment();
@@ -160,10 +156,8 @@ final class SesAddressSyntax {
     }
 
     private static String encodePhrase(String personal) {
-        long nonAscii = personal.chars().filter(c -> c >= 0x80).count();
-        if (nonAscii > 0) {
-            Encoding encoding = nonAscii >= personal.length() - nonAscii ? Encoding.B : Encoding.Q;
-            return EncoderUtil.encodeEncodedWord(personal, Usage.WORD_ENTITY, 0, StandardCharsets.UTF_8, encoding);
+        if (SesEncodedWord.needsEncoding(personal)) {
+            return SesEncodedWord.encode(personal);
         }
         boolean needsQuotes = false;
         StringBuilder quoted = new StringBuilder("\"");
@@ -172,8 +166,7 @@ final class SesAddressSyntax {
             if (c == '"' || c == '\\') {
                 quoted.append('\\');
                 needsQuotes = true;
-            } else if ((c < ' ' && c != '\r' && c != '\n' && c != '\t') || c == 0x7f
-                    || PHRASE_SPECIALS.indexOf(c) >= 0) {
+            } else if (PHRASE_SPECIALS.indexOf(c) >= 0) {
                 needsQuotes = true;
             }
             quoted.append(c);
