@@ -1244,27 +1244,73 @@ class CognitoServiceTest {
         assertNotNull(clientWithTokenValidity(pool, token, validity, unit).getClientId());
     }
 
-    /** The limits apply to the client as the update leaves it, its stored values included. */
+    /**
+     * An update is checked as it is sent: a token validity or unit it omits is reset to its default rather
+     * than kept, so a units-only change no longer stretches the stored validity.
+     */
     @Test
-    void updateUserPoolClientRejectsTokenValidityOutsideAwsLimits() {
+    void updateUserPoolClientChecksTokenValidityAsSent() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
         UserPoolClient client = clientWithTokenValidity(pool, "AccessToken", 60, "minutes");
 
         AwsException shorter = assertThrows(AwsException.class, () -> service.updateUserPoolClient(
                 pool.getId(), client.getClientId(), null, null, null, null, null, null, null, null,
-                4, null, null, null, null, null, null, null, null, null, null));
-        AwsException longerUnit = assertThrows(AwsException.class, () -> service.updateUserPoolClient(
-                pool.getId(), client.getClientId(), null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, Map.of("AccessToken", "hours"), null, null, null));
-
+                4, null, null, null, null, null, null, Map.of("AccessToken", "minutes"), null, null, null));
         assertEquals("Invalid range for token validity.", shorter.getMessage());
-        assertEquals("Invalid range for token validity.", longerUnit.getMessage());
         assertEquals(60, service.describeUserPoolClient(pool.getId(), client.getClientId()).getAccessTokenValidity());
+
+        UserPoolClient unitsOnly = service.updateUserPoolClient(
+                pool.getId(), client.getClientId(), null, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null, Map.of("AccessToken", "hours"), null, null, null);
+        assertNull(unitsOnly.getAccessTokenValidity());
+        assertEquals(Map.of("AccessToken", "hours"), unitsOnly.getTokenValidityUnits());
+    }
+
+    /**
+     * AWS: "If you don't provide a value for an attribute, Amazon Cognito sets it to its default value."
+     * The API documents no default name, so the name stays; the id and the secret are not settings.
+     */
+    @Test
+    void updateUserPoolClientResetsEveryOmittedSettingToItsDefault() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "configured", true, true,
+                List.of("code"), List.of("openid"), Map.of("ApplicationId", "app"), List.of("https://example.com"),
+                "https://example.com", List.of("ALLOW_USER_AUTH"), 15, 20, List.of("https://example.com/logout"),
+                "ENABLED", List.of("email"), 7, List.of("COGNITO", "Google"),
+                Map.of("AccessToken", "minutes", "IdToken", "minutes", "RefreshToken", "days"),
+                List.of("family_name"), Map.of("Feature", "ENABLED"), false, 10);
+        String secret = client.getClientSecret();
+
+        UserPoolClient updated = service.updateUserPoolClient(pool.getId(), client.getClientId(), null, null,
+                null, null, null, null, null, null, 2, null, null, null, null, null, null, null, null, null, null);
+
+        assertEquals("configured", updated.getClientName());
+        assertEquals(client.getClientId(), updated.getClientId());
+        assertEquals(secret, updated.getClientSecret());
+        assertEquals(2, updated.getAccessTokenValidity());
+        assertFalse(updated.isAllowedOAuthFlowsUserPoolClient());
+        assertEquals(List.of(), updated.getAllowedOAuthFlows());
+        assertEquals(List.of(), updated.getAllowedOAuthScopes());
+        assertNull(updated.getAnalyticsConfiguration());
+        assertEquals(List.of(), updated.getCallbackURLs());
+        assertNull(updated.getDefaultRedirectURI());
+        assertEquals(List.of(), updated.getExplicitAuthFlows());
+        assertNull(updated.getIdTokenValidity());
+        assertEquals(3, updated.getAuthSessionValidity());
+        assertEquals(List.of(), updated.getLogoutURLs());
+        assertNull(updated.getPreventUserExistenceErrors());
+        assertEquals(List.of(), updated.getReadAttributes());
+        assertNull(updated.getRefreshTokenValidity());
+        assertEquals(List.of("COGNITO"), updated.getSupportedIdentityProviders());
+        assertNull(updated.getTokenValidityUnits());
+        assertEquals(List.of(), updated.getWriteAttributes());
+        assertNull(updated.getRefreshTokenRotation());
+        assertTrue(updated.getEnableTokenRevocation());
     }
 
     /**
      * AWS replaces a RefreshTokenValidity of 0 with "the default value of 30 days" whatever the refresh token
-     * unit, so the client issues 30-day refresh tokens and an update that leaves the validity alone succeeds.
+     * unit, so the client issues 30-day refresh tokens, whether the 0 came on create or on update.
      */
     @ParameterizedTest
     @CsvSource({"seconds, 2592000", "minutes, 43200", "hours, 720", "days, 30"})
@@ -1276,9 +1322,9 @@ class CognitoServiceTest {
 
         assertFalse(service.isRefreshTokenExpired(client,
                 new String[] {pool.getId(), "alice", client.getClientId(), issuedTwentyNineDaysAgo, "token"}));
-        assertEquals("renamed",
-                service.updateUserPoolClient(pool.getId(), client.getClientId(), "renamed", null, null, null)
-                        .getClientName());
+        assertEquals(expected, service.updateUserPoolClient(pool.getId(), client.getClientId(), null, null, null,
+                null, null, null, null, null, null, null, null, null, null, 0, null, Map.of("RefreshToken", unit),
+                null, null, null).getRefreshTokenValidity());
     }
 
     /** A client whose {@code token} validity is {@code validity}, in {@code unit} or its default unit when null. */

@@ -1090,62 +1090,17 @@ public class CognitoService implements ResourceProvider {
         validateAuthSessionValidity(authSessionValidity);
         UserPool userPool = describeUserPool(userPoolId);
         String clientId = clientIdFor(userPool, clientName);
-        List<String> normalizedAllowedOAuthFlows = normalizeStringList(allowedOAuthFlows);
-        List<String> normalizedAllowedOAuthScopes = normalizeStringList(allowedOAuthScopes);
-        List<String> normalizedCallbackUrls = normalizeStringList(callbackURLs);
-        String normalizedDefaultRedirectUri = normalizeOptionalString(defaultRedirectURI);
-        List<String> normalizedExplicitAuthFlows = normalizeStringList(explicitAuthFlows);
-        List<String> normalizedLogoutUrls = normalizeStringList(logoutURLs);
-        List<String> normalizedReadAttributes = normalizeStringList(readAttributes);
-        List<String> normalizedSupportedIdentityProviders = normalizeStringList(supportedIdentityProviders);
-        Map<String, String> copiedTokenValidityUnits = copyStringMap(tokenValidityUnits);
-        List<String> normalizedWriteAttributes = normalizeStringList(writeAttributes);
-        Integer normalizedRefreshTokenValidity = normalizeRefreshTokenValidity(refreshTokenValidity,
-                copiedTokenValidityUnits);
-
-        validateUserPoolClientConfiguration(
-                allowedOAuthFlowsUserPoolClient,
-                normalizedAllowedOAuthFlows,
-                normalizedAllowedOAuthScopes,
-                normalizedCallbackUrls,
-                normalizedDefaultRedirectUri,
-                accessTokenValidity,
-                idTokenValidity,
-                normalizedRefreshTokenValidity,
-                normalizedLogoutUrls,
-                copiedTokenValidityUnits
-        );
-        validateTokenValidityLimits(accessTokenValidity, idTokenValidity, normalizedRefreshTokenValidity,
-                copiedTokenValidityUnits);
-
-        UserPoolClient client = new UserPoolClient();
+        UserPoolClient client = requestedClientSettings(clientName, allowedOAuthFlowsUserPoolClient,
+                allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs, defaultRedirectURI,
+                explicitAuthFlows, accessTokenValidity, idTokenValidity, logoutURLs, preventUserExistenceErrors,
+                readAttributes, refreshTokenValidity, supportedIdentityProviders, tokenValidityUnits,
+                writeAttributes, refreshTokenRotation, enableTokenRevocation, authSessionValidity);
+        if (client.getSupportedIdentityProviders().isEmpty()) {
+            client.setSupportedIdentityProviders(List.of("COGNITO"));
+        }
         client.setClientId(clientId);
         client.setUserPoolId(userPoolId);
-        client.setClientName(clientName);
         client.setGenerateSecret(generateSecret);
-        client.setAllowedOAuthFlowsUserPoolClient(allowedOAuthFlowsUserPoolClient);
-        client.setAllowedOAuthFlows(normalizedAllowedOAuthFlows);
-        client.setAllowedOAuthScopes(normalizedAllowedOAuthScopes);
-        client.setAnalyticsConfiguration(copyObjectMap(analyticsConfiguration));
-        client.setCallbackURLs(normalizedCallbackUrls);
-        client.setDefaultRedirectURI(normalizedDefaultRedirectUri);
-        client.setExplicitAuthFlows(normalizedExplicitAuthFlows);
-        client.setAccessTokenValidity(accessTokenValidity);
-        client.setIdTokenValidity(idTokenValidity);
-        if (authSessionValidity != null) {
-            client.setAuthSessionValidity(authSessionValidity);
-        }
-        client.setLogoutURLs(normalizedLogoutUrls);
-        client.setPreventUserExistenceErrors(preventUserExistenceErrors);
-        client.setReadAttributes(normalizedReadAttributes);
-        client.setRefreshTokenValidity(normalizedRefreshTokenValidity);
-        client.setSupportedIdentityProviders(normalizedSupportedIdentityProviders.isEmpty()
-                ? List.of("COGNITO")
-                : normalizedSupportedIdentityProviders);
-        client.setTokenValidityUnits(copiedTokenValidityUnits);
-        client.setWriteAttributes(normalizedWriteAttributes);
-        client.setRefreshTokenRotation(copyObjectMap(refreshTokenRotation));
-        client.setEnableTokenRevocation(enableTokenRevocation != null ? enableTokenRevocation : Boolean.TRUE);
         if (generateSecret) {
             String clientSecret = generateSecretValue();
             if (userPool.getClientSecretOverride() != null) {
@@ -1279,6 +1234,12 @@ public class CognitoService implements ResourceProvider {
                 enableTokenRevocation, null);
     }
 
+    /**
+     * AWS: "If you don't provide a value for an attribute, Amazon Cognito sets it to its default value."
+     * So a setting the request leaves out, null here, takes the default a new client gets rather than
+     * keeping its stored value. The name is the exception: the API documents no default for it, so an
+     * update without one keeps the client's.
+     */
     public UserPoolClient updateUserPoolClient(String userPoolId, String clientId, String clientName,
                                                Boolean allowedOAuthFlowsUserPoolClient,
                                                List<String> allowedOAuthFlows, List<String> allowedOAuthScopes,
@@ -1292,110 +1253,13 @@ public class CognitoService implements ResourceProvider {
                                                Boolean enableTokenRevocation, Integer authSessionValidity) {
         validateAuthSessionValidity(authSessionValidity);
         UserPoolClient client = describeUserPoolClient(userPoolId, clientId);
-        boolean effectiveAllowedOAuthFlowsUserPoolClient = allowedOAuthFlowsUserPoolClient != null
-                ? allowedOAuthFlowsUserPoolClient
-                : client.isAllowedOAuthFlowsUserPoolClient();
-        List<String> effectiveAllowedOAuthFlows = allowedOAuthFlows != null
-                ? normalizeStringList(allowedOAuthFlows)
-                : client.getAllowedOAuthFlows();
-        List<String> effectiveAllowedOAuthScopes = allowedOAuthScopes != null
-                ? normalizeStringList(allowedOAuthScopes)
-                : client.getAllowedOAuthScopes();
-        List<String> effectiveCallbackUrls = callbackURLs != null
-                ? normalizeStringList(callbackURLs)
-                : client.getCallbackURLs();
-        String effectiveDefaultRedirectUri = defaultRedirectURI != null
-                ? normalizeOptionalString(defaultRedirectURI)
-                : client.getDefaultRedirectURI();
-        Integer effectiveAccessTokenValidity = accessTokenValidity != null
-                ? accessTokenValidity
-                : client.getAccessTokenValidity();
-        Integer effectiveIdTokenValidity = idTokenValidity != null
-                ? idTokenValidity
-                : client.getIdTokenValidity();
-        Map<String, String> effectiveTokenValidityUnits = tokenValidityUnits != null
-                ? copyStringMap(tokenValidityUnits)
-                : client.getTokenValidityUnits();
-        Integer effectiveRefreshTokenValidity = refreshTokenValidity != null
-                ? normalizeRefreshTokenValidity(refreshTokenValidity, effectiveTokenValidityUnits)
-                : client.getRefreshTokenValidity();
-        List<String> effectiveLogoutUrls = logoutURLs != null
-                ? normalizeStringList(logoutURLs)
-                : client.getLogoutURLs();
-
-        validateUserPoolClientConfiguration(
-                effectiveAllowedOAuthFlowsUserPoolClient,
-                effectiveAllowedOAuthFlows,
-                effectiveAllowedOAuthScopes,
-                effectiveCallbackUrls,
-                effectiveDefaultRedirectUri,
-                effectiveAccessTokenValidity,
-                effectiveIdTokenValidity,
-                effectiveRefreshTokenValidity,
-                effectiveLogoutUrls,
-                effectiveTokenValidityUnits
-        );
-        validateTokenValidityLimits(effectiveAccessTokenValidity, effectiveIdTokenValidity,
-                effectiveRefreshTokenValidity, effectiveTokenValidityUnits);
-
-        if (clientName != null) client.setClientName(clientName);
-        if (allowedOAuthFlowsUserPoolClient != null) {
-            client.setAllowedOAuthFlowsUserPoolClient(allowedOAuthFlowsUserPoolClient);
-        }
-        if (allowedOAuthFlows != null) {
-            client.setAllowedOAuthFlows(effectiveAllowedOAuthFlows);
-        }
-        if (allowedOAuthScopes != null) {
-            client.setAllowedOAuthScopes(effectiveAllowedOAuthScopes);
-        }
-        if (analyticsConfiguration != null) {
-            client.setAnalyticsConfiguration(copyObjectMap(analyticsConfiguration));
-        }
-        if (callbackURLs != null) {
-            client.setCallbackURLs(effectiveCallbackUrls);
-        }
-        if (defaultRedirectURI != null) {
-            client.setDefaultRedirectURI(effectiveDefaultRedirectUri);
-        }
-        if (explicitAuthFlows != null) {
-            client.setExplicitAuthFlows(normalizeStringList(explicitAuthFlows));
-        }
-        if (accessTokenValidity != null) {
-            client.setAccessTokenValidity(accessTokenValidity);
-        }
-        if (idTokenValidity != null) {
-            client.setIdTokenValidity(idTokenValidity);
-        }
-        if (logoutURLs != null) {
-            client.setLogoutURLs(effectiveLogoutUrls);
-        }
-        if (preventUserExistenceErrors != null) {
-            client.setPreventUserExistenceErrors(preventUserExistenceErrors);
-        }
-        if (readAttributes != null) {
-            client.setReadAttributes(normalizeStringList(readAttributes));
-        }
-        if (refreshTokenValidity != null) {
-            client.setRefreshTokenValidity(effectiveRefreshTokenValidity);
-        }
-        if (supportedIdentityProviders != null) {
-            client.setSupportedIdentityProviders(normalizeStringList(supportedIdentityProviders));
-        }
-        if (tokenValidityUnits != null) {
-            client.setTokenValidityUnits(effectiveTokenValidityUnits);
-        }
-        if (writeAttributes != null) {
-            client.setWriteAttributes(normalizeStringList(writeAttributes));
-        }
-        if (refreshTokenRotation != null) {
-            client.setRefreshTokenRotation(copyObjectMap(refreshTokenRotation));
-        }
-        if (enableTokenRevocation != null) {
-            client.setEnableTokenRevocation(enableTokenRevocation);
-        }
-        if (authSessionValidity != null) {
-            client.setAuthSessionValidity(authSessionValidity);
-        }
+        UserPoolClient settings = requestedClientSettings(clientName != null ? clientName : client.getClientName(),
+                Boolean.TRUE.equals(allowedOAuthFlowsUserPoolClient), allowedOAuthFlows, allowedOAuthScopes,
+                analyticsConfiguration, callbackURLs, defaultRedirectURI, explicitAuthFlows, accessTokenValidity,
+                idTokenValidity, logoutURLs, preventUserExistenceErrors, readAttributes, refreshTokenValidity,
+                supportedIdentityProviders, tokenValidityUnits, writeAttributes, refreshTokenRotation,
+                enableTokenRevocation, authSessionValidity);
+        copyUserPoolClientSettings(settings, client);
 
         client.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         clientStore.put(clientId, client);
@@ -1417,9 +1281,9 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
-     * Puts back the settings {@link #userPoolClientSettings} copied, including clearing one the
-     * update added, which {@link #updateUserPoolClient} cannot do since a null there keeps the
-     * current value. The client's id, secrets and branding stay as they are now.
+     * Puts back the settings {@link #userPoolClientSettings} copied, exactly as they were, which
+     * {@link #updateUserPoolClient} cannot do since it applies a create's defaults and normalization.
+     * The client's id, secrets and branding stay as they are now.
      */
     public UserPoolClient restoreUserPoolClientSettings(UserPoolClient settings) {
         UserPoolClient client = describeUserPoolClient(settings.getUserPoolId(), settings.getClientId());
@@ -1430,6 +1294,75 @@ public class CognitoService implements ResourceProvider {
         LOG.infov("Restored User Pool Client settings: {0} for pool {1}", restored.getClientId(),
                 restored.getUserPoolId());
         return restored;
+    }
+
+    /**
+     * The settings a create or an update sets, from the request: normalized, checked, and with the
+     * default a new client gets for each one the request omits. The client's id, pool, secret and dates
+     * are the caller's.
+     */
+    private UserPoolClient requestedClientSettings(String clientName, boolean allowedOAuthFlowsUserPoolClient,
+                                                   List<String> allowedOAuthFlows, List<String> allowedOAuthScopes,
+                                                   Map<String, Object> analyticsConfiguration,
+                                                   List<String> callbackURLs,
+                                                   String defaultRedirectURI, List<String> explicitAuthFlows,
+                                                   Integer accessTokenValidity, Integer idTokenValidity,
+                                                   List<String> logoutURLs, String preventUserExistenceErrors,
+                                                   List<String> readAttributes, Integer refreshTokenValidity,
+                                                   List<String> supportedIdentityProviders,
+                                                   Map<String, String> tokenValidityUnits, List<String> writeAttributes,
+                                                   Map<String, Object> refreshTokenRotation,
+                                                   Boolean enableTokenRevocation, Integer authSessionValidity) {
+        List<String> normalizedAllowedOAuthFlows = normalizeStringList(allowedOAuthFlows);
+        List<String> normalizedAllowedOAuthScopes = normalizeStringList(allowedOAuthScopes);
+        List<String> normalizedCallbackUrls = normalizeStringList(callbackURLs);
+        String normalizedDefaultRedirectUri = normalizeOptionalString(defaultRedirectURI);
+        List<String> normalizedLogoutUrls = normalizeStringList(logoutURLs);
+        Map<String, String> copiedTokenValidityUnits = copyStringMap(tokenValidityUnits);
+        Integer normalizedRefreshTokenValidity = normalizeRefreshTokenValidity(refreshTokenValidity,
+                copiedTokenValidityUnits);
+
+        validateUserPoolClientConfiguration(
+                allowedOAuthFlowsUserPoolClient,
+                normalizedAllowedOAuthFlows,
+                normalizedAllowedOAuthScopes,
+                normalizedCallbackUrls,
+                normalizedDefaultRedirectUri,
+                accessTokenValidity,
+                idTokenValidity,
+                normalizedRefreshTokenValidity,
+                normalizedLogoutUrls,
+                copiedTokenValidityUnits
+        );
+        validateTokenValidityLimits(accessTokenValidity, idTokenValidity, normalizedRefreshTokenValidity,
+                copiedTokenValidityUnits);
+
+        UserPoolClient settings = new UserPoolClient();
+        settings.setClientName(clientName);
+        settings.setAllowedOAuthFlowsUserPoolClient(allowedOAuthFlowsUserPoolClient);
+        settings.setAllowedOAuthFlows(normalizedAllowedOAuthFlows);
+        settings.setAllowedOAuthScopes(normalizedAllowedOAuthScopes);
+        settings.setAnalyticsConfiguration(copyObjectMap(analyticsConfiguration));
+        settings.setCallbackURLs(normalizedCallbackUrls);
+        settings.setDefaultRedirectURI(normalizedDefaultRedirectUri);
+        settings.setExplicitAuthFlows(normalizeStringList(explicitAuthFlows));
+        settings.setAccessTokenValidity(accessTokenValidity);
+        settings.setIdTokenValidity(idTokenValidity);
+        if (authSessionValidity != null) {
+            settings.setAuthSessionValidity(authSessionValidity);
+        }
+        settings.setLogoutURLs(normalizedLogoutUrls);
+        settings.setPreventUserExistenceErrors(preventUserExistenceErrors);
+        settings.setReadAttributes(normalizeStringList(readAttributes));
+        settings.setRefreshTokenValidity(normalizedRefreshTokenValidity);
+        settings.setSupportedIdentityProviders(supportedIdentityProviders == null
+                ? List.of("COGNITO")
+                : normalizeStringList(supportedIdentityProviders));
+        settings.setTokenValidityUnits(copiedTokenValidityUnits);
+        settings.setWriteAttributes(normalizeStringList(writeAttributes));
+        settings.setRefreshTokenRotation(copyObjectMap(refreshTokenRotation));
+        settings.setEnableTokenRevocation(enableTokenRevocation != null ? enableTokenRevocation : Boolean.TRUE);
+        return settings;
     }
 
     /** The name and every field {@link #updateUserPoolClient} sets. */

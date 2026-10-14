@@ -2831,7 +2831,8 @@ class CognitoIntegrationTest {
                  "TokenValidityUnits": {"AccessToken": "minutes", "IdToken": "minutes", "RefreshToken": "minutes"}}
                 """.formatted(limitsPoolId)).path("UserPoolClient").path("ClientId").asText();
         cognitoAction("UpdateUserPoolClient", """
-                {"UserPoolId": "%s", "ClientId": "%s", "AccessTokenValidity": 4}
+                {"UserPoolId": "%s", "ClientId": "%s", "AccessTokenValidity": 4,
+                 "TokenValidityUnits": {"AccessToken": "minutes"}}
                 """.formatted(limitsPoolId, limitsClientId))
                 .then()
                 .statusCode(400)
