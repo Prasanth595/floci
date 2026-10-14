@@ -54,6 +54,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.lang.reflect.Field;
@@ -71,9 +72,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.LogRecord;
 import java.util.stream.Collectors;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -452,6 +455,69 @@ class RdsServiceTest {
                 verify(proxyManager, times(enabled ? 1 : 0))
                         .updateIamEnabled("rds-resource:" + member.getDbInstanceArn(), true);
             }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void memberPublicationAndClusterIamToggleKeepProxyStateConsistent(boolean initiallyEnabled) throws Exception {
+        InMemoryStorage<String, DbInstance> instances = spy(new InMemoryStorage<>());
+        RdsService service = newService(containerManager, proxyManager, instances, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        service.createDbCluster("race-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", initiallyEnabled, null);
+        CountDownLatch published = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean firstPublication = new AtomicBoolean(true);
+        AtomicBoolean installed = new AtomicBoolean(false);
+        AtomicBoolean proxyIam = new AtomicBoolean(initiallyEnabled);
+        doAnswer(call -> {
+            Object result = call.callRealMethod();
+            DbInstance value = call.getArgument(1);
+            if ("race-member".equals(value.getDbInstanceIdentifier()) && firstPublication.compareAndSet(true, false)) {
+                published.countDown();
+                assertTrue(release.await(5, TimeUnit.SECONDS));
+            }
+            return result;
+        }).when(instances).put(any(), any());
+        doAnswer(call -> {
+            proxyIam.set(call.getArgument(2));
+            installed.set(true);
+            return null;
+        }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any(), any(), any());
+        doAnswer(call -> {
+            String key = call.getArgument(0);
+            if (key.endsWith(":db:race-member") && installed.get()) {
+                proxyIam.set(call.getArgument(1));
+            }
+            return null;
+        }).when(proxyManager).updateIamEnabled(any(), anyBoolean());
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        AtomicReference<Thread> modifierThread = new AtomicReference<>();
+        try {
+            Future<DbInstance> creation = workers.submit(() -> service.createDbInstance("race-member",
+                    "aurora-postgresql", "16.3", "admin", "password", "dbname", "db.r5.large", 20,
+                    !initiallyEnabled, null, null, "race-cluster", null, false, false, null,
+                    Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults()));
+            assertTrue(published.await(5, TimeUnit.SECONDS));
+            Future<DbCluster> modification = workers.submit(() -> {
+                modifierThread.set(Thread.currentThread());
+                return service.modifyDbCluster("race-cluster", null, !initiallyEnabled);
+            });
+            await().atMost(Duration.ofSeconds(5)).until(() -> modification.isDone()
+                    || (modifierThread.get() != null && modifierThread.get().getState() == Thread.State.BLOCKED));
+            release.countDown();
+            creation.get(5, TimeUnit.SECONDS);
+            modification.get(5, TimeUnit.SECONDS);
+            assertTrue(installed.get());
+            assertEquals(!initiallyEnabled, service.getDbCluster("race-cluster").isIamDatabaseAuthenticationEnabled());
+            assertEquals(!initiallyEnabled, service.getDbInstance("race-member").isIamDatabaseAuthenticationEnabled());
+            assertEquals(!initiallyEnabled, proxyIam.get());
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
         }
     }
 

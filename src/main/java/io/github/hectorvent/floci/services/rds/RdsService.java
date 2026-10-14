@@ -837,45 +837,56 @@ public class RdsService implements Resettable, ResourceProvider {
         }
 
         String accountId = accountIdFromArn(instance.getDbInstanceArn());
-        putInstanceForScope(accountId, effectiveRegion, id, instance);
+        // Publish the effective cluster setting and initial relay under the same monitor as
+        // ModifyDBCluster. Container provisioning above stays outside this publication boundary.
+        synchronized (this) {
+            if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
+                DbCluster currentCluster = findClusterForScope(accountId, effectiveRegion, dbClusterIdentifier);
+                if (currentCluster != null) {
+                    iamEnabled = currentCluster.isIamDatabaseAuthenticationEnabled();
+                    instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
+                }
+            }
+            putInstanceForScope(accountId, effectiveRegion, id, instance);
 
-        if (!mock && hasBackend(backendHost, backendPort)) {
-            final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
-            try {
-                proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
-                        engine, iamEnabled, proxyPort, backendHost, backendPort,
-                        instance.getEndpoint().address(),
-                        masterUsername, masterPassword, dbName,
-                        (user, pw) -> validateDbPasswordForScope(
-                                accountId, instanceRegion, id, user, pw),
-                        proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
-                                instanceRegion, accountId, dbUserResourceId(instance)));
-            } catch (RuntimeException | Error e) {
+            if (!mock && hasBackend(backendHost, backendPort)) {
+                final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
                 try {
-                    deleteInstanceForScope(accountId, effectiveRegion, id);
-                } catch (RuntimeException rollbackFailure) {
-                    e.addSuppressed(rollbackFailure);
+                    proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
+                            engine, iamEnabled, proxyPort, backendHost, backendPort,
+                            instance.getEndpoint().address(),
+                            masterUsername, masterPassword, dbName,
+                            (user, pw) -> validateDbPasswordForScope(
+                                    accountId, instanceRegion, id, user, pw),
+                            proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
+                                    instanceRegion, accountId, dbUserResourceId(instance)));
+                } catch (RuntimeException | Error e) {
+                    try {
+                        deleteInstanceForScope(accountId, effectiveRegion, id);
+                    } catch (RuntimeException rollbackFailure) {
+                        e.addSuppressed(rollbackFailure);
+                    }
+                    throw e;
                 }
-                throw e;
             }
-        }
 
-        if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
-            DbCluster cluster = findClusterForScope(
-                    currentAccountId(), effectiveRegion, dbClusterIdentifier);
-            if (cluster != null) {
-                cluster.getDbClusterMembers().add(id);
-                if (cluster.resolveWriterIdentifier() == null
-                        || !cluster.getDbClusterMembers().contains(cluster.getClusterWriterIdentifier())) {
-                    cluster.setClusterWriterIdentifier(cluster.resolveWriterIdentifier());
+            if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
+                DbCluster cluster = findClusterForScope(
+                        currentAccountId(), effectiveRegion, dbClusterIdentifier);
+                if (cluster != null) {
+                    cluster.getDbClusterMembers().add(id);
+                    if (cluster.resolveWriterIdentifier() == null
+                            || !cluster.getDbClusterMembers().contains(cluster.getClusterWriterIdentifier())) {
+                        cluster.setClusterWriterIdentifier(cluster.resolveWriterIdentifier());
+                    }
+                    putClusterForScope(currentAccountId(), effectiveRegion,
+                            dbClusterIdentifier, cluster);
                 }
-                putClusterForScope(currentAccountId(), effectiveRegion,
-                        dbClusterIdentifier, cluster);
             }
-        }
 
-        instance.setStatus(DbInstanceStatus.AVAILABLE);
-        putInstanceForScope(accountId, effectiveRegion, id, instance);
+            instance.setStatus(DbInstanceStatus.AVAILABLE);
+            putInstanceForScope(accountId, effectiveRegion, id, instance);
+        }
         LOG.infov("DB instance {0} created, engine={1}, endpoint={2}:{3}",
                 id, engine, endpoint.address(), String.valueOf(endpoint.port()));
         return instance;
