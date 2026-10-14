@@ -168,6 +168,12 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
+    public boolean requiresUpdateRecovery(StackResource resource) {
+        return "UPDATE_FAILED".equals(resource.getStatus())
+                && resource.getAttributes().containsKey(UPDATE_SNAPSHOT_ATTR);
+    }
+
+    @Override
     public boolean rollbackUpdate(StackResource resource) {
         if (ReplacementCleanup.rollback(resource, this::delete)) {
             restoreManagedTags(resource, readSnapshot(resource));

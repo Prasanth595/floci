@@ -614,7 +614,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
     }
 
     @Test
-    void outputsOnlyUpdateDoesNotClearAnUnrestoredIdentitySnapshot() throws Exception {
+    void outputsOnlyUpdateKeepsFailedIdentityRollbackRetryable() throws Exception {
         String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
         String otherAccount = "000000000002";
         stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
@@ -645,17 +645,13 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             ObjectNode outputsOnly = (ObjectNode) MAPPER.readTree(template(identityName, true));
             outputsOnly.withObject("/Outputs").set("Marker", MAPPER.valueToTree(Map.of("Value", "cleanup")));
             cfn("UpdateStack", outputsOnly.toString()).then().statusCode(200);
-            String completed = await().atMost(Duration.ofSeconds(15)).until(
-                    () -> cfn("DescribeStacks", null).then().statusCode(200).extract().asString(),
-                    body -> List.of("UPDATE_COMPLETE", "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS")
-                            .contains(XmlParser.extractFirst(body, "StackStatus", null)));
-            assertEquals("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS",
-                    XmlParser.extractFirst(completed, "StackStatus", null));
+            String failedAgain = awaitStatus("UPDATE_ROLLBACK_FAILED");
+            assertEquals(null, XmlParser.extractPairs(failedAgain,
+                    "Outputs", "OutputKey", "OutputValue").get("Marker"));
             assertEquals(false, sesIdentity(identityName).jsonPath().getBoolean("FeedbackForwardingStatus"));
             assertEquals("new", sesIdentity(identityName).jsonPath()
                     .getString("Tags.find { it.Key == 'purpose' }.Value"));
-            cfn("UpdateStack", template(identityName, false)).then().statusCode(400);
-            verify(identityService, times(1)).save(
+            verify(identityService, times(3)).save(
                     argThat(identity -> isOriginalSnapshot(identity, identityName, originalTokens)),
                     eq("us-east-1"));
 
@@ -678,6 +674,43 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             given().header("Authorization", auth(otherAccount, "ses"))
                     .delete("/v2/email/identities/{identity}", identityName)
                     .then().statusCode(anyOf(is(200), is(404)));
+        }
+    }
+
+    @Test
+    void outputsOnlyUpdateRecoversPendingIdentityRollbackBeforeCommit() throws Exception {
+        String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        createIdentityStack(identityName);
+        List<String> originalTokens = sesIdentity(identityName).jsonPath()
+                .getList("DkimAttributes.Tokens", String.class);
+        ObjectNode failed = (ObjectNode) MAPPER.readTree(template(identityName, true));
+        failed.withObject("/Resources").set("BadSecret", MAPPER.valueToTree(Map.of(
+                "Type", "AWS::SecretsManager::Secret", "DependsOn", "Identity",
+                "Properties", Map.of("SecretString", "explicit",
+                        "GenerateSecretString", Map.of("PasswordLength", 32)))));
+        doThrow(new AwsException("ServiceUnavailableException", "temporary restore failure", 503))
+                .doCallRealMethod().when(identityService).save(
+                        argThat(identity -> isOriginalSnapshot(identity, identityName, originalTokens)),
+                        eq("us-east-1"));
+
+        try {
+            cfn("UpdateStack", failed.toString()).then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_FAILED");
+
+            ObjectNode outputsOnly = (ObjectNode) MAPPER.readTree(template(identityName, true));
+            outputsOnly.withObject("/Outputs").set("Marker", MAPPER.valueToTree(Map.of("Value", "recovered")));
+            cfn("UpdateStack", outputsOnly.toString()).then().statusCode(200);
+            String completed = awaitStatus("UPDATE_COMPLETE");
+            assertEquals("recovered", XmlParser.extractPairs(completed,
+                    "Outputs", "OutputKey", "OutputValue").get("Marker"));
+            assertEquals("new", sesIdentity(identityName).jsonPath()
+                    .getString("Tags.find { it.Key == 'purpose' }.Value"));
+            verify(identityService, times(3)).save(
+                    any(Identity.class),
+                    eq("us-east-1"));
+        } finally {
+            doCallRealMethod().when(identityService).save(any(Identity.class), eq("us-east-1"));
         }
     }
 

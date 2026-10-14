@@ -1601,6 +1601,15 @@ public class CloudFormationService implements ResourceProvider {
             if (resources.isObject()) {
                 List<String> sortedLogicalIds = topologicalSort(resources, conditions);
 
+                if (!isCreate) {
+                    for (String logicalId : sortedLogicalIds) {
+                        StackResource existing = stack.getResources().get(logicalId);
+                        if (existing != null && dispatcher.requiresUpdateRecovery(existing)) {
+                            changedResourceIds.add(logicalId);
+                        }
+                    }
+                }
+
                 for (String logicalId : sortedLogicalIds) {
                     if (!isCreate && !changedResourceIds.contains(logicalId)) {
                         continue;

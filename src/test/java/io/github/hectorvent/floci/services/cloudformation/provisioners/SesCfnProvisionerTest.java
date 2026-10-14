@@ -411,6 +411,19 @@ class SesCfnProvisionerTest {
     }
 
     @Test
+    void onlyFailedUpdatesWithPendingSnapshotsRequireRecovery() {
+        StackResource resource = resource();
+        resource.setStatus("UPDATE_FAILED");
+        assertFalse(provisioner.requiresUpdateRecovery(resource));
+
+        resource.getAttributes().put("__FlociSesUpdateSnapshot", "{\"managedTags\":\"[]\"}");
+        assertTrue(provisioner.requiresUpdateRecovery(resource));
+
+        resource.setStatus("UPDATE_COMPLETE");
+        assertFalse(provisioner.requiresUpdateRecovery(resource));
+    }
+
+    @Test
     void failedDisplacedIdentityCleanupDoesNotReportStackDeleteSuccess() throws Exception {
         Identity replacement = domain("other.example.com");
         when(ses.createEmailIdentity(eq("other.example.com"), isNull(), eq(List.of()), eq("us-east-1")))
