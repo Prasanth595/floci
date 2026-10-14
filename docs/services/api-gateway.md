@@ -76,6 +76,17 @@ throughout the definition before parsing it. Values come from the request region
 account, so the same definition can be imported across regions and partitions. This
 includes mapping templates and applies to both `ImportRestApi` and `PutRestApi`.
 
+OpenAPI integration types `aws`, `aws_proxy`, `http`, `http_proxy`, and `mock`, including
+uppercase and mixed-case spellings, are
+stored as the public Integration values `AWS`, `AWS_PROXY`, `HTTP`, `HTTP_PROXY`,
+and `MOCK`. Both `GetIntegration` and `GetMethod.methodIntegration` return these
+canonical values after import, merge, or overwrite.
+The accepted type list is generated from Botocore's public API Gateway service model
+and checked by `make aws-data-check`; importing an API requires no AWS SDK or network lookup.
+Unknown integration type strings produce warnings and leave the method without an
+integration. With `failOnWarnings=true`, the import or update is rejected before
+changing the API. Leading/trailing whitespace and non-ASCII lookalikes are not accepted.
+
 ### Supported Operations
 
 | Category | Operations |
@@ -87,7 +98,7 @@ includes mapping templates and applies to both `ImportRestApi` and `PutRestApi`.
 | **Integrations** | PutIntegration, GetIntegration, UpdateIntegration, DeleteIntegration |
 | **Integration Responses** | PutIntegrationResponse, GetIntegrationResponse, UpdateIntegrationResponse, DeleteIntegrationResponse |
 | **Deployments** | CreateDeployment, GetDeployment, GetDeployments, UpdateDeployment, DeleteDeployment |
-| **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage, FlushStageAuthorizersCache |
+| **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage, FlushStageAuthorizersCache, GetExport |
 | **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, DeleteAuthorizer |
 | **API Keys** | CreateApiKey, ImportApiKeys, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey |
 | **Usage Plans** | CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan, GetUsage |
@@ -232,8 +243,8 @@ Rejections are `403`, and never reach the integration:
 | Signature mismatch | `The request signature we calculated does not match…` / `InvalidSignatureException` | `Forbidden` |
 
 A verified caller reaches the integration as `requestContext.identity.{accessKey, accountId, caller,
-user, userArn}` on a REST proxy event, and as `requestContext.authorizer.iam` on an HTTP API 2.0
-event.
+user, userArn}` on a REST proxy or HTTP API 1.0 event, and as `requestContext.authorizer.iam` on an
+HTTP API 2.0 event.
 
 As on AWS, a REST (v1) `AWS_PROXY` or `HTTP_PROXY` integration never receives the caller's
 `Authorization` header when the method is `AWS_IAM`, and on any method the header is dropped if it
@@ -310,7 +321,7 @@ These management-plane operations have no handler in v1. Calls will return `404`
 - Model templates: `GetModelTemplate`
 - Documentation parts and versions (the entire family, 10 operations)
 - Client Certificates (5 operations)
-- `GetExport` / `ImportDocumentationParts`
+- `ImportDocumentationParts`
 
 The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`)
 is implemented separately and is not counted as management-plane operations. A deployed REST
@@ -387,8 +398,46 @@ authorization settings, request parameters and models, method responses, and int
 configuration. Resources without methods omit `resourceMethods`.
 
 For example, `aws apigateway get-resources --rest-api-id <id> --embed methods` lists method
-metadata without a separate `get-method` call for each operation. Stage OpenAPI export
-(`GetExport`) is not implemented.
+metadata without a separate `get-method` call for each operation.
+
+### Stage OpenAPI Export
+
+`GetExport` returns a deployed REST API as OpenAPI 3.0 (`oas30`) or Swagger 2.0 (`swagger`).
+Set `Accept: application/json` (the default) or `application/yaml`. The response contains the
+specification body with `Content-Type` and `Content-Disposition` headers.
+
+```bash
+aws apigateway get-export --rest-api-id <id> --stage-name dev --export-type oas30 \
+  --parameters extensions=apigateway --accepts application/json api.json
+```
+
+By default, integration and authorizer definitions are omitted, while the authorization-type marker
+remains in each security scheme. A protected API exported without authorizer definitions cannot be
+safely re-imported: Floci returns `BadRequestException` before changing resources. For an importable
+protected definition, include `extensions=authorizers` or `extensions=apigateway`.
+Only schemes referenced by an operation's effective security requirements need a definition;
+unused schemes do not prevent re-import. Explicit operation security overrides API-level security,
+including an empty security list that makes the operation public.
+
+Request `extensions=integrations` or `extensions=authorizers` for the respective definitions;
+`extensions=apigateway` includes both, request validators, customized gateway responses, API policy
+and binary media types. Exports include stored methods (including ANY),
+request parameters and JSON models, response headers, security requirements, and supported integration
+settings. Exported integration types and passthrough settings use OpenAPI's lowercase spelling;
+import normalizes them to management API enum values.
+
+New deployments retain an export snapshot. Undeployed edits do not change it, and exporting another
+stage uses that stage's deployment. Deployment description updates preserve the snapshot. Older
+persisted deployments without a snapshot must be redeployed before export; Floci returns an explicit
+`BadRequestException` rather than exporting the live definition.
+
+This exports Floci's stored configuration, not the original uploaded document. Unsupported metadata,
+Postman extensions and full documentation exports are outside this operation's scope. Non-JSON models are rejected. Swagger supports only one body schema per
+operation, so methods using different request models per content type cannot be exported as Swagger;
+use `oas30` instead. Swagger response headers do not retain the method-response required flag.
+Integration responses must have distinct selection patterns to fit OpenAPI's response map. Duplicate
+patterns (including multiple default responses) and the literal regex `default`, which is reserved
+in that map, return `BadRequestException` rather than silently discarding or changing a response.
 
 ### Integration Settings
 
@@ -526,11 +575,10 @@ setups, and `floci:override-id` wins when both are present. Every other tag is p
 
 Edge-optimized APIs and custom domains (`EDGE`) exist only in the commercial partition: China
 has CloudFront but no edge-optimized API Gateway, and GovCloud, EUSC and the ISO partitions have
-no CloudFront. Floci enforces this for custom domains only: creating a domain with `EDGE`, or
-switching one to it, outside the commercial partition is a `BadRequestException`, and `REGIONAL`
-domains work in every partition (private custom domains are not emulated). REST APIs are not
-checked yet, so an `EDGE` REST API is still created in any partition. Invoke URLs use the
-partition's DNS suffix
+no CloudFront. Floci enforces this for REST APIs and custom domains: creating either with `EDGE`,
+or switching one to it with `UpdateRestApi` or `UpdateDomainName`, outside the commercial partition
+is a `BadRequestException`. `REGIONAL` APIs and domains work in every partition (private custom
+domains are not emulated). Invoke URLs use the partition's DNS suffix
 (`<api-id>.execute-api.cn-north-1.amazonaws.com.cn`). See [AWS Partitions](../configuration/partitions.md).
 
 ## Configuration
@@ -614,14 +662,39 @@ object places no condition on its statement, as in IAM.
 | **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
 | **Deployments** | CreateDeployment, GetDeployment, GetDeployments, UpdateDeployment, DeleteDeployment |
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
-| **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, DeleteDomainName |
-| **API Mappings** | CreateApiMapping, GetApiMapping, GetApiMappings, DeleteApiMapping |
+| **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
+| **API Mappings** | CreateApiMapping, GetApiMapping, GetApiMappings, UpdateApiMapping, DeleteApiMapping |
 | **VPC Links** | CreateVpcLink, GetVpcLink, GetVpcLinks, UpdateVpcLink, DeleteVpcLink |
 | **Tags** | TagResource, UntagResource, GetTags |
 
 `TagResource`, `UntagResource` and `GetTags` accept API, stage and VPC link ARNs
 (`arn:<partition>:apigateway:<region>::/vpclinks/<vpcLinkId>`). `UpdateVpcLink` changes only the
 name, as in the API model.
+
+### Custom Domain Names and API Mappings
+
+A custom domain created through either API is one record, routed by its `Host` header as
+described under [Custom Domain Names](#custom-domain-names); an API mapping sends the request to
+the mapped stage of an HTTP, WebSocket or REST API. A REST API can be mapped under a key with
+several levels, such as `orders/v1`, which only the v2 API creates.
+
+`CreateDomainName` and `UpdateDomainName` take exactly one domain name configuration and refuse
+mutual TLS, ownership verification certificates, an IP address type other than `ipv4` and a routing
+mode other than `API_MAPPING_ONLY`; an update replaces the configuration as a whole. As on AWS, a v2
+domain is regional: the `EDGE` endpoint type is refused, and any other one, `PRIVATE` included,
+gives a `REGIONAL` domain, whose certificate the v1 API reports as
+`regionalCertificateArn`. The v2 API does not manage an edge-optimized domain, an HTTP API or a key
+with several levels needs a domain on the `TLS_1_2` security policy (so such a domain cannot leave
+it), and a WebSocket API cannot share a domain with an HTTP or REST API.
+
+A mapping key holds letters, digits and `$-_.+!*'(),`, with `/` between its levels, at most 300
+characters; it does not start or end with `/` or hold `//`. No key, an empty one, or on a create one
+of whitespace only, is the root mapping. `UpdateApiMapping` changes only what it names, and a
+mapping keeps its `apiMappingId` when its key changes. The keys and their messages were measured
+against API Gateway.
+
+Templates can create domains and mappings with `AWS::ApiGatewayV2::DomainName` and
+`AWS::ApiGatewayV2::ApiMapping`; see [CloudFormation](cloudformation.md).
 
 ### WebSocket Data-Plane {#websocket-data-plane}
 
@@ -682,7 +755,7 @@ DELETE /execute-api/{apiId}/{stageName}/@connections/{connectionId}  — Disconn
 
 ### Not Implemented
 
-- `ExportApi`, `UpdateDomainName`, `UpdateApiMapping`
+- `ExportApi`
 
 ### Examples
 

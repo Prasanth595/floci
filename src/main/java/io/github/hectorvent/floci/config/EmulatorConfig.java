@@ -1121,6 +1121,20 @@ public interface EmulatorConfig {
     interface CloudControlServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Worker threads that run CreateResource provisioning.
+         * Env: FLOCI_SERVICES_CLOUDCONTROL_CREATE_WORKER_THREADS
+         */
+        @WithDefault("4")
+        int createWorkerThreads();
+
+        /**
+         * CreateResource requests that may wait for a worker; past that a new create is refused with
+         * ThrottlingException. Env: FLOCI_SERVICES_CLOUDCONTROL_CREATE_QUEUE_CAPACITY
+         */
+        @WithDefault("64")
+        int createQueueCapacity();
     }
     interface S3VectorsServiceConfig {
         @WithDefault("true")
@@ -1692,6 +1706,15 @@ public interface EmulatorConfig {
 
         @WithDefault("24")
         int resultTtlHours();
+
+        @WithDefault("10")
+        int maxConcurrentStatements();
+
+        @WithDefault("100")
+        int queueCapacity();
+
+        @WithDefault("10")
+        int shutdownTimeoutSeconds();
     }
 
     interface RedshiftServerlessServiceConfig {
@@ -2865,7 +2888,7 @@ public interface EmulatorConfig {
          * ARN AWS would refuse. The content is never fetched either way, so a function whose
          * behaviour depends on the layer will not run correctly here.
          *
-         * <p>A layer ARN outside the {@code aws} partition is rejected regardless: partitions
+         * <p>A layer ARN outside the request's partition is rejected regardless: partitions
          * are isolated, so no resource policy can make one readable.
          *
          * Env var: FLOCI_SERVICES_LAMBDA_ACCEPT_EXTERNAL_LAYER_ARNS
@@ -3525,6 +3548,16 @@ public interface EmulatorConfig {
          */
         @WithDefault("30")
         int connectionRequestTimeoutSeconds();
+
+        /**
+         * How long a Docker call waits for the daemon's response before it fails, in seconds, for
+         * both pools. The limit is per attempt: a control-plane request that is safe to repeat is
+         * tried up to six times. Requests that hold a stream open for as long as a container runs (container
+         * waits, exec and attach output, followed logs, streamed stats, events, image pulls and
+         * builds) are exempt, since they can stay silent while healthy.
+         */
+        @WithDefault("300")
+        int apiTimeoutSeconds();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

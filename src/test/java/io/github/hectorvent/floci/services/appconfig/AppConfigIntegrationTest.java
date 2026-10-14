@@ -868,16 +868,18 @@ class AppConfigIntegrationTest {
     @Test @Order(46)
     void startConfigurationSessionPrefersIdOverAnotherResourcesName() {
         // A second environment and profile named after the first ones' IDs: the ID must still select the original.
-        given()
+        String decoyEnvironmentId = given()
                 .contentType(ContentType.JSON)
                 .body("{\"Name\": \"" + envId + "\"}")
                 .when().post("/applications/" + appId + "/environments")
-                .then().statusCode(201);
-        given()
+                .then().statusCode(201)
+                .extract().path("Id");
+        String decoyProfileId = given()
                 .contentType(ContentType.JSON)
                 .body("{\"Name\": \"" + profileId + "\", \"LocationUri\": \"hosted\", \"Type\": \"AWS.Freeform\"}")
                 .when().post("/applications/" + appId + "/configurationprofiles")
-                .then().statusCode(201);
+                .then().statusCode(201)
+                .extract().path("Id");
 
         String token = given()
                 .contentType(ContentType.JSON)
@@ -893,6 +895,13 @@ class AppConfigIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("foo", notNullValue());
+
+        given()
+                .when().delete("/applications/" + appId + "/environments/" + decoyEnvironmentId)
+                .then().statusCode(204);
+        given()
+                .when().delete("/applications/" + appId + "/configurationprofiles/" + decoyProfileId)
+                .then().statusCode(204);
     }
 
     @Test @Order(47)
@@ -1083,5 +1092,33 @@ class AppConfigIntegrationTest {
                 .header("Content-Type", startsWith("application/octet-stream"))
                 .extract().asByteArray();
         assertArrayEquals(stored, body);
+    }
+
+    @Test @Order(51)
+    void deleteEnvironmentRemovesIt() {
+        String token = given()
+                .contentType(ContentType.JSON)
+                .body("{\"ApplicationIdentifier\":\"" + appId + "\",\"EnvironmentIdentifier\":\""
+                        + envId + "\",\"ConfigurationProfileIdentifier\":\"" + profileId + "\"}")
+                .when().post("/configurationsessions")
+                .then().statusCode(201)
+                .extract().path("InitialConfigurationToken");
+
+        given()
+                .when().delete("/applications/test-app/environments/test-env")
+                .then().statusCode(204);
+
+        given()
+                .when().get("/applications/" + appId + "/environments/" + envId)
+                .then().statusCode(404);
+
+        given()
+                .when().get("/applications/" + appId + "/environments/" + envId + "/deployments/1")
+                .then().statusCode(404);
+
+        given()
+                .queryParam("configuration_token", token)
+                .when().get("/configuration")
+                .then().statusCode(404);
     }
 }

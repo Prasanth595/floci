@@ -472,6 +472,29 @@ for the integration that raised it: `StepFunctions.ExecutionAlreadyExistsExcepti
 `aws-sdk:sfn:startExecution`. An Express child starts a new execution instead, so the same `Name`
 never fails it.
 
+## Lambda tasks under IAM enforcement
+
+A Lambda task, given a function ARN as its `Resource` or as the `FunctionName` of
+`arn:aws:states:::lambda:invoke`, runs the function in the account and Region the ARN names. With
+[IAM enforcement](iam.md#resource-based-policies) on, the task invokes the function as the state
+machine's execution role, as on AWS. In the role's own account, the role's policies or the
+function's policy can allow `lambda:InvokeFunction`. For a function in another account, both have
+to: the role's policies, and the function's policy through, for example, `AddPermission` naming the
+role or its account. The role's permissions boundary and its account's service control policies
+apply too, and a Deny in any of them refuses the call. A task that names a version or alias is
+authorized against that version or alias. A refused task fails with `Lambda.AccessDeniedException`,
+whose cause names the role's session and the kind of policy that refused it.
+
+A task whose `Credentials` name a role invokes the function as that role instead, once the
+execution role has assumed it. The role's trust policy has to allow the execution role, and Step
+Functions passes the state machine's ARN as `sts:ExternalId`, which the trust policy can require.
+The execution role's own policies have to allow `sts:AssumeRole` on the role too when the role is in
+another account, or when the trust policy names only the execution role's account. `RoleArn` is
+read the way the task's `Parameters` or `Arguments` are: as written, through a path or an intrinsic
+function as `RoleArn.$`, or through JSONata. A role the execution role cannot assume fails the task
+with `States.Permissions`, whose cause names the execution role's session and `sts:AssumeRole` on
+the role.
+
 ## AWS SDK task integrations
 
 A resource of the form `arn:aws:states:::aws-sdk:<service>:<action>` calls the service's API and
@@ -493,10 +516,18 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 | `arn:aws:states:::aws-sdk:sfn:sendTaskSuccess` | `{}` | `Sfn.InvalidTokenException` when no task is waiting on the token |
 | `arn:aws:states:::aws-sdk:sfn:sendTaskFailure` | `{}` | `Sfn.InvalidTokenException` |
 | `arn:aws:states:::aws-sdk:rdsdata:executeStatement` | RDS Data statement result | `RdsData.BadRequestException` for an invalid request |
+| `arn:aws:states:::aws-sdk:redshiftdata:executeStatement` | Data API statement handle (`Id`, `CreatedAt`, ...) | `RedshiftData.ValidationException` for an invalid request |
+| `arn:aws:states:::aws-sdk:redshiftdata:describeStatement` | statement status, `ResultRows` | `RedshiftData.ResourceNotFoundException` for an unknown `Id` |
 | `arn:aws:states:::aws-sdk:scheduler:createSchedule` | `{ScheduleArn}` | `Scheduler.ConflictException` when the name is taken |
 | `arn:aws:states:::aws-sdk:scheduler:updateSchedule` | `{ScheduleArn}` | `Scheduler.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:scheduler:deleteSchedule` | `{}` | `Scheduler.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:sns:publish` | `{MessageId}` | `Sns.NotFoundException` when the topic does not exist |
+
+Redshift Data API execution returns a statement `Id` before SQL completes. Follow the
+`executeStatement` task with `describeStatement`, a Choice on `Status`, and a Wait state
+before polling again. Read results only after `FINISHED`; route `FAILED` and `ABORTED`
+to the workflow's failure path. `WithEvent=true` can also route the terminal status
+through EventBridge.
 
 Scheduler create and update tasks accept `StartDate` and `EndDate` as RFC 3339 strings, including
 offsets and fractional seconds. The direct Scheduler API continues to use numeric epoch seconds.
@@ -511,6 +542,15 @@ happened.
 PascalCase names such as `ResourceArn`, `SecretArn`, `Sql` and `Parameters`; the adapter translates
 them to the direct API shape and returns a recursively PascalCase result. Other RDS Data actions are
 not routed through Step Functions yet.
+
+Every Redshift Data API action Floci implements is reachable as `aws-sdk:redshiftdata:<action>`
+(`executeStatement`, `batchExecuteStatement`, `describeStatement`, `getStatementResult`,
+`getStatementResultV2`, `listStatements`, `cancelStatement`, `listDatabases`, `listSchemas`,
+`listTables`, `describeTable`). Arguments and results keep the Data API's PascalCase names, and
+`CreatedAt` and `UpdatedAt` are ISO-8601 strings. Use `ClusterIdentifier` for a provisioned cluster
+or `WorkgroupName` for a Serverless workgroup. A statement that fails in SQL is not a task failure:
+`executeStatement` succeeds and `describeStatement` reports `Status: FAILED`, as on AWS. There is no
+`.sync` variant, as on AWS.
 
 ## Publishing to SNS
 
