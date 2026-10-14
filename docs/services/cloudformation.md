@@ -354,6 +354,31 @@ set to exactly what the template lists. Removing the property leaves collection 
 - Hot-reload code (`S3Bucket: hot-reload`) is compared by host path: the same path is a no-op, a different path updates the bind mount in place.
 - `Tags` are applied when the function is created, including a replacement function. On `UpdateStack` the template's tags are applied and only the keys the previous template set and the new one drops are removed, so a tag added outside the template is kept, as in AWS.
 
+## SAM published aliases
+
+`AutoPublishAlias` creates a version and points the generated alias at that version's
+numeric `Version` attribute. CloudFormation resolves the version before creating the
+alias. As in SAM, the version's logical id is `<Function>Version` followed by ten hex digits of a
+SHA-1 over the function's code, with its template parameter references resolved (pseudo
+parameters such as `${AWS::Region}` stay as written), and its `Environment` and `MemorySize` as
+written. An update that changes any of them, or a parameter the code uses, publishes a new version
+and moves the alias to it. A parameter used only in `Environment` or `MemorySize` does not, and
+neither does a property outside the hash, such as `Timeout`. `AutoPublishAliasAllProperties`
+hashes every property floci gives the function instead, and a string `AutoPublishCodeSha256`
+replaces the hash with its first ten characters. A new id publishes only when the function's code
+or configuration changed since its last version, so a new `AutoPublishCodeSha256` alone, or a
+`Tags` edit under `AutoPublishAliasAllProperties`, leaves the alias where it is. On AWS a new
+`AutoPublishCodeSha256` alone also publishes, because SAM appends it to the function's
+`Description`; floci's transform sets no `Description` on the function.
+
+The version a new id replaces stays published: like SAM, floci gives the version
+`DeletionPolicy: Retain` unless the function sets a `DeletionPolicy` or `VersionDeletionPolicy`
+(or a `CapacityProviderConfig`, which makes it `Delete`), and the update reports it
+`DELETE_SKIPPED`. With `Delete` floci reports the old version `DELETE_COMPLETE` but never deletes
+it, where AWS does. Changes made to `$LATEST` outside the stack, including Lambda's reactive S3
+sync, do not reach the alias until an update publishes a new version. Event sources and API
+integrations still invoke the function rather than the alias, so they run `$LATEST`.
+
 ## RDS Credential Dynamic References
 
 `AWS::RDS::DBInstance` and `AWS::RDS::DBCluster` resolve CloudFormation dynamic
@@ -564,7 +589,8 @@ asked for it, so the window defaults to 30 seconds (see [Configuration](#configu
 ## Deletion Policies
 
 A resource's [`DeletionPolicy`](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-deletionpolicy.html)
-attribute is honored on `DeleteStack` and on the rollback of a failed `CreateStack`:
+attribute is honored on `DeleteStack`, on the rollback of a failed `CreateStack`, and when an
+update removes the resource from the template, where it applies as on `DeleteStack`:
 
 | Value | `DeleteStack` | Rollback of the create that made the resource |
 |---|---|---|
@@ -597,9 +623,6 @@ Deviations from AWS to be aware of:
 - Every resource defaults to `Delete`. AWS instead defaults `AWS::RDS::DBCluster`, and
   `AWS::RDS::DBInstance` without a `DBClusterIdentifier`, to `Snapshot`.
 - Unrecognized values are treated as `Delete`.
-- An update that removes a resource from the template does not delete it (or consult its policy);
-  only the new template's resources are provisioned. AWS applies `DeletionPolicy` to update-time
-  removals as well.
 - After `DeleteStack` completes, a retained resource's `DELETE_SKIPPED` record is only visible
   through `DescribeStackEvents` for the deleted stack, not `DescribeStackResources`.
 - `UpdateReplacePolicy`, and the `RetainExceptOnCreate` request parameter of `CreateStack` /
