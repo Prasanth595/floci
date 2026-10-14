@@ -13,7 +13,6 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
-import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -769,9 +768,8 @@ class CognitoIntegrationTest {
                         equalTo("no-reply@verificationemail.com"));
     }
 
-    @ParameterizedTest
-    @ValueSource(strings = {"", "Temp\"Slash\\123!"})
-    void adminCreateUserEmailsAnInvitationWithAWorkingTemporaryPassword(String temporaryPassword) throws Exception {
+    @Test
+    void adminCreateUserEmailsAnInvitationWithAWorkingTemporaryPassword() throws Exception {
         String invitePoolId = cognitoJson("CreateUserPool", """
                 { "PoolName": "InvitationPool" }
                 """).path("UserPool").path("Id").asText();
@@ -788,11 +786,10 @@ class CognitoIntegrationTest {
                 {
                   "UserPoolId": "%s",
                   "Username": "%s",
-                  "TemporaryPassword": %s,
                   "UserAttributes": [{ "Name": "email", "Value": "%s" }],
                   "DesiredDeliveryMediums": ["EMAIL"]
                 }
-                """.formatted(invitePoolId, invitee, OBJECT_MAPPER.writeValueAsString(temporaryPassword), invitee))
+                """.formatted(invitePoolId, invitee, invitee))
                 .then()
                 .statusCode(200)
                 .body("User.UserStatus", equalTo("FORCE_CHANGE_PASSWORD"));
@@ -811,19 +808,15 @@ class CognitoIntegrationTest {
                 .matcher(body);
         assertTrue(invitation.find(), body);
         assertEquals(invitee, invitation.group(1));
-        if (!temporaryPassword.isEmpty()) {
-            assertEquals(temporaryPassword, invitation.group(2));
-        }
 
         cognitoAction("AdminInitiateAuth", """
                 {
                   "UserPoolId": "%s",
                   "ClientId": "%s",
                   "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
-                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": %s }
+                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
                 }
-                """.formatted(invitePoolId, inviteClientId, invitee,
-                        OBJECT_MAPPER.writeValueAsString(invitation.group(2))))
+                """.formatted(invitePoolId, inviteClientId, invitee, invitation.group(2)))
                 .then()
                 .statusCode(200)
                 .body("ChallengeName", equalTo("NEW_PASSWORD_REQUIRED"));

@@ -17,7 +17,9 @@ class RdsDataSqlParametersTest {
         for (String sql : List.of("select 1; select 2", "select ';'; select 2",
                 "select $tag$;$tag$; select 2", "select 1; /* ignored */ select 2")) {
             AwsException error = assertThrows(AwsException.class, () -> RdsDataSqlParameters.parse(sql, false));
-            assertEquals("Multi-statements aren't supported", error.getMessage());
+            assertEquals("ValidationException", error.getErrorCode());
+            assertEquals("Multistatements aren't supported", error.getMessage());
+            assertEquals(400, error.getHttpStatus());
         }
     }
 

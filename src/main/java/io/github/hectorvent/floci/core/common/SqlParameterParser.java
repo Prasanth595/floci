@@ -31,12 +31,13 @@ public final class SqlParameterParser {
      *                      honor backslash escapes (e.g. Redshift Data API)
      * @param numericNames whether a parameter name may start with a digit, as in
      *                     {@code :1} (RDS Data API)
+     * @param mysqlComments whether comments follow MySQL's hash, double-dash, and non-nesting rules
      */
     public record Options(boolean allowBackticks, boolean backslashEscapes, boolean escapeStrings,
-                          boolean numericNames) {
-        public static final Options REDSHIFT = new Options(false, false, true, false);
-        public static final Options RDS_MYSQL = new Options(true, true, false, true);
-        public static final Options RDS_POSTGRESQL = new Options(true, false, false, true);
+                          boolean numericNames, boolean mysqlComments) {
+        public static final Options REDSHIFT = new Options(false, false, true, false, false);
+        public static final Options RDS_MYSQL = new Options(true, true, false, true, true);
+        public static final Options RDS_POSTGRESQL = new Options(true, false, false, true, false);
     }
 
     /**
@@ -77,7 +78,7 @@ public final class SqlParameterParser {
             }
 
             if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                int end = skipBlockComment(sql, i, !Options.RDS_MYSQL.equals(options));
+                int end = skipBlockComment(sql, i, !options.mysqlComments());
                 out.append(sql, i, end);
                 i = end;
                 continue;
@@ -202,7 +203,7 @@ public final class SqlParameterParser {
             }
 
             if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                i = skipBlockComment(sql, i, !Options.RDS_MYSQL.equals(options));
+                i = skipBlockComment(sql, i, !options.mysqlComments());
                 continue;
             }
 
@@ -231,7 +232,7 @@ public final class SqlParameterParser {
     }
 
     private static boolean startsLineComment(String sql, int start, Options options) {
-        boolean mysql = Options.RDS_MYSQL.equals(options);
+        boolean mysql = options.mysqlComments();
         if (mysql && sql.charAt(start) == '#') {
             return true;
         }

@@ -51,9 +51,9 @@ final class RdsDataSqlParameters {
      */
     static ParsedSql parse(String sql, boolean backslashEscapes) {
         SqlParameterParser.Options statementOptions = new SqlParameterParser.Options(
-                true, backslashEscapes, !backslashEscapes, true);
+                true, backslashEscapes, !backslashEscapes, true, backslashEscapes);
         if (SqlParameterParser.isMultiStatement(sql, statementOptions)) {
-            throw new AwsException("BadRequestException", "Multi-statements aren't supported", 400);
+            throw new AwsException("ValidationException", "Multistatements aren't supported", 400);
         }
         return SqlParameterParser.parse(sql, backslashEscapes
                 ? SqlParameterParser.Options.RDS_MYSQL

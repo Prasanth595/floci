@@ -187,6 +187,29 @@ class SqlParameterParserTest {
     }
 
     @Test
+    void mysqlCommentRulesAreIndependentOfQuotingAndParameterOptions() {
+        Options options = new Options(false, false, true, false, true);
+        assertFalse(SqlParameterParser.isMultiStatement("select 1; # ignored; select 2\n", options));
+        assertTrue(SqlParameterParser.isMultiStatement("select 1--1; select 2", options));
+        assertTrue(SqlParameterParser.isMultiStatement("select 1; /* outer /* inner */ select 2; */", options));
+
+        ParsedSql hash = SqlParameterParser.parse("select :value # :ignored\n", options);
+        assertEquals(List.of("value"), hash.parameterOrder());
+        ParsedSql dash = SqlParameterParser.parse("select 1--:value", options);
+        assertEquals(List.of("value"), dash.parameterOrder());
+        ParsedSql block = SqlParameterParser.parse("select :first /* outer /* inner */ + :second", options);
+        assertEquals(List.of("first", "second"), block.parameterOrder());
+    }
+
+    @Test
+    void mysqlQuotingOptionsDoNotEnableMysqlComments() {
+        Options options = new Options(true, true, false, true, false);
+        assertTrue(SqlParameterParser.isMultiStatement("select 1; # not a comment", options));
+        assertFalse(SqlParameterParser.isMultiStatement("select 1--1; select 2", options));
+        assertFalse(SqlParameterParser.isMultiStatement("select 1; /* outer /* inner */ select 2; */", options));
+    }
+
+    @Test
     void numericNamesAreNotArraySliceBounds() {
         for (String sql : new String[] {
                 "select arr[1:2] from t", "select arr[:2] from t", "select arr[1:] from t",

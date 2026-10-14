@@ -62,7 +62,8 @@ class RdsDataServiceTest {
                 "insert into data_api_events(name) values ('first'); insert into data_api_events(name) values ('second')"),
                 REGION));
 
-        assertEquals("Multi-statements aren't supported", error.getMessage());
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Multistatements aren't supported", error.getMessage());
         assertEquals(400, error.getHttpStatus());
         assertEquals(0, harness.countEvents());
     }
@@ -79,7 +80,8 @@ class RdsDataServiceTest {
 
         AwsException error = assertThrows(AwsException.class,
                 () -> harness.service.executeStatement(request, REGION));
-        assertEquals("Multi-statements aren't supported", error.getMessage());
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Multistatements aren't supported", error.getMessage());
 
         harness.service.commitTransaction(harness.transactionRequest(transactionId), REGION);
         assertEquals(0, harness.countEvents());
@@ -96,7 +98,8 @@ class RdsDataServiceTest {
 
             AwsException error = assertThrows(AwsException.class,
                     () -> harness.service.batchExecuteStatement(request, REGION));
-            assertEquals("Multi-statements aren't supported", error.getMessage());
+            assertEquals("ValidationException", error.getErrorCode());
+            assertEquals("Multistatements aren't supported", error.getMessage());
             assertEquals(0, harness.countEvents());
         }
     }
