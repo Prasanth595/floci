@@ -2221,8 +2221,9 @@ public class CloudFormationService implements ResourceProvider {
                         || dispatcher.rollbackUpdate(resource,
                                 event -> addEvent(stack, resource.getLogicalId(), event.getPhysicalResourceId(),
                                         resource.getResourceType(), event.getResourceStatus(), event.getResourceStatusReason()))) {
-                    resource.setStatus(previous.getStatus());
-                    resource.setStatusReason(previous.getStatusReason());
+                    boolean recoveredPendingUpdate = dispatcher.requiresUpdateRecovery(previous);
+                    resource.setStatus(recoveredPendingUpdate ? "UPDATE_COMPLETE" : previous.getStatus());
+                    resource.setStatusReason(recoveredPendingUpdate ? null : previous.getStatusReason());
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "UPDATE_COMPLETE",
                             "Resource update rolled back");

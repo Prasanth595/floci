@@ -36,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
@@ -706,8 +707,53 @@ class CloudFormationSesEmailIdentityIntegrationTest {
                     "Outputs", "OutputKey", "OutputValue").get("Marker"));
             assertEquals("new", sesIdentity(identityName).jsonPath()
                     .getString("Tags.find { it.Key == 'purpose' }.Value"));
-            verify(identityService, times(3)).save(
-                    any(Identity.class),
+            verify(identityService, atLeastOnce()).save(
+                    argThat(identity -> isOriginalSnapshot(identity, identityName, originalTokens)),
+                    eq("us-east-1"));
+        } finally {
+            doCallRealMethod().when(identityService).save(any(Identity.class), eq("us-east-1"));
+        }
+    }
+
+    @Test
+    void recoveredIdentityStaysCompleteWhenLaterResourceFails() throws Exception {
+        String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        createIdentityStack(identityName);
+        List<String> originalTokens = sesIdentity(identityName).jsonPath()
+                .getList("DkimAttributes.Tokens", String.class);
+        ObjectNode firstFailure = (ObjectNode) MAPPER.readTree(template(identityName, true));
+        firstFailure.withObject("/Resources").set("BadSecret", MAPPER.valueToTree(Map.of(
+                "Type", "AWS::SecretsManager::Secret", "DependsOn", "Identity",
+                "Properties", Map.of("SecretString", "explicit",
+                        "GenerateSecretString", Map.of("PasswordLength", 32)))));
+        doThrow(new AwsException("ServiceUnavailableException", "temporary restore failure", 503))
+                .doCallRealMethod().when(identityService).save(
+                        argThat(identity -> isOriginalSnapshot(identity, identityName, originalTokens)),
+                        eq("us-east-1"));
+
+        try {
+            cfn("UpdateStack", firstFailure.toString()).then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_FAILED");
+
+            ObjectNode secondFailure = (ObjectNode) MAPPER.readTree(template(identityName, true));
+            secondFailure.withObject("/Resources").set("AnotherBadSecret", MAPPER.valueToTree(Map.of(
+                    "Type", "AWS::SecretsManager::Secret", "DependsOn", "Identity",
+                    "Properties", Map.of("SecretString", "explicit",
+                            "GenerateSecretString", Map.of("PasswordLength", 32)))));
+            secondFailure.withObject("/Outputs").set("Marker", MAPPER.valueToTree(Map.of("Value", "attempted")));
+            cfn("UpdateStack", secondFailure.toString()).then().statusCode(200);
+            String rolledBack = awaitStatus("UPDATE_ROLLBACK_COMPLETE");
+            assertEquals(null, XmlParser.extractPairs(rolledBack,
+                    "Outputs", "OutputKey", "OutputValue").get("Marker"));
+            assertEquals("UPDATE_COMPLETE", XmlParser.extractPairs(
+                    cfn("DescribeStackResources", null).then().statusCode(200).extract().asString(),
+                    "StackResources", "LogicalResourceId", "ResourceStatus").get("Identity"));
+            Response restored = sesIdentity(identityName);
+            assertEquals(originalTokens, restored.jsonPath().getList("DkimAttributes.Tokens", String.class));
+            assertEquals("old", restored.jsonPath().getString("Tags.find { it.Key == 'purpose' }.Value"));
+            verify(identityService, atLeastOnce()).save(
+                    argThat(identity -> isOriginalSnapshot(identity, identityName, originalTokens)),
                     eq("us-east-1"));
         } finally {
             doCallRealMethod().when(identityService).save(any(Identity.class), eq("us-east-1"));
