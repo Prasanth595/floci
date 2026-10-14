@@ -446,7 +446,7 @@ class RdsServiceTest {
         }
         clearInvocations(proxyManager);
 
-        serviceA.modifyDbInstance("shared-member", "MemberOnlyPassword!", true, "us-east-1");
+        serviceA.modifyDbInstance("shared-member", "MemberOnlyPassword!", true, null, null, null, "us-east-1");
         for (String account : List.of(accountA, accountB)) {
             for (String region : List.of("us-east-1", "us-west-2")) {
                 DbInstance member = rawInstances.get(account + "/" + region + "::shared-member").orElseThrow();
