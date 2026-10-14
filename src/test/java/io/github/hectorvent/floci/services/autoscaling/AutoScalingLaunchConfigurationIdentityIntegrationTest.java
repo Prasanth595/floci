@@ -89,7 +89,7 @@ class AutoScalingLaunchConfigurationIdentityIntegrationTest {
                         "StartInstanceRefreshResponse.StartInstanceRefreshResult.InstanceRefreshId");
         reconciler.reconcileAll();
         reconciler.reconcileAll();
-        // The refresh itself must have launched the replacement, not an ordinary scale-out.
+        // The refresh completes once its replacement is in service.
         given().header("Authorization", AUTH).formParam("Action", "DescribeInstanceRefreshes")
                 .formParam("AutoScalingGroupName", name).formParam("InstanceRefreshIds.member.1", refreshId)
                 .post("/").then().statusCode(200)
