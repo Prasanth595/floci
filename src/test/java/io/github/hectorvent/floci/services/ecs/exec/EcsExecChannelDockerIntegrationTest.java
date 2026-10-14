@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ecs.exec;
 
 import com.github.dockerjava.api.DockerClient;
+import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
@@ -21,6 +22,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayOutputStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
@@ -50,6 +52,9 @@ class EcsExecChannelDockerIntegrationTest {
 
     @Inject
     EcsContainerManager containerManager;
+
+    @Inject
+    EcsService service;
 
     @Inject
     EcsExecSessionRegistry sessions;
@@ -97,7 +102,8 @@ class EcsExecChannelDockerIntegrationTest {
                     List.of("/bin/sh", "-c", "printf '\\000\\001\\002\\003\\377\\376'; "
                             + "head -c 5000 /dev/zero; printf 'exec-channel-ok'"), interactive);
 
-            PluginClient client = new PluginClient(vertx, session);
+            PluginClient client = new PluginClient(vertx, session,
+                    URI.create(service.execStreamUrl(session, URI.create("http://localhost:" + RestAssured.port + "/"))));
             try {
                 client.open();
 
@@ -160,7 +166,8 @@ class EcsExecChannelDockerIntegrationTest {
                     "arn:aws:ecs:us-east-1:000000000000:container/exec/app", runtimeId,
                     List.of("/bin/sh", "-c", "echo exec-uid-$(id -u)-end"), false);
 
-            PluginClient client = new PluginClient(vertx, session);
+            PluginClient client = new PluginClient(vertx, session,
+                    URI.create(service.execStreamUrl(session, URI.create("http://localhost:" + RestAssured.port + "/"))));
             try {
                 client.open();
                 client.next();
@@ -197,21 +204,22 @@ class EcsExecChannelDockerIntegrationTest {
 
         private final Vertx vertx;
         private final ExecSession session;
+        private final URI streamUrl;
         private final BlockingQueue<AgentMessage> received = new LinkedBlockingQueue<>();
 
         private HttpClient httpClient;
         private WebSocket webSocket;
         private long sequence;
 
-        PluginClient(Vertx vertx, ExecSession session) {
+        PluginClient(Vertx vertx, ExecSession session, URI streamUrl) {
             this.vertx = vertx;
             this.session = session;
+            this.streamUrl = streamUrl;
         }
 
         void open() throws Exception {
             httpClient = vertx.createHttpClient();
-            webSocket = httpClient.webSocket(RestAssured.port, "localhost",
-                            EcsExecChannelHandler.CHANNEL_PATH_PREFIX + session.sessionId())
+            webSocket = httpClient.webSocket(streamUrl.getPort(), streamUrl.getHost(), streamUrl.getRawPath())
                     .toCompletionStage().toCompletableFuture().get(20, TimeUnit.SECONDS);
             webSocket.binaryMessageHandler(buffer -> received.add(AgentMessage.decode(buffer.getBytes())));
             webSocket.writeTextMessage("{\"MessageSchemaVersion\":\"1.0\",\"RequestId\":\""

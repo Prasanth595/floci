@@ -369,7 +369,12 @@ a mock-mode task reports the `ExecuteCommandAgent` as running but has no runtime
 `ExecuteCommand` answers `TargetNotConnectedException`.
 
 The response carries a `session` with a `streamUrl` pointing at Floci's own data channel and a
-single-use `tokenValue`, so the AWS CLI works as documented:
+single-use `tokenValue`, so the AWS CLI works as documented. The channel URL uses the incoming
+HTTP request's hostname, port and application base path instead of Floci's configured internal
+hostname. HTTP endpoints produce `ws://` URLs and HTTPS endpoints produce `wss://` URLs. Calls
+made inside Floci without an HTTP request retain the configured base URL. Reverse proxies must
+expose the data channel under the same endpoint and configure trusted forwarding on the server
+if they terminate TLS or rewrite the application base path:
 
 ```bash
 aws ecs execute-command --cluster my-cluster --task <task-arn> \
