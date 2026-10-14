@@ -152,13 +152,7 @@ public class LambdaFunctionStore implements Resettable {
     }
 
     private static long versionOrder(LambdaFunction fn) {
-        String v = fn.getVersion();
-        if (v == null || "$LATEST".equals(v)) {
-            return -1;
-        }
-        // Never throw here: deleteAll routes through this, so an unexpected key must not block it.
-        return !v.isEmpty() && v.length() < 19 && v.chars().allMatch(Character::isDigit)
-                ? Long.parseLong(v) : Long.MAX_VALUE;
+        return "$LATEST".equals(fn.getVersion()) ? -1 : Long.parseLong(fn.getVersion());
     }
 
     /**
