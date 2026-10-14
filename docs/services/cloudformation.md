@@ -131,6 +131,31 @@ an atomic ownership check against another stack or a direct Cognito API writer r
 Failed in-place restoration preserves the original name and scopes for a `ContinueUpdateRollback`
 retry. Deleting the current server keeps this snapshot if deletion fails.
 
+## SSM parameters
+
+Like AWS's resource handler, `AWS::SSM::Parameter` is created with one `PutParameter` that carries
+the template's tags and does not overwrite. A name that already exists outside the stack fails the
+resource with `ParameterAlreadyExists`; the stack never overwrites, adopts or deletes that
+parameter. Floci applies the `Name`, `Type`, `Value` and `Tags` properties.
+
+An update that keeps `Name` overwrites the parameter. When a later resource fails the update, the
+rollback writes the prior value and settings back, as a new SSM version when they changed (the
+version history is not rewound, as on AWS), and returns the tags the previous or the failed
+template set to their prior values; other tags are left alone. As on AWS, the update first checks
+that the parameter exists: one deleted outside the stack fails it with `ParameterNotFound` before
+anything is written. A rollback that finds the parameter gone fails the same way, leaving the stack
+in `UPDATE_ROLLBACK_FAILED`.
+
+Giving `Name` a new value replaces the parameter. The previous parameter stays until the update
+commits, and is then deleted unless `UpdateReplacePolicy` is `Retain`; a failed update deletes the
+replacement instead. A restore or delete that fails during the rollback leaves the stack in
+`UPDATE_ROLLBACK_FAILED`, and `ContinueUpdateRollback` retries it (see
+[Failed update rollbacks](#failed-update-rollbacks)). Deleting a parameter that is already gone
+counts as deleted. Known differences: removing an explicit `Name` keeps the parameter under that
+name, where AWS replaces it with one under a generated name; and an update in place of a parameter
+deleted outside the stack ends in `UPDATE_ROLLBACK_COMPLETE`, since nothing was written, where AWS's
+rollback repeats the existence check and likely ends in `UPDATE_ROLLBACK_FAILED`.
+
 ## Supported Resource Types
 
 Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`. Each delegates to
@@ -628,8 +653,10 @@ Deviations from AWS to be aware of:
   removals as well.
 - After `DeleteStack` completes, a retained resource's `DELETE_SKIPPED` record is only visible
   through `DescribeStackEvents` for the deleted stack, not `DescribeStackResources`.
-- `UpdateReplacePolicy`, and the `RetainExceptOnCreate` request parameter of `CreateStack` /
-  `UpdateStack`, are not implemented.
+- `UpdateReplacePolicy` is honored only by the resource types that delete a displaced resource once
+  the update commits, such as an SSM parameter or a log stream; other types keep the displaced
+  resource, or delete it during the update, whatever the policy. The `RetainExceptOnCreate` request
+  parameter of `CreateStack` / `UpdateStack` is not implemented.
 
 ## StackSets
 
