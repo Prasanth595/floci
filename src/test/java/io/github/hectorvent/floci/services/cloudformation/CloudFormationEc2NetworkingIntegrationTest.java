@@ -187,14 +187,17 @@ class CloudFormationEc2NetworkingIntegrationTest {
         assertFalse(retagged.contains("<key>tier</key>"), "the dropped tag must be removed");
 
         // CidrBlock is createOnly: the public subnet is replaced, and with it the NAT gateway and the
-        // association that name it; the gateway, EIP and route tables stay.
-        cloudFormation("UpdateStack", template(vpcId, "10.40.2.0/24"));
+        // association that name it; the gateway and route tables stay. The replacement gateway gets a
+        // new EIP: CloudFormation creates it before deleting the old one, and CreateNatGateway refuses
+        // an Elastic IP still associated with the displaced gateway, as AWS does.
+        cloudFormation("UpdateStack", template(vpcId, "10.40.2.0/24").replace("NatEip", "NatEipB"));
         Map<String, String> replaced = XmlParser.extractPairs(describeStacks("UPDATE_COMPLETE"), "Outputs", "OutputKey", "OutputValue");
         assertFalse(out.get("SubnetId").equals(replaced.get("SubnetId")), "a changed CIDR must replace the subnet");
         assertFalse(out.get("NatId").equals(replaced.get("NatId")), "the NAT gateway follows its subnet");
         assertFalse(out.get("AssocId").equals(replaced.get("AssocId")), "the association follows its subnet");
         assertEquals(out.get("IgwId"), replaced.get("IgwId"));
-        assertEquals(out.get("EipAllocationId"), replaced.get("EipAllocationId"));
+        assertFalse(out.get("EipAllocationId").equals(replaced.get("EipAllocationId")), "the gateway takes the new EIP");
+        assertFalse(ec2("DescribeAddresses").contains(out.get("EipAllocationId")), "the displaced EIP must be gone");
         assertEquals(out.get("PublicRtId"), replaced.get("PublicRtId"));
         assertEquals(out.get("PrivateRtId"), replaced.get("PrivateRtId"));
         assertFalse(ec2("DescribeSubnets").contains(out.get("SubnetId")), "the displaced subnet must be gone");

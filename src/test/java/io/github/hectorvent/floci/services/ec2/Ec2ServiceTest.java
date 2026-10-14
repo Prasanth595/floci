@@ -669,6 +669,54 @@ class Ec2ServiceTest {
         assertEquals("InvalidNetworkInterfaceID.NotFound", e.getErrorCode());
     }
 
+    /**
+     * A gateway persisted before Address records were marked has an allocation that looks free.
+     * The gateway still holds it, so a second gateway is refused it.
+     */
+    @Test
+    void natGatewayRefusesAnElasticIpHeldByALegacyGatewayWithAnUnmarkedAddress() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of()).getFirst().getSubnetId();
+        String allocationId = service.allocateAddress("us-east-1").getAllocationId();
+        service.createNatGateway("us-east-1", subnetId, allocationId, null, null);
+        // Simulate the pre-change record: in-memory storage hands back the stored object.
+        Address legacy = service.describeAddresses("us-east-1", List.of(allocationId), Map.of()).getFirst();
+        legacy.setAssociationId(null);
+        legacy.setNetworkInterfaceId(null);
+        legacy.setPrivateIpAddress(null);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createNatGateway("us-east-1", subnetId, allocationId, null, null));
+        assertEquals("Resource.AlreadyAssociated", e.getErrorCode());
+    }
+
+    /** DeleteNatGateway releases the Elastic IP under the lock CreateNatGateway takes. */
+    @Test
+    void deleteNatGatewayReleasesTheElasticIpUnderTheAllocationLock() throws Exception {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of()).getFirst().getSubnetId();
+        String allocationId = service.allocateAddress("us-east-1").getAllocationId();
+        String natId = service.createNatGateway("us-east-1", subnetId, allocationId, null, null).getNatGatewayId();
+        java.lang.reflect.Field field = Ec2Service.class.getDeclaredField("privateIpAllocationLock");
+        field.setAccessible(true);
+        Object lock = field.get(service);
+
+        Thread deleter = new Thread(() -> service.deleteNatGateway("us-east-1", natId));
+        synchronized (lock) {
+            deleter.start();
+            deleter.join(500);
+            assertTrue(deleter.isAlive(), "delete must wait for the allocation lock");
+        }
+        deleter.join(5000);
+        assertFalse(deleter.isAlive());
+        assertNull(service.describeAddresses("us-east-1", List.of(allocationId), Map.of())
+                .getFirst().getAssociationId());
+    }
+
     @Test
     void runInstancesRequiresImageIdInsteadOfDefaulting() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),

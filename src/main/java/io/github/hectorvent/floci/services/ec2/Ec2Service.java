@@ -8825,7 +8825,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             // another gateway is refused, not taken over.
             if (isSet(allocationId)) {
                 Address held = getRequiredAddress(region, allocationId);
-                if (isSet(held.getAssociationId()) || isSet(held.getInstanceId())) {
+                // The gateway scan covers gateways persisted before the Address record was marked.
+                if (isSet(held.getAssociationId()) || isSet(held.getInstanceId())
+                        || isHeldByNatGateway(region, allocationId)) {
                     throw new AwsException("Resource.AlreadyAssociated",
                             "Elastic IP address " + allocationId + " is already associated.", 400);
                 }
@@ -8878,7 +8880,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /** Derived from the gateway id, like {@link #endpointEniId}, so it is stable across restarts. */
     private static String natEniId(String natGatewayId) {
-        String hex = java.util.UUID.nameUUIDFromBytes(
+        String hex = UUID.nameUUIDFromBytes(
                 ("nat|" + natGatewayId).getBytes(StandardCharsets.UTF_8))
                 .toString().replace("-", "");
         return "eni-" + hex.substring(0, 17);
@@ -8947,24 +8949,27 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public NatGateway deleteNatGateway(String region, String natGatewayId) {
         ensureDefaultResources(region);
         NatGateway natGateway = getRequiredNatGateway(region, natGatewayId);
-        natGateway.setState("deleted");
-        // Hand the Elastic IP back, but only if the association is still the gateway's own.
-        for (NatGatewayAddress gatewayAddress : natGateway.getNatGatewayAddresses()) {
-            if (!isSet(gatewayAddress.getAllocationId())) {
-                continue;
+        // Hand the Elastic IP back, but only if the association is still the gateway's own. Under
+        // the lock createNatGateway takes, so a concurrent create cannot have its association wiped.
+        synchronized (privateIpAllocationLock) {
+            natGateway.setState("deleted");
+            for (NatGatewayAddress gatewayAddress : natGateway.getNatGatewayAddresses()) {
+                if (!isSet(gatewayAddress.getAllocationId())) {
+                    continue;
+                }
+                addresses.get(key(region, gatewayAddress.getAllocationId()))
+                        .filter(eip -> gatewayAddress.getAssociationId() != null
+                                && gatewayAddress.getAssociationId().equals(eip.getAssociationId()))
+                        .ifPresent(eip -> {
+                            eip.setAssociationId(null);
+                            eip.setNetworkInterfaceId(null);
+                            eip.setPrivateIpAddress(null);
+                            addresses.put(key(region, eip.getAllocationId()), eip);
+                        });
             }
-            addresses.get(key(region, gatewayAddress.getAllocationId()))
-                    .filter(eip -> gatewayAddress.getAssociationId() != null
-                            && gatewayAddress.getAssociationId().equals(eip.getAssociationId()))
-                    .ifPresent(eip -> {
-                        eip.setAssociationId(null);
-                        eip.setNetworkInterfaceId(null);
-                        eip.setPrivateIpAddress(null);
-                        addresses.put(key(region, eip.getAllocationId()), eip);
-                    });
+            natGateways.delete(key(region, natGatewayId));
+            tags.delete(natGatewayId);
         }
-        natGateways.delete(key(region, natGatewayId));
-        tags.delete(natGatewayId);
         return natGateway;
     }
 
@@ -9081,6 +9086,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 return;
             }
         }
+    }
+
+    private boolean isHeldByNatGateway(String region, String allocationId) {
+        return natGateways.scan(k -> true).stream()
+                .filter(g -> region.equals(g.getRegion()) && !"deleted".equals(g.getState()))
+                .anyMatch(g -> allocationId.equals(g.getAllocationId())
+                        || g.getNatGatewayAddresses().stream().anyMatch(a -> allocationId.equals(a.getAllocationId())));
     }
 
     private boolean isNatGatewayAssociation(String region, String associationId) {
