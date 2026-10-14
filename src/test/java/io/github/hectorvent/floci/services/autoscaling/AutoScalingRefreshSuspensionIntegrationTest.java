@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
@@ -20,6 +21,9 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 class AutoScalingRefreshSuspensionIntegrationTest {
     @Inject
     AutoScalingReconciler reconciler;
+
+    @Inject
+    Ec2Service ec2;
 
     private static final String GROUP = "DescribeAutoScalingGroupsResponse."
             + "DescribeAutoScalingGroupsResult.AutoScalingGroups.member";
@@ -71,6 +75,78 @@ class AutoScalingRefreshSuspensionIntegrationTest {
         } finally {
             request("DeleteLaunchConfiguration").formParam("LaunchConfigurationName", name)
                     .post("/").then().statusCode(200);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"configuration", "template"})
+    void replacementRetainsEncodedUserDataAndSelectsTheCurrentSubnet(String source) {
+        String name = "refresh-placement-" + UUID.randomUUID().toString().substring(0, 8);
+        String encoded = "/w";
+        String vpcId = ec2.createVpc("us-east-1", "10.92.0.0/16", false).getVpcId();
+        List<String> subnets = new ArrayList<>();
+        try {
+            subnets.add(ec2.createSubnet("us-east-1", vpcId, "10.92.0.0/28", "us-east-1a").getSubnetId());
+            subnets.add(ec2.createSubnet("us-east-1", vpcId, "10.92.1.0/24", "us-east-1b").getSubnetId());
+            boolean configuration = "configuration".equals(source);
+            RequestSpecification create = given().header("Authorization", auth(configuration ? "autoscaling" : "ec2"))
+                    .formParam("Action", configuration ? "CreateLaunchConfiguration" : "CreateLaunchTemplate")
+                    .formParam(configuration ? "LaunchConfigurationName" : "LaunchTemplateName", name);
+            String prefix = configuration ? "" : "LaunchTemplateData.";
+            create.formParam(prefix + "ImageId", "ami-amazonlinux2023")
+                    .formParam(prefix + "InstanceType", "t3.micro").formParam(prefix + "UserData", encoded)
+                    .post("/").then().statusCode(200);
+            try {
+                RequestSpecification createGroup = request("CreateAutoScalingGroup")
+                        .formParam("AutoScalingGroupName", name).formParam("MinSize", 0)
+                        .formParam("MaxSize", 1).formParam("DesiredCapacity", 1)
+                        .formParam("VPCZoneIdentifier", subnets.getFirst())
+                        .formParam("AvailabilityZones.member.1", "us-east-1a");
+                if (configuration) {
+                    createGroup.formParam("LaunchConfigurationName", name);
+                } else {
+                    createGroup.formParam("LaunchTemplate.LaunchTemplateName", name)
+                            .formParam("LaunchTemplate.Version", "1");
+                }
+                createGroup.post("/").then().statusCode(200);
+                try {
+                    reconcileTwice();
+                    String original = group(name).xmlPath().getString(GROUP + ".Instances.member.InstanceId");
+                    assertEquals(subnets.getFirst(), ec2.getInstance("us-east-1", original).orElseThrow().getSubnetId());
+                    request("UpdateAutoScalingGroup").formParam("AutoScalingGroupName", name)
+                            .formParam("VPCZoneIdentifier", String.join(",", subnets))
+                            .post("/").then().statusCode(200);
+                    String refreshId = request("StartInstanceRefresh").formParam("AutoScalingGroupName", name)
+                            .post("/").then().statusCode(200).extract().xmlPath()
+                            .getString("StartInstanceRefreshResponse.StartInstanceRefreshResult.InstanceRefreshId");
+                    reconcileTwice();
+                    Response current = group(name);
+                    assertEquals(1, current.xmlPath().getList(GROUP + ".Instances.member").size());
+                    String replacement = current.xmlPath().getString(GROUP + ".Instances.member.InstanceId");
+                    assertNotEquals(original, replacement);
+                    assertEquals("terminated", instanceState(original));
+                    assertEquals(subnets.getLast(), ec2.getInstance("us-east-1", replacement).orElseThrow().getSubnetId());
+                    assertEquals("us-east-1b", current.xmlPath().getString(GROUP + ".Instances.member.AvailabilityZone"));
+                    assertEquals("Successful", refresh(name, refreshId).xmlPath().getString(REFRESH + ".Status"));
+                    assertEquals(encoded, given().header("Authorization", auth("ec2"))
+                            .formParam("Action", "DescribeInstanceAttribute").formParam("InstanceId", replacement)
+                            .formParam("Attribute", "userData").post("/").then().statusCode(200)
+                            .extract().xmlPath().getString("DescribeInstanceAttributeResponse.userData.value"));
+                } finally {
+                    request("DeleteAutoScalingGroup").formParam("AutoScalingGroupName", name)
+                            .formParam("ForceDelete", true).post("/").then().statusCode(200);
+                }
+            } finally {
+                given().header("Authorization", auth(configuration ? "autoscaling" : "ec2"))
+                        .formParam("Action", configuration ? "DeleteLaunchConfiguration" : "DeleteLaunchTemplate")
+                        .formParam(configuration ? "LaunchConfigurationName" : "LaunchTemplateName", name)
+                        .post("/").then().statusCode(200);
+            }
+        } finally {
+            for (String subnet : subnets) {
+                ec2.deleteSubnet("us-east-1", subnet);
+            }
+            ec2.deleteVpc("us-east-1", vpcId);
         }
     }
 

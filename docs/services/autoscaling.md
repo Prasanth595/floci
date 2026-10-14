@@ -176,8 +176,9 @@ adjustments. Suspension and resumption wait for any desired-capacity adjustment 
 in progress for that group, so a completed suspension cannot be bypassed by an earlier
 reconciliation check.
 
-Suspension does not yet pause instance-refresh selection or replacement cleanup.
-Explicitly requested termination and stale-instance cleanup continue independently.
+New owned refresh replacements also pause for `InstanceRefresh`, `Launch`, or
+`Terminate`, as described above. Explicitly requested termination and stale-instance
+cleanup continue independently.
 Other suspended process names are stored and returned but do not pause their
 associated activities.
 

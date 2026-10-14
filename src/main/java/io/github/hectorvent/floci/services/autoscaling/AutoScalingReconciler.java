@@ -525,7 +525,6 @@ public class AutoScalingReconciler {
         if (saveFailure != null) {
             throw saveFailure;
         }
-
     }
 
     private List<Instance> findRefreshLaunch(AutoScalingGroup asg, String clientToken) {
@@ -590,7 +589,6 @@ public class AutoScalingReconciler {
                 }
                 AsgInstance asgInst = new AsgInstance();
                 asgInst.setInstanceId(ec2Inst.getInstanceId());
-
                 asgInst.setLifecycleState("Pending");
                 asgInst.setHealthStatus("Healthy");
                 if (metadata != null) {
