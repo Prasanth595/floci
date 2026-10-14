@@ -3359,12 +3359,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         validateArchitectureCompatibility(region, imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
         String architecture = architectureFor(region, imageId, effectiveInstanceType);
-        if (blockDeviceMappings != null) {
-            blockDeviceMappings.stream()
-                    .filter(m -> m.getEbs() != null && m.getEbs().getVolumeType() != null)
-                    .forEach(m -> requireValidVolumeType(m.getEbs().getVolumeType()));
-        }
-        String rootVolumeType = rootVolumeTypeFor(findImageForCapture(region, imageId), blockDeviceMappings);
+        // An entry with NoDevice set removes its device whatever else it names, as on AWS.
+        List<LaunchTemplateData.BlockDeviceMapping> mappedDevices = blockDeviceMappings == null ? List.of()
+                : blockDeviceMappings.stream().filter(m -> m.getNoDevice() == null).toList();
+        mappedDevices.stream()
+                .filter(m -> m.getEbs() != null && m.getEbs().getVolumeType() != null)
+                .forEach(m -> requireValidVolumeType(m.getEbs().getVolumeType()));
+        String rootVolumeType = rootVolumeTypeFor(findImageForCapture(region, imageId), mappedDevices);
         List<Instance> launched = new ArrayList<>();
         // Resolving the AMI, building the instances that depend on it and publishing them is one
         // step. A DeregisterImage releases the captured layer only when no live instance resolves
