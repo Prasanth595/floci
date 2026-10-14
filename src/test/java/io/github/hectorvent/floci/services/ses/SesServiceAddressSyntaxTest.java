@@ -151,6 +151,12 @@ class SesServiceAddressSyntaxTest {
     }
 
     @Test
+    void v1RawSendWithSender_addressInTheDisplayNameIsNotSwappedIn() {
+        assertRejects("User name is missing: '\"sender@example.com\" <sender.example.com>'.",
+                () -> service.sendEmail(request(SENDER).content(fromHeaderRaw(SENDER + " <" + NO_AT + ">", false)).build()));
+    }
+
+    @Test
     void v1RawSendWithSender_onlyTheFirstFromHeaderAddressNeedsAnAt() {
         assertRejects("User name is missing: 'sender.example.com'.", () -> service.sendEmail(request(SENDER)
                 .content(fromHeaderRaw(NO_AT + ", " + SENDER, false)).build()));
