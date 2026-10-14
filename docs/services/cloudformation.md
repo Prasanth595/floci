@@ -339,6 +339,15 @@ references in `MasterUsername` and `MasterUserPassword` during resource creation
 
 Dynamic-reference expansion is currently scoped to these RDS credential properties.
 
+## RDS Associated Roles
+
+`AWS::RDS::DBCluster` and `AWS::RDS::DBInstance` apply `AssociatedRoles` through the same checks as
+`AddRoleToDBCluster` / `AddRoleToDBInstance` (see [RDS IAM role associations](rds.md#iam-role-associations)):
+
+- On create, the roles are associated with the new cluster or instance. A list RDS refuses (a role named twice, a missing `RoleArn`, or an instance role without `FeatureName`) fails the resource, and the new database is deleted again.
+- On `UpdateStack` (no interruption, as in AWS), the roles the template gained are added, and the roles the previous template declared and the new one drops are removed. A role associated outside the stack is kept.
+- An Aurora cluster member (`AWS::RDS::DBInstance` with `DBClusterIdentifier`) cannot carry `AssociatedRoles`: the schema documents the property as not applicable there, since the cluster manages its roles. The resource fails with a `ValidationError` pointing at the cluster's `AssociatedRoles`.
+
 ## Account-Aware Provisioning
 
 Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's account** namespace

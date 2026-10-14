@@ -158,6 +158,30 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void deletesANewDbInstanceWhoseAssociatedRolesAreRefused() {
+        DbInstance instance = mock(DbInstance.class);
+        when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
+        when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
+                any(), anyMap(), nullable(String.class))).thenReturn(instance);
+        when(rdsService.addRoleToDbInstance("us-east-1", "mydb", "arn:aws:iam::000000000000:role/a", "s3Import"))
+                .thenReturn(instance);
+        when(rdsService.addRoleToDbInstance("us-east-1", "mydb", "arn:aws:iam::000000000000:role/b", "s3Import"))
+                .thenThrow(new AwsException("DBInstanceRoleAlreadyExists", "s3Import is already associated", 400));
+
+        StackResource r = provision("Db", "AWS::RDS::DBInstance", """
+                {"DBInstanceIdentifier":"mydb","Engine":"postgres","MasterUsername":"admin",
+                 "MasterUserPassword":"secret","AssociatedRoles":[
+                   {"RoleArn":"arn:aws:iam::000000000000:role/a","FeatureName":"s3Import"},
+                   {"RoleArn":"arn:aws:iam::000000000000:role/b","FeatureName":"s3Import"}]}
+                """);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("s3Import is already associated"), r.getStatusReason());
+        verify(rdsService).deleteDbInstance("mydb", "us-east-1");
+    }
+
+    @Test
     void provisionsDbInstanceInStackRegion() {
         DbInstance instance = mock(DbInstance.class);
         when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
