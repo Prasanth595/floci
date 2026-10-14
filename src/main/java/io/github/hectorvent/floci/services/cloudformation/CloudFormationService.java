@@ -2713,14 +2713,12 @@ public class CloudFormationService implements ResourceProvider {
         Map<String, String> conditionParams = new HashMap<>(params);
         template.path("Parameters").fieldNames().forEachRemaining(name -> conditionParams.putIfAbsent(name, ""));
         conditionParams.putIfAbsent("AWS::NotificationARNs", "");
-        // AWS allows only Ref, Fn::FindInMap and condition functions inside a condition, so an import
-        // there is a template error, whether or not the export exists.
+        // An import in a template being deployed is refused up front (requireStringConditionReferences).
+        // One reaching here comes from a stored template, which compares it as "", as before
+        // conditions went through the engine, so it never blocks an update.
         CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
                 accountId, region, stackName, stackId, conditionParams, Map.of(), Map.of(),
-                conditions, mappings, objectMapper, name -> {
-                    throw new AwsException("ValidationError",
-                            "Template error: Fn::ImportValue is not supported in Conditions", 400);
-                });
+                conditions, mappings, objectMapper, name -> "");
         condNode.fields().forEachRemaining(e -> conditions.put(e.getKey(), false));
         condNode.fields().forEachRemaining(e ->
                 conditions.put(e.getKey(), evaluateCondition(e.getValue(), conditions, engine)));
@@ -2729,14 +2727,17 @@ public class CloudFormationService implements ResourceProvider {
 
     private static final String NON_STRING_CONDITION_REFERENCE =
             "Template error: every Condition object must have a single String value.";
+    private static final String IMPORT_VALUE_IN_CONDITION =
+            "Template error: Fn::ImportValue is not supported in Conditions";
 
     /**
      * Rejects a template whose conditions name another one with anything but a string, as
      * CloudFormation does before evaluating any of them: {@code Fn::And}, {@code Fn::Or} and
      * {@code Fn::Not} stop early, so evaluation alone would read such an operand as false or never
      * reach it. SAM's translator emits this shape when a conditional function's event invoke
-     * destination is itself conditional. Checked on the template being deployed only, so a stored
-     * template is never a reason an update cannot proceed.
+     * destination is itself conditional. Also rejects {@code Fn::ImportValue} anywhere in a
+     * condition: AWS allows only Ref, Fn::FindInMap and condition functions there. Checked on the
+     * template being deployed only, so a stored template is never a reason an update cannot proceed.
      */
     private static void requireStringConditionReferencesIn(JsonNode template) {
         template.path("Conditions").forEach(CloudFormationService::requireStringConditionReferences);
@@ -2752,6 +2753,9 @@ public class CloudFormationService implements ResourceProvider {
         }
         if (expression.has("Condition") && !expression.get("Condition").isTextual()) {
             throw new AwsException("ValidationError", NON_STRING_CONDITION_REFERENCE, 400);
+        }
+        if (expression.has("Fn::ImportValue")) {
+            throw new AwsException("ValidationError", IMPORT_VALUE_IN_CONDITION, 400);
         }
         expression.forEach(CloudFormationService::requireStringConditionReferences);
     }

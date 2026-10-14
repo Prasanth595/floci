@@ -694,6 +694,67 @@ class CloudFormationResourceConditionIntegrationTest {
         }
     }
 
+    /** An import in an Fn::Or operand that evaluation never reaches is still a template error. */
+    @Test
+    void importValueInAConditionOperandEvaluationSkipsIsStillRejected() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-cond-or-import-" + Long.toString(System.nanoTime(), 36))
+            .formParam("TemplateBody", """
+                    {"Conditions": {"IsOn": {"Fn::Or": [{"Fn::Equals": ["a", "a"]},
+                       {"Fn::Equals": [{"Fn::ImportValue": "never-resolved"}, "on"]}]}},
+                     "Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Condition": "IsOn"}}}
+                    """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", containsString("Fn::ImportValue is not supported in Conditions"));
+    }
+
+    /**
+     * A SAM template's conditions are checked after the transform, so an import there fails the
+     * change set with the template error, as the non-string condition reference does, rather than
+     * leaving a change set whose DescribeChangeSet answers with an error.
+     */
+    @Test
+    void importValueInASamTemplateConditionFailsTheChangeSet() {
+        String stackName = "cfn-cond-sam-import-" + Long.toString(System.nanoTime(), 36);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "deploy")
+            .formParam("ChangeSetType", "CREATE")
+            .formParam("TemplateBody", """
+                    {"Transform": "AWS::Serverless-2016-10-31",
+                     "Conditions": {"IsOn": {"Fn::Equals": [{"Fn::ImportValue": "never-resolved"}, "on"]}},
+                     "Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Condition": "IsOn"}}}
+                    """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeChangeSet")
+                .formParam("StackName", stackName)
+                .formParam("ChangeSetName", "deploy")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeChangeSetResponse.DescribeChangeSetResult.Status", equalTo("FAILED"))
+                .body("DescribeChangeSetResponse.DescribeChangeSetResult.StatusReason",
+                        containsString("Fn::ImportValue is not supported in Conditions"));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
     /**
      * A declared parameter the stack gives no value and no Default compares as an empty string, as it
      * did before conditions went through the template engine, which answers an unresolved Ref with
