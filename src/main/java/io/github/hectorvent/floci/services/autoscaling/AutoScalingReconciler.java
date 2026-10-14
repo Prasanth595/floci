@@ -592,7 +592,8 @@ public class AutoScalingReconciler {
                 asgInst.setLifecycleState("Pending");
                 asgInst.setHealthStatus("Healthy");
                 if (metadata != null) {
-                    asgInst.setAvailabilityZone(metadata.availabilityZone());
+                    asgInst.setAvailabilityZone(metadata.availabilityZone() != null ? metadata.availabilityZone()
+                            : ec2Inst.getPlacement() != null ? ec2Inst.getPlacement().getAvailabilityZone() : null);
                     asgInst.setLaunchConfigurationName(metadata.launchConfigurationName());
                     asgInst.setLaunchTemplateId(metadata.launchTemplateId());
                     asgInst.setLaunchTemplateName(metadata.launchTemplateName());

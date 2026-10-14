@@ -118,6 +118,26 @@ class AutoScalingRefreshStorageTest {
         reconciler = new AutoScalingReconciler(service, ec2, mock(ElbV2Service.class));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void replacementWithoutDeclaredZoneUsesTheAcceptedEc2Placement(String mode) throws IOException {
+        setUp(mode);
+        group.setAvailabilityZones(List.of());
+        service.saveAutoScalingGroupIfPresent(group);
+        when(ec2.describeInstances(REGION, List.of(), null)).thenReturn(List.of());
+        Reservation accepted = reservation("i-replacement");
+        accepted.getInstances().getFirst().setPlacement(new Placement("us-east-1b"));
+        when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
+                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any())).thenReturn(accepted);
+        InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        reconciler.reconcile(group);
+        assertEquals("i-replacement", group.getInstances().getFirst().getInstanceId());
+        assertEquals("us-east-1b", group.getInstances().getFirst().getAvailabilityZone());
+        assertEquals("i-replacement", refresh.getReplacements().getFirst().getReplacementInstanceId());
+        restart(mode);
+        assertEquals("us-east-1b", group.getInstances().getFirst().getAvailabilityZone());
+    }
+
     @AfterEach
     void closeStorage() {
         factories.forEach(StorageFactory::shutdownAll);
@@ -437,9 +457,16 @@ class AutoScalingRefreshStorageTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"persistent,false", "persistent,true", "hybrid,false", "hybrid,true", "wal,false", "wal,true"})
-    void recoveredLaunchRetainsAttemptSourceAfterGroupChanges(String mode, boolean sourceDeleted) throws IOException {
+    @CsvSource({"persistent,false,false", "persistent,true,false", "hybrid,false,false", "hybrid,true,false",
+            "wal,false,false", "wal,true,false", "persistent,false,true", "persistent,true,true",
+            "hybrid,false,true", "hybrid,true,true", "wal,false,true", "wal,true,true"})
+    void recoveredLaunchRetainsAttemptSourceAfterGroupChanges(String mode, boolean sourceDeleted,
+                                                             boolean defaultPlacement) throws IOException {
         setUp(mode);
+        if (defaultPlacement) {
+            group.setAvailabilityZones(List.of());
+            service.saveAutoScalingGroupIfPresent(group);
+        }
         List<Reservation> launched = new ArrayList<>();
         when(ec2.describeInstances(REGION, List.of(), null)).thenAnswer(invocation -> List.copyOf(launched));
         when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
