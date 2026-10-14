@@ -5291,4 +5291,45 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200);
     }
+
+    @Test
+    @Order(329)
+    void runInstancesRootBlockDeviceMappingOverridesAmiRootVolumeType() {
+        // ami-0abcdef1234567890 is gp2-rooted at /dev/xvda; a root mapping overrides it.
+        assertEquals("gp3", launchedRootVolumeType("gp3"));
+        assertEquals("gp2", launchedRootVolumeType(null));
+    }
+
+    private String launchedRootVolumeType(String rootOverride) {
+        var request = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-0abcdef1234567890")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1");
+        if (rootOverride != null) {
+            request = request
+                .formParam("BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+                .formParam("BlockDeviceMapping.1.Ebs.VolumeSize", "8")
+                .formParam("BlockDeviceMapping.1.Ebs.VolumeType", rootOverride);
+        }
+        String instanceId = request
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        return given()
+            .formParam("Action", "DescribeVolumes")
+            .formParam("Filter.1.Name", "attachment.instance-id")
+            .formParam("Filter.1.Value.1", instanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("DescribeVolumesResponse.volumeSet.item.volumeType");
+    }
 }

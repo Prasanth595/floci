@@ -438,6 +438,28 @@ public class Ec2QueryHandler {
         return mappings;
     }
 
+    /**
+     * RunInstances' BlockDeviceMappings, reduced to device name and volume type: all the launch
+     * consumes (the root override). Unlike RegisterImage, the model marks no member required, so
+     * nothing here rejects.
+     */
+    private List<BlockDeviceMapping> parseRunInstancesRootTypeMappings(MultivaluedMap<String, String> p) {
+        List<BlockDeviceMapping> mappings = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String prefix = "BlockDeviceMapping." + i + ".";
+            if (p.keySet().stream().noneMatch(k -> k.startsWith(prefix))) {
+                break;
+            }
+            BlockDeviceMapping mapping = new BlockDeviceMapping();
+            mapping.setDeviceName(p.getFirst(prefix + "DeviceName"));
+            EbsBlockDevice ebs = new EbsBlockDevice();
+            ebs.setVolumeType(p.getFirst(prefix + "Ebs.VolumeType"));
+            mapping.setEbs(ebs);
+            mappings.add(mapping);
+        }
+        return mappings;
+    }
+
     private Integer parseOptionalInt(String value, String name) {
         if (value == null || value.isBlank()) {
             return null;
@@ -827,7 +849,7 @@ public class Ec2QueryHandler {
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
                 creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")),
-                p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"));
+                p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), parseRunInstancesRootTypeMappings(p));
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();

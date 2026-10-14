@@ -3243,6 +3243,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                     LaunchTemplateData.MetadataOptions metadataOptions,
                                     String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun,
                                     String hostId, String tenancy) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, availabilityZone,
+                metadataOptions, creditSpecificationCpuCredits, encodedUserData, dryRun, hostId, tenancy, null);
+    }
+
+    /**
+     * @param blockDeviceMappings the request's BlockDeviceMappings, or null. An entry naming the
+     *                            AMI's root device overrides the root volume type, as on AWS.
+     */
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId,
+                                    int networkInterfaceDeviceIndex, String availabilityZone,
+                                    LaunchTemplateData.MetadataOptions metadataOptions,
+                                    String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun,
+                                    String hostId, String tenancy, List<BlockDeviceMapping> blockDeviceMappings) {
         if (hostId != null && !hostId.isBlank()) {
             Host host = getRequiredAvailableHost(region, hostId);
             if ((availabilityZone == null || availabilityZone.isBlank())
@@ -3339,7 +3359,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         validateArchitectureCompatibility(region, imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
         String architecture = architectureFor(region, imageId, effectiveInstanceType);
-        String rootVolumeType = rootVolumeTypeFor(findImageForCapture(region, imageId));
+        String rootVolumeType = rootVolumeTypeFor(findImageForCapture(region, imageId), blockDeviceMappings);
         List<Instance> launched = new ArrayList<>();
         // Resolving the AMI, building the instances that depend on it and publishing them is one
         // step. A DeregisterImage releases the captured layer only when no live instance resolves
@@ -6410,10 +6430,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * The root volume takes the type the AMI's root mapping declares, as on AWS. RunInstances does
-     * not accept request BlockDeviceMappings here, so there is no per-launch override to honour.
+     * The root volume takes the type a request mapping for the AMI's root device names, else the
+     * type the AMI's root mapping declares, as on AWS.
      */
-    private static String rootVolumeTypeFor(Image image) {
+    private static String rootVolumeTypeFor(Image image, List<BlockDeviceMapping> requestMappings) {
+        String rootDeviceName = image != null && image.getRootDeviceName() != null
+                ? image.getRootDeviceName() : new Instance().getRootDeviceName();
+        if (requestMappings != null) {
+            for (BlockDeviceMapping m : requestMappings) {
+                if (m.getEbs() != null && m.getEbs().getVolumeType() != null
+                        && Objects.equals(m.getDeviceName(), rootDeviceName)) {
+                    return m.getEbs().getVolumeType();
+                }
+            }
+        }
         if (image == null || image.getBlockDeviceMappings() == null) {
             return DEFAULT_ROOT_VOLUME_TYPE;
         }
