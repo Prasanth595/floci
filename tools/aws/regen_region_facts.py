@@ -23,7 +23,14 @@ China and GovCloud user guides for what neither transcribes, are the sources her
   `region-info/build-tools/generate-static-data.ts`.
 - The management console host per partition, for `aws`, `aws-cn` and `aws-us-gov`: one sentence
   each from the user-guide snapshots under `aws-docs/partition-guides` (`CONSOLE_HOST_SENTENCES`).
-  No source states it for the ISO or EUSC partitions, which get no field.
+  No source states it for the ISO or EUSC partitions, which get no field. The snapshots are these
+  three pages, saved under the path after the arrow:
+    https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-organizations.html -> gov/govcloud-organizations.md
+    https://docs.amazonaws.cn/en_us/aws/latest/userguide/console.html -> cn/console.md
+    https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/configure-account.html -> gov/configure-account.md
+  Either rendering parses: the page's text (what the `aws-refs` skill's docs driver extracts from
+  the `.html`), or the Markdown AWS serves at the same URL with `.md` in place of `.html`, which
+  writes the China host as a link.
 
 Nothing is hand-typed. When the checkouts are absent (CI), `--check` only verifies the vendored
 file parses and keeps its shape; a regeneration needs `local/aws`.
@@ -68,12 +75,14 @@ VPCE_CASE_RE = re.compile(r"((?:\s*case '[a-z0-9-]+':\n)+)\s*return '([a-z0-9.-]
 # host two ways: `console.amazonaws.cn` on its console page (cn/console.md, and again in
 # cn/accounts-and-credentials.md) and `console.www.amazonaws.cn` once (cn/managing-aws.md). The
 # console page's own statement is the one vendored. The commercial host is taken from the GovCloud
-# guide, which names it where it sends the reader back to the commercial Region.
+# guide, which names it where it sends the reader back to the commercial Region. AWS's Markdown
+# rendering of the China page writes the host as a link, `[https://host](https://host).`, where the
+# page text has `https://host .`; the pattern takes both.
 CONSOLE_HOST_SENTENCES = {
     "aws": ("gov/govcloud-organizations.md", re.compile(
         r"in the commercial Region, sign in to the Organizations console at https://([a-z0-9.-]+)/organizations")),
     "aws-cn": ("cn/console.md", re.compile(
-        r"Management Console is available in both Chinese and English and can be accessed at https://([a-z0-9.-]+) ")),
+        r"Management Console is available in both Chinese and English and can be accessed at \[?https://([a-z0-9.-]+)[\] ]")),
     "aws-us-gov": ("gov/configure-account.md", re.compile(
         r"Sign in to the AWS GovCloud \(US\) console and open the IAM console at https://([a-z0-9.-]+)/iam")),
 }
@@ -311,6 +320,8 @@ def self_check(path: Path, partitions_path: Path = PARTITIONS) -> list[str]:
         expected = ".".join(reversed(partition["dnsSuffix"].split("."))) + ".vpce"
         if entry.get("vpcEndpointServiceNamePrefix") != expected:
             problems.append(f"{path}: {partition['id']}.vpcEndpointServiceNamePrefix should be {expected!r}")
+        if partition["id"] in CONSOLE_HOST_SENTENCES and "consoleHost" not in entry:
+            problems.append(f"{path}: {partition['id']}.consoleHost is missing")
     known = {region["id"] for partition in partitions_doc for region in partition["regions"]}
     for region in document["regions"]:
         if region not in known:

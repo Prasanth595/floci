@@ -115,6 +115,10 @@ IAM users can now use either the account alias or account number.
 
 Sign in to the AWS GovCloud (US) console and open the IAM console at https://console.amazonaws-us-gov.com/iam.
 """
+# the same sentence in the Markdown AWS serves at .../userguide/console.md
+GUIDE_CHINA_MARKDOWN = """
+The Amazon Web Services Management Console is available in both Chinese and English and can be accessed at [https://console.amazonaws.cn](https://console.amazonaws.cn). The Amazon Web Services Management Console is dedicated to the China Regions.
+"""
 GUIDES = {"aws": GUIDE_COMMERCIAL, "aws-cn": GUIDE_CHINA, "aws-us-gov": GUIDE_GOVCLOUD}
 PARTITIONS = {"partitions": [
     {"id": "aws", "dnsSuffix": "amazonaws.com", "regions": [{"id": "us-east-1"}, {"id": "af-south-1"}]},
@@ -180,6 +184,11 @@ def test_console_hosts_come_from_the_guide_sentences(tmp_path):
                                              "aws-us-gov": "console.amazonaws-us-gov.com"}
     assert r.guides_present(guides)
     assert not r.guides_present(tmp_path / "nowhere")
+
+
+def test_the_china_console_host_parses_from_the_markdown_link_form():
+    page, sentence = r.CONSOLE_HOST_SENTENCES["aws-cn"]
+    assert r.parse_console_host(GUIDE_CHINA_MARKDOWN, sentence, page) == "console.amazonaws.cn"
 
 
 def test_a_guide_page_without_its_sentence_or_with_two_hosts_is_an_error():
@@ -286,6 +295,9 @@ def test_self_check_holds_the_values_to_what_partitions_json_publishes(tmp_path)
         "console host with a scheme": lambda d: d["partitions"][partition].update(
             consoleHost="https://console.aws.amazon.com"),
         "console host that is not a console": lambda d: d["partitions"][partition].update(consoleHost="example.com"),
+        "missing China console host": lambda d: d["partitions"]["aws-cn"].pop("consoleHost"),
+        "missing GovCloud console host": lambda d: d["partitions"]["aws-us-gov"].pop("consoleHost"),
+        "missing commercial console host": lambda d: d["partitions"]["aws"].pop("consoleHost"),
         "missing partition": lambda d: d["partitions"].pop(partition),
         "partition entry not an object": lambda d: d["partitions"].update({partition: "invalid"}),
         "region entry not an object": lambda d: d["regions"].update({region: ["invalid"]}),
