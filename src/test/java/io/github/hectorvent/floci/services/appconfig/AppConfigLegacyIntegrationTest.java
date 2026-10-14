@@ -6,6 +6,8 @@ import io.restassured.http.ContentType;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -228,8 +230,10 @@ class AppConfigLegacyIntegrationTest {
                 .body("values", nullValue());
     }
 
-    @Test
-    void variantFeatureFlagsAreIonForACallerThatAcceptsOnlyIon() {
+    @ParameterizedTest
+    @ValueSource(strings = {"application/ion; type=AWS.AppConfig.FeatureFlags",
+            "application/ion; type=\"AWS.AppConfig.FeatureFlags\""})
+    void variantFeatureFlagsAreIonForACallerThatAcceptsOnlyIon(String accept) {
         String flags = createProfile(Map.of("Name", "variant-flags", "LocationUri", "hosted",
                 "Type", "AWS.AppConfig.FeatureFlags"));
         createHostedVersion(flags, "{\"flags\":{},\"version\":\"1\",\"values\":{\"promo\":{\"_variants\":["
@@ -237,7 +241,7 @@ class AppConfigLegacyIntegrationTest {
                 + "\"rule\":\"(eq $storeId \\\"uk\\\")\"},{\"enabled\":false,\"name\":\"default\"}]}}}");
         deploy(environment, flags, "1");
 
-        byte[] ion = given().accept("application/ion; type=AWS.AppConfig.FeatureFlags")
+        byte[] ion = given().accept(accept)
                 .queryParam("client_id", "reader").get(path(environment, flags))
                 .then().statusCode(200)
                 .header("Configuration-Version", "1")
