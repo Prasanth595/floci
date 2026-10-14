@@ -63,7 +63,7 @@ class RdsDataServiceTest {
                 REGION));
 
         assertEquals("ValidationException", error.getErrorCode());
-        assertEquals("Multistatements aren't supported", error.getMessage());
+        assertEquals("Multistatements aren't supported.", error.getMessage());
         assertEquals(400, error.getHttpStatus());
         assertEquals(0, harness.countEvents());
     }
@@ -81,7 +81,7 @@ class RdsDataServiceTest {
         AwsException error = assertThrows(AwsException.class,
                 () -> harness.service.executeStatement(request, REGION));
         assertEquals("ValidationException", error.getErrorCode());
-        assertEquals("Multistatements aren't supported", error.getMessage());
+        assertEquals("Multistatements aren't supported.", error.getMessage());
 
         harness.service.commitTransaction(harness.transactionRequest(transactionId), REGION);
         assertEquals(0, harness.countEvents());
@@ -99,7 +99,7 @@ class RdsDataServiceTest {
             AwsException error = assertThrows(AwsException.class,
                     () -> harness.service.batchExecuteStatement(request, REGION));
             assertEquals("ValidationException", error.getErrorCode());
-            assertEquals("Multistatements aren't supported", error.getMessage());
+            assertEquals("Multistatements aren't supported.", error.getMessage());
             assertEquals(0, harness.countEvents());
         }
     }
