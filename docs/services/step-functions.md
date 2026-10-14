@@ -732,20 +732,25 @@ execution enters. Rules that match `aws.states`, for example on `detail.stateMac
 | `TIMED_OUT` | the state machine's `TimeoutSeconds` elapses |
 | `ABORTED` | `StopExecution` stops the execution |
 
-The `detail` carries `executionArn`, `stateMachineArn`, `name`, `status`, `startDate` and
-`stopDate` (epoch milliseconds, `stopDate` null while `RUNNING`), `input`, `inputDetails`,
-`output` and `outputDetails` (set only on `SUCCEEDED`), `error`, `cause`,
-`stateMachineVersionArn` and `stateMachineAliasArn` when the execution was started through one,
-and the redrive fields.
+The `detail` carries every key of AWS's documented event, null when it does not apply:
+`executionArn`, `stateMachineArn`, `name`, `status`, `startDate` and `stopDate` (epoch
+milliseconds, `stopDate` null while `RUNNING`), `input`, `inputDetails`, `output` and
+`outputDetails` (set only on `SUCCEEDED`), `stateMachineVersionArn` and `stateMachineAliasArn`
+(null unless the execution was started through one), `error`, `cause`, and the redrive fields.
+
+- A `TIMED_OUT` event names `States.Timeout` as its `error`.
+- `FAILED` and `TIMED_OUT` report `redriveStatus` `REDRIVABLE` with the reason
+  `Execution is <status> and is redrivable`. Every other status reports `NOT_REDRIVABLE` with
+  `Execution is <status> and cannot be redriven`.
+- As on AWS, when the escaped `input` and escaped `output` together exceed 248 KiB, `input` is
+  left out and `inputDetails.included` is `false`. When the escaped `output` alone exceeds
+  248 KiB, `output` is left out and `outputDetails.included` is `false`.
+  `DescribeExecution` still returns both in full.
 
 Known differences from AWS:
 
 - Executions aborted by the startup sweep described above emit no `ABORTED` event.
 - Floci does not implement redrive, so `redriveCount` is always `0` and `redriveDate` is null.
-- `input` and `output` are never truncated, so `inputDetails.included` and
-  `outputDetails.included` are always `true`.
-- An idempotent `StartExecution` that returns the running execution emits nothing, because no
-  status changed.
 
 ## Partitions
 

@@ -89,6 +89,24 @@ class StepFunctionsExecutionStatusEventsIntegrationTest {
     }
 
     @Test
+    void timedOutExecutionNamesStatesTimeout() throws Exception {
+        String smArn = createStateMachine("status-events-timeout", "STANDARD", """
+                {"TimeoutSeconds": 1, "StartAt": "W", "States": {"W": {"Type": "Wait", "Seconds": 5, "End": true}}}
+                """);
+        String queueUrl = routeEventsTo("status-events-timeout", smArn);
+
+        waitForTerminalState(startExecution(smArn, "{}"));
+
+        List<JsonNode> events = receiveEvents(queueUrl, 2);
+        assertEquals(List.of("RUNNING", "TIMED_OUT"), statuses(events));
+        JsonNode timedOut = events.get(1).path("detail");
+        assertEquals("States.Timeout", timedOut.path("error").asText());
+        assertEquals("REDRIVABLE", timedOut.path("redriveStatus").asText());
+        assertEquals("Execution is TIMED_OUT and is redrivable", timedOut.path("redriveStatusReason").asText());
+        assertNoMoreEvents(queueUrl);
+    }
+
+    @Test
     void stoppedExecutionEmitsAbortedExactlyOnce() throws Exception {
         String smArn = createStateMachine("status-events-stop", "STANDARD", """
                 {"StartAt": "W", "States": {"W": {"Type": "Wait", "Seconds": 30, "End": true}}}

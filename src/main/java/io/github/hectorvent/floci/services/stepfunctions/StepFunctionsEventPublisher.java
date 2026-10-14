@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -30,6 +31,10 @@ public class StepFunctionsEventPublisher {
     private static final Logger LOG = Logger.getLogger(StepFunctionsEventPublisher.class);
     static final String SOURCE = "aws.states";
     static final String DETAIL_TYPE = "Step Functions Execution Status Change";
+    // AWS's documented EventBridge quota rule: when the escaped input and escaped output together
+    // exceed 248 KiB the input is left out, and when the escaped output alone exceeds it the output
+    // is left out too. inputDetails/outputDetails.included report which ones were.
+    static final long MAX_PAYLOAD_BYTES = 248L * 1024;
 
     private final EventBridgeService eventBridgeService;
     private final RegionResolver regionResolver;
@@ -87,10 +92,12 @@ public class StepFunctionsEventPublisher {
 
     // The fields are read under the Execution's monitor, the one the worker and StopExecution take
     // for their terminal writes, so the event never pairs one status with another's stopDate.
-    private ObjectNode buildDetail(Execution exec) {
+    // Every key of the documented event is always present, null when it does not apply.
+    private ObjectNode buildDetail(Execution exec) throws JsonProcessingException {
         ObjectNode detail = objectMapper.createObjectNode();
         synchronized (exec) {
             String status = exec.getStatus();
+            boolean succeeded = "SUCCEEDED".equals(status);
             detail.put("executionArn", exec.getExecutionArn());
             detail.put("stateMachineArn", exec.getStateMachineArn());
             detail.put("name", exec.getName());
@@ -101,45 +108,58 @@ public class StepFunctionsEventPublisher {
             } else {
                 detail.putNull("stopDate");
             }
-            detail.put("input", exec.getInput());
-            detail.put("output", "SUCCEEDED".equals(status) ? exec.getOutput() : null);
-            detail.putObject("inputDetails").put("included", true);
-            if ("SUCCEEDED".equals(status)) {
-                detail.putObject("outputDetails").put("included", true);
+
+            String output = succeeded ? exec.getOutput() : null;
+            long outputSize = escapedSize(output);
+            boolean outputIncluded = outputSize <= MAX_PAYLOAD_BYTES;
+            boolean inputIncluded = escapedSize(exec.getInput()) + outputSize <= MAX_PAYLOAD_BYTES;
+            detail.put("input", inputIncluded ? exec.getInput() : null);
+            detail.putObject("inputDetails").put("included", inputIncluded);
+            detail.put("output", outputIncluded ? output : null);
+            if (succeeded) {
+                detail.putObject("outputDetails").put("included", outputIncluded);
             } else {
                 detail.putNull("outputDetails");
             }
-            detail.put("error", exec.getError());
-            detail.put("cause", exec.getCause());
-            if (exec.getStateMachineVersionArn() != null) {
-                detail.put("stateMachineVersionArn", exec.getStateMachineVersionArn());
-            }
-            if (exec.getStateMachineAliasArn() != null) {
-                detail.put("stateMachineAliasArn", exec.getStateMachineAliasArn());
-            }
+
+            detail.put("stateMachineVersionArn", exec.getStateMachineVersionArn());
+            detail.put("stateMachineAliasArn", exec.getStateMachineAliasArn());
             detail.put("redriveCount", 0);
             detail.putNull("redriveDate");
             detail.put("redriveStatus", redriveStatus(status));
             detail.put("redriveStatusReason", redriveStatusReason(status));
+            detail.put("error", "TIMED_OUT".equals(status) && exec.getError() == null
+                    ? "States.Timeout" : exec.getError());
+            detail.put("cause", exec.getCause());
         }
         return detail;
     }
 
-    // Floci does not implement RedriveExecution, so these carry what AWS reports for an execution
-    // that was never redriven, the same values the .sync:2 response envelope uses.
+    /**
+     * The size of {@code value} once escaped as a JSON string, the measure AWS applies its 248 KiB
+     * rule to. A null value takes no room.
+     */
+    private long escapedSize(String value) throws JsonProcessingException {
+        if (value == null) {
+            return 0;
+        }
+        // writeValueAsBytes quotes the string; the quotes are not part of the payload.
+        return objectMapper.writeValueAsBytes(value).length - 2L;
+    }
+
+    // Floci does not implement RedriveExecution, so these carry what AWS's documented events report
+    // for an execution that was never redriven: FAILED and TIMED_OUT are redrivable, the rest are not.
     private static String redriveStatus(String status) {
-        return "RUNNING".equals(status) || "SUCCEEDED".equals(status) ? "NOT_REDRIVABLE" : "REDRIVABLE";
+        return "FAILED".equals(status) || "TIMED_OUT".equals(status) ? "REDRIVABLE" : "NOT_REDRIVABLE";
     }
 
     private static String redriveStatusReason(String status) {
         if (status == null) {
             return null;
         }
-        return switch (status) {
-            case "RUNNING" -> "Execution is RUNNING and cannot be redriven";
-            case "SUCCEEDED" -> "Execution is SUCCEEDED and cannot be redriven";
-            default -> null;
-        };
+        return "FAILED".equals(status) || "TIMED_OUT".equals(status)
+                ? "Execution is " + status + " and is redrivable"
+                : "Execution is " + status + " and cannot be redriven";
     }
 
     private static long toEpochMillis(double epochSeconds) {

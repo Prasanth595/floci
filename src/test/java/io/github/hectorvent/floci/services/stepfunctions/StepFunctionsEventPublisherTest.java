@@ -78,6 +78,12 @@ class StepFunctionsEventPublisherTest {
         assertTrue(detail.path("outputDetails").isNull());
         assertTrue(detail.path("error").isNull());
         assertTrue(detail.path("cause").isNull());
+        // Present and null when unused, as in AWS's documented events, not left out.
+        assertTrue(detail.has("stateMachineVersionArn"));
+        assertTrue(detail.path("stateMachineVersionArn").isNull());
+        assertTrue(detail.has("stateMachineAliasArn"));
+        assertTrue(detail.path("stateMachineAliasArn").isNull());
+        assertTrue(detail.has("redriveDate"));
         assertEquals(0, detail.path("redriveCount").asInt());
         assertEquals("NOT_REDRIVABLE", detail.path("redriveStatus").asText());
         assertEquals("Execution is RUNNING and cannot be redriven", detail.path("redriveStatusReason").asText());
@@ -114,7 +120,109 @@ class StepFunctionsEventPublisherTest {
         assertEquals("boom", detail.path("cause").asText());
         assertTrue(detail.path("output").isNull());
         assertEquals("REDRIVABLE", detail.path("redriveStatus").asText());
-        assertTrue(detail.path("redriveStatusReason").isNull());
+        assertEquals("Execution is FAILED and is redrivable", detail.path("redriveStatusReason").asText());
+    }
+
+    @Test
+    void timedOutEventNamesStatesTimeoutAndIsRedrivable() throws Exception {
+        Execution exec = execution("TIMED_OUT");
+        exec.setStopDate(1_700_000_004.0);
+
+        publisher.emitStatusChange(exec);
+
+        JsonNode detail = detailOf(captureEntry());
+        assertEquals("TIMED_OUT", detail.path("status").asText());
+        assertEquals("States.Timeout", detail.path("error").asText());
+        assertEquals("REDRIVABLE", detail.path("redriveStatus").asText());
+        assertEquals("Execution is TIMED_OUT and is redrivable", detail.path("redriveStatusReason").asText());
+    }
+
+    @Test
+    void abortedEventIsNotRedrivable() throws Exception {
+        Execution exec = execution("ABORTED");
+        exec.setStopDate(1_700_000_005.0);
+
+        publisher.emitStatusChange(exec);
+
+        JsonNode detail = detailOf(captureEntry());
+        assertEquals("ABORTED", detail.path("status").asText());
+        assertEquals("NOT_REDRIVABLE", detail.path("redriveStatus").asText());
+        assertEquals("Execution is ABORTED and cannot be redriven", detail.path("redriveStatusReason").asText());
+        assertTrue(detail.path("outputDetails").isNull());
+    }
+
+    @Test
+    void inputOverTheLimitIsExcluded() throws Exception {
+        Execution exec = execution("RUNNING");
+        exec.setInput(payloadOfSize(StepFunctionsEventPublisher.MAX_PAYLOAD_BYTES + 1));
+
+        publisher.emitStatusChange(exec);
+
+        JsonNode detail = detailOf(captureEntry());
+        assertTrue(detail.path("input").isNull());
+        assertFalse(detail.path("inputDetails").path("included").asBoolean());
+    }
+
+    @Test
+    void inputAtTheLimitIsIncluded() throws Exception {
+        Execution exec = execution("RUNNING");
+        String input = payloadOfSize(StepFunctionsEventPublisher.MAX_PAYLOAD_BYTES);
+        exec.setInput(input);
+
+        publisher.emitStatusChange(exec);
+
+        JsonNode detail = detailOf(captureEntry());
+        assertEquals(input, detail.path("input").asText());
+        assertTrue(detail.path("inputDetails").path("included").asBoolean());
+    }
+
+    @Test
+    void inputIsExcludedWhenInputAndOutputTogetherExceedTheLimit() throws Exception {
+        Execution exec = execution("SUCCEEDED");
+        exec.setStopDate(1_700_000_002.0);
+        long half = StepFunctionsEventPublisher.MAX_PAYLOAD_BYTES / 2;
+        exec.setInput(payloadOfSize(half + 1));
+        String output = payloadOfSize(half);
+        exec.setOutput(output);
+
+        publisher.emitStatusChange(exec);
+
+        JsonNode detail = detailOf(captureEntry());
+        assertTrue(detail.path("input").isNull());
+        assertFalse(detail.path("inputDetails").path("included").asBoolean());
+        assertEquals(output, detail.path("output").asText());
+        assertTrue(detail.path("outputDetails").path("included").asBoolean());
+    }
+
+    @Test
+    void outputOverTheLimitIsExcluded() throws Exception {
+        Execution exec = execution("SUCCEEDED");
+        exec.setStopDate(1_700_000_002.0);
+        exec.setOutput(payloadOfSize(StepFunctionsEventPublisher.MAX_PAYLOAD_BYTES + 1));
+
+        publisher.emitStatusChange(exec);
+
+        JsonNode detail = detailOf(captureEntry());
+        assertTrue(detail.path("output").isNull());
+        assertFalse(detail.path("outputDetails").path("included").asBoolean());
+    }
+
+    @Test
+    void sizeIsMeasuredOnTheEscapedPayload() throws Exception {
+        Execution exec = execution("RUNNING");
+        // Each quote escapes to two characters, so this fits raw but not escaped.
+        long quotes = StepFunctionsEventPublisher.MAX_PAYLOAD_BYTES / 2 + 1;
+        exec.setInput("\"".repeat((int) quotes));
+
+        publisher.emitStatusChange(exec);
+
+        JsonNode detail = detailOf(captureEntry());
+        assertFalse(detail.path("inputDetails").path("included").asBoolean());
+    }
+
+    // A payload whose escaped form is exactly {@code size} bytes: ASCII letters escape to themselves.
+    private static String payloadOfSize(long size) {
+        return "a".repeat((int) size);
     }
 
     @Test
