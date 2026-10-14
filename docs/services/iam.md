@@ -1114,8 +1114,13 @@ a Query `Action` field on it does not change the action it is checked as, and it
 still percent-encoded, as the router matches it, so an encoded `/` inside a parameter cannot make
 the route's rule miss.
 
-A request that names its operation, in a Query `Action` or an `X-Amz-Target` header, is authorized
-as the action AWS checks for that operation, which is usually the operation's own name. Where AWS
+A request that names its operation, in a Query `Action`, an `X-Amz-Target` header or a Smithy RPC v2
+path (`/service/<service>/operation/<operation>`), is authorized as the action AWS checks for that
+operation, which is usually the operation's own name. An RPC v2 call is checked as the service and
+operation in its path, the ones Floci runs, whatever its `smithy-protocol` header says, and an
+`X-Amz-Target` header on it does not change the action it is checked as. A CBOR body, on that path
+or on the `x-amz-cbor-1.1` one, names its resource and condition keys (a queue URL, a table name,
+`dynamodb:LeadingKeys`) the way a JSON body does, and they are read from it the same way. Where AWS
 authorizes an operation as a single action of another name, Floci does the same: `SendMessageBatch`
 is checked as `sqs:SendMessage` and `PublishBatch` as `sns:Publish`, so a policy granting the
 single-message action covers the batch call, and one naming the batch operation, which is not an
@@ -1469,7 +1474,8 @@ lazily-resolved `ScpProvider` exists to avoid.
 
 With enforcement on, a request carrying no `Authorization` header is refused with
 `403 MissingAuthenticationToken` when its wire shape names a management operation: a JSON, CBOR or
-Query request, identified by `X-Amz-Target`, an rpcv2 path or an `Action` parameter.
+Query request, identified by `X-Amz-Target`, an rpcv2 path or an `Action` parameter. A call routed
+to the rpcv2 endpoint is one whatever its `smithy-protocol` header says.
 
 Two carve-outs, both deliberate.
 
