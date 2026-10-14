@@ -83,6 +83,25 @@ class RdsRoleFeatureNameIntegrationTest {
     }
 
     @Test
+    @Order(5)
+    void theOtherFeatureChecksMatchWithoutRegardToCaseToo() {
+        // feature-postgres holds ROLE for "s3import" (order 1). The same feature in another case is
+        // the same feature: a second role for it is refused, and it finds the association to remove.
+        query("AddRoleToDBInstance").formParam("DBInstanceIdentifier", "feature-postgres")
+                .formParam("RoleArn", OTHER_ROLE).formParam("FeatureName", "s3Import")
+        .when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("DBInstanceRoleAlreadyExists"));
+        query("RemoveRoleFromDBInstance").formParam("DBInstanceIdentifier", "feature-postgres")
+                .formParam("RoleArn", ROLE).formParam("FeatureName", "S3IMPORT")
+        .when().post("/").then().statusCode(200);
+
+        // feature-apg holds ROLE for "Bedrock" (order 2); a cluster removal matches it the same way.
+        query("RemoveRoleFromDBCluster").formParam("DBClusterIdentifier", "feature-apg")
+                .formParam("RoleArn", ROLE).formParam("FeatureName", "bedrock")
+        .when().post("/").then().statusCode(200);
+    }
+
+    @Test
     @Order(2)
     void clusterFeatureMustBeOneTheEngineSupports() {
         createCluster("feature-apg", "aurora-postgresql");

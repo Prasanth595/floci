@@ -9636,7 +9636,7 @@ public class RdsService implements Resettable, ResourceProvider {
         requireAvailableCluster(cluster, clusterId);
         String feature = blankToNull(featureName);
         boolean removed = cluster.getAssociatedRoles().removeIf(existing -> existing.getRoleArn().equals(roleArn)
-                && (feature == null || feature.equals(existing.getFeatureName())));
+                && (feature == null || feature.equalsIgnoreCase(existing.getFeatureName())));
         if (!removed) {
             throw new AwsException("DBClusterRoleNotFound", "Role ARN " + roleArn
                     + (feature == null ? "" : " for feature " + feature)
@@ -9661,7 +9661,7 @@ public class RdsService implements Resettable, ResourceProvider {
         requireAvailableInstance(instance, instanceId);
         requireSupportedFeature(engineName(instance), featureName);
         for (DbRoleAssociation existing : instance.getAssociatedRoles()) {
-            if (existing.getRoleArn().equals(roleArn) || featureName.equals(existing.getFeatureName())) {
+            if (existing.getRoleArn().equals(roleArn) || featureName.equalsIgnoreCase(existing.getFeatureName())) {
                 throw new AwsException("DBInstanceRoleAlreadyExists", "Role ARN " + existing.getRoleArn()
                         + " is already associated with DB instance " + instanceId + " for feature "
                         + existing.getFeatureName() + ".", 400);
@@ -9683,7 +9683,7 @@ public class RdsService implements Resettable, ResourceProvider {
         DbInstance instance = getDbInstance(instanceId, effectiveRegion);
         requireAvailableInstance(instance, instanceId);
         boolean removed = instance.getAssociatedRoles().removeIf(existing -> existing.getRoleArn().equals(roleArn)
-                && featureName.equals(existing.getFeatureName()));
+                && featureName.equalsIgnoreCase(existing.getFeatureName()));
         if (!removed) {
             throw new AwsException("DBInstanceRoleNotFound", "Role ARN " + roleArn
                     + " is not associated with DB instance " + instanceId + " for feature " + featureName + ".", 404);
@@ -9712,11 +9712,6 @@ public class RdsService implements Resettable, ResourceProvider {
                         + " is named more than once for DB cluster " + clusterId + ".", 400);
             }
         }
-    }
-
-    /** The same checks without a feature check, for a caller that does not know the engine yet. */
-    public void validateClusterRoleAssociations(String clusterId, List<DbRoleAssociation> roles) {
-        validateClusterRoleAssociations(clusterId, null, roles);
     }
 
     private static String blankToNull(String value) {
