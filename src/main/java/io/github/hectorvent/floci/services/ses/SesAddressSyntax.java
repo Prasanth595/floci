@@ -110,10 +110,11 @@ final class SesAddressSyntax {
 
     /**
      * A mailbox as JavaMail's {@code InternetAddress.toString()} writes it once parsed: the display
-     * name as written before the angle bracket, comments included, or else the first comment
-     * (probe-confirmed both ways), unquoted, dropped when blank, and quoted again only when it
-     * holds a special character, then the addr-spec in angle brackets; a bare addr-spec keeps no
-     * brackets unless it holds a special character. A raw non-ASCII name comes out as
+     * name as written before the angle bracket, comments included, and dropped when it is blank once
+     * unquoted, or the first comment only when nothing precedes the angle bracket (probe-confirmed
+     * each way). The name is quoted again only when it holds a special character, then the addr-spec
+     * follows in angle brackets; a bare addr-spec keeps no brackets unless it holds a special
+     * character. A raw non-ASCII name comes out as
      * {@link SesEncodedWord} writes it and an encoded-word stays as written (probe-confirmed for a
      * short all non-ASCII name, which is one B encoded-word; longer and mixed names follow JavaMail
      * and are assumed).
@@ -130,9 +131,10 @@ final class SesAddressSyntax {
     private static String personal(String mailbox) {
         Stripped stripped = stripComments(mailbox);
         if (stripped.lastAngle() >= 0 && stripped.text().trim().endsWith(">")) {
-            String phrase = unquote(mailbox.substring(0, stripped.lastAngle()).trim());
-            if (!phrase.isBlank()) {
-                return phrase;
+            String phrase = mailbox.substring(0, stripped.lastAngle()).trim();
+            if (!phrase.isEmpty()) {
+                String unquoted = unquote(phrase);
+                return unquoted.isBlank() ? null : unquoted;
             }
         }
         String comment = stripped.firstComment();

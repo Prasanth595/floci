@@ -172,8 +172,8 @@ class SesAddressSyntaxTest {
     @Test
     void javaMailStringDropsABlankDisplayName() {
         assertEquals("probe.example.invalid", SesAddressSyntax.javaMailString("\"\" <probe.example.invalid>"));
-        assertEquals("Alice <probe.example.invalid>",
-                SesAddressSyntax.javaMailString("\" \" <probe.example.invalid> (Alice)"));
+        assertEquals("probe.example.invalid", SesAddressSyntax.javaMailString("\" \" <probe.example.invalid> (Alice)"));
+        assertEquals("Alice <probe.example.invalid>", SesAddressSyntax.javaMailString("<probe.example.invalid> (Alice)"));
     }
 
     @Test

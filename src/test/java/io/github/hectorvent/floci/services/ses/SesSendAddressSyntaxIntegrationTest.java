@@ -412,7 +412,9 @@ class SesSendAddressSyntaxIntegrationTest {
         "\"Alice, B\" <sender.example.com> | User name is missing: '\"Alice, B\" <sender.example.com>'.",
         "sender@example.com <sender.example.com> | User name is missing: '\"sender@example.com\" <sender.example.com>'.",
         "Alice (Bob) <sender.example.com> | User name is missing: '\"Alice (Bob)\" <sender.example.com>'.",
-        "Alice <sender.example.com> (Bob) | User name is missing: 'Alice <sender.example.com>'."
+        "Alice <sender.example.com> (Bob) | User name is missing: 'Alice <sender.example.com>'.",
+        "\" \" <sender.example.com> (Alice) | User name is missing: 'sender.example.com'.",
+        "<sender.example.com> (Alice) | User name is missing: 'Alice <sender.example.com>'."
     })
     void v1SendRawEmail_fromHeaderWithoutAtAndSource_isAMissingUserName(String from, String message) {
         given()
