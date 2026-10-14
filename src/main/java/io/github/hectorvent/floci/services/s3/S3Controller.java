@@ -1903,7 +1903,10 @@ public class S3Controller {
     private List<CompletedPart> parseCompleteMultipartBody(String xml) {
         List<Map<String, String>> parts = XmlParser.extractGroups(xml, "Part");
         if (parts.isEmpty()) {
-            throw new AwsException("InvalidRequest", "You must specify at least one part", 400);
+            if ("CompleteMultipartUpload".equals(XmlParser.rootElementName(xml))) {
+                throw new AwsException("InvalidRequest", "You must specify at least one part", 400);
+            }
+            throw malformedCompleteMultipartXml();
         }
         List<CompletedPart> completedParts = new ArrayList<>();
         for (Map<String, String> part : parts) {
