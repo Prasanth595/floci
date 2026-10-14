@@ -743,6 +743,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String instanceDockerVolumeName = null;
         String instanceStorageResourceId = dbiResourceId;
         PlacementResolution placement;
+        DbCluster publicationCluster = null;
 
         String engineIdentifier = engineParam != null && !engineParam.isBlank()
                 ? engineParam.toLowerCase() : null;
@@ -757,6 +758,7 @@ public class RdsService implements Resettable, ResourceProvider {
             if (engineIdentifier == null && cluster.getEngineIdentifier() != null) {
                 engineIdentifier = cluster.getEngineIdentifier().toLowerCase();
             }
+            publicationCluster = cluster;
             iamEnabled = cluster.isIamDatabaseAuthenticationEnabled();
             backendHost = cluster.getContainerHost();
             backendPort = cluster.getContainerPort();
@@ -832,20 +834,24 @@ public class RdsService implements Resettable, ResourceProvider {
 
         instance.setDbiResourceId(dbiResourceId);
         instance.setDbInstanceArn(dbInstanceArn);
-        if (manageMasterUserPassword) {
-            attachManagedMasterUserSecret(instance, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
-        }
-
         String accountId = accountIdFromArn(instance.getDbInstanceArn());
-        // Publish the effective cluster setting and initial relay under the same monitor as
-        // ModifyDBCluster. Container provisioning above stays outside this publication boundary.
-        synchronized (this) {
+        // The canonical cluster owns member publication and cluster changes. Standalone
+        // publication and slow relay/storage work do not hold the service-wide monitor.
+        synchronized (publicationCluster != null ? publicationCluster : instance) {
             if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
                 DbCluster currentCluster = findClusterForScope(accountId, effectiveRegion, dbClusterIdentifier);
+                if (currentCluster != publicationCluster) {
+                    releaseProxyPort(proxyPort);
+                    throw new AwsException("InvalidDBClusterStateFault",
+                            "DB cluster changed during member creation.", 400);
+                }
                 if (currentCluster != null) {
                     iamEnabled = currentCluster.isIamDatabaseAuthenticationEnabled();
                     instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
                 }
+            }
+            if (manageMasterUserPassword) {
+                attachManagedMasterUserSecret(instance, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
             }
             putInstanceForScope(accountId, effectiveRegion, id, instance);
 
@@ -4579,7 +4585,29 @@ public class RdsService implements Resettable, ResourceProvider {
                 serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause, null, null, region);
     }
 
-    public synchronized DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
+    public DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                     Integer serverlessV2SecondsUntilAutoPause,
+                                     Boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
+                                     String region) {
+        String effectiveRegion = effectiveRegion(region);
+        while (true) {
+            DbCluster cluster = getDbCluster(id, effectiveRegion);
+            // Wait for same-cluster publication before entering the global mutation monitor.
+            synchronized (cluster) {
+                synchronized (this) {
+                    if (findClusterForScope(currentAccountId(), effectiveRegion, id) != cluster) {
+                        continue;
+                    }
+                    return doModifyDbCluster(id, newPassword, iamEnabled, serverlessV2MinCapacity,
+                            serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
+                            manageMasterUserPassword, masterUserSecretKmsKeyId, region);
+                }
+            }
+        }
+    }
+
+    private DbCluster doModifyDbCluster(String id, String newPassword, Boolean iamEnabled,
                                      Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                      Integer serverlessV2SecondsUntilAutoPause,
                                      Boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
@@ -4706,11 +4734,27 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
-    public synchronized void deleteDbCluster(String id) {
+    public void deleteDbCluster(String id) {
         deleteDbCluster(id, regionResolver.getDefaultRegion());
     }
 
-    public synchronized void deleteDbCluster(String id, String region) {
+    public void deleteDbCluster(String id, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        while (true) {
+            DbCluster cluster = getDbCluster(id, effectiveRegion);
+            synchronized (cluster) {
+                synchronized (this) {
+                    if (findClusterForScope(currentAccountId(), effectiveRegion, id) != cluster) {
+                        continue;
+                    }
+                    doDeleteDbCluster(id, region);
+                    return;
+                }
+            }
+        }
+    }
+
+    private void doDeleteDbCluster(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = Optional.ofNullable(
                         findClusterForScope(currentAccountId(), effectiveRegion, id))
