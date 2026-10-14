@@ -9105,11 +9105,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private List<NatGateway> callerNatGateways() {
         if (natGateways instanceof AccountAwareStorageBackend<NatGateway> aware) {
             String caller = callerAccountId();
-            // ponytail: reads every account's gateways; scope to caller + unprefixed keys if this gets hot.
-            return aware.scanAllAccountEntries(k -> true).stream()
-                    .filter(e -> caller.equals(e.accountId()))
-                    .map(AccountAwareStorageBackend.AccountEntry::value)
-                    .toList();
+            List<NatGateway> own = aware.scanForAccount(caller, k -> true);
+            if (!caller.equals(defaultAccountId)) {
+                return own;
+            }
+            List<NatGateway> all = new ArrayList<>(own);
+            all.addAll(aware.scanUnscopedLegacy(g -> true));
+            return all;
         }
         return natGateways.scan(k -> true);
     }
