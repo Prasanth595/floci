@@ -59,7 +59,7 @@ For the upstream API shape, see the [Amazon Redshift Serverless API Reference](h
 | `UpdateCustomDomainAssociation` | Point an association at another certificate ARN |
 | `DeleteCustomDomainAssociation` | Remove a custom domain association |
 | `GetTrack` | Return one of the release tracks `current` and `trailing`; a track carries no `workgroupVersion` |
-| `ListTracks` | Page through the three release tracks |
+| `ListTracks` | Page through the two release tracks |
 | `ListManagedWorkgroups` | Always an empty list: Floci models no Glue zero-ETL managed workgroups |
 | `ListReservations` | Always an empty list: Floci offers no reservations |
 | `ListReservationOfferings` | Always an empty list: Floci publishes no reservation offerings |

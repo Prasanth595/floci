@@ -18,6 +18,7 @@ import java.time.Instant;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -345,7 +346,7 @@ class RedshiftServerlessAdministrationHandlerTest {
         JsonNode rest = ok("ListTracks", "{\"nextToken\":\"" + next + "\"}");
         assertEquals(1, rest.get("tracks").size());
         assertEquals("trailing", rest.get("tracks").get(0).get("trackName").textValue());
-        assertTrue(!rest.has("nextToken"));
+        assertFalse(rest.has("nextToken"));
         assertEquals("ValidationException", errorType("ListTracks", "{\"maxResults\":\"x\"}"));
     }
 
