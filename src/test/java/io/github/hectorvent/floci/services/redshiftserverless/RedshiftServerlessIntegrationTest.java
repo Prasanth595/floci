@@ -736,6 +736,24 @@ class RedshiftServerlessIntegrationTest {
                 .statusCode(200);
     }
 
+    @Test
+    void scheduledActionRoundTripsOverTheWire() {
+        call("CreateNamespace", "{\"namespaceName\":\"sched-ns\",\"adminUsername\":\"admin\"}").statusCode(200);
+
+        call("CreateScheduledAction", "{\"scheduledActionName\":\"admin-sched\",\"namespaceName\":\"sched-ns\","
+                + "\"roleArn\":\"arn:aws:iam::000000000000:role/r\",\"schedule\":{\"cron\":\"cron(0 3 * * ? *)\"},"
+                + "\"targetAction\":{\"createSnapshot\":{\"namespaceName\":\"sched-ns\",\"snapshotNamePrefix\":\"p\"}}}")
+                .statusCode(200)
+                .body("scheduledAction.state", equalTo("ACTIVE"))
+                .body("scheduledAction.schedule.cron", equalTo("cron(0 3 * * ? *)"));
+        call("CreateScheduledAction", "{\"scheduledActionName\":\"BAD_NAME\",\"namespaceName\":\"sched-ns\","
+                + "\"roleArn\":\"arn:aws:iam::000000000000:role/r\",\"schedule\":{\"cron\":\"x\"},"
+                + "\"targetAction\":{\"createSnapshot\":{\"namespaceName\":\"sched-ns\",\"snapshotNamePrefix\":\"p\"}}}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        call("DeleteScheduledAction", "{\"scheduledActionName\":\"admin-sched\"}").statusCode(200);
+    }
+
     private static io.restassured.response.ValidatableResponse call(String action, String body) {
         return given()
                 .header("X-Amz-Target", TARGET_PREFIX + action)

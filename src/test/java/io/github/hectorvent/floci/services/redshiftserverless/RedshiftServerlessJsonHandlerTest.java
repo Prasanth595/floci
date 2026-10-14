@@ -96,13 +96,14 @@ class RedshiftServerlessJsonHandlerTest {
                         new RedshiftServerlessResourcePolicyService(storageFactory, service, mapper),
                         new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, service),
                         customDomains,
-                        new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, service)),
+                        new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, service),
+                        new RedshiftServerlessScheduledActionService(storageFactory, service)),
                 customDomains);
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     private static void stubAdministrationStores(StorageFactory storageFactory) {
-        for (String file : List.of("resourcepolicies", "endpointaccess", "customdomains", "snapshotcopyconfigurations")) {
+        for (String file : List.of("resourcepolicies", "endpointaccess", "customdomains", "snapshotcopyconfigurations", "scheduledactions")) {
             when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-" + file + ".json"),
                     any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
                     AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
@@ -409,7 +410,7 @@ class RedshiftServerlessJsonHandlerTest {
 
     @Test
     void aModeledActionWithoutAnImplementationIsStillAnUnknownOperation() {
-        Response response = handler.handle("CreateScheduledAction", mapper.createObjectNode(), REGION);
+        Response response = handler.handle("ConvertRecoveryPointToSnapshot", mapper.createObjectNode(), REGION);
 
         assertEquals(400, response.getStatus());
         assertEquals("UnknownOperationException", errorType(response));

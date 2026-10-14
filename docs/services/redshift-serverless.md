@@ -62,6 +62,11 @@ For the upstream API shape, see the [Amazon Redshift Serverless API Reference](h
 | `ListSnapshotCopyConfigurations` | Page through the snapshot copy configurations, filtered by `namespaceName` |
 | `UpdateSnapshotCopyConfiguration` | Change the `snapshotRetentionPeriod` of a snapshot copy configuration |
 | `DeleteSnapshotCopyConfiguration` | Remove a snapshot copy configuration and return it |
+| `CreateScheduledAction` | Record a scheduled `createSnapshot` action; it is stored, never run |
+| `GetScheduledAction` | Return a scheduled action by name |
+| `ListScheduledActions` | Page through the scheduled actions, filtered by `namespaceName` |
+| `UpdateScheduledAction` | Apply the supplied members to a scheduled action; `schedule` and `targetAction` replace the stored ones |
+| `DeleteScheduledAction` | Remove a scheduled action and return it |
 <!-- floci:actions:end -->
 
 Namespace and workgroup state is account and Region scoped and persisted through `StorageFactory`.
@@ -140,3 +145,4 @@ aws redshift-serverless delete-namespace --namespace-name analytics
 - **Endpoint access is recorded, not acted on.** An endpoint is stored per account and Region, echoed in the shape of the API model, and dropped on read once its workgroup is gone; a workgroup recreated under the same name is a different workgroup and does not inherit it. `CreateEndpointAccess` creates no VPC endpoint. `address` and `port` are the workgroup's own, so a client can connect; `vpcEndpoint` carries a generated id and one network interface per subnet, without a `vpcId`, and `ListEndpointAccess` with a `vpcId` returns nothing. `vpcSecurityGroupIds` is optional. Endpoint names are 1 to 30 letters, digits or hyphens, start with a letter, and contain no consecutive or trailing hyphens. Security groups are the only member `UpdateEndpointAccess` changes.
 - **Custom domain associations are recorded, not acted on.** An association is stored per account and Region and dropped on read once its workgroup is gone; a workgroup recreated under the same name does not inherit it. A workgroup has at most one custom domain association. The certificate expiry time comes from ACM when the certificate exists in the emulator.
 - **Snapshot copy configurations are recorded, not acted on.** `CreateSnapshotCopyConfiguration` copies no snapshot. A configuration is stored per account and Region and dropped on read once its namespace is gone; a namespace recreated under the same name does not inherit it. The destination Region must differ from the namespace's, and a namespace has only one configuration at a time (`ConflictException`). Delete the existing configuration before choosing another destination Region.
+- **Scheduled actions are recorded, never run.** An action is stored per account and Region and dropped on read once its namespace is gone; a namespace recreated under the same name does not inherit it. The owning `namespaceName` and the `targetAction.createSnapshot.namespaceName` must each exist but are not required to match, as the API reference does not say they must. `schedule` holds exactly one of `at` and `cron`; a one-off `at` in the future is the only `nextInvocations` reported, because cron expressions are not evaluated. `startTime`, `endTime` and `at` are epoch seconds.
