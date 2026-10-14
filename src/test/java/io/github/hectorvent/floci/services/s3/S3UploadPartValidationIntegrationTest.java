@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
@@ -14,6 +15,7 @@ import java.util.UUID;
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Regression coverage for AWS's InvalidArgument response for an invalid multipart part number. */
 @QuarkusTest
@@ -23,6 +25,9 @@ class S3UploadPartValidationIntegrationTest {
 
     @TestHTTPResource("/")
     static URI baseUri;
+
+    @Inject
+    S3Service s3Service;
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
@@ -53,8 +58,8 @@ class S3UploadPartValidationIntegrationTest {
         }
     }
 
-    private static void assertInvalidPartNumber(String bucket, String key, String uploadId,
-                                                String partNumber, String copySource) {
+    private void assertInvalidPartNumber(String bucket, String key, String uploadId,
+                                         String partNumber, String copySource) {
         RequestSpecification request = given().body("part");
         if (copySource != null) {
             request.header("x-amz-copy-source", copySource);
@@ -67,6 +72,9 @@ class S3UploadPartValidationIntegrationTest {
                 .body("Error.Message", equalTo("Part number must be an integer between 1 and 10000, inclusive"))
                 .body("Error.ArgumentName", equalTo("partNumber"))
                 .body("Error.ArgumentValue", equalTo(partNumber));
+
+        assertTrue(s3Service.listParts(bucket, key, uploadId).getParts().isEmpty(),
+                "Rejected part " + partNumber + " must not be recorded");
     }
 
     private String createBucket(String prefix) {
