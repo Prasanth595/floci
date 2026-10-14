@@ -110,9 +110,9 @@ final class SesAddressSyntax {
 
     /**
      * A mailbox as JavaMail's {@code InternetAddress.toString()} writes it once parsed: the display
-     * name as written before the angle bracket, comments included, and dropped when it is blank once
-     * unquoted, or the first comment only when nothing precedes the angle bracket (probe-confirmed
-     * each way). The name is quoted again only when it holds a special character, then the addr-spec
+     * name as written from its first character outside a comment to the angle bracket, later
+     * comments included, and dropped when it is blank once unquoted, or the first comment only when
+     * only comments precede the angle bracket (probe-confirmed each way). The name is quoted again only when it holds a special character, then the addr-spec
      * follows in angle brackets; a bare addr-spec keeps no brackets unless it holds a special
      * character. A raw non-ASCII name comes out as
      * {@link SesEncodedWord} writes it and an encoded-word stays as written (probe-confirmed for a
@@ -130,12 +130,10 @@ final class SesAddressSyntax {
 
     private static String personal(String mailbox) {
         Stripped stripped = stripComments(mailbox);
-        if (stripped.lastAngle() >= 0 && stripped.text().trim().endsWith(">")) {
-            String phrase = mailbox.substring(0, stripped.lastAngle()).trim();
-            if (!phrase.isEmpty()) {
-                String unquoted = unquote(phrase);
-                return unquoted.isBlank() ? null : unquoted;
-            }
+        if (stripped.lastAngle() >= 0 && stripped.text().trim().endsWith(">")
+                && stripped.phraseStart() < stripped.lastAngle()) {
+            String phrase = unquote(mailbox.substring(stripped.phraseStart(), stripped.lastAngle()).trim());
+            return phrase.isBlank() ? null : phrase;
         }
         String comment = stripped.firstComment();
         return comment == null || comment.isBlank() ? null : comment.trim();
@@ -269,13 +267,14 @@ final class SesAddressSyntax {
         return withoutComments;
     }
 
-    private record Stripped(String text, String firstComment, int lastAngle) {
+    private record Stripped(String text, String firstComment, int phraseStart, int lastAngle) {
     }
 
     private static Stripped stripComments(String mailbox) {
         StringBuilder out = new StringBuilder();
         String firstComment = null;
         int commentStart = -1;
+        int phraseStart = -1;
         int lastAngle = -1;
         boolean quoted = false;
         int commentDepth = 0;
@@ -305,8 +304,11 @@ final class SesAddressSyntax {
             } else if (!quoted && c == '<') {
                 lastAngle = i;
             }
+            if (phraseStart < 0 && !Character.isWhitespace(c)) {
+                phraseStart = i;
+            }
             out.append(c);
         }
-        return new Stripped(out.toString(), firstComment, lastAngle);
+        return new Stripped(out.toString(), firstComment, phraseStart, lastAngle);
     }
 }
