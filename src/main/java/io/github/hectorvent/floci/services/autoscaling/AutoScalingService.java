@@ -599,7 +599,14 @@ public class AutoScalingService {
     // and region that issued it. The key is per bean instance, not static: a static initializer can
     // run at native-image build time and bake one key into every process. A token does not outlive
     // a restart; a genuine token past the end (groups deleted since) still resumes.
-    private final byte[] tagCursorKey = new SecureRandom().generateSeed(32);
+    private final byte[] tagCursorKey = newTagCursorKey();
+
+    // nextBytes, not generateSeed: generateSeed reads the entropy source and can block at startup.
+    private static byte[] newTagCursorKey() {
+        byte[] key = new byte[32];
+        new SecureRandom().nextBytes(key);
+        return key;
+    }
 
     private byte[] signTagCursor(String region, byte[] cursor) {
         try {
