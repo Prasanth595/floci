@@ -508,6 +508,27 @@ class RedshiftServerlessIntegrationTest {
                 .body("__type", equalTo("ValidationException"));
     }
 
+    @Test
+    void resourcePolicyRoundTripsOverTheWire() {
+        call("CreateNamespace", "{\"namespaceName\":\"policy-ns\",\"adminUsername\":\"admin\"}").statusCode(200);
+        String snapshotArn = call("CreateSnapshot", "{\"snapshotName\":\"policy-snap\",\"namespaceName\":\"policy-ns\"}")
+                .statusCode(200).extract().path("snapshot.snapshotArn");
+
+        call("PutResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\",\"policy\":\"{\\\"Version\\\":\\\"2012-10-17\\\"}\"}")
+                .statusCode(200)
+                .body("resourcePolicy.resourceArn", equalTo(snapshotArn));
+        call("GetResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}")
+                .statusCode(200)
+                .body("resourcePolicy.policy", equalTo("{\"Version\":\"2012-10-17\"}"));
+        call("DeleteResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}").statusCode(200);
+        call("GetResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        call("PutResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+    }
+
     private static io.restassured.response.ValidatableResponse call(String action, String body) {
         return given()
                 .header("X-Amz-Target", TARGET_PREFIX + action)

@@ -471,6 +471,11 @@ public class RedshiftServerlessService implements Resettable {
         return snapshotArn.substring(prefix.length());
     }
 
+    /** The snapshot called {@code snapshotName} in {@code region}, empty when there is none. */
+    public Optional<RedshiftServerlessSnapshot> findSnapshot(String snapshotName, String region) {
+        return snapshotName == null ? Optional.empty() : snapshots.get(storageKey(region, snapshotName));
+    }
+
     /**
      * Changes a snapshot's retention. An omitted period leaves the snapshot as it is, and -1 makes
      * it indefinite. {@code snapshotRemainingDays} keeps counting from the creation time, because
