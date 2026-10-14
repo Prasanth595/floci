@@ -4786,10 +4786,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * An instance or NAT gateway still sitting in one of the subnets pins the subnet, and through it
-     * the VPC. A {@code shutting-down} instance still holds its network interface and a
-     * {@code deleting} NAT gateway still holds its address, so only {@code terminated} and
-     * {@code deleted} release the subnet; AWS answers {@code DependencyViolation} until then.
+     * Anything still holding a network interface in one of the subnets pins the subnet, and through
+     * it the VPC: an instance, a NAT gateway, a standalone network interface, or an interface or
+     * Gateway Load Balancer endpoint. A {@code shutting-down} instance still holds its interface and
+     * a {@code deleting} NAT gateway still holds its address, so only {@code terminated} and
+     * {@code deleted} release the subnet; a standalone interface is removed from the store on
+     * delete, so its presence alone counts. AWS answers {@code DependencyViolation} until then.
      */
     private void requireNoSubnetResidents(String region, Set<String> subnetIds, String message) {
         if (subnetIds.isEmpty()) {
@@ -4802,7 +4804,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                         || !"terminated".equals(instance.getState().getName())))
                 || natGateways.scan(k -> k.startsWith(regionPrefix)).stream()
                         .anyMatch(natGateway -> subnetIds.contains(natGateway.getSubnetId())
-                                && !"deleted".equals(natGateway.getState()));
+                                && !"deleted".equals(natGateway.getState()))
+                || networkInterfaces.scan(k -> k.startsWith(regionPrefix)).stream()
+                        .anyMatch(ni -> subnetIds.contains(ni.getSubnetId()))
+                || vpcEndpoints.scan(k -> k.startsWith(regionPrefix)).stream()
+                        .anyMatch(endpoint -> !"deleted".equals(endpoint.getState())
+                                && nullToEmpty(endpoint.getSubnetIds()).stream().anyMatch(subnetIds::contains));
         if (occupied) {
             throw new AwsException("DependencyViolation", message, 400);
         }
