@@ -781,14 +781,14 @@ public class Ec2QueryHandler {
             userData = Ec2UserDataDecoder.decode(userDataEncoded);
         }
 
-        String iamInstanceProfileArn = service.resolveLaunchIamInstanceProfileArn(
-                p.getFirst("IamInstanceProfile.Name"), p.getFirst("IamInstanceProfile.Arn"));
-
         // Parse TagSpecifications. AWS applies each specification to exactly the resource
         // type it names, so the interfaces RunInstances creates are tagged only by a
         // ResourceType=network-interface specification - never by the instance's own tags.
         List<Tag> instanceTags = parseTagsForResource(p, "instance");
         List<Tag> networkInterfaceTags = parseTagsForResource(p, "network-interface");
+        // Resolved after tag parsing so reserved tags are refused before any service call.
+        String iamInstanceProfileArn = service.resolveLaunchIamInstanceProfileArn(
+                p.getFirst("IamInstanceProfile.Name"), p.getFirst("IamInstanceProfile.Arn"));
 
         // Absent fields stay null so the launch default, or the launch template's value, applies.
         LaunchTemplateData.MetadataOptions metadataOptions = parseMetadataOptions(p, "MetadataOptions.");
