@@ -53,6 +53,11 @@ For the upstream API shape, see the [Amazon Redshift Serverless API Reference](h
 | `ListEndpointAccess` | Page through the endpoints, filtered by `workgroupName`, `ownerAccount` and `vpcId` |
 | `UpdateEndpointAccess` | Replace the `vpcSecurityGroupIds` of an endpoint |
 | `DeleteEndpointAccess` | Remove an endpoint and return it with `endpointStatus` `DELETING` |
+| `CreateCustomDomainAssociation` | Record a custom domain and ACM certificate ARN for a workgroup |
+| `GetCustomDomainAssociation` | Return a custom domain association |
+| `ListCustomDomainAssociations` | Page through the associations, filtered by `customDomainName` and `customDomainCertificateArn` |
+| `UpdateCustomDomainAssociation` | Point an association at another certificate ARN |
+| `DeleteCustomDomainAssociation` | Remove a custom domain association |
 <!-- floci:actions:end -->
 
 Namespace and workgroup state is account and Region scoped and persisted through `StorageFactory`.
@@ -129,3 +134,4 @@ aws redshift-serverless delete-namespace --namespace-name analytics
 - **`UpdateSnapshot` changes only `retentionPeriod`.** It is validated like `CreateSnapshot` (`-1` or 1 to 3653 days), `-1` makes the snapshot indefinite, and an omitted period leaves the snapshot unchanged. `snapshotRemainingDays` keeps counting from the creation time, because Floci stores no separate retention start.
 - **Resource policies are recorded, not acted on.** A policy is stored per account and Region, echoed in the shape of the API model, and dropped on read once the snapshot it belongs to is gone. A snapshot recreated under the same name is a different snapshot: the record keeps the snapshot's creation time, so the policy is not inherited. `PutResourcePolicy` accepts a JSON object for a snapshot ARN of this account and Region; no principal in it gains access. A foreign or non-snapshot ARN is a `ValidationException`.
 - **Endpoint access is recorded, not acted on.** An endpoint is stored per account and Region, echoed in the shape of the API model, and dropped on read once its workgroup is gone; a workgroup recreated under the same name is a different workgroup and does not inherit it. `CreateEndpointAccess` creates no VPC endpoint. `address` and `port` are the workgroup's own, so a client can connect; `vpcEndpoint` carries a generated id and one network interface per subnet, without a `vpcId`, and `ListEndpointAccess` with a `vpcId` returns nothing. `vpcSecurityGroupIds` is optional. Endpoint names are 1 to 30 letters, digits or hyphens, start with a letter, and contain no consecutive or trailing hyphens. Security groups are the only member `UpdateEndpointAccess` changes.
+- **Custom domain associations are recorded, not acted on.** An association is stored per account and Region and dropped on read once its workgroup is gone; a workgroup recreated under the same name does not inherit it. The domain name and the ACM certificate ARN are checked against the patterns of the API model, but Floci reads no certificate, so `customDomainCertificateExpiryTime` is not returned.

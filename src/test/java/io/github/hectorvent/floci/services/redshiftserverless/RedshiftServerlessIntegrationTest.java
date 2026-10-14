@@ -679,6 +679,27 @@ class RedshiftServerlessIntegrationTest {
                 .body("endpoint.endpointStatus", equalTo("DELETING"));
     }
 
+    @Test
+    void customDomainAssociationRoundTripsOverTheWire() {
+        call("CreateNamespace", "{\"namespaceName\":\"domain-ns\",\"adminUsername\":\"admin\"}").statusCode(200);
+        call("CreateWorkgroup", "{\"workgroupName\":\"domain-wg\",\"namespaceName\":\"domain-ns\"}").statusCode(200);
+
+        String certificate = "arn:aws:acm:us-east-1:000000000000:certificate/11111111-2222-3333-4444-555555555555";
+        call("CreateCustomDomainAssociation", "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\","
+                + "\"customDomainCertificateArn\":\"" + certificate + "\"}")
+                .statusCode(200)
+                .body("customDomainName", equalTo("db.example.com"));
+        call("CreateCustomDomainAssociation", "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"bad_domain\","
+                + "\"customDomainCertificateArn\":\"" + certificate + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        call("ListCustomDomainAssociations", "{\"customDomainName\":\"db.example.com\"}")
+                .statusCode(200)
+                .body("associations", hasSize(1));
+        call("DeleteCustomDomainAssociation",
+                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\"}").statusCode(200);
+    }
+
     private static io.restassured.response.ValidatableResponse call(String action, String body) {
         return given()
                 .header("X-Amz-Target", TARGET_PREFIX + action)

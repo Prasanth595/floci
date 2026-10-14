@@ -33,6 +33,8 @@ import static org.mockito.Mockito.when;
 class RedshiftServerlessAdministrationHandlerTest {
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT_ID = "123456789012";
+    private static final String CERTIFICATE_ARN =
+            "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555";
 
     private final ObjectMapper mapper = new ObjectMapper();
     private RedshiftServerlessJsonHandler handler;
@@ -43,7 +45,7 @@ class RedshiftServerlessAdministrationHandlerTest {
     void setUp() {
         StorageFactory storageFactory = mock(StorageFactory.class);
         for (String file : List.of("namespaces", "workgroups", "snapshots", "usagelimits", "resourcepolicies",
-                "endpointaccess")) {
+                "endpointaccess", "customdomains")) {
             when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-" + file + ".json"),
                 any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
@@ -69,7 +71,8 @@ class RedshiftServerlessAdministrationHandlerTest {
                 new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, serverlessService),
                 new RedshiftServerlessAdminJsonHandler(mapper,
                         new RedshiftServerlessResourcePolicyService(storageFactory, serverlessService, mapper),
-                        new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, serverlessService)));
+                        new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, serverlessService),
+                        new RedshiftServerlessCustomDomainService(storageFactory, serverlessService)));
     }
 
     @Test
@@ -266,6 +269,54 @@ class RedshiftServerlessAdministrationHandlerTest {
     }
 
     @Test
+    void customDomainAssociationIsKeyedByWorkgroupAndDomain() {
+        workgroup("domain-ns", "domain-wg");
+        String request = "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\","
+                + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}";
+
+        JsonNode created = ok("CreateCustomDomainAssociation", request);
+        assertEquals("db.example.com", created.get("customDomainName").textValue());
+        assertEquals("domain-wg", created.get("workgroupName").textValue());
+        assertEquals(CERTIFICATE_ARN, created.get("customDomainCertificateArn").textValue());
+
+        assertEquals("ConflictException", errorType("CreateCustomDomainAssociation", request));
+        assertEquals("ValidationException", errorType("CreateCustomDomainAssociation",
+                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"-bad\","
+                        + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}"));
+        assertEquals("ValidationException", errorType("CreateCustomDomainAssociation",
+                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"other.example.com\","
+                        + "\"customDomainCertificateArn\":\"not-an-arn\"}"));
+        assertEquals("ResourceNotFoundException", errorType("CreateCustomDomainAssociation",
+                "{\"workgroupName\":\"nope\",\"customDomainName\":\"x.example.com\","
+                        + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}"));
+
+        String replacement = CERTIFICATE_ARN.replace("11111111", "99999999");
+        assertEquals(replacement, ok("UpdateCustomDomainAssociation", "{\"workgroupName\":\"domain-wg\","
+                + "\"customDomainName\":\"db.example.com\",\"customDomainCertificateArn\":\"" + replacement + "\"}")
+                .get("customDomainCertificateArn").textValue());
+        assertEquals(replacement, ok("GetCustomDomainAssociation",
+                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\"}")
+                .get("customDomainCertificateArn").textValue());
+        assertEquals(1, ok("ListCustomDomainAssociations", "{\"customDomainName\":\"db.example.com\"}")
+                .get("associations").size());
+        assertEquals(0, ok("ListCustomDomainAssociations", "{\"customDomainName\":\"x.example.com\"}")
+                .get("associations").size());
+        assertEquals("ValidationException", errorType("UpdateCustomDomainAssociation",
+                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\"}"));
+        assertEquals("ValidationException", errorType("ListCustomDomainAssociations", "{\"maxResults\":0}"));
+        assertEquals("ValidationException", errorType("ListCustomDomainAssociations", "{\"maxResults\":101}"));
+        assertEquals("ValidationException", errorType("ListCustomDomainAssociations", "{\"nextToken\":\"bad-token\"}"));
+        JsonNode trackToken = ok("ListTracks", "{\"maxResults\":1}");
+        assertEquals("ValidationException", errorType("ListCustomDomainAssociations",
+                "{\"nextToken\":\"" + trackToken.get("nextToken").textValue() + "\"}"));
+
+        assertEquals(0, ok("DeleteCustomDomainAssociation",
+                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\"}").size());
+        assertEquals("ResourceNotFoundException", errorType("GetCustomDomainAssociation",
+                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\"}"));
+    }
+
+    @Test
     void tracksAreTheTwoAwsReleaseTracks() {
         JsonNode track = ok("GetTrack", "{\"trackName\":\"trailing\"}").get("track");
         assertEquals("trailing", track.get("trackName").textValue());
@@ -328,18 +379,24 @@ class RedshiftServerlessAdministrationHandlerTest {
     }
 
     @Test
-    void aWorkgroupRecreatedUnderTheSameNameDoesNotInheritEndpoints() {
+    void aWorkgroupRecreatedUnderTheSameNameDoesNotInheritEndpointsOrDomains() {
         workgroup("recreate-wg-ns", "recreate-wg");
         ok("CreateEndpointAccess", "{\"endpointName\":\"old-ep\",\"workgroupName\":\"recreate-wg\","
                 + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}");
+        ok("CreateCustomDomainAssociation", "{\"workgroupName\":\"recreate-wg\",\"customDomainName\":\"old.example.com\","
+                + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}");
 
         ok("DeleteWorkgroup", "{\"workgroupName\":\"recreate-wg\"}");
         ok("CreateWorkgroup", "{\"workgroupName\":\"recreate-wg\",\"namespaceName\":\"recreate-wg-ns\"}");
 
         assertEquals("ResourceNotFoundException", errorType("GetEndpointAccess", "{\"endpointName\":\"old-ep\"}"));
+        assertEquals("ResourceNotFoundException", errorType("GetCustomDomainAssociation",
+                "{\"workgroupName\":\"recreate-wg\",\"customDomainName\":\"old.example.com\"}"));
         assertEquals(0, ok("ListEndpointAccess", "{\"workgroupName\":\"recreate-wg\"}").get("endpoints").size());
         ok("CreateEndpointAccess", "{\"endpointName\":\"old-ep\",\"workgroupName\":\"recreate-wg\","
                 + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}");
+        ok("CreateCustomDomainAssociation", "{\"workgroupName\":\"recreate-wg\",\"customDomainName\":\"old.example.com\","
+                + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}");
     }
 
     @Test

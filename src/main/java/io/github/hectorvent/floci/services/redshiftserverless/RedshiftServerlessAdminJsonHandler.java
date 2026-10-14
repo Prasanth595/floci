@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.services.redshiftserverless.model.CustomDomainAssociation;
 import io.github.hectorvent.floci.services.redshiftserverless.model.EndpointAccess;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ResourcePolicy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -27,16 +28,19 @@ public class RedshiftServerlessAdminJsonHandler {
     private static final List<String> TRACK_NAMES = RedshiftServerlessService.TRACK_NAMES;
 
     private final ObjectMapper objectMapper;
+    private final RedshiftServerlessCustomDomainService customDomains;
     private final RedshiftServerlessEndpointAccessService endpointAccess;
     private final RedshiftServerlessResourcePolicyService resourcePolicies;
 
     @Inject
     public RedshiftServerlessAdminJsonHandler(ObjectMapper objectMapper,
                                               RedshiftServerlessResourcePolicyService resourcePolicies,
-                                              RedshiftServerlessEndpointAccessService endpointAccess) {
+                                              RedshiftServerlessEndpointAccessService endpointAccess,
+                                              RedshiftServerlessCustomDomainService customDomains) {
         this.objectMapper = objectMapper;
         this.resourcePolicies = resourcePolicies;
         this.endpointAccess = endpointAccess;
+        this.customDomains = customDomains;
     }
 
     Supplier<Response> operation(String action, JsonNode request, String region) {
@@ -48,7 +52,7 @@ public class RedshiftServerlessAdminJsonHandler {
                     ServerlessSupport.text(request, "resourceArn"), region));
             case "DeleteResourcePolicy" -> () -> {
                 resourcePolicies.deleteResourcePolicy(ServerlessSupport.text(request, "resourceArn"), region);
-                return Response.ok(objectMapper.createObjectNode()).build();
+                return emptyResponse();
             };
             case "GetTrack" -> () -> getTrack(ServerlessSupport.text(request, "trackName"));
             case "ListTracks" -> () -> listTracks(request);
@@ -71,6 +75,25 @@ public class RedshiftServerlessAdminJsonHandler {
                     ServerlessSupport.stringList(request, "vpcSecurityGroupIds"), region));
             case "DeleteEndpointAccess" -> () -> endpointResponse(endpointAccess.deleteEndpointAccess(
                     ServerlessSupport.text(request, "endpointName"), region));
+            case "CreateCustomDomainAssociation" -> () -> customDomainResponse(
+                    customDomains.createCustomDomainAssociation(
+                            ServerlessSupport.text(request, "workgroupName"),
+                            ServerlessSupport.text(request, "customDomainName"),
+                            ServerlessSupport.text(request, "customDomainCertificateArn"), region));
+            case "GetCustomDomainAssociation" -> () -> customDomainResponse(
+                    customDomains.getCustomDomainAssociation(ServerlessSupport.text(request, "workgroupName"),
+                            ServerlessSupport.text(request, "customDomainName"), region));
+            case "ListCustomDomainAssociations" -> () -> listCustomDomains(request, region);
+            case "UpdateCustomDomainAssociation" -> () -> customDomainResponse(
+                    customDomains.updateCustomDomainAssociation(
+                            ServerlessSupport.text(request, "workgroupName"),
+                            ServerlessSupport.text(request, "customDomainName"),
+                            ServerlessSupport.text(request, "customDomainCertificateArn"), region));
+            case "DeleteCustomDomainAssociation" -> () -> {
+                customDomains.deleteCustomDomainAssociation(ServerlessSupport.text(request, "workgroupName"),
+                        ServerlessSupport.text(request, "customDomainName"), region);
+                return emptyResponse();
+            };
             default -> null;
         };
     }
@@ -154,6 +177,32 @@ public class RedshiftServerlessAdminJsonHandler {
         return node;
     }
 
+    // ── Custom domain association ──────────────────────────────────────────
+
+    private Response listCustomDomains(JsonNode request, String region) {
+        PaginatedResult<CustomDomainAssociation> page = customDomains.listCustomDomainAssociations(
+                ServerlessSupport.text(request, "customDomainName"),
+                ServerlessSupport.text(request, "customDomainCertificateArn"), region,
+                ServerlessSupport.maxResults(request), ServerlessSupport.text(request, "nextToken"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("associations");
+        page.items().forEach(association -> items.add(customDomainNode(association)));
+        putNextToken(response, page);
+        return Response.ok(response).build();
+    }
+
+    private Response customDomainResponse(CustomDomainAssociation association) {
+        return Response.ok(customDomainNode(association)).build();
+    }
+
+    private ObjectNode customDomainNode(CustomDomainAssociation association) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("customDomainCertificateArn", association.getCustomDomainCertificateArn());
+        node.put("customDomainName", association.getCustomDomainName());
+        node.put("workgroupName", association.getWorkgroupName());
+        return node;
+    }
+
     // ── Tracks, managed workgroups and reservations ────────────────────────
 
     /**
@@ -200,6 +249,10 @@ public class RedshiftServerlessAdminJsonHandler {
     }
 
     // ── Shared ─────────────────────────────────────────────────────────────
+
+    private Response emptyResponse() {
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
 
     private static void putNextToken(ObjectNode response, PaginatedResult<?> page) {
         if (page.nextToken() != null) {

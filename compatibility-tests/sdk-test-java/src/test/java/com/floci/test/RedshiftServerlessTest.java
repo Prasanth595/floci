@@ -347,6 +347,32 @@ class RedshiftServerlessTest {
         }
     }
 
+    @Test
+    void customDomainAssociationUsesAwsSdk() {
+        assumeFalse(TestFixtures.isRealAws(), "Creates resources and asserts emulator-local behavior");
+
+        try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient()) {
+            String namespaceName = "floci-compat-domain-ns";
+            String workgroupName = "floci-compat-domain-wg";
+            String certificate = "arn:aws:acm:us-east-1:000000000000:certificate/11111111-2222-3333-4444-555555555555";
+            try {
+                client.createNamespace(request -> request.namespaceName(namespaceName).adminUsername("admin")
+                        .adminUserPassword("Secret123!"));
+                client.createWorkgroup(request -> request.workgroupName(workgroupName).namespaceName(namespaceName));
+
+                client.createCustomDomainAssociation(request -> request.workgroupName(workgroupName)
+                        .customDomainName("db.example.com").customDomainCertificateArn(certificate));
+                assertThat(client.listCustomDomainAssociations(request -> request.customDomainName("db.example.com"))
+                        .associations()).hasSize(1);
+                client.deleteCustomDomainAssociation(request -> request.workgroupName(workgroupName)
+                        .customDomainName("db.example.com"));
+            } finally {
+                deleteWorkgroupBestEffort(client, workgroupName);
+                deleteBestEffort(client, namespaceName);
+            }
+        }
+    }
+
     private static void deleteSnapshotBestEffort(RedshiftServerlessClient client, String snapshotName) {
         try {
             client.deleteSnapshot(request -> request.snapshotName(snapshotName));
