@@ -133,6 +133,23 @@ class RdsDataFieldMapperTest {
         }
     }
 
+    @Test
+    void rejectsPostgresBitStringsWithoutConvertingTheirBitsToBooleans() throws Exception {
+        Array array = sqlArray(Types.BIT, new String[] {"10", "01"});
+        when(array.getBaseTypeName()).thenReturn("bit");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> RdsDataFieldMapper.toField(objectMapper, array, Types.ARRAY));
+        assertEquals("UnsupportedResultException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        verify(array).free();
+
+        Array bool = sqlArray(Types.BIT, new Boolean[] {true, false});
+        when(bool.getBaseTypeName()).thenReturn("bool");
+        assertEquals(objectMapper.readTree("{\"arrayValue\":{\"booleanValues\":[true,false]}}"),
+                RdsDataFieldMapper.toField(objectMapper, bool, Types.ARRAY));
+    }
+
     private void assertArrayField(int baseType, Object values, String expected) throws Exception {
         Array array = sqlArray(baseType, values);
         ObjectNode field = RdsDataFieldMapper.toField(objectMapper, array, Types.ARRAY);

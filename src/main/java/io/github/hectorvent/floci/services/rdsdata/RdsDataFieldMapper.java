@@ -79,6 +79,10 @@ final class RdsDataFieldMapper {
     private static ObjectNode mapArray(ObjectMapper objectMapper, Array array) throws SQLException {
         try {
             int baseType = array.getBaseType();
+            // PostgreSQL reports both bool and bit strings as JDBC BIT; decoding bit strings as booleans loses bits.
+            if (baseType == Types.BIT && "bit".equalsIgnoreCase(array.getBaseTypeName())) {
+                throw new AwsException("UnsupportedResultException", "Bit-string arrays are not supported.", 400);
+            }
             String fieldName = switch (baseType) {
                 case Types.BIGINT, Types.INTEGER, Types.SMALLINT, Types.TINYINT -> "longValue";
                 case Types.BOOLEAN, Types.BIT -> "booleanValue";
