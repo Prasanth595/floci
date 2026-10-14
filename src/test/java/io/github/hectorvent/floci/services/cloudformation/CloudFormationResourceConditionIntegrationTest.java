@@ -697,21 +697,26 @@ class CloudFormationResourceConditionIntegrationTest {
     /** An import in an Fn::Or operand that evaluation never reaches is still a template error. */
     @Test
     void importValueInAConditionOperandEvaluationSkipsIsStillRejected() {
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "CreateStack")
-            .formParam("StackName", "cfn-cond-or-import-" + Long.toString(System.nanoTime(), 36))
-            .formParam("TemplateBody", """
-                    {"Conditions": {"IsOn": {"Fn::Or": [{"Fn::Equals": ["a", "a"]},
-                       {"Fn::Equals": [{"Fn::ImportValue": "never-resolved"}, "on"]}]}},
-                     "Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Condition": "IsOn"}}}
-                    """)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(400)
-            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-            .body("ErrorResponse.Error.Message", containsString("Fn::ImportValue is not supported in Conditions"));
+        String stackName = "cfn-cond-or-import-" + Long.toString(System.nanoTime(), 36);
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", """
+                        {"Conditions": {"IsOn": {"Fn::Or": [{"Fn::Equals": ["a", "a"]},
+                           {"Fn::Equals": [{"Fn::ImportValue": "never-resolved"}, "on"]}]}},
+                         "Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Condition": "IsOn"}}}
+                        """)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", containsString("Fn::ImportValue is not supported in Conditions"));
+        } finally {
+            deleteStack(stackName);
+        }
     }
 
     /**

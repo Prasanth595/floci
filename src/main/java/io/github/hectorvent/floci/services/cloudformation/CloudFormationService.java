@@ -2737,7 +2737,8 @@ public class CloudFormationService implements ResourceProvider {
      * reach it. SAM's translator emits this shape when a conditional function's event invoke
      * destination is itself conditional. Also rejects {@code Fn::ImportValue} anywhere in a
      * condition: AWS allows only Ref, Fn::FindInMap and condition functions there. Checked on the
-     * template being deployed only, so a stored template is never a reason an update cannot proceed.
+     * template being deployed only, so a stored template read as the old side of a diff, a rollback
+     * or a delete ordering is never a reason an update cannot proceed.
      */
     private static void requireStringConditionReferencesIn(JsonNode template) {
         template.path("Conditions").forEach(CloudFormationService::requireStringConditionReferences);
