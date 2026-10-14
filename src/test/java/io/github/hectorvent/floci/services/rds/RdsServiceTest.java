@@ -2205,6 +2205,48 @@ class RdsServiceTest {
         return new SecretsManagerService(factory, config, regionResolver, null, new ObjectMapper(), null);
     }
 
+    @ParameterizedTest
+    @CsvSource({"aurora-postgresql,false", "aurora-postgresql,true",
+            "aurora-mysql,false", "aurora-mysql,true"})
+    void clusterMemberDoesNotCreateItsOwnManagedSecret(String engine, boolean mockMode) {
+        when(config.services().rds().mock()).thenReturn(mockMode);
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        Secret unexpected = new Secret();
+        unexpected.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:unexpected-member");
+        when(secrets.createSecret(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(unexpected);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secrets);
+        service.createDbCluster("managed-member-cluster", engine, null,
+                "clusteradmin", "ClusterPassword!", "dbname", false, null);
+        clearInvocations(kmsService);
+        DbInstance member = service.createDbInstance("managed-member", engine, null,
+                null, null, "dbname", "db.r5.large", 20, false, null, null,
+                "managed-member-cluster", true, null);
+        assertEquals("clusteradmin", member.getMasterUsername());
+        assertEquals("ClusterPassword!", member.getMasterPassword());
+        assertNull(member.getMasterUserSecretArn());
+        assertNull(member.getMasterUserSecretStatus());
+        assertNull(member.getMasterUserSecretKmsKeyId());
+        verifyNoInteractions(secrets, kmsService);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aurora-postgresql", "aurora-mysql"})
+    void clusterMemberSecretFlagDoesNotRequireSecretsManager(String engine) {
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), (SecretsManagerService) null);
+        service.createDbCluster("no-member-secrets", engine, null,
+                "clusteradmin", "ClusterPassword!", "dbname", false, null);
+        DbInstance member = assertDoesNotThrow(() -> service.createDbInstance("member-no-secrets", engine, null,
+                null, null, "dbname", "db.r5.large", 20, false, null, null,
+                "no-member-secrets", true, null));
+        assertEquals("clusteradmin", member.getMasterUsername());
+        assertEquals("ClusterPassword!", member.getMasterPassword());
+        assertNull(member.getMasterUserSecretArn());
+    }
+
     @Test
     void modifyDbClusterRekeysExistingManagedSecret() {
         when(config.services().rds().mock()).thenReturn(true);

@@ -726,10 +726,12 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidParameterValue",
                     "MasterUsername must begin with a letter and contain only alphanumeric characters or underscores.", 400);
         }
-        if (manageMasterUserPassword && (masterPassword == null || masterPassword.isBlank())) {
+        boolean manageInstancePassword = manageMasterUserPassword
+                && (dbClusterIdentifier == null || dbClusterIdentifier.isBlank());
+        if (manageInstancePassword && (masterPassword == null || masterPassword.isBlank())) {
             masterPassword = generatedMasterPassword();
         }
-        String effectiveSecretKmsKeyId = manageMasterUserPassword
+        String effectiveSecretKmsKeyId = manageInstancePassword
                 ? resolveManagedSecretKmsKeyId(masterUserSecretKmsKeyId, effectiveRegion) : null;
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
@@ -869,7 +871,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     }
                 }
             }
-            if (manageMasterUserPassword) {
+            if (manageInstancePassword) {
                 attachManagedMasterUserSecret(instance, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
             }
             putInstanceForScope(accountId, effectiveRegion, id, instance);

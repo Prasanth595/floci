@@ -3,15 +3,19 @@ package com.floci.test;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.CreateDbInstanceRequest;
 import software.amazon.awssdk.services.rds.model.DBInstance;
 import software.amazon.awssdk.services.rds.model.RdsException;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.secretsmanager.model.ResourceNotFoundException;
 
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("Aurora member master credentials")
 class RdsMemberCredentialsTest {
@@ -52,4 +56,45 @@ class RdsMemberCredentialsTest {
             }
         }
     }
+    @ParameterizedTest
+    @ValueSource(strings = {"aurora-postgresql", "aurora-mysql"})
+    @DisplayName("Managed Aurora credentials remain owned by the cluster")
+    void memberDoesNotCreateASeparateManagedSecret(String engine) {
+        String clusterId = TestFixtures.uniqueName("cluster-secret-owner");
+        String memberId = clusterId + "-member";
+        try (RdsClient rds = TestFixtures.rdsClient();
+             SecretsManagerClient secrets = TestFixtures.secretsManagerClient()) {
+            try {
+                String clusterArn = rds.createDBCluster(request -> request.dbClusterIdentifier(clusterId)
+                        .engine(engine).masterUsername("clusteradmin").manageMasterUserPassword(true))
+                        .dbCluster().masterUserSecret().secretArn();
+                String original = secrets.getSecretValue(request -> request.secretId(clusterArn)).secretString();
+                DBInstance member = rds.createDBInstance(request -> request.dbInstanceIdentifier(memberId)
+                        .dbClusterIdentifier(clusterId).engine(engine).dbInstanceClass("db.serverless")
+                        .manageMasterUserPassword(true)).dbInstance();
+                assertThat(member.masterUsername()).isEqualTo("clusteradmin");
+                assertThat(member.masterUserSecret()).isNull();
+                assertThat(rds.describeDBInstances(request -> request.dbInstanceIdentifier(memberId))
+                        .dbInstances().get(0).masterUserSecret()).isNull();
+                assertThatThrownBy(() -> secrets.getSecretValue(request -> request.secretId("rds!" + member.dbiResourceId())))
+                        .isInstanceOfSatisfying(ResourceNotFoundException.class,
+                                error -> assertThat(error.statusCode()).isEqualTo(400));
+                rds.deleteDBInstance(request -> request.dbInstanceIdentifier(memberId).skipFinalSnapshot(true));
+                assertThat(secrets.getSecretValue(request -> request.secretId(clusterArn)).secretString()).isEqualTo(original);
+            } finally {
+                try {
+                    try {
+                        rds.deleteDBInstance(request -> request.dbInstanceIdentifier(memberId).skipFinalSnapshot(true));
+                    } catch (RdsException error) {
+                        if (!"DBInstanceNotFound".equals(error.awsErrorDetails().errorCode())) {
+                            throw error;
+                        }
+                    }
+                } finally {
+                    rds.deleteDBCluster(request -> request.dbClusterIdentifier(clusterId).skipFinalSnapshot(true));
+                }
+            }
+        }
+    }
+
 }
