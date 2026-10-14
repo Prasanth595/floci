@@ -1262,6 +1262,25 @@ class CognitoServiceTest {
         assertEquals(60, service.describeUserPoolClient(pool.getId(), client.getClientId()).getAccessTokenValidity());
     }
 
+    /**
+     * AWS replaces a RefreshTokenValidity of 0 with "the default value of 30 days" whatever the refresh token
+     * unit, so the client issues 30-day refresh tokens and an update that leaves the validity alone succeeds.
+     */
+    @ParameterizedTest
+    @CsvSource({"seconds, 2592000", "minutes, 43200", "hours, 720", "days, 30"})
+    void refreshTokenValidityZeroBecomesThirtyDaysInTheRefreshTokenUnit(String unit, int expected) {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+        UserPoolClient client = clientWithTokenValidity(pool, "RefreshToken", 0, unit);
+        assertEquals(expected, client.getRefreshTokenValidity());
+        String issuedTwentyNineDaysAgo = String.valueOf(System.currentTimeMillis() - Duration.ofDays(29).toMillis());
+
+        assertFalse(service.isRefreshTokenExpired(client,
+                new String[] {pool.getId(), "alice", client.getClientId(), issuedTwentyNineDaysAgo, "token"}));
+        assertEquals("renamed",
+                service.updateUserPoolClient(pool.getId(), client.getClientId(), "renamed", null, null, null)
+                        .getClientName());
+    }
+
     /** A client whose {@code token} validity is {@code validity}, in {@code unit} or its default unit when null. */
     private UserPoolClient clientWithTokenValidity(UserPool pool, String token, int validity, String unit) {
         return service.createUserPoolClient(pool.getId(), "validity-client", false, false, List.of(), List.of(),
@@ -4629,7 +4648,7 @@ class CognitoServiceTest {
         );
 
         long issuedAtMillis = System.currentTimeMillis() - Duration.ofMinutes(61).toMillis();
-        String raw = pool.getId() + "|alice|" + client.getClientId() + "|" + issuedAtMillis + "|" + java.util.UUID.randomUUID();
+        String raw = pool.getId() + "|alice|" + client.getClientId() + "|" + issuedAtMillis + "|" + UUID.randomUUID();
         String expiredRefreshToken = signRawRefreshToken(pool, raw);
 
         AwsException exception = assertThrows(AwsException.class, () ->

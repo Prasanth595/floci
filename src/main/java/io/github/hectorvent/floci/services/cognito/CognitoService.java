@@ -1100,7 +1100,8 @@ public class CognitoService implements ResourceProvider {
         List<String> normalizedSupportedIdentityProviders = normalizeStringList(supportedIdentityProviders);
         Map<String, String> copiedTokenValidityUnits = copyStringMap(tokenValidityUnits);
         List<String> normalizedWriteAttributes = normalizeStringList(writeAttributes);
-        Integer normalizedRefreshTokenValidity = normalizeRefreshTokenValidity(refreshTokenValidity);
+        Integer normalizedRefreshTokenValidity = normalizeRefreshTokenValidity(refreshTokenValidity,
+                copiedTokenValidityUnits);
 
         validateUserPoolClientConfiguration(
                 allowedOAuthFlowsUserPoolClient,
@@ -1114,7 +1115,7 @@ public class CognitoService implements ResourceProvider {
                 normalizedLogoutUrls,
                 copiedTokenValidityUnits
         );
-        validateTokenValidityLimits(accessTokenValidity, idTokenValidity, refreshTokenValidity,
+        validateTokenValidityLimits(accessTokenValidity, idTokenValidity, normalizedRefreshTokenValidity,
                 copiedTokenValidityUnits);
 
         UserPoolClient client = new UserPoolClient();
@@ -1312,12 +1313,12 @@ public class CognitoService implements ResourceProvider {
         Integer effectiveIdTokenValidity = idTokenValidity != null
                 ? idTokenValidity
                 : client.getIdTokenValidity();
-        Integer effectiveRefreshTokenValidity = refreshTokenValidity != null
-                ? normalizeRefreshTokenValidity(refreshTokenValidity)
-                : client.getRefreshTokenValidity();
         Map<String, String> effectiveTokenValidityUnits = tokenValidityUnits != null
                 ? copyStringMap(tokenValidityUnits)
                 : client.getTokenValidityUnits();
+        Integer effectiveRefreshTokenValidity = refreshTokenValidity != null
+                ? normalizeRefreshTokenValidity(refreshTokenValidity, effectiveTokenValidityUnits)
+                : client.getRefreshTokenValidity();
         List<String> effectiveLogoutUrls = logoutURLs != null
                 ? normalizeStringList(logoutURLs)
                 : client.getLogoutURLs();
@@ -1335,8 +1336,7 @@ public class CognitoService implements ResourceProvider {
                 effectiveTokenValidityUnits
         );
         validateTokenValidityLimits(effectiveAccessTokenValidity, effectiveIdTokenValidity,
-                refreshTokenValidity != null ? refreshTokenValidity : client.getRefreshTokenValidity(),
-                effectiveTokenValidityUnits);
+                effectiveRefreshTokenValidity, effectiveTokenValidityUnits);
 
         if (clientName != null) client.setClientName(clientName);
         if (allowedOAuthFlowsUserPoolClient != null) {
@@ -4919,11 +4919,10 @@ public class CognitoService implements ResourceProvider {
     /**
      * AWS: access and ID tokens "Must be set to a value between 5 minutes and 1 day", refresh tokens
      * "between 60 minutes and 3,650 days", each in its TokenValidityUnits unit: hours for access and ID
-     * tokens and days for refresh tokens when the client names none. A refresh token validity of 0 is
-     * AWS's 30-day default. Runs after {@link #validateTokenValidityUnits}, so every unit is a known one.
-     * {@code floci.services.cognito.enforce-token-validity-limits=false} turns it off.
-     *
-     * @param refreshTokenValidity the value as the caller gave it, before 0 becomes the default
+     * tokens and days for refresh tokens when the client names none. Runs after
+     * {@link #validateTokenValidityUnits}, so every unit is a known one, and after
+     * {@link #normalizeRefreshTokenValidity}, so a refresh token validity of 0 is already AWS's 30-day
+     * default. {@code floci.services.cognito.enforce-token-validity-limits=false} turns it off.
      */
     private void validateTokenValidityLimits(Integer accessTokenValidity, Integer idTokenValidity,
                                              Integer refreshTokenValidity, Map<String, String> tokenValidityUnits) {
@@ -4935,10 +4934,8 @@ public class CognitoService implements ResourceProvider {
                         MIN_ACCESS_AND_ID_TOKEN_VALIDITY, MAX_ACCESS_AND_ID_TOKEN_VALIDITY)
                 || outsideLimits(idTokenValidity, tokenValidityUnit(tokenValidityUnits, "IdToken", "hours"),
                         MIN_ACCESS_AND_ID_TOKEN_VALIDITY, MAX_ACCESS_AND_ID_TOKEN_VALIDITY)
-                || (refreshTokenValidity != null && refreshTokenValidity != 0
-                        && outsideLimits(refreshTokenValidity,
-                                tokenValidityUnit(tokenValidityUnits, "RefreshToken", "days"),
-                                MIN_REFRESH_TOKEN_VALIDITY, MAX_REFRESH_TOKEN_VALIDITY));
+                || outsideLimits(refreshTokenValidity, tokenValidityUnit(tokenValidityUnits, "RefreshToken", "days"),
+                        MIN_REFRESH_TOKEN_VALIDITY, MAX_REFRESH_TOKEN_VALIDITY);
         if (outOfRange) {
             // AWS's message names neither the token nor the limit.
             throw new AwsException("InvalidParameterException", "Invalid range for token validity.", 400);
@@ -4963,11 +4960,22 @@ public class CognitoService implements ResourceProvider {
         return validity.compareTo(min) < 0 || validity.compareTo(max) > 0;
     }
 
-    private Integer normalizeRefreshTokenValidity(Integer value) {
-        if (value != null && value == 0) {
-            return DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS;
+    /**
+     * AWS: "You can't set RefreshTokenValidity to 0. If you do, Amazon Cognito overrides the value with the
+     * default value of 30 days." The 30 days are kept in the client's refresh token unit, so a client in
+     * minutes stores 43200 rather than 30 minutes.
+     */
+    private Integer normalizeRefreshTokenValidity(Integer value, Map<String, String> tokenValidityUnits) {
+        if (value == null || value != 0) {
+            return value;
         }
-        return value;
+        Duration defaultValidity = Duration.ofDays(DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS);
+        return switch (tokenValidityUnit(tokenValidityUnits, "RefreshToken", "days")) {
+            case "seconds" -> (int) defaultValidity.toSeconds();
+            case "minutes" -> (int) defaultValidity.toMinutes();
+            case "hours" -> (int) defaultValidity.toHours();
+            default -> DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS;
+        };
     }
 
     private List<ResourceServerScope> normalizeScopes(List<ResourceServerScope> scopes) {
