@@ -26,7 +26,9 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
@@ -459,6 +461,24 @@ class AutoScalingServiceTest {
         assertEquals(1, secondPage.instanceRefreshes().size());
         assertEquals(first.getInstanceRefreshId(), secondPage.instanceRefreshes().getFirst().getInstanceRefreshId());
         assertNull(secondPage.nextToken());
+    }
+
+    // StorageBackedMap snapshots keys and reads values lazily, so a group deleted mid-read
+    // surfaces as a null value; DescribeTags must skip it rather than fail.
+    @Test
+    void describeTagsSkipsAGroupDeletedDuringTheRead() throws Exception {
+        service.createOrUpdateTags(REGION, "test-asg", "auto-scaling-group", Map.of("k", "v"), Map.of());
+        Field field = AutoScalingService.class.getDeclaredField("groups");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Map<String, AutoScalingGroup> live = (Map<String, AutoScalingGroup>) field.get(service);
+        Map<String, AutoScalingGroup> withVanished = new HashMap<>(live);
+        withVanished.put(REGION + "::vanished", null);
+        field.set(service, withVanished);
+
+        AutoScalingService.TagPage page = service.describeTags(REGION, Map.of(), null, null);
+
+        assertEquals(List.of("k"), page.tags().stream().map(AutoScalingService.TagDescription::key).toList());
     }
 
     @Test

@@ -11,6 +11,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.math.BigInteger;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -1464,7 +1465,7 @@ public class AutoScalingQueryHandler {
             int dot = rest.indexOf('.');
             String index = dot < 0 ? rest : rest.substring(0, dot);
             if (!index.isEmpty() && index.chars().allMatch(Character::isDigit)
-                    && Integer.parseInt(index) > contiguous) {
+                    && new BigInteger(index).compareTo(BigInteger.valueOf(contiguous)) > 0) {
                 throw new AwsException("ValidationError",
                         "Parameter " + key + " follows a missing member index.", 400);
             }

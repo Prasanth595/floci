@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
@@ -135,7 +136,7 @@ class AutoScalingDescribeTagsIntegrationTest {
                 .formParam("Filters.member.1.Values.member.1", "AsgId")
             .when().post("/")
             .then().statusCode(400)
-                .body(org.hamcrest.Matchers.containsString("ValidationError"));
+                .body(containsString("ValidationError"));
     }
 
     @Test
@@ -144,7 +145,7 @@ class AutoScalingDescribeTagsIntegrationTest {
                 .formParam("MaxRecords", "abc")
             .when().post("/")
             .then().statusCode(400)
-                .body(org.hamcrest.Matchers.containsString("ValidationError"));
+                .body(containsString("ValidationError"));
     }
 
     @Test
@@ -154,13 +155,84 @@ class AutoScalingDescribeTagsIntegrationTest {
                 .formParam("Filters.member.2.Values.member.1", "AsgId")
             .when().post("/")
             .then().statusCode(400)
-                .body(org.hamcrest.Matchers.containsString("ValidationError"));
+                .body(containsString("ValidationError"));
         describe()
                 .formParam("Filters.member.1.Name", "key")
                 .formParam("Filters.member.1.Values.member.2", "AsgId")
             .when().post("/")
             .then().statusCode(400)
-                .body(org.hamcrest.Matchers.containsString("ValidationError"));
+                .body(containsString("ValidationError"));
+    }
+
+    @Test
+    void oversizedFilterIndexIsAValidationErrorNotAServerError() {
+        describe()
+                .formParam("Filters.member.99999999999.Name", "key")
+            .when().post("/")
+            .then().statusCode(400)
+                .body(containsString("ValidationError"));
+        describe()
+                .formParam("Filters.member.1.Name", "key")
+                .formParam("Filters.member.1.Values.member.99999999999", "AsgId")
+            .when().post("/")
+            .then().statusCode(400)
+                .body(containsString("ValidationError"));
+    }
+
+    // A tag deleted from an already-returned page must not shift the next page past an unread tag.
+    @Test
+    void nextTokenSurvivesATagDeletedBeforeTheCursor() {
+        String group = "describe-tags-cursor";
+        createGroup(group, "k1", "v", false);
+        given()
+                .formParam("Action", "CreateOrUpdateTags")
+                .formParam("Tags.member.1.ResourceId", group)
+                .formParam("Tags.member.1.ResourceType", "auto-scaling-group")
+                .formParam("Tags.member.1.Key", "k2")
+                .formParam("Tags.member.1.Value", "v")
+                .formParam("Tags.member.2.ResourceId", group)
+                .formParam("Tags.member.2.ResourceType", "auto-scaling-group")
+                .formParam("Tags.member.2.Key", "k3")
+                .formParam("Tags.member.2.Value", "v")
+                .header("Authorization", AUTH)
+            .when().post("/")
+            .then().statusCode(200);
+
+        XmlPath first = describe()
+                .formParam("Filters.member.1.Name", "auto-scaling-group")
+                .formParam("Filters.member.1.Values.member.1", group)
+                .formParam("MaxRecords", "2")
+            .when().post("/")
+            .then().statusCode(200).extract().xmlPath();
+        assertEquals(List.of("k1", "k2"), first.getList(ROOT + ".Key"));
+        String token = first.getString("DescribeTagsResponse.DescribeTagsResult.NextToken");
+
+        given()
+                .formParam("Action", "DeleteTags")
+                .formParam("Tags.member.1.ResourceId", group)
+                .formParam("Tags.member.1.ResourceType", "auto-scaling-group")
+                .formParam("Tags.member.1.Key", "k1")
+                .header("Authorization", AUTH)
+            .when().post("/")
+            .then().statusCode(200);
+
+        XmlPath second = describe()
+                .formParam("Filters.member.1.Name", "auto-scaling-group")
+                .formParam("Filters.member.1.Values.member.1", group)
+                .formParam("MaxRecords", "2")
+                .formParam("NextToken", token)
+            .when().post("/")
+            .then().statusCode(200).extract().xmlPath();
+        assertEquals(List.of("k3"), second.getList(ROOT + ".Key"));
+    }
+
+    @Test
+    void garbageNextTokenIsInvalidNextToken() {
+        describe()
+                .formParam("NextToken", "!!not-a-token!!")
+            .when().post("/")
+            .then().statusCode(400)
+                .body(containsString("InvalidNextToken"));
     }
 
     private static RequestSpecification describe() {

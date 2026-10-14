@@ -555,7 +555,8 @@ public class AutoScalingService {
     }
 
     // AWS: values inside one filter are ORed, separate filters are ANDed; only these four
-    // filter names exist. Ordered by group then key so NextToken offsets stay stable.
+    // filter names exist. Ordered by (group, key); NextToken is the last pair returned, so tags
+    // added or removed between pages neither skip nor repeat an entry.
     public TagPage describeTags(String region, Map<String, List<String>> filters,
                                 Integer maxRecords, String nextToken) {
         for (String name : filters.keySet()) {
@@ -563,9 +564,10 @@ public class AutoScalingService {
                 throw new AwsException("ValidationError", "Filter name '" + name + "' is not valid.", 400);
             }
         }
-        int offset = parseNextToken(nextToken);
+        String[] after = parseTagCursor(nextToken);
         int limit = maxRecords != null ? Math.min(Math.max(maxRecords, 1), 100) : 50;
         List<TagDescription> matches = groups.values().stream()
+                .filter(Objects::nonNull) // group deleted between key snapshot and value read
                 .filter(g -> region.equals(g.getRegion()))
                 .sorted(Comparator.comparing(AutoScalingGroup::getAutoScalingGroupName))
                 .flatMap(g -> new TreeMap<>(g.getTags()).entrySet().stream()
@@ -575,12 +577,32 @@ public class AutoScalingService {
                         && matchesFilter(filters, "key", t.key())
                         && matchesFilter(filters, "value", t.value())
                         && matchesFilter(filters, "propagate-at-launch", String.valueOf(t.propagateAtLaunch())))
+                .filter(t -> after == null || t.resourceId().compareTo(after[0]) > 0
+                        || (t.resourceId().equals(after[0]) && t.key().compareTo(after[1]) > 0))
                 .collect(Collectors.toList());
-        if (offset > matches.size()) {
-            throw new AwsException("InvalidNextToken", "The NextToken value is not valid.", 400);
+        if (matches.size() <= limit) {
+            return new TagPage(matches, null);
         }
-        int end = Math.min(offset + limit, matches.size());
-        return new TagPage(matches.subList(offset, end), end < matches.size() ? String.valueOf(end) : null);
+        TagDescription last = matches.get(limit - 1);
+        String token = Base64.getUrlEncoder().withoutPadding().encodeToString(
+                (last.resourceId() + "\0" + last.key()).getBytes(StandardCharsets.UTF_8));
+        return new TagPage(matches.subList(0, limit), token);
+    }
+
+    private static String[] parseTagCursor(String nextToken) {
+        if (nextToken == null || nextToken.isBlank()) {
+            return null;
+        }
+        try {
+            String[] cursor = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8)
+                    .split("\0", 2);
+            if (cursor.length == 2) {
+                return cursor;
+            }
+        } catch (IllegalArgumentException ignored) {
+            // falls through to InvalidNextToken
+        }
+        throw new AwsException("InvalidNextToken", "The NextToken value is not valid.", 400);
     }
 
     private static boolean matchesFilter(Map<String, List<String>> filters, String name, String actual) {
