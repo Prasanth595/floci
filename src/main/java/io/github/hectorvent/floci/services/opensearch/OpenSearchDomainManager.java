@@ -117,6 +117,10 @@ public class OpenSearchDomainManager {
                 .withEnv("discovery.type", "single-node")
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withLogRotation()
+                // The OpenSearch image's entrypoint is a bash script that runs the server as its
+                // child rather than exec'ing it. As PID 1 that script ignores SIGTERM, so every
+                // DeleteDomain, and every shutdown for each domain, waited out the whole stop timeout.
+                .withInit()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "opensearch", domain.getDomainName(), regionResolver.getAccountId(),
                         regionResolver.getDefaultRegion()));
