@@ -16,10 +16,10 @@ import jakarta.ws.rs.core.Response;
  * Browser-facing endpoints that launch and redirect to the floci-ui sidecar.
  *
  * <ul>
- *   <li>{@code GET /_floci/ui} — kicks off the sidecar start (async) and returns the
+ *   <li>{@code GET /_floci/ui}: kicks off the sidecar start (async) and returns the
  *       landing page, which shows its wait view on this path: it polls {@code /status}
  *       and redirects when ready.</li>
- *   <li>{@code GET /_floci/ui/status} — JSON {@code {ready, url, error}} the
+ *   <li>{@code GET /_floci/ui/status}: JSON {@code {ready, url, error}} the
  *       interstitial polls.</li>
  * </ul>
  */

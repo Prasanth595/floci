@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Floci — local AWS emulator</title>
+  <title>Floci: local AWS emulator</title>
   <script>
     // One file, two views: the dashboard, and the "starting Floci UI" wait page served at /_floci/ui.
     document.documentElement.dataset.view =
@@ -322,10 +322,10 @@
     <div class="block">
       <h2>Runtime</h2>
       <dl class="facts" id="runtime">
-        <div><dt>Version</dt><dd id="r-version">—</dd></div>
-        <div><dt>Edition</dt><dd id="r-edition">—</dd></div>
-        <div><dt>DynamoDB</dt><dd id="r-ddb">—</dd></div>
-        <div><dt>Floci UI</dt><dd class="plain" id="r-ui">—</dd></div>
+        <div><dt>Version</dt><dd id="r-version">-</dd></div>
+        <div><dt>Edition</dt><dd id="r-edition">-</dd></div>
+        <div><dt>DynamoDB</dt><dd id="r-ddb">-</dd></div>
+        <div><dt>Floci UI</dt><dd class="plain" id="r-ui">-</dd></div>
       </dl>
     </div>
   </section>
@@ -639,9 +639,9 @@
     function renderNewsGate() {
       $("news-off").hidden = true;
       $("news-body").innerHTML = '<div class="gate">' +
-              "<p>News is off. This page only talks to your local emulator until you say otherwise.</p>" +
-              "<p>Turning it on fetches release notes and announcements from <code>" + escapeHtml(newsHost) +
-              "</code> each time you open this page. Nothing about your emulator is sent.</p>" +
+              "<p>News is off. This page fetches nothing from <code>" + escapeHtml(newsHost) + "</code> until you turn it on.</p>" +
+              "<p>Turning it on fetches release notes and announcements each time you open this page. " +
+              "Nothing about your emulator is sent.</p>" +
               '<button class="btn btn-quiet" id="news-on">Turn on news</button></div>';
       $("news-on").addEventListener("click", function () { setNewsAllowed(true); loadNews(true); });
     }
@@ -653,7 +653,7 @@
               .sort(function (a, b) { return cmpVersion(b.version, a.version); })[0];
       if (!latest) { el.textContent = ""; return; }
       el.innerHTML = cmpVersion(latest.version, version) > 0
-              ? "<b>" + escapeHtml(latest.version) + " is out.</b> You're running " + escapeHtml(version) + ". Update with <b>floci update</b>, then restart."
+              ? "<b>" + escapeHtml(latest.version) + " is out.</b> You're running " + escapeHtml(version) + ". Pull the new image and restart: with the Floci CLI, <b>floci stop</b>, then <b>floci start --pull always</b>."
               : "You're running the latest release, " + escapeHtml(version) + ".";
     }
 
