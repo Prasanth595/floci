@@ -760,7 +760,6 @@ public class RdsService implements Resettable, ResourceProvider {
                 engineIdentifier = cluster.getEngineIdentifier().toLowerCase();
             }
             publicationCluster = cluster;
-            iamEnabled = cluster.isIamDatabaseAuthenticationEnabled();
             backendHost = cluster.getContainerHost();
             backendPort = cluster.getContainerPort();
             containerId = cluster.getContainerId();
@@ -839,8 +838,9 @@ public class RdsService implements Resettable, ResourceProvider {
         // The canonical cluster owns member publication and cluster changes. Standalone
         // publication and slow relay/storage work do not hold the service-wide monitor.
         synchronized (publicationCluster != null ? publicationCluster : instance) {
+            DbCluster currentCluster = null;
             if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
-                DbCluster currentCluster = findClusterForScope(accountId, effectiveRegion, dbClusterIdentifier);
+                currentCluster = findClusterForScope(accountId, effectiveRegion, dbClusterIdentifier);
                 if (currentCluster != publicationCluster) {
                     releaseProxyPort(proxyPort);
                     throw new AwsException("InvalidDBClusterStateFault",
@@ -888,18 +888,13 @@ public class RdsService implements Resettable, ResourceProvider {
                 }
             }
 
-            if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
-                DbCluster cluster = findClusterForScope(
-                        currentAccountId(), effectiveRegion, dbClusterIdentifier);
-                if (cluster != null) {
-                    cluster.getDbClusterMembers().add(id);
-                    if (cluster.resolveWriterIdentifier() == null
-                            || !cluster.getDbClusterMembers().contains(cluster.getClusterWriterIdentifier())) {
-                        cluster.setClusterWriterIdentifier(cluster.resolveWriterIdentifier());
-                    }
-                    putClusterForScope(currentAccountId(), effectiveRegion,
-                            dbClusterIdentifier, cluster);
+            if (currentCluster != null) {
+                currentCluster.getDbClusterMembers().add(id);
+                if (currentCluster.resolveWriterIdentifier() == null
+                        || !currentCluster.getDbClusterMembers().contains(currentCluster.getClusterWriterIdentifier())) {
+                    currentCluster.setClusterWriterIdentifier(currentCluster.resolveWriterIdentifier());
                 }
+                putClusterForScope(accountId, effectiveRegion, dbClusterIdentifier, currentCluster);
             }
 
             instance.setStatus(DbInstanceStatus.AVAILABLE);
