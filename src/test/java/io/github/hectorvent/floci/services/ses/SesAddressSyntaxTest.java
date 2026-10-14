@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The address forms of {@link SesAddressSyntax#violation(String)}. The four messages and the
@@ -125,5 +126,54 @@ class SesAddressSyntaxTest {
         assertEquals(400, e.getHttpStatus());
         assertEquals(MISSING_DOMAIN, e.getMessage());
         assertDoesNotThrow(() -> SesAddressSyntax.require("sender@example.com"));
+    }
+
+    @Test
+    void javaMailStringRendersTheProbedForms() {
+        assertEquals("probe.example.invalid", SesAddressSyntax.javaMailString("probe.example.invalid"));
+        assertEquals("Alice <probe.example.invalid>", SesAddressSyntax.javaMailString("Alice <probe.example.invalid>"));
+        assertEquals("Alice <probe.example.invalid>", SesAddressSyntax.javaMailString("probe.example.invalid (Alice)"));
+        assertEquals("<\"probe example\">", SesAddressSyntax.javaMailString("\"probe example\""));
+        assertEquals("=?UTF-8?B?5bGx55Sw?= <probe.example.invalid>",
+                SesAddressSyntax.javaMailString("山田 <probe.example.invalid>"));
+        assertEquals("\"Alice, B\" <probe.example.invalid>",
+                SesAddressSyntax.javaMailString("\"Alice, B\" <probe.example.invalid>"));
+    }
+
+    @Test
+    void javaMailStringQuotesTheNameOnlyWhenItHoldsASpecial() {
+        assertEquals("Alice B <probe.example.invalid>",
+                SesAddressSyntax.javaMailString("\"Alice B\" <probe.example.invalid>"));
+        assertEquals("\"Alice B.\" <probe.example.invalid>",
+                SesAddressSyntax.javaMailString("Alice B. <probe.example.invalid>"));
+        assertEquals("\"Alice \\\"B\\\"\" <probe.example.invalid>",
+                SesAddressSyntax.javaMailString("\"Alice \\\"B\\\"\" <probe.example.invalid>"));
+    }
+
+    @Test
+    void javaMailStringKeepsAnEncodedWordAndPrefersTheDisplayNameToAComment() {
+        assertEquals("=?UTF-8?B?5bGx55Sw?= <probe.example.invalid>",
+                SesAddressSyntax.javaMailString("=?UTF-8?B?5bGx55Sw?= <probe.example.invalid>"));
+        assertEquals("Alice <probe.example.invalid>",
+                SesAddressSyntax.javaMailString("Alice <probe.example.invalid> (Bob)"));
+        assertEquals("probe.example.invalid", SesAddressSyntax.javaMailString("<probe.example.invalid>"));
+    }
+
+    @Test
+    void javaMailStringEncodesAMostlyAsciiNameAsQAndSplitsALongName() {
+        assertEquals("=?UTF-8?Q?Alice_=E5=B1=B1=E7=94=B0?= <probe.example.invalid>",
+                SesAddressSyntax.javaMailString("Alice 山田 <probe.example.invalid>"));
+        String encoded = SesAddressSyntax.javaMailString("山田".repeat(20) + " <probe.example.invalid>");
+        String[] words = encoded.substring(0, encoded.indexOf(" <")).split(" ");
+        assertTrue(words.length > 1, encoded);
+        for (String word : words) {
+            assertTrue(word.startsWith("=?UTF-8?B?") && word.endsWith("?=") && word.length() <= 75, word);
+        }
+    }
+
+    @Test
+    void javaMailStringUnquotesAPhraseOnlyAtItsOuterQuotesLikeJavaMail() {
+        assertEquals("\"Alice\\\" \\\"Bob\" <probe.example.invalid>",
+                SesAddressSyntax.javaMailString("\"Alice\" \"Bob\" <probe.example.invalid>"));
     }
 }
