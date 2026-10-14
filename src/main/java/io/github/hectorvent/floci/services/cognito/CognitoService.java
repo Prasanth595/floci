@@ -1686,7 +1686,7 @@ public class CognitoService implements ResourceProvider {
     private static final String CERTIFICATE_NOT_USABLE = "The specified SSL certificate doesn't exist, "
             + "isn't in us-east-1 region, isn't valid, or doesn't include a valid certificate chain."; // partition-literal: AWS's message text
     /** The partitions where AWS documents user pool custom domains as not available. */
-    private static final Set<String> CUSTOM_DOMAIN_UNAVAILABLE_PARTITIONS = Set.of("aws-us-gov");
+    private static final Set<String> CUSTOM_DOMAIN_UNAVAILABLE_PARTITIONS = Set.of("aws-us-gov", "aws-eusc");
 
     /**
      * Creates either an Amazon Cognito prefix domain ({@code customDomainConfig == null})
@@ -1907,10 +1907,11 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
-     * User pool custom domains are not available in AWS GovCloud (US): "Custom domains for user
-     * pools are not available"
-     * (https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-cog.html). Prefix domains
-     * are. No source shows AWS's message for the refusal, so the wording is Floci's own.
+     * User pool custom domains are not available in AWS GovCloud (US) or in the AWS European
+     * Sovereign Cloud: both guides say "Custom domains for user pools are not available"
+     * (https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-cog.html,
+     * https://docs.aws.eu/esc/latest/userguide/cognito.html). Prefix domains are. No source shows
+     * AWS's message for the refusal, so the wording is Floci's own.
      */
     private static void requireCustomDomainsAvailable(String region) {
         AwsPartition partition = AwsPartitions.forRegionOrCommercial(region);

@@ -191,12 +191,20 @@ class PartitionRegionGatesIntegrationTest {
     }
 
     /**
-     * GovCloud has user pools but no custom domains for them, so a CustomDomainConfig is refused
-     * there for what it asks, before its certificate is looked at; a prefix domain is not affected.
+     * GovCloud and the European Sovereign Cloud have user pools but no custom domains for them, so a
+     * CustomDomainConfig is refused there for what it asks, before its certificate is looked at; a
+     * prefix domain is not affected.
      */
     @Test
-    void userPoolCustomDomainsAreRejectedInGovCloud() {
-        String region = "us-gov-west-1";
+    void userPoolCustomDomainsAreRejectedInGovCloudAndEusc() {
+        for (String region : List.of("us-gov-west-1", "eusc-de-east-1")) {
+            assertCustomDomainsRejected(region);
+        }
+    }
+
+    private void assertCustomDomainsRejected(String region) {
+        String partition = AwsRegions.partitionFor(region);
+        String certificateArn = "arn:" + partition + ":acm:" + region + ":000000000000:certificate/custom";
         String suffix = Long.toString(System.nanoTime(), 36);
         String poolId = cognito(region, "CreateUserPool", "{\"PoolName\":\"domain-gate-" + suffix + "\"}")
             .then().statusCode(200)
@@ -205,10 +213,10 @@ class PartitionRegionGatesIntegrationTest {
 
         cognito(region, "CreateUserPoolDomain", "{\"UserPoolId\":\"" + poolId + "\","
                 + "\"Domain\":\"auth-" + suffix + ".example.com\",\"CustomDomainConfig\":{\"CertificateArn\":"
-                + "\"arn:aws-us-gov:acm:us-gov-west-1:000000000000:certificate/custom\"}}")
+                + "\"" + certificateArn + "\"}}")
             .then().statusCode(400)
                 .body("__type", containsString("InvalidParameterException"))
-                .body("message", containsString("not available in partition aws-us-gov"));
+                .body("message", containsString("not available in partition " + partition));
 
         String prefix = "gate-" + suffix;
         cognito(region, "CreateUserPoolDomain",
@@ -219,9 +227,9 @@ class PartitionRegionGatesIntegrationTest {
 
         cognito(region, "UpdateUserPoolDomain", "{\"UserPoolId\":\"" + poolId + "\","
                 + "\"Domain\":\"" + prefix + "\",\"CustomDomainConfig\":{\"CertificateArn\":"
-                + "\"arn:aws-us-gov:acm:us-gov-west-1:000000000000:certificate/custom\"}}")
+                + "\"" + certificateArn + "\"}}")
             .then().statusCode(400)
-                .body("message", containsString("not available in partition aws-us-gov"));
+                .body("message", containsString("not available in partition " + partition));
     }
 
     @Test

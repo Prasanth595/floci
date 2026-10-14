@@ -1,11 +1,10 @@
 package io.github.hectorvent.floci.services.cognito;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.acm.AcmService;
-import io.github.hectorvent.floci.services.acm.model.Certificate;
-import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -19,15 +18,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
 
 /**
- * User pool custom domains are not available in AWS GovCloud (US), so one cannot be created or
- * configured there, while a prefix domain works in every partition that has user pools.
+ * User pool custom domains are not available in AWS GovCloud (US) or in the AWS European Sovereign
+ * Cloud, so one cannot be created or configured there, while a prefix domain works in every
+ * partition that has user pools.
  */
 class CognitoCustomDomainPartitionTest {
 
@@ -39,12 +36,7 @@ class CognitoCustomDomainPartitionTest {
     private final AcmService acmService = mock(AcmService.class);
 
     private CognitoService serviceIn(String region) {
-        when(acmService.describeCertificate(anyString(), eq("us-east-1"))).thenAnswer(invocation -> {
-            Certificate certificate = new Certificate();
-            certificate.setArn(invocation.getArgument(0));
-            certificate.setStatus(CertificateStatus.ISSUED);
-            return certificate;
-        });
+        CognitoCertificateStubs.everyCertificateIsIssued(acmService);
         return new CognitoService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -55,38 +47,39 @@ class CognitoCustomDomainPartitionTest {
         return service.createUserPool(Map.of("PoolName", "domain-pool"), region).getId();
     }
 
-    private static void assertRefused(AwsException error) {
+    private static void assertRefused(AwsException error, String region) {
         assertEquals("InvalidParameterException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
-        assertThat(error.getMessage(), containsString("not available in partition aws-us-gov"));
+        assertThat(error.getMessage(),
+                containsString("not available in partition " + AwsRegions.partitionFor(region)));
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"us-gov-west-1", "us-gov-east-1"})
-    void aCustomDomainIsRefusedInGovCloud(String region) {
+    @ValueSource(strings = {"us-gov-west-1", "us-gov-east-1", "eusc-de-east-1"})
+    void aCustomDomainIsRefusedInGovCloudAndEusc(String region) {
         CognitoService service = serviceIn(region);
         String poolId = createPool(service, region);
 
         AwsException error = assertThrows(AwsException.class,
                 () -> service.createUserPoolDomain(CUSTOM_DOMAIN, poolId, CUSTOM, null));
 
-        assertRefused(error);
+        assertRefused(error, region);
         assertTrue(service.findCustomDomain(CUSTOM_DOMAIN).isEmpty());
         // Refused before the certificate is looked at.
         verifyNoInteractions(acmService);
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"us-gov-west-1", "us-gov-east-1"})
-    void aPrefixDomainCannotBeGivenACustomDomainConfigInGovCloud(String region) {
+    @ValueSource(strings = {"us-gov-west-1", "us-gov-east-1", "eusc-de-east-1"})
+    void aPrefixDomainCannotBeGivenACustomDomainConfigInGovCloudOrEusc(String region) {
         CognitoService service = serviceIn(region);
         String poolId = createPool(service, region);
-        service.createUserPoolDomain("gov-prefix", poolId, null, null);
+        service.createUserPoolDomain("only-prefix", poolId, null, null);
 
         AwsException error = assertThrows(AwsException.class,
-                () -> service.updateUserPoolDomain("gov-prefix", poolId, CUSTOM, null));
+                () -> service.updateUserPoolDomain("only-prefix", poolId, CUSTOM, null));
 
-        assertRefused(error);
+        assertRefused(error, region);
         verifyNoInteractions(acmService);
     }
 
