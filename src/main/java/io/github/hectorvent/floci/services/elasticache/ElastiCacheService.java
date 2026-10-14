@@ -2292,7 +2292,7 @@ public class ElastiCacheService implements ResourceProvider {
 
             @Override
             public AuthMode authMode() {
-                return groups.get(groupId).map(ReplicationGroup::getAuthMode).orElse(null);
+                return groups.getForAccount(accountId, groupId).map(ReplicationGroup::getAuthMode).orElse(null);
             }
         };
     }
