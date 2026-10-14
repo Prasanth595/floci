@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -8,6 +9,7 @@ import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefresh;
+import io.github.hectorvent.floci.services.autoscaling.model.ScalingActivity;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
@@ -18,6 +20,7 @@ import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -80,7 +83,7 @@ class AutoScalingRefreshStorageTest {
         when(ec2.describeLaunchTemplateVersions(eq(REGION), eq("lt-original"), isNull(), anyList()))
                 .thenReturn(List.of(template));
         when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
-                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any())).thenReturn(reservation("i-replacement"));
+                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any())).thenReturn(reservation("i-replacement"));
     }
 
     private AutoScalingService storedService(String mode) {
@@ -128,7 +131,7 @@ class AutoScalingRefreshStorageTest {
         Reservation accepted = reservation("i-replacement");
         accepted.getInstances().getFirst().setPlacement(new Placement("us-east-1b"));
         when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
-                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any())).thenReturn(accepted);
+                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any())).thenReturn(accepted);
         InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
         reconciler.reconcile(group);
         assertEquals("i-replacement", group.getInstances().getFirst().getInstanceId());
@@ -171,7 +174,7 @@ class AutoScalingRefreshStorageTest {
         assertAll(
                 () -> verify(ec2, never()).terminateInstances(anyString(), anyList()),
                 () -> verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(),
-                        any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any()),
+                        any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any()),
                 () -> assertEquals(List.of("i-original"), group.getInstances().stream()
                         .map(AsgInstance::getInstanceId).toList()),
                 () -> assertNotEquals("Successful", service.describeInstanceRefreshes(
@@ -183,7 +186,7 @@ class AutoScalingRefreshStorageTest {
     void failedReplacementLaunchRemainsPausedAfterRestart(String mode) throws IOException {
         setUp(mode);
         when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
-                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any()))
+                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("launch unavailable"))
                 .thenReturn(reservation("i-replacement"));
         service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
@@ -199,7 +202,7 @@ class AutoScalingRefreshStorageTest {
         reconciler.reconcile(group);
         assertAll(
                 () -> verify(ec2, times(1)).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(),
-                        anyList(), any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any()),
+                        anyList(), any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any()),
                 () -> assertTrue(group.getInstances().isEmpty()));
     }
 
@@ -252,10 +255,108 @@ class AutoScalingRefreshStorageTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void failedReplacementRecordsActivityAndRetainsRetryOwnership(String mode) throws IOException {
+        setUp(mode);
+        when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
+                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any()))
+                .thenThrow(new AwsException(
+                        "InsufficientInstanceCapacity", "replacement capacity unavailable", 500))
+                .thenThrow(new AwsException("InsufficientInstanceCapacity", "replacement capacity unavailable", 500))
+                .thenThrow(new AwsException("RequestLimitExceeded", "replacement throttled", 503))
+                .thenReturn(reservation("i-replacement"));
+        InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        String token = refresh.getReplacements().getFirst().getLaunchClientToken();
+        reconciler.reconcile(group);
+        assertTrue(group.getInstances().isEmpty());
+        assertEquals("InProgress", refresh.getStatus());
+        assertEquals(token, refresh.getReplacements().getFirst().getLaunchClientToken());
+        List<ScalingActivity> failed = service.describeScalingActivities(REGION, "suspended-group").stream()
+                .filter(activity -> "Failed".equals(activity.getStatusCode())).toList();
+        assertEquals(1, failed.size());
+        assertEquals("replacement capacity unavailable", failed.getFirst().getStatusMessage());
+        assertEquals(100, failed.getFirst().getProgress());
+        assertNotNull(failed.getFirst().getEndTime());
+        reconciler.reconcile(group);
+        assertEquals(1, service.describeScalingActivities(REGION, "suspended-group").stream()
+                .filter(activity -> "Failed".equals(activity.getStatusCode())).count());
+        reconciler.reconcile(group);
+        assertEquals(List.of("replacement throttled", "replacement capacity unavailable"),
+                service.describeScalingActivities(REGION, "suspended-group").stream()
+                        .filter(activity -> "Failed".equals(activity.getStatusCode()))
+                        .map(ScalingActivity::getStatusMessage).toList());
+        restart(mode);
+        assertEquals(2, service.describeScalingActivities(REGION, "suspended-group").stream()
+                .filter(activity -> "Failed".equals(activity.getStatusCode())).count());
+        reconciler.reconcile(group);
+        reconciler.reconcile(group);
+        verify(ec2, times(4)).runInstances(eq(REGION), any(), any(), eq(1), eq(1), any(), anyList(), any(),
+                eq(token), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
+        assertEquals("Successful", service.describeInstanceRefreshes(REGION, "suspended-group", null, null, null)
+                .instanceRefreshes().getFirst().getStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void failedReplacementAllowsSiblingProgressWithOneInventoryScan(String mode) {
+        setUp(mode);
+        group.setDesiredCapacity(2);
+        AsgInstance second = new AsgInstance();
+        second.setInstanceId("i-second-original");
+        second.setLifecycleState("InService");
+        second.setHealthStatus("Healthy");
+        group.getInstances().add(second);
+        service.saveAutoScalingGroupIfPresent(group);
+        Reservation unrelated = reservation("i-unrelated");
+        unrelated.getInstances().getFirst().setClientToken("unrelated-attempt");
+        when(ec2.describeInstances(REGION, List.of(), null)).thenReturn(List.of(unrelated));
+        when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
+                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any()))
+                .thenThrow(new IllegalStateException("first replacement launch unavailable"))
+                .thenReturn(reservation("i-sibling"))
+                .thenReturn(reservation("i-retry"));
+        InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        String token = refresh.getReplacements().getFirst().getLaunchClientToken();
+        reconciler.reconcile(group);
+        assertEquals(List.of("i-sibling"), group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+        assertEquals("InProgress", refresh.getStatus());
+        assertEquals(token, refresh.getReplacements().getFirst().getLaunchClientToken());
+        assertEquals("first replacement launch unavailable", service.describeScalingActivities(REGION, "suspended-group")
+                .stream().filter(activity -> "Failed".equals(activity.getStatusCode())).findFirst().orElseThrow()
+                .getStatusMessage());
+        verify(ec2, times(1)).describeInstances(REGION, List.of(), null);
+        reconciler.reconcile(group);
+        verify(ec2, times(2)).describeInstances(REGION, List.of(), null);
+        assertEquals(List.of("i-sibling", "i-retry"),
+                group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+        reconciler.reconcile(group);
+        assertEquals("Successful", refresh.getStatus());
+        verify(ec2, times(2)).describeInstances(REGION, List.of(), null);
+    }
+
+    @Test
+    void refreshCleanupFailureRetainsOwnershipAndPropagates() {
+        setUp("persistent");
+        InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        String token = refresh.getReplacements().getFirst().getLaunchClientToken();
+        AutoScalingService intercepted = spy(service);
+        doReturn(false).when(intercepted).saveAutoScalingGroupIfPresent(group);
+        IllegalStateException cleanupFailure = new IllegalStateException("cleanup refused");
+        when(ec2.terminateInstances(REGION, List.of("i-replacement"))).thenThrow(cleanupFailure);
+        AutoScalingReconciler worker = new AutoScalingReconciler(intercepted, ec2, mock(ElbV2Service.class));
+        assertSame(cleanupFailure, assertThrows(IllegalStateException.class, () -> worker.reconcile(group)));
+        assertEquals(token, refresh.getReplacements().getFirst().getLaunchClientToken());
+        assertEquals("InProgress", refresh.getStatus());
+        assertNull(refresh.getReplacements().getFirst().getReplacementInstanceId());
+        assertEquals(List.of("i-replacement"), group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
     void launchRetryResumesWithSavedToken(String mode) throws IOException {
         setUp(mode);
         when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
-                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any()))
+                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("launch unavailable"))
                 .thenReturn(reservation("i-replacement"));
         InstanceRefresh refresh = service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
@@ -265,7 +366,7 @@ class AutoScalingRefreshStorageTest {
         reconciler.reconcile(group);
         reconciler.reconcile(group);
         verify(ec2, times(2)).runInstances(eq(REGION), any(), any(), eq(1), eq(1), any(), anyList(), any(),
-                eq(token), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any());
+                eq(token), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
         verify(ec2, times(1)).terminateInstances(REGION, List.of("i-original"));
         assertEquals("Successful", service.describeInstanceRefreshes(REGION, "suspended-group", null, null, null)
                 .instanceRefreshes().getFirst().getStatus());
@@ -285,7 +386,7 @@ class AutoScalingRefreshStorageTest {
         reconciler.reconcile(group);
         assertEquals(List.of("i-recovered"), group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
         verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
-                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any());
+                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
         reconciler.reconcile(group);
         assertEquals(1, group.getInstances().size());
     }
@@ -302,7 +403,7 @@ class AutoScalingRefreshStorageTest {
         verify(ec2).terminateInstances(REGION, List.of("i-original"));
         assertTrue(group.getInstances().isEmpty());
         verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
-                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any());
+                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
     }
 
     @ParameterizedTest
@@ -317,7 +418,7 @@ class AutoScalingRefreshStorageTest {
         reconciler.reconcile(group);
         verify(ec2, never()).terminateInstances(anyString(), anyList());
         verify(ec2).runInstances(eq(REGION), any(), any(), eq(1), eq(1), any(), anyList(), any(), isNull(),
-                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any());
+                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
         assertEquals(2, group.getInstances().size());
     }
 
@@ -332,7 +433,7 @@ class AutoScalingRefreshStorageTest {
         reconciler.reconcile(group);
         verify(ec2).terminateInstances(REGION, List.of("i-original"));
         verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
-                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any());
+                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
         assertTrue(group.getInstances().isEmpty());
         assertEquals("Successful", service.describeInstanceRefreshes(REGION, "suspended-group", null, null, null)
                 .instanceRefreshes().getFirst().getStatus());
@@ -349,7 +450,7 @@ class AutoScalingRefreshStorageTest {
         reconciler.reconcile(group);
         assertTrue(group.getInstances().isEmpty());
         verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
-                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any());
+                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
         service.resumeProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
         restart(mode);
         reconciler.reconcile(group);
@@ -379,7 +480,7 @@ class AutoScalingRefreshStorageTest {
         assertEquals("i-recovered", restored.getReplacements().getFirst().getReplacementInstanceId());
         assertEquals("Successful", restored.getStatus());
         verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
-                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any());
+                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
     }
 
     @ParameterizedTest
@@ -451,7 +552,7 @@ class AutoScalingRefreshStorageTest {
         verify(ec2, never()).terminateInstances(anyString(), argThat(ids -> ids.contains(detachedId)));
         if (decrement) {
             verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
-                    any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any());
+                    any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
         }
         assertEquals("Successful", restored.getStatus());
     }
@@ -470,7 +571,7 @@ class AutoScalingRefreshStorageTest {
         List<Reservation> launched = new ArrayList<>();
         when(ec2.describeInstances(REGION, List.of(), null)).thenAnswer(invocation -> List.copyOf(launched));
         when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
-                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any())).thenAnswer(invocation -> {
+                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any())).thenAnswer(invocation -> {
                     Reservation accepted = reservation("i-accepted");
                     accepted.getInstances().getFirst().setClientToken(invocation.getArgument(8));
                     accepted.getInstances().getFirst().setInstanceType("t3.micro");
@@ -503,7 +604,7 @@ class AutoScalingRefreshStorageTest {
                 () -> assertEquals("t3.micro", recovered.getInstanceType()),
                 () -> assertEquals("us-east-1a", recovered.getAvailabilityZone()));
         verify(ec2, times(1)).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
-                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any());
+                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
     }
 
     @ParameterizedTest
@@ -530,7 +631,7 @@ class AutoScalingRefreshStorageTest {
                 () -> assertNull(recovered.getLaunchTemplateName()),
                 () -> assertNull(recovered.getLaunchTemplateVersion()));
         verify(ec2, never()).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
-                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any());
+                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
     }
 
     @ParameterizedTest
@@ -546,7 +647,7 @@ class AutoScalingRefreshStorageTest {
         service.saveAutoScalingGroupIfPresent(group);
         when(ec2.describeInstances(REGION, List.of(), null)).thenReturn(List.of());
         when(ec2.runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(), any(),
-                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any()))
+                anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any()))
                 .thenReturn(reservation("i-first-replacement"))
                 .thenThrow(new IllegalStateException("Second launch unavailable"))
                 .thenReturn(reservation("i-second-replacement"));
@@ -565,7 +666,7 @@ class AutoScalingRefreshStorageTest {
         assertEquals(1, restored.getInstancesToUpdate());
         assertEquals("Complete", restored.getReplacements().getFirst().getPhase());
         verify(ec2, times(2)).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
-                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any());
+                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
         service.resumeProcesses(REGION, "suspended-group", List.of("InstanceRefresh"));
         reconciler.reconcile(group);
         reconciler.reconcile(group);
@@ -574,7 +675,7 @@ class AutoScalingRefreshStorageTest {
         assertEquals(List.of("i-first-replacement", "i-second-replacement"), group.getInstances().stream()
                 .map(AsgInstance::getInstanceId).toList());
         verify(ec2, times(3)).runInstances(eq(REGION), any(), any(), anyInt(), anyInt(), any(), anyList(), any(),
-                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any());
+                any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
         verify(ec2).terminateInstances(REGION, List.of("i-original", "i-second"));
     }
 

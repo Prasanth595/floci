@@ -93,6 +93,10 @@ class AutoScalingRefreshSuspensionIntegrationTest {
                     .formParam("Action", configuration ? "CreateLaunchConfiguration" : "CreateLaunchTemplate")
                     .formParam(configuration ? "LaunchConfigurationName" : "LaunchTemplateName", name);
             String prefix = configuration ? "" : "LaunchTemplateData.";
+            if (!configuration) {
+                create.formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+                        .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp2");
+            }
             create.formParam(prefix + "ImageId", "ami-amazonlinux2023")
                     .formParam(prefix + "InstanceType", "t3.micro").formParam(prefix + "UserData", encoded)
                     .post("/").then().statusCode(200);
@@ -113,6 +117,7 @@ class AutoScalingRefreshSuspensionIntegrationTest {
                     reconcileTwice();
                     String original = group(name).xmlPath().getString(GROUP + ".Instances.member.InstanceId");
                     assertEquals(subnets.getFirst(), ec2.getInstance("us-east-1", original).orElseThrow().getSubnetId());
+                    assertEquals(configuration ? "gp3" : "gp2", rootVolumeType(original));
                     request("UpdateAutoScalingGroup").formParam("AutoScalingGroupName", name)
                             .formParam("VPCZoneIdentifier", String.join(",", subnets))
                             .post("/").then().statusCode(200);
@@ -124,6 +129,7 @@ class AutoScalingRefreshSuspensionIntegrationTest {
                     assertEquals(1, current.xmlPath().getList(GROUP + ".Instances.member").size());
                     String replacement = current.xmlPath().getString(GROUP + ".Instances.member.InstanceId");
                     assertNotEquals(original, replacement);
+                    assertEquals(configuration ? "gp3" : "gp2", rootVolumeType(replacement));
                     assertEquals("terminated", instanceState(original));
                     assertEquals(subnets.getLast(), ec2.getInstance("us-east-1", replacement).orElseThrow().getSubnetId());
                     assertEquals("us-east-1b", current.xmlPath().getString(GROUP + ".Instances.member.AvailabilityZone"));
@@ -211,6 +217,13 @@ class AutoScalingRefreshSuspensionIntegrationTest {
                 }
             }
         }
+    }
+
+    private String rootVolumeType(String instanceId) {
+        String volumeId = ec2.getInstance("us-east-1", instanceId).orElseThrow().getRootVolumeId();
+        return given().header("Authorization", auth("ec2")).formParam("Action", "DescribeVolumes")
+                .formParam("VolumeId.1", volumeId).post("/").then().statusCode(200)
+                .extract().xmlPath().getString("DescribeVolumesResponse.volumeSet.item.volumeType");
     }
 
     private static String accountRefreshStatus(String account, String name) {

@@ -49,8 +49,12 @@ after a launch error and rebalancing without a capacity increase are not impleme
 
 AWS launch errors appear as failed scaling activities after preserving partial
 launches. Repeated identical failures reuse the recorded activity, following the
-scale-in behavior, and do not complete an instance refresh. Unexpected runtime,
-save and cleanup failures still propagate.
+scale-in behavior, and do not complete an instance refresh. Unexpected runtime
+failures in ordinary scale-out, and save and cleanup failures, still propagate.
+Refresh launch failures retain the original replacement attempt and appear as
+failed scaling activities while other replacements can continue. Refresh and
+ordinary launches share the same launch settings, including template block-device
+mappings; accepted refresh launches keep their recorded source identity.
 
 For groups configured only with Availability Zones, Floci preserves its unpinned
 EC2 launch behavior and counts each member under the requested zone. This permits
