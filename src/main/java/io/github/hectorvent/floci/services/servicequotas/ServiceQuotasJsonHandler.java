@@ -35,11 +35,12 @@ public class ServiceQuotasJsonHandler {
             case "RequestServiceQuotaIncrease" -> handleRequestServiceQuotaIncrease(request, region, accountId);
             case "GetRequestedServiceQuotaChange" ->
                     Response.ok(service.getRequestedServiceQuotaChange(
-                            stringOrNull(request, "RequestId"))).build();
+                            stringOrNull(request, "RequestId"), region)).build();
             case "ListRequestedServiceQuotaChangeHistoryByQuota" ->
                     Response.ok(service.listRequestedServiceQuotaChangeHistoryByQuota(
                             stringOrNull(request, "ServiceCode"), stringOrNull(request, "QuotaCode"),
-                            stringOrNull(request, "NextToken"), integerOrNull(request, "MaxResults"))).build();
+                            stringOrNull(request, "NextToken"), integerOrNull(request, "MaxResults"),
+                            region)).build();
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",
                             "Unknown operation: ServiceQuotasV20190624." + action))

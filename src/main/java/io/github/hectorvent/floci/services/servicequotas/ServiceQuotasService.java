@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 
@@ -94,7 +95,7 @@ public class ServiceQuotasService {
         if (quotaCodeFilter != null && !quotaCodeFilter.isEmpty()) {
             quotas = quotas.stream().filter(q -> q.quotaCode().equals(quotaCodeFilter)).toList();
         }
-        Page page = paginate(quotas, nextToken, maxResults);
+        Page<QuotaDefinition> page = paginate(quotas, nextToken, maxResults);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("Quotas");
@@ -178,7 +179,7 @@ public class ServiceQuotasService {
         }
     }
 
-    private static Page paginate(List<QuotaDefinition> items, String nextToken, Integer maxResults) {
+    private static <T> Page<T> paginate(List<T> items, String nextToken, Integer maxResults) {
         if (maxResults != null && (maxResults < 1 || maxResults > 100)) {
             throw new AwsException("IllegalArgumentException",
                     "Invalid input: MaxResults must be between 1 and 100.", 400);
@@ -209,7 +210,8 @@ public class ServiceQuotasService {
     }
 
     public ObjectNode listRequestedServiceQuotaChangeHistoryByQuota(String serviceCode, String quotaCode,
-                                                                    String nextToken, Integer maxResults) {
+                                                                    String nextToken, Integer maxResults,
+                                                                    String region) {
         requireServiceCode(serviceCode);
         if (quotaCode == null || quotaCode.isBlank()) {
             throw new AwsException("IllegalArgumentException", "Invalid input: QuotaCode must not be empty.", 400);
@@ -219,21 +221,29 @@ public class ServiceQuotasService {
             throw new AwsException("NoSuchResourceException",
                     "The request failed because the specified service quota does not exist.", 400);
         }
-        if (maxResults != null && (maxResults < 1 || maxResults > 100)) {
-            throw new AwsException("IllegalArgumentException", "Invalid input: MaxResults must be between 1 and 100.", 400);
+        List<ObjectNode> matching = new ArrayList<>();
+        for (ObjectNode requested : requestedQuotaStore.scan(key -> key.startsWith(region + "/"))) {
+            if (serviceCode.equals(requested.path("ServiceCode").asText())
+                    && quotaCode.equals(requested.path("QuotaCode").asText())) {
+                matching.add(requested);
+            }
         }
-        if (nextToken != null && !nextToken.isEmpty()) {
-            throw new AwsException("InvalidPaginationTokenException", "Invalid NextToken.", 400);
-        }
+        Page<ObjectNode> page = paginate(matching, nextToken, maxResults);
         ObjectNode response = objectMapper.createObjectNode();
-        response.putArray("RequestedQuotas");
+        ArrayNode array = response.putArray("RequestedQuotas");
+        for (ObjectNode requested : page.items()) {
+            array.add(requested.deepCopy());
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
         return response;
     }
 
     record QuotaDefinition(String quotaCode, String quotaName, double value, boolean globalQuota) {
     }
 
-    private record Page(List<QuotaDefinition> items, String nextToken) {
+    private record Page<T>(List<T> items, String nextToken) {
     }
 
     public ObjectNode requestServiceQuotaIncrease(String serviceCode, String quotaCode, Double desiredValue,
@@ -257,9 +267,7 @@ public class ServiceQuotasService {
                 .orElseThrow(() -> new AwsException("NoSuchResourceException",
                         "The request failed because the specified service quota does not exist.", 400));
 
-        CRC32 crc = new CRC32();
-        crc.update((serviceCode + "/" + quotaCode).getBytes(StandardCharsets.UTF_8));
-        String id = "%08X".formatted(crc.getValue());
+        String id = UUID.randomUUID().toString();
 
         long now = Instant.now().getEpochSecond();
 
@@ -286,19 +294,19 @@ public class ServiceQuotasService {
             requestedQuota.set("QuotaContext", context);
         }
 
-        requestedQuotaStore.put(id, requestedQuota.deepCopy());
+        requestedQuotaStore.put(region + "/" + id, requestedQuota.deepCopy());
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("RequestedQuota", requestedQuota);
         return response;
     }
 
-    public ObjectNode getRequestedServiceQuotaChange(String requestId) {
+    public ObjectNode getRequestedServiceQuotaChange(String requestId, String region) {
         if (requestId == null || requestId.isEmpty()) {
             throw new AwsException("IllegalArgumentException",
                     "Invalid input: RequestId must not be empty.", 400);
         }
-        ObjectNode requestedQuota = requestedQuotaStore.get(requestId)
+        ObjectNode requestedQuota = requestedQuotaStore.get(region + "/" + requestId)
                 .orElseThrow(() -> new AwsException("NoSuchResourceException",
                         "The request failed because the specified request ID does not exist.", 400));
         ObjectNode response = objectMapper.createObjectNode();

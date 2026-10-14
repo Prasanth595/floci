@@ -123,7 +123,7 @@ class ServiceQuotasServiceTest {
                 .withObject("RequestedQuota");
         String id = created.path("Id").asText();
 
-        ObjectNode read = service.getRequestedServiceQuotaChange(id).withObject("RequestedQuota");
+        ObjectNode read = service.getRequestedServiceQuotaChange(id, "us-east-1").withObject("RequestedQuota");
         assertEquals(id, read.path("Id").asText());
         assertEquals("codebuild", read.path("ServiceCode").asText());
         assertEquals("L-2DC20C30", read.path("QuotaCode").asText());
@@ -133,9 +133,70 @@ class ServiceQuotasServiceTest {
     }
 
     @Test
+    void repeatedRequestsForTheSameQuotaGetDistinctIds() {
+        ObjectNode first = service.requestServiceQuotaIncrease(
+                "codebuild", "L-2DC20C30", 9000.0, null, "us-east-1", ACCOUNT_ID)
+                .withObject("RequestedQuota");
+        ObjectNode second = service.requestServiceQuotaIncrease(
+                "codebuild", "L-2DC20C30", 9500.0, null, "us-east-1", ACCOUNT_ID)
+                .withObject("RequestedQuota");
+
+        String firstId = first.path("Id").asText();
+        String secondId = second.path("Id").asText();
+        assertEquals(firstId, service.getRequestedServiceQuotaChange(firstId, "us-east-1")
+                .path("RequestedQuota").path("Id").asText());
+        assertEquals(secondId, service.getRequestedServiceQuotaChange(secondId, "us-east-1")
+                .path("RequestedQuota").path("Id").asText());
+        assertEquals(9000.0, service.getRequestedServiceQuotaChange(firstId, "us-east-1")
+                .path("RequestedQuota").path("DesiredValue").asDouble());
+        assertEquals(9500.0, service.getRequestedServiceQuotaChange(secondId, "us-east-1")
+                .path("RequestedQuota").path("DesiredValue").asDouble());
+    }
+
+    @Test
+    void requestStoredInOneRegionIsNotVisibleInAnother() {
+        String id = service.requestServiceQuotaIncrease(
+                "codebuild", "L-2DC20C30", 9000.0, null, "us-east-1", ACCOUNT_ID)
+                .path("RequestedQuota").path("Id").asText();
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.getRequestedServiceQuotaChange(id, "eu-west-1"));
+        assertEquals("NoSuchResourceException", e.getErrorCode());
+    }
+
+    @Test
+    void historyListsOnlyTheRequestedQuota() {
+        service.requestServiceQuotaIncrease(
+                "codebuild", "L-2DC20C30", 9000.0, null, "us-east-1", ACCOUNT_ID);
+        service.requestServiceQuotaIncrease(
+                "lambda", "L-B99A9384", 8000.0, null, "us-east-1", ACCOUNT_ID);
+
+        JsonNode codebuild = service.listRequestedServiceQuotaChangeHistoryByQuota(
+                "codebuild", "L-2DC20C30", null, null, "us-east-1");
+        assertEquals(1, codebuild.path("RequestedQuotas").size());
+        assertEquals("codebuild", codebuild.path("RequestedQuotas").get(0).path("ServiceCode").asText());
+
+        JsonNode lambda = service.listRequestedServiceQuotaChangeHistoryByQuota(
+                "lambda", "L-B99A9384", null, null, "us-east-1");
+        assertEquals(1, lambda.path("RequestedQuotas").size());
+        assertEquals("lambda", lambda.path("RequestedQuotas").get(0).path("ServiceCode").asText());
+    }
+
+    @Test
+    void missingRequestIdThrowsIllegalArgument() {
+        AwsException empty = assertThrows(AwsException.class,
+                () -> service.getRequestedServiceQuotaChange("", "us-east-1"));
+        assertEquals("IllegalArgumentException", empty.getErrorCode());
+        assertEquals(400, empty.getHttpStatus());
+        AwsException nullId = assertThrows(AwsException.class,
+                () -> service.getRequestedServiceQuotaChange(null, "us-east-1"));
+        assertEquals("IllegalArgumentException", nullId.getErrorCode());
+    }
+
+    @Test
     void unknownRequestIdThrowsNoSuchResource() {
         AwsException e = assertThrows(AwsException.class,
-                () -> service.getRequestedServiceQuotaChange("DEADBEEF"));
+                () -> service.getRequestedServiceQuotaChange("DEADBEEF", "us-east-1"));
         assertEquals("NoSuchResourceException", e.getErrorCode());
         assertEquals(400, e.getHttpStatus());
     }
