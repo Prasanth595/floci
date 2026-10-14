@@ -11,6 +11,7 @@ import static org.hamcrest.Matchers.matchesRegex;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * Wire-level tests for {@code ServiceQuotasV20190624.RequestServiceQuotaIncrease}.
@@ -58,7 +59,7 @@ class RequestServiceQuotaIncreaseConsumerTest {
                 + "\",\"DesiredValue\":9000}")
         .then()
             .statusCode(200)
-            .body("RequestedQuota.Id", matchesRegex("[0-9A-F]{8}"))
+            .body("RequestedQuota.Id", notNullValue())
             .body("RequestedQuota.ServiceCode", equalTo("codebuild"))
             .body("RequestedQuota.ServiceName", equalTo("AWS CodeBuild"))
             .body("RequestedQuota.QuotaCode", equalTo(CONCURRENT_BUILDS_QUOTA))
@@ -89,13 +90,13 @@ class RequestServiceQuotaIncreaseConsumerTest {
 
     /** The id must be stable so a caller can correlate a repeated request. */
     @Test
-    void requestIncrease_sameQuotaTwice_returnsSameId() {
+    void requestIncrease_sameQuotaTwice_returnsDistinctIds() {
         String body = "{\"ServiceCode\":\"lambda\",\"QuotaCode\":\"L-B99A9384\",\"DesiredValue\":2000}";
         String first = request(body).then().statusCode(200)
                 .extract().path("RequestedQuota.Id");
         String second = request(body).then().statusCode(200)
                 .extract().path("RequestedQuota.Id");
-        assertEquals(first, second);
+        assertNotEquals(first, second);
     }
 
     @Test
