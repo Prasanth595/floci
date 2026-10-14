@@ -1387,7 +1387,8 @@ public class S3Service implements Resettable, ResourceProvider {
         if (decision == ResourcePolicyDecision.EXPLICIT_DENY) {
             throw accessDeniedException(bucketName, key);
         }
-        if (decision == ResourcePolicyDecision.ALLOW || decision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER) {
+        if (decision == ResourcePolicyDecision.ALLOW || decision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER
+                || decision == ResourcePolicyDecision.ALLOW_ACCOUNT) {
             return;
         }
         if (sameAccountAsOwner) {

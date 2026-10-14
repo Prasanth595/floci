@@ -29,51 +29,9 @@ class OpenSearchDomainManagerTest {
 
     @Test
     void startDomainLabelsContainerWithResourceIdentity() {
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.OpenSearchServiceConfig opensearch = mock(EmulatorConfig.OpenSearchServiceConfig.class);
-        when(config.services()).thenReturn(services);
-        when(services.opensearch()).thenReturn(opensearch);
-        when(services.dockerNetwork()).thenReturn(Optional.empty());
-        when(opensearch.proxyBasePort()).thenReturn(9400);
-        when(opensearch.proxyMaxPort()).thenReturn(9499);
-        when(opensearch.defaultImage()).thenReturn(Optional.of("opensearchproject/opensearch:2.11.0"));
-        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
-        when(config.docker()).thenReturn(docker);
-        lenient().when(docker.logMaxSize()).thenReturn("10m");
-        lenient().when(docker.logMaxFile()).thenReturn("3");
-        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
-        when(config.storage()).thenReturn(storage);
-        when(storage.hostPersistentPath()).thenReturn("floci-data");
-        when(storage.persistentPath()).thenReturn("/data");
+        Started started = startDomain("my-domain", 9400, false);
 
-        PortAllocator portAllocator = mock(PortAllocator.class);
-        when(portAllocator.allocate(9400, 9499)).thenReturn(9400);
-
-        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
-        when(lifecycleManager.createAndStart(any())).thenReturn(
-                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of(
-                        9200, new ContainerLifecycleManager.EndpointInfo("172.17.0.5", 9200))));
-
-        ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
-        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
-        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
-
-        RegionResolver regionResolver = mock(RegionResolver.class);
-        when(regionResolver.getAccountId()).thenReturn("000000000000");
-        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
-
-        OpenSearchDomainManager manager = new OpenSearchDomainManager(containerBuilder, lifecycleManager,
-                mock(ContainerDetector.class), portAllocator, config, regionResolver);
-
-        Domain domain = new Domain();
-        domain.setDomainName("my-domain");
-        domain.setEngineVersion("OpenSearch_2.11");
-
-        manager.startDomain(domain);
-
-        verify(builder).withLabels(Map.of(
+        verify(started.builder()).withLabels(Map.of(
                 "io.floci", "aws",
                 "io.floci.service", "opensearch",
                 "io.floci.resource-id", "my-domain",
@@ -90,57 +48,23 @@ class OpenSearchDomainManagerTest {
      */
     @Test
     void startDomainPublishesAHostPortEvenWhenFlociRunsInAContainer() {
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.OpenSearchServiceConfig opensearch = mock(EmulatorConfig.OpenSearchServiceConfig.class);
-        when(config.services()).thenReturn(services);
-        when(services.opensearch()).thenReturn(opensearch);
-        when(services.dockerNetwork()).thenReturn(Optional.empty());
-        when(opensearch.proxyBasePort()).thenReturn(9400);
-        when(opensearch.proxyMaxPort()).thenReturn(9499);
-        when(opensearch.defaultImage()).thenReturn(Optional.of("opensearchproject/opensearch:2.11.0"));
-        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
-        when(config.docker()).thenReturn(docker);
-        lenient().when(docker.logMaxSize()).thenReturn("10m");
-        lenient().when(docker.logMaxFile()).thenReturn("3");
-        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
-        when(config.storage()).thenReturn(storage);
-        when(storage.hostPersistentPath()).thenReturn("floci-data");
-        when(storage.persistentPath()).thenReturn("/data");
+        Started started = startDomain("host-reach", 9401, true);
 
-        PortAllocator portAllocator = mock(PortAllocator.class);
-        when(portAllocator.allocate(9400, 9499)).thenReturn(9401);
+        verify(started.portAllocator()).allocate(9400, 9499);
+        verify(started.builder()).withPortBinding(9200, 9401);
+        assertEquals("http://172.17.0.5:9200", started.domain().getEndpoint());
+        assertEquals(Integer.valueOf(9401), started.domain().getHostPort());
+    }
 
-        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
-        when(lifecycleManager.createAndStart(any())).thenReturn(
-                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of(
-                        9200, new ContainerLifecycleManager.EndpointInfo("172.17.0.5", 9200))));
+    /**
+     * The image's entrypoint keeps the server as a child of a bash PID 1, which ignores SIGTERM.
+     * Without an init process each DeleteDomain waits out the whole stop timeout.
+     */
+    @Test
+    void startDomainRunsTheContainerUnderAnInitProcess() {
+        Started started = startDomain("init", 9400, false);
 
-        ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
-        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
-        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
-
-        RegionResolver regionResolver = mock(RegionResolver.class);
-        when(regionResolver.getAccountId()).thenReturn("000000000000");
-        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
-
-        ContainerDetector containerDetector = mock(ContainerDetector.class);
-        lenient().when(containerDetector.isRunningInContainer()).thenReturn(true);
-
-        OpenSearchDomainManager manager = new OpenSearchDomainManager(containerBuilder, lifecycleManager,
-                containerDetector, portAllocator, config, regionResolver);
-
-        Domain domain = new Domain();
-        domain.setDomainName("host-reach");
-        domain.setEngineVersion("OpenSearch_2.11");
-
-        manager.startDomain(domain);
-
-        verify(portAllocator).allocate(9400, 9499);
-        verify(builder).withPortBinding(9200, 9401);
-        assertEquals("http://172.17.0.5:9200", domain.getEndpoint());
-        assertEquals(Integer.valueOf(9401), domain.getHostPort());
+        verify(started.builder()).withInit();
     }
 
     /**
@@ -206,5 +130,59 @@ class OpenSearchDomainManagerTest {
 
         verify(lifecycleManager).stopAndRemove("container-id", null);
         verify(portAllocator).release(9401);
+    }
+
+    private record Started(ContainerBuilder.Builder builder, PortAllocator portAllocator, Domain domain) {
+    }
+
+    /** Starts an OpenSearch 2.11 domain against a mocked builder and lifecycle, with no Docker. */
+    private static Started startDomain(String domainName, int hostPort, boolean flociInContainer) {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.OpenSearchServiceConfig opensearch = mock(EmulatorConfig.OpenSearchServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.opensearch()).thenReturn(opensearch);
+        when(services.dockerNetwork()).thenReturn(Optional.empty());
+        when(opensearch.proxyBasePort()).thenReturn(9400);
+        when(opensearch.proxyMaxPort()).thenReturn(9499);
+        when(opensearch.defaultImage()).thenReturn(Optional.of("opensearchproject/opensearch:2.11.0"));
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        when(config.docker()).thenReturn(docker);
+        lenient().when(docker.logMaxSize()).thenReturn("10m");
+        lenient().when(docker.logMaxFile()).thenReturn("3");
+        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        when(config.storage()).thenReturn(storage);
+        when(storage.hostPersistentPath()).thenReturn("floci-data");
+        when(storage.persistentPath()).thenReturn("/data");
+
+        PortAllocator portAllocator = mock(PortAllocator.class);
+        when(portAllocator.allocate(9400, 9499)).thenReturn(hostPort);
+
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of(
+                        9200, new ContainerLifecycleManager.EndpointInfo("172.17.0.5", 9200))));
+
+        ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
+
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
+        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+        lenient().when(containerDetector.isRunningInContainer()).thenReturn(flociInContainer);
+
+        OpenSearchDomainManager manager = new OpenSearchDomainManager(containerBuilder, lifecycleManager,
+                containerDetector, portAllocator, config, regionResolver);
+
+        Domain domain = new Domain();
+        domain.setDomainName(domainName);
+        domain.setEngineVersion("OpenSearch_2.11");
+
+        manager.startDomain(domain);
+        return new Started(builder, portAllocator, domain);
     }
 }

@@ -688,6 +688,47 @@ class IamConditionContextResolverTest {
         assertEquals(List.of("000000000000"), conditions.get("aws:PrincipalAccount"));
     }
 
+    @Test
+    void aServiceCallCarriesTheServiceAndItsSourceButNoIamPrincipal() {
+        Map<String, List<String>> conditions = IamConditionContextResolver.serviceCallContext(
+                "ses.amazonaws.com", "arn:aws:sns:eu-west-2:111122223333:events", "111122223333",
+                "arn:aws:ses:eu-west-2:444455556666:configuration-set/my-set", "444455556666");
+
+        assertEquals(Map.of(
+                "aws:PrincipalIsAWSService", List.of("true"),
+                "aws:PrincipalServiceName", List.of("ses.amazonaws.com"),
+                "aws:PrincipalServiceNamesList", List.of("ses.amazonaws.com"),
+                "aws:SourceArn", List.of("arn:aws:ses:eu-west-2:444455556666:configuration-set/my-set"),
+                "aws:SourceAccount", List.of("444455556666"),
+                "aws:SourceOwner", List.of("444455556666"),
+                "aws:ResourceAccount", List.of("111122223333"),
+                "aws:RequestedRegion", List.of("eu-west-2")), conditions);
+    }
+
+    @Test
+    void onlyACallToATopicFromAServiceSnsListsCarriesSourceOwner() {
+        Map<String, List<String>> fromS3 = IamConditionContextResolver.serviceCallContext(
+                "s3.amazonaws.com", "arn:aws:sns:eu-west-2:111122223333:events", "111122223333",
+                "arn:aws:s3:::bucket", "111122223333");
+        Map<String, List<String>> toQueue = IamConditionContextResolver.serviceCallContext(
+                "ses.amazonaws.com", "arn:aws:sqs:eu-west-2:111122223333:events", "111122223333",
+                "arn:aws:ses:eu-west-2:111122223333:configuration-set/my-set", "111122223333");
+
+        assertFalse(fromS3.containsKey("aws:SourceOwner"));
+        assertEquals(List.of("111122223333"), fromS3.get("aws:SourceAccount"));
+        assertFalse(toQueue.containsKey("aws:SourceOwner"));
+    }
+
+    @Test
+    void aServiceCallWithNoSourceLeavesTheSourceKeysOut() {
+        Map<String, List<String>> conditions = IamConditionContextResolver.serviceCallContext(
+                "ses.amazonaws.com", "arn:aws:s3:::bucket", "111122223333", null, null);
+
+        assertFalse(conditions.containsKey("aws:SourceArn"));
+        assertFalse(conditions.containsKey("aws:SourceAccount"));
+        assertEquals(List.of("111122223333"), conditions.get("aws:ResourceAccount"));
+    }
+
     private Decision decisionForEveryTarget(String policy, String action, ContainerRequestContext request) {
         Decision first = evaluator.simulateCustomPolicy(List.of(policy), action, "*",
                 resolver.resolve("ec2", action, request));

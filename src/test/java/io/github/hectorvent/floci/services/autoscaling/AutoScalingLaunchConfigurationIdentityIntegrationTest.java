@@ -12,7 +12,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 
 @QuarkusTest
 class AutoScalingLaunchConfigurationIdentityIntegrationTest {
@@ -58,6 +60,49 @@ class AutoScalingLaunchConfigurationIdentityIntegrationTest {
                 .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.metadataOptions.httpEndpoint", equalTo("enabled"))
                 .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.metadataOptions.httpPutResponseHopLimit", equalTo("2"));
     }
+    @Test
+    void refreshReplacementResolvesProfileAndPreservesRequiredMetadata() {
+        String name = "refresh-identity-" + UUID.randomUUID();
+        String arn = given().header("Authorization", AUTH.replace("/autoscaling/", "/iam/"))
+                .formParam("Action", "CreateInstanceProfile").formParam("InstanceProfileName", name)
+                .post("/").then().statusCode(200).extract().path(
+                        "CreateInstanceProfileResponse.CreateInstanceProfileResult.InstanceProfile.Arn");
+        given().header("Authorization", AUTH).formParam("Action", "CreateLaunchConfiguration")
+                .formParam("LaunchConfigurationName", name).formParam("ImageId", "ami-amazonlinux2023")
+                .formParam("InstanceType", "t3.micro").formParam("IamInstanceProfile", name)
+                .formParam("MetadataOptions.HttpTokens", "required")
+                .formParam("MetadataOptions.HttpPutResponseHopLimit", "2")
+                .post("/").then().statusCode(200);
+        given().header("Authorization", AUTH).formParam("Action", "CreateAutoScalingGroup")
+                .formParam("AutoScalingGroupName", name).formParam("LaunchConfigurationName", name)
+                .formParam("MinSize", "1").formParam("MaxSize", "1").formParam("DesiredCapacity", "1")
+                .formParam("AvailabilityZones.member.1", "us-east-1a").post("/").then().statusCode(200);
+        String instancePath = "DescribeAutoScalingGroupsResponse.DescribeAutoScalingGroupsResult"
+                + ".AutoScalingGroups.member.Instances.member.InstanceId";
+        reconciler.reconcileAll();
+        reconciler.reconcileAll();
+        String original = given().header("Authorization", AUTH).formParam("Action", "DescribeAutoScalingGroups")
+                .formParam("AutoScalingGroupNames.member.1", name).post("/").then().statusCode(200)
+                .extract().path(instancePath);
+        given().header("Authorization", AUTH).formParam("Action", "StartInstanceRefresh")
+                .formParam("AutoScalingGroupName", name).post("/").then().statusCode(200);
+        reconciler.reconcileAll();
+        reconciler.reconcileAll();
+        String replacement = given().header("Authorization", AUTH).formParam("Action", "DescribeAutoScalingGroups")
+                .formParam("AutoScalingGroupNames.member.1", name).post("/").then().statusCode(200)
+                .extract().path(instancePath);
+        assertThat(replacement, not(equalTo(original)));
+        String item = "DescribeInstancesResponse.reservationSet.item.instancesSet.item";
+        given().header("Authorization", AUTH.replace("/autoscaling/", "/ec2/")).formParam("Action", "DescribeInstances")
+                .formParam("InstanceId.1", replacement).post("/").then().statusCode(200)
+                .body(item + ".iamInstanceProfile.arn", equalTo(arn))
+                .body(item + ".metadataOptions.httpTokens", equalTo("required"))
+                .body(item + ".metadataOptions.httpPutResponseHopLimit", equalTo("2"));
+        given().header("Authorization", AUTH).formParam("Action", "DeleteAutoScalingGroup")
+                .formParam("AutoScalingGroupName", name).formParam("ForceDelete", "true")
+                .post("/").then().statusCode(200);
+    }
+
     @ParameterizedTest
     @CsvSource({"MetadataOptions.HttpTokens=invalid,ValidationError",
             "MetadataOptions.HttpEndpoint=invalid,ValidationError",
