@@ -1246,10 +1246,10 @@ requests. REST-JSON requests return HTTP 403 `AccessDeniedException`; AWS Query 
 requests retain HTTP 403 XML `AccessDenied` responses. The routed protocol determines
 the status, not just the request's content type.
 
-A REST request is authorized as the operation of the route it reached. An `X-Amz-Target` header or
-a Query `Action` field on it does not change the action it is checked as, and its path is matched
-still percent-encoded, as the router matches it, so an encoded `/` inside a parameter cannot make
-the route's rule miss.
+A REST request is authorized as the operation of the route it reached. An `X-Amz-Target` header, a
+Query `Action` field or a `smithy-protocol` header on it does not change the action it is checked
+as, and its path is matched still percent-encoded, as the router matches it, so an encoded `/`
+inside a parameter cannot make the route's rule miss.
 
 The REST routes mapped to an action are those of S3, Lambda, API Gateway, SES v2, RDS Data,
 Kinesis, EventBridge Scheduler and EventBridge Pipes. In Lambda they are the function, alias,
@@ -1936,7 +1936,9 @@ lazily-resolved `ScpProvider` exists to avoid.
 With enforcement on, a request carrying no `Authorization` header is refused with
 `403 MissingAuthenticationToken` when its wire shape names a management operation: a JSON, CBOR or
 Query request, identified by `X-Amz-Target`, an rpcv2 path or an `Action` parameter. A call routed
-to the rpcv2 endpoint is one whatever its `smithy-protocol` header says.
+to the JSON, CBOR, rpcv2 or Query endpoint is one whatever its `smithy-protocol` header or content
+type says: with `FLOCI_PROTOCOLS_STRICT_CLAIMING` off (the default), a request whose protocol
+those signals leave unclear is still served, and is judged by the endpoint that serves it.
 
 Two carve-outs, both deliberate.
 

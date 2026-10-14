@@ -156,7 +156,8 @@ public interface EmulatorConfig {
          * wire-protocol-selection guide (e.g. an unknown Smithy-Protocol header
          * value, a recognized-but-unimplemented rpc-v2-json request, or an
          * X-Amz-Target post with a foreign content type). When disabled such
-         * requests are only logged and pass through to JAX-RS matching.
+         * requests are logged and pass through to JAX-RS matching, and are then
+         * handled as the protocol of the route that serves them.
          */
         @WithDefault("false")
         boolean strictClaiming();

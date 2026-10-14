@@ -770,14 +770,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (resourceInfo == null || !AwsJsonCborController.class.equals(resourceInfo.getResourceClass())) {
             return null;
         }
-        MultivaluedMap<String, String> parameters = ctx.getUriInfo().getPathParameters();
-        String serviceId = parameters.getFirst(AwsJsonCborController.RPC_V2_SERVICE_PARAMETER);
-        String operation = parameters.getFirst(AwsJsonCborController.RPC_V2_OPERATION_PARAMETER);
-        if (serviceId == null || operation == null) {
-            return null;
-        }
-        return new ProtocolClaim(WireProtocol.RPCV2_CBOR, catalog.byCborSdkServiceId(serviceId).orElse(null),
-                operation, null);
+        return ProtocolClaimer.rpcV2RouteClaim(catalog, ctx.getUriInfo().getPathParameters());
     }
 
     /**
