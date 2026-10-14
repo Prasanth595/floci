@@ -41,6 +41,7 @@ public class RdsAuthProxy {
     private volatile boolean running;
     private ServerSocket serverSocket;
     private Thread acceptThread;
+    Duration acceptRetirementTimeout = Duration.ofSeconds(5);
 
     public RdsAuthProxy(String instanceId, String backendHost, int backendPort,
                         DatabaseEngine engine, boolean iamEnabled,
@@ -133,7 +134,7 @@ public class RdsAuthProxy {
         Thread accepting = acceptThread;
         if (accepting != null && accepting != Thread.currentThread() && accepting.isAlive()) {
             try {
-                if (!accepting.join(Duration.ofSeconds(5))) {
+                if (!accepting.join(acceptRetirementTimeout)) {
                     throw new IllegalStateException("RDS proxy accept loop did not stop for instance " + instanceId);
                 }
             } catch (InterruptedException e) {

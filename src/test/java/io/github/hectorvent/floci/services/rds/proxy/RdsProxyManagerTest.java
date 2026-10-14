@@ -80,6 +80,7 @@ class RdsProxyManagerTest {
         RdsProxyManager manager = new RdsProxyManager(
                 mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class), testConfig());
         RdsAuthProxy proxy = authProxy("proxy");
+        proxy.acceptRetirementTimeout = Duration.ofMillis(10);
         CountDownLatch release = new CountDownLatch(1);
         Thread accepting = blockedRetirement(release);
         ConcurrentHashMap<String, RdsAuthProxy> owned = registry(manager);
