@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.appconfig;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -11,6 +12,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -166,6 +168,35 @@ class AppConfigLegacyIntegrationTest {
             given().queryParam("client_id", "reader").get(selected)
                     .then().statusCode(400).body("__type", equalTo("BadRequestException"));
         }
+    }
+
+    @Test
+    void unknownApplicationOrProfileIsNotFound() {
+        String deletedApplication = given().contentType(ContentType.JSON).body(Map.of("Name", "gone-" + UUID.randomUUID()))
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        given().delete("/applications/" + deletedApplication).then().statusCode(204);
+        String otherApplication = given().contentType(ContentType.JSON).body(Map.of("Name", "other-" + UUID.randomUUID()))
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        String otherProfile = given().contentType(ContentType.JSON)
+                .body(Map.of("Name", "other-settings", "LocationUri", "hosted"))
+                .post("/applications/" + otherApplication + "/configurationprofiles")
+                .then().statusCode(201).extract().path("Id");
+
+        Map<String, String> selected = new LinkedHashMap<>();
+        selected.put("application by name",
+                "/applications/absent-" + UUID.randomUUID() + "/environments/local/configurations/settings");
+        selected.put("application by id",
+                "/applications/" + deletedApplication + "/environments/local/configurations/settings");
+        selected.put("profile by name", path(environment, "absent-settings"));
+        selected.put("profile by id", path(environment, otherProfile));
+        Map<String, String> expected = new LinkedHashMap<>();
+        Map<String, String> actual = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : selected.entrySet()) {
+            Response response = given().queryParam("client_id", "reader").get(entry.getValue());
+            expected.put(entry.getKey(), "404 ResourceNotFoundException");
+            actual.put(entry.getKey(), response.statusCode() + " " + response.path("__type"));
+        }
+        assertEquals(expected, actual);
     }
 
     @Test

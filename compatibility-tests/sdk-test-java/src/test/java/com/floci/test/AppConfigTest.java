@@ -599,6 +599,10 @@ class AppConfigTest {
                     () -> appConfig.getConfiguration(GetConfigurationRequest.builder()
                             .application(legacyAppId).environment("absent").configuration(legacyProfileId)
                             .clientId("sdk-client").build()));
+            assertThrows(ResourceNotFoundException.class,
+                    () -> appConfig.getConfiguration(GetConfigurationRequest.builder()
+                            .application(legacyAppId).environment(legacyEnvId).configuration("absent-config")
+                            .clientId("sdk-client").build()));
         } finally {
             try {
                 appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(legacyAppId).build());
