@@ -63,10 +63,9 @@ class RdsManagedSecretIntegrationTest {
                 RdsException error = assertThrows(RdsException.class, () -> rds.createDBInstance(request.build()));
                 assertEquals("InvalidParameterCombination", error.awsErrorDetails().errorCode());
                 assertEquals(400, error.statusCode());
-                if ("password".equals(field)) {
-                    assertEquals("The requested DB Instance will be a member of a DB Cluster. "
-                            + "Set master user password for the DB Cluster.", error.awsErrorDetails().errorMessage());
-                }
+                assertEquals("The requested DB Instance will be a member of a DB Cluster. "
+                        + ("password".equals(field) ? "Set master user password for the DB Cluster."
+                        : "Set master user name for the DB Cluster."), error.awsErrorDetails().errorMessage());
                 assertEquals("DBInstanceNotFound", assertThrows(RdsException.class,
                         () -> rds.describeDBInstances(value -> value.dbInstanceIdentifier(memberId)))
                         .awsErrorDetails().errorCode());

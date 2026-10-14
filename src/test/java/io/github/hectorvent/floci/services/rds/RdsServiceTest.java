@@ -781,10 +781,9 @@ class RdsServiceTest {
                 "dbname", "db.serverless", 0, false, null, null, "reject-member-credentials"));
         assertEquals("InvalidParameterCombination", rejected.getErrorCode());
         assertEquals(400, rejected.getHttpStatus());
-        if ("password".equals(field)) {
-            assertEquals("The requested DB Instance will be a member of a DB Cluster. "
-                    + "Set master user password for the DB Cluster.", rejected.getMessage());
-        }
+        assertEquals("The requested DB Instance will be a member of a DB Cluster. "
+                + ("password".equals(field) ? "Set master user password for the DB Cluster."
+                : "Set master user name for the DB Cluster."), rejected.getMessage());
         assertEquals("DBInstanceNotFound", assertThrows(AwsException.class,
                 () -> rdsService.getDbInstance("rejected-member")).getErrorCode());
         assertTrue(cluster.getDbClusterMembers().isEmpty());

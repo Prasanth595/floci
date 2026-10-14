@@ -711,7 +711,7 @@ public class RdsService implements Resettable, ResourceProvider {
             if (masterUsername != null) {
                 throw new AwsException("InvalidParameterCombination",
                         "The requested DB Instance will be a member of a DB Cluster. "
-                                + "Set master username for the DB Cluster.", 400);
+                                + "Set master user name for the DB Cluster.", 400);
             }
         }
 
