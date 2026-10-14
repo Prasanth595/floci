@@ -1674,6 +1674,11 @@ public class ElastiCacheService implements ResourceProvider {
                 ElastiCacheUser user = member(username);
                 return user == null ? null : user.getAuthMode();
             }
+
+            @Override
+            public String ownerAccountId() {
+                return account;
+            }
         };
     }
 
@@ -2293,6 +2298,11 @@ public class ElastiCacheService implements ResourceProvider {
             @Override
             public AuthMode authMode() {
                 return groups.getForAccount(accountId, groupId).map(ReplicationGroup::getAuthMode).orElse(null);
+            }
+
+            @Override
+            public String ownerAccountId() {
+                return accountId;
             }
         };
     }

@@ -1097,6 +1097,8 @@ class ElastiCacheServiceTest {
         verify(proxyManager).startProxy(eq("grp"), eq(AuthMode.PASSWORD), eq(16379), anyString(), anyInt(),
                 validator.capture());
         assertTrue(validator.getValue().validatePassword(null, "secret-token"));
+        assertEquals("111111111111", validator.getValue().ownerAccountId(),
+                "IAM tokens must be checked against the restored group's own account");
     }
 
     @Test
@@ -1154,6 +1156,7 @@ class ElastiCacheServiceTest {
         // The proxy authenticates on its own thread, where the store falls back to the default account.
         account.set("000000000000");
         assertTrue(validator.getValue().validatePassword(null, "secret-token"));
+        assertEquals("111111111111", validator.getValue().ownerAccountId());
     }
 
     @Test
