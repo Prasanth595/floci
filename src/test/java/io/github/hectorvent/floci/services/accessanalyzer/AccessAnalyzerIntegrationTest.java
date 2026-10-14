@@ -86,7 +86,9 @@ class AccessAnalyzerIntegrationTest {
     @Test
     void getAnalyzerNotFoundReturns404() {
         given().header("Authorization", AUTH).get("/analyzer/nonexistent")
-                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+                .then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"))
+                .body("resourceId", equalTo("nonexistent"))
+                .body("resourceType", equalTo("analyzer"));
     }
-
 }

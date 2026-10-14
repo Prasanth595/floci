@@ -17,7 +17,6 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -85,13 +84,8 @@ public class AccessAnalyzerService implements Resettable {
     }
 
     public synchronized void deleteAnalyzer(String region, String analyzerName) {
-        validateAnalyzerName(analyzerName);
-        String key = storageKey(region, analyzerName);
-        Optional<Analyzer> analyzer = analyzers.get(key);
-        if (analyzer.isEmpty()) {
-            throw analyzerNotFound(analyzerName);
-        }
-        analyzers.delete(key);
+        getAnalyzer(region, analyzerName);
+        analyzers.delete(storageKey(region, analyzerName));
     }
 
     private static int analyzerLimit(String type) {
