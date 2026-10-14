@@ -24,7 +24,7 @@ class RdsMemberCredentialsTest {
     @ParameterizedTest
     @CsvSource({"aurora-postgresql, false", "aurora-postgresql, true",
             "aurora-mysql, false", "aurora-mysql, true"})
-    @DisplayName("Members expose the cluster master user with omitted or conflicting credentials")
+    @DisplayName("Members inherit cluster credentials after explicit credentials are rejected")
     void memberMasterUserComesFromCluster(String engine, boolean conflicting) {
         String clusterId = TestFixtures.uniqueName("member-credentials");
         String memberId = clusterId + "-member";
@@ -37,6 +37,12 @@ class RdsMemberCredentialsTest {
                         .engine(engine).dbInstanceClass("db.serverless");
                 if (conflicting) {
                     request.masterUsername("differentuser").masterUserPassword("DifferentPassword!");
+                    assertThatThrownBy(() -> rds.createDBInstance(request.build()))
+                            .isInstanceOfSatisfying(RdsException.class, error -> {
+                                assertThat(error.statusCode()).isEqualTo(400);
+                                assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterCombination");
+                            });
+                    request.masterUsername(null).masterUserPassword(null);
                 }
                 DBInstance created = rds.createDBInstance(request.build()).dbInstance();
                 assertThat(created.masterUsername()).isEqualTo("clusteradmin");

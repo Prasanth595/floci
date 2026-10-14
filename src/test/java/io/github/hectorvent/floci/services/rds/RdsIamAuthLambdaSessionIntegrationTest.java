@@ -128,8 +128,6 @@ class RdsIamAuthLambdaSessionIntegrationTest {
                     .formParam("DBClusterIdentifier", clusterId)
                     .formParam("DBInstanceClass", "db.r5.large")
                     .formParam("Engine", "aurora-postgresql")
-                    .formParam("MasterUsername", MASTER_USER)
-                    .formParam("MasterUserPassword", MASTER_PASSWORD)
                     .formParam("DBName", DATABASE)
                     .formParam("AllocatedStorage", "20")
                     .when().post("/").then().statusCode(200)
@@ -183,8 +181,6 @@ class RdsIamAuthLambdaSessionIntegrationTest {
                     .formParam("DBClusterIdentifier", clusterId)
                     .formParam("DBInstanceClass", "db.r5.large")
                     .formParam("Engine", "aurora-postgresql")
-                    .formParam("MasterUsername", MASTER_USER)
-                    .formParam("MasterUserPassword", MASTER_PASSWORD)
                     .formParam("DBName", DATABASE)
                     .formParam("EnableIAMDatabaseAuthentication", Boolean.toString(!enabled))
                     .when().post("/").then().statusCode(200)
@@ -225,8 +221,12 @@ class RdsIamAuthLambdaSessionIntegrationTest {
                     .formParam("Engine", "aurora-postgresql")
                     .formParam("DBName", DATABASE);
             if (conflicting) {
-                createMember.formParam("MasterUsername", "differentuser")
-                        .formParam("MasterUserPassword", "DifferentPassword!");
+                rds("CreateDBInstance").formParam("DBInstanceIdentifier", memberId)
+                        .formParam("DBClusterIdentifier", clusterId).formParam("DBInstanceClass", "db.serverless")
+                        .formParam("Engine", "aurora-postgresql").formParam("DBName", DATABASE)
+                        .formParam("MasterUsername", "differentuser").formParam("MasterUserPassword", "DifferentPassword!")
+                        .when().post("/").then().statusCode(400)
+                        .body(containsString("<Code>InvalidParameterCombination</Code>"));
             }
             int port = createMember.when().post("/").then().statusCode(200).extract().xmlPath()
                     .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");

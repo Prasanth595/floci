@@ -702,6 +702,19 @@ public class RdsService implements Resettable, ResourceProvider {
                     "DB instance " + id + " already exists.", 400);
         }
 
+        if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
+            if (masterPassword != null) {
+                throw new AwsException("InvalidParameterCombination",
+                        "The requested DB Instance will be a member of a DB Cluster. "
+                                + "Set master user password for the DB Cluster.", 400);
+            }
+            if (masterUsername != null) {
+                throw new AwsException("InvalidParameterCombination",
+                        "The requested DB Instance will be a member of a DB Cluster. "
+                                + "Set master username for the DB Cluster.", 400);
+            }
+        }
+
         DatabaseEngine engine = resolveEngine(engineParam);
         if (engine == DatabaseEngine.SQLSERVER && dbName != null && !dbName.isBlank()) {
             throw new AwsException("InvalidParameterCombination",
@@ -4762,8 +4775,9 @@ public class RdsService implements Resettable, ResourceProvider {
         } else {
             changeCredentials.run();
         }
-        boolean passwordRotated = credentialsChanged && rotateBackend;
-        if (credentialsChanged && hasNewPassword) {
+        boolean passwordAccepted = credentialsChanged && hasNewPassword;
+        boolean passwordChanged = passwordAccepted && !newPassword.equals(oldPassword);
+        if (passwordAccepted) {
             cluster.setMasterPassword(newPassword);
         }
         if (iamEnabled != null) {
@@ -4795,11 +4809,9 @@ public class RdsService implements Resettable, ResourceProvider {
             applyAutoPause(cluster);
         }
 
-        // A cluster rotation applies to every endpoint: the cluster's own proxy and each member
-        // instance's proxy hold start-time password snapshots, and member endpoints validate
-        // against the member's stored password, so propagate the rotated credential to all of
-        // them (AWS applies the cluster master password to every member endpoint).
-        if (passwordRotated) {
+        // Accepted credentials belong to every endpoint even before a backend is provisioned.
+        // Running backends have already accepted the rotation before metadata is published.
+        if (passwordChanged) {
             proxyManager.updateMasterPassword(
                     rdsResourceRelayKey(cluster.getDbClusterArn(), id), newPassword);
             updateClusterMembers(cluster, effectiveRegion,

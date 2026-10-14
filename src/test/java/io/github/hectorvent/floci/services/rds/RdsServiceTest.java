@@ -301,7 +301,7 @@ class RdsServiceTest {
                 "admin", "password", "dbname", true, null);
         clearInvocations(proxyManager);
         DbInstance member = rdsService.createDbInstance("iam-member", engine, null,
-                "admin", "password", "dbname", "db.serverless",
+                null, null, "dbname", "db.serverless",
                 0, true, null, null, "iam-cluster");
         if (!"create".equals(path)) {
             clearInvocations(proxyManager);
@@ -369,7 +369,7 @@ class RdsServiceTest {
         DbCluster cluster = rdsService.createDbCluster("iam-cluster", engine, version,
                 "admin", "password", "dbname", false, null);
         DbInstance member = rdsService.createDbInstance("iam-member", engine, version,
-                "admin", "password", "dbname", "db.r5.large",
+                null, null, "dbname", "db.r5.large",
                 20, false, null, null, "iam-cluster", null, false, false, null,
                 Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
         cluster.getDbClusterMembers().add("missing-member");
@@ -398,7 +398,7 @@ class RdsServiceTest {
         DbCluster cluster = rdsService.createDbCluster("iam-cluster", engine, version,
                 "admin", "password", "dbname", false, null);
         DbInstance member = rdsService.createDbInstance("iam-member", engine, version,
-                "admin", "password", "dbname", "db.r5.large",
+                null, null, "dbname", "db.r5.large",
                 20, false, null, null, "iam-cluster", null, false, false, null,
                 Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
         rdsService.createDbInstance("standalone", engine, version,
@@ -420,7 +420,7 @@ class RdsServiceTest {
     }
 
     @Test
-    void modifyClusterIamAuthenticationKeepsOtherAccountsAndRegionsUnchanged() {
+    void modifyClusterCredentialsAndIamKeepOtherAccountsAndRegionsUnchanged() {
         InMemoryStorage<String, DbInstance> rawInstances = new InMemoryStorage<>();
         InMemoryStorage<String, DbCluster> rawClusters = new InMemoryStorage<>();
         String accountA = "111111111111";
@@ -440,13 +440,13 @@ class RdsServiceTest {
                 service.createDbCluster("shared-cluster", "aurora-postgresql", "16.3",
                         "admin", "password", "dbname", false, null, null, null, false, region);
                 service.createDbInstance("shared-member", "aurora-postgresql", "16.3",
-                        "admin", "password", "dbname", "db.r5.large", 20, false, null, null,
+                        null, null, "dbname", "db.r5.large", 20, false, null, null,
                         "shared-cluster", null, false, false, null, Map.of(), List.of(), region);
             }
         }
         clearInvocations(proxyManager);
 
-        serviceA.modifyDbCluster("shared-cluster", null, true, "us-east-1");
+        serviceA.modifyDbCluster("shared-cluster", "ScopedPassword!", true, "us-east-1");
 
         for (String account : List.of(accountA, accountB)) {
             for (String region : List.of("us-east-1", "us-west-2")) {
@@ -455,6 +455,12 @@ class RdsServiceTest {
                 DbInstance member = rawInstances.get(account + "/" + region + "::shared-member").orElseThrow();
                 assertEquals(enabled, cluster.isIamDatabaseAuthenticationEnabled());
                 assertEquals(enabled, member.isIamDatabaseAuthenticationEnabled());
+                assertEquals(enabled ? "ScopedPassword!" : "password", cluster.getMasterPassword());
+                assertEquals(enabled ? "ScopedPassword!" : "password", member.getMasterPassword());
+                verify(proxyManager, times(enabled ? 1 : 0))
+                        .updateMasterPassword("rds-resource:" + cluster.getDbClusterArn(), "ScopedPassword!");
+                verify(proxyManager, times(enabled ? 1 : 0))
+                        .updateMasterPassword("rds-resource:" + member.getDbInstanceArn(), "ScopedPassword!");
                 verify(proxyManager, times(enabled ? 1 : 0))
                         .updateIamEnabled("rds-resource:" + cluster.getDbClusterArn(), true);
                 verify(proxyManager, times(enabled ? 1 : 0))
@@ -481,7 +487,7 @@ class RdsServiceTest {
         ExecutorService worker = Executors.newSingleThreadExecutor();
         try {
             Future<DbInstance> creation = worker.submit(() -> rdsService.createDbInstance("replacement-member",
-                    "aurora-postgresql", "16.3", "admin", "password", "dbname", "db.r5.large", 20,
+                    "aurora-postgresql", "16.3", null, null, "dbname", "db.r5.large", 20,
                     true, null, null, "replaced-cluster", null, false, false, null,
                     Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults()));
             assertTrue(endpoint.await(5, TimeUnit.SECONDS));
@@ -496,7 +502,7 @@ class RdsServiceTest {
                     () -> rdsService.getDbInstance("replacement-member")).getErrorCode());
             assertTrue(rdsService.getDbCluster("replaced-cluster").getDbClusterMembers().isEmpty());
             DbInstance retry = rdsService.createDbInstance("replacement-member", "aurora-postgresql", "16.3",
-                    "admin", "password", "dbname", "db.r5.large", 20, false, null, null, "replaced-cluster",
+                    null, null, "dbname", "db.r5.large", 20, false, null, null, "replaced-cluster",
                     null, false, false, null, Map.of(), List.of(), null, null, true,
                     DbInstanceSettings.defaults(), true, 7001, false);
             assertEquals(7001, retry.getProxyPort());
@@ -591,7 +597,7 @@ class RdsServiceTest {
         AtomicReference<Thread> deletionThread = new AtomicReference<>();
         try {
             Future<DbInstance> creation = workers.submit(() -> service.createDbInstance("race-member",
-                    "aurora-postgresql", "16.3", "admin", "password", "dbname", "db.r5.large", 20,
+                    "aurora-postgresql", "16.3", null, null, "dbname", "db.r5.large", 20,
                     !initiallyEnabled, null, null, "race-cluster", null, false, false, null,
                     Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults()));
             assertTrue(published.await(5, TimeUnit.SECONDS));
@@ -703,7 +709,7 @@ class RdsServiceTest {
         AtomicReference<Thread> modifierThread = new AtomicReference<>();
         try {
             Future<DbInstance> creation = workers.submit(() -> service.createDbInstance("race-member",
-                    "aurora-postgresql", "16.3", "admin", "password", "dbname", "db.r5.large", 20,
+                    "aurora-postgresql", "16.3", null, null, "dbname", "db.r5.large", 20,
                     true, null, null, "race-cluster", null, false, false, null,
                     Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults()));
             assertTrue(published.await(5, TimeUnit.SECONDS));
@@ -758,6 +764,77 @@ class RdsServiceTest {
 
 
     @ParameterizedTest
+    @CsvSource({"aurora-postgresql, username, true", "aurora-postgresql, username, false",
+            "aurora-postgresql, password, true", "aurora-postgresql, password, false",
+            "aurora-mysql, username, true", "aurora-mysql, username, false",
+            "aurora-mysql, password, true", "aurora-mysql, password, false"})
+    void clusterMemberRejectsExplicitMasterCredentialsBeforeAllocation(String engine, String field, boolean matching) {
+        when(rdsConfig.mock()).thenReturn(true);
+        when(rdsConfig.proxyMaxPort()).thenReturn(7001);
+        DbCluster cluster = rdsService.createDbCluster("reject-member-credentials", engine, null,
+                "clusteradmin", "ClusterPassword!", "dbname", false, null);
+        String username = "username".equals(field) ? matching ? "clusteradmin" : "differentadmin" : null;
+        String password = "password".equals(field) ? matching ? "ClusterPassword!" : "DifferentPassword!" : null;
+        clearInvocations(containerManager, proxyManager, kmsService);
+        AwsException rejected = assertThrows(AwsException.class, () -> rdsService.createDbInstance(
+                "rejected-member", engine, null, username, password,
+                "dbname", "db.serverless", 0, false, null, null, "reject-member-credentials"));
+        assertEquals("InvalidParameterCombination", rejected.getErrorCode());
+        assertEquals(400, rejected.getHttpStatus());
+        if ("password".equals(field)) {
+            assertEquals("The requested DB Instance will be a member of a DB Cluster. "
+                    + "Set master user password for the DB Cluster.", rejected.getMessage());
+        }
+        assertEquals("DBInstanceNotFound", assertThrows(AwsException.class,
+                () -> rdsService.getDbInstance("rejected-member")).getErrorCode());
+        assertTrue(cluster.getDbClusterMembers().isEmpty());
+        verifyNoInteractions(containerManager, proxyManager, kmsService);
+        DbInstance retry = rdsService.createDbInstance("rejected-member", engine, null, null, null,
+                "dbname", "db.serverless", 0, false, null, null, "reject-member-credentials");
+        assertEquals(7001, retry.getProxyPort());
+        assertEquals(cluster.getMasterUsername(), retry.getMasterUsername());
+        assertEquals(cluster.getMasterPassword(), retry.getMasterPassword());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"aurora-postgresql, false", "aurora-postgresql, true",
+            "aurora-mysql, false", "aurora-mysql, true"})
+    void acceptedPasswordForUnprovisionedClusterUpdatesCanonicalMembers(String engine, boolean mockMode) {
+        when(rdsConfig.mock()).thenReturn(true);
+        DbCluster cluster = rdsService.createDbCluster("offline-credentials", engine, null,
+                "clusteradmin", "OldPassword!", "dbname", false, null);
+        DbInstance member = rdsService.createDbInstance("offline-member", engine, null, null, null,
+                "dbname", "db.serverless", 0, false, null, null, "offline-credentials");
+        DbCluster other = rdsService.createDbCluster("other-offline-credentials", engine, null,
+                "otheradmin", "OtherPassword!", "dbname", false, null);
+        DbInstance sibling = rdsService.createDbInstance("other-offline-member", engine, null, null, null,
+                "dbname", "db.serverless", 0, false, null, null, "other-offline-credentials");
+        assertNull(cluster.getContainerId());
+        assertNull(cluster.getDockerVolumeName());
+        cluster.getDbClusterMembers().clear();
+        when(rdsConfig.mock()).thenReturn(mockMode);
+        clearInvocations(containerManager, proxyManager);
+        rdsService.modifyDbCluster("offline-credentials", "AcceptedPassword!", null);
+        assertEquals("AcceptedPassword!", cluster.getMasterPassword());
+        assertEquals("AcceptedPassword!", member.getMasterPassword());
+        assertEquals("AcceptedPassword!", rdsService.getDbInstance("offline-member").getMasterPassword());
+        assertEquals("OtherPassword!", other.getMasterPassword());
+        assertEquals("OtherPassword!", sibling.getMasterPassword());
+        verify(containerManager, never()).rotateMasterPassword(any(), any(), any(), any(), any(), any());
+        verify(proxyManager).updateMasterPassword("rds-resource:" + cluster.getDbClusterArn(), "AcceptedPassword!");
+        verify(proxyManager).updateMasterPassword("rds-resource:" + member.getDbInstanceArn(), "AcceptedPassword!");
+        verify(proxyManager, never()).updateMasterPassword(eq("rds-resource:" + sibling.getDbInstanceArn()), any());
+        when(rdsConfig.mock()).thenReturn(false);
+        clearInvocations(containerManager, proxyManager);
+        DbInstance started = rdsService.ensureInstanceBackend("offline-member", "us-east-1");
+        assertNotNull(started.getContainerId());
+        verify(containerManager).tryStart(eq(cluster.getDbClusterArn()), eq("offline-credentials"), any(), any(),
+                eq(cluster.getEngine()), any(), eq("clusteradmin"), eq("AcceptedPassword!"), eq("dbname"));
+        verify(proxyManager).startProxy(eq("rds-resource:" + member.getDbInstanceArn()), any(), anyBoolean(),
+                anyInt(), any(), anyInt(), any(), eq("clusteradmin"), eq("AcceptedPassword!"), eq("dbname"), any(), any());
+    }
+
+    @ParameterizedTest
     @CsvSource({"aurora-postgresql,16.3,false,false", "aurora-postgresql,16.3,true,false",
             "aurora-mysql,8.0,false,false", "aurora-mysql,8.0,true,false",
             "aurora-postgresql,16.3,false,true", "aurora-postgresql,16.3,true,true",
@@ -770,7 +847,7 @@ class RdsServiceTest {
         clearInvocations(proxyManager);
 
         DbInstance member = rdsService.createDbInstance("iam-member", engine, version,
-                "admin", "password", "dbname", "db.r5.large", 20, !clusterEnabled,
+                null, null, "dbname", "db.r5.large", 20, !clusterEnabled,
                 null, null, "iam-cluster", null, false, false, null,
                 Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
 
@@ -795,13 +872,17 @@ class RdsServiceTest {
                 clusterUser, clusterPassword, "dbname", true, null);
         clearInvocations(proxyManager);
         DbInstance member = rdsService.createDbInstance("incomplete-credentials-member", engine, null,
-                "memberadmin", "MemberPassword!", "dbname", "db.serverless", 0, true,
+                null, null, "dbname", "db.serverless", 0, true,
                 null, null, "incomplete-credentials-cluster");
-        String expectedUser = clusterUser != null ? clusterUser : "memberadmin";
-        String expectedPassword = clusterPassword != null ? clusterPassword : "MemberPassword!";
+        String expectedUser = clusterUser != null ? clusterUser : "root";
+        String expectedPassword = clusterPassword;
         assertEquals(expectedUser, member.getMasterUsername());
         assertEquals(expectedPassword, member.getMasterPassword());
-        assertTrue(rdsService.validateDbPassword("incomplete-credentials-member", expectedUser, expectedPassword));
+        if (expectedPassword != null) {
+            assertTrue(rdsService.validateDbPassword("incomplete-credentials-member", expectedUser, expectedPassword));
+        } else {
+            assertFalse(rdsService.validateDbPassword("incomplete-credentials-member", expectedUser, "invented-password"));
+        }
         verify(proxyManager).startProxy(eq("rds-resource:" + member.getDbInstanceArn()), any(), eq(true),
                 anyInt(), any(), anyInt(), any(), eq(expectedUser), eq(expectedPassword),
                 eq("dbname"), any(), any());
@@ -859,8 +940,13 @@ class RdsServiceTest {
         DbCluster cluster = rdsService.createDbCluster("credentials-cluster", engine, null,
                 "clusteradmin", "ClusterPassword!", "dbname", true, null);
         clearInvocations(proxyManager);
-        DbInstance member = rdsService.createDbInstance("credentials-member", engine, null,
-                conflicting ? "differentuser" : null, conflicting ? "DifferentPassword!" : null,
+        if (conflicting) {
+            AwsException rejected = assertThrows(AwsException.class, () -> rdsService.createDbInstance(
+                    "credentials-member", engine, null, "differentuser", "DifferentPassword!",
+                    "dbname", "db.serverless", 0, true, null, null, "credentials-cluster"));
+            assertEquals("InvalidParameterCombination", rejected.getErrorCode());
+        }
+        DbInstance member = rdsService.createDbInstance("credentials-member", engine, null, null, null,
                 "dbname", "db.serverless", 0, true, null, null, "credentials-cluster");
         assertEquals(cluster.getMasterUsername(), member.getMasterUsername());
         assertEquals(cluster.getMasterPassword(), member.getMasterPassword());
@@ -1210,7 +1296,7 @@ class RdsServiceTest {
                 "admin", "password", "dbname", false, null);
 
         DbInstance member = rdsService.createDbInstance("aurora-member", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.r5.large",
+                null, null, "dbname", "db.r5.large",
                 20, false, null, null, "aurora-cluster", null, false, false, null,
                 Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
 
@@ -2050,7 +2136,7 @@ class RdsServiceTest {
         String arn = cluster.getMasterUserSecretArn();
         String key = cluster.getMasterUserSecretKmsKeyId();
         DbInstance member = service.createDbInstance("optout-member", engine, version,
-                "admin", oldPassword, "dbname", "db.r5.large", 20, false, null, null, "optout");
+                null, null, "dbname", "db.r5.large", 20, false, null, null, "optout");
         secrets.replicateSecretToRegions(arn,
                 List.of(new SecretsManagerService.ReplicaRegion("us-west-2", null)), false, "us-east-1");
         String secretValue = secrets.getSecretValue(arn, null, null, "us-east-1").getSecretString();
@@ -2116,7 +2202,7 @@ class RdsServiceTest {
         String arn = cluster.getMasterUserSecretArn();
         String oldPassword = cluster.getMasterPassword();
         DbInstance member = service.createDbInstance("retry-member", engine, version,
-                "admin", oldPassword, "dbname", "db.r5.large", 20, false, null, null, "optout-retry");
+                null, null, "dbname", "db.r5.large", 20, false, null, null, "optout-retry");
         secrets.replicateSecretToRegions(arn,
                 List.of(new SecretsManagerService.ReplicaRegion("us-west-2", null)), false, "us-east-1");
         service.modifyDbCluster("optout-retry", "replacement-password", null,
@@ -2154,7 +2240,7 @@ class RdsServiceTest {
         cluster.setMasterUserSecretStatus("active");
         cluster.setMasterUserSecretKmsKeyId("managed-key");
         DbInstance member = rdsService.createDbInstance("missing-secrets-member", engine, version,
-                "admin", "original-password", "dbname", "db.r5.large", 20, false, null, null, "missing-secrets");
+                null, null, "dbname", "db.r5.large", 20, false, null, null, "missing-secrets");
         clearInvocations(containerManager, proxyManager);
 
         AwsException error = assertThrows(AwsException.class, () -> rdsService.modifyDbCluster(
@@ -2607,7 +2693,7 @@ class RdsServiceTest {
         cluster.setContainerId("container-1");
         cluster.setDockerVolumeName("volume-1");
         DbInstance member = rdsService.createDbInstance("member-1", "aurora-postgresql", "16.3",
-                "admin", "original-password", "dbname", "db.r5.large",
+                null, null, "dbname", "db.r5.large",
                 20, false, null, null, "cluster1");
 
         DbCluster modified = rdsService.modifyDbCluster("cluster1", "rotated-password", null);
@@ -2633,7 +2719,7 @@ class RdsServiceTest {
         cluster.setContainerId("container-1");
         cluster.setDockerVolumeName("volume-1");
         DbInstance member = rdsService.createDbInstance("member-1", "aurora-postgresql", "16.3",
-                "admin", "original-password", "dbname", "db.r5.large",
+                null, null, "dbname", "db.r5.large",
                 20, false, null, null, "cluster1");
         cluster.getDbClusterMembers().add("missing-member");
         cluster.getDbClusterMembers().clear();
@@ -2665,7 +2751,7 @@ class RdsServiceTest {
     }
 
     @Test
-    void modifyDbClusterPasswordRotationSkipsBackendInMockMode() {
+    void modifyDbClusterPasswordChangePublishesCredentialsWithoutBackendInMockMode() {
         when(config.services().rds().mock()).thenReturn(true);
         rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
                 "admin", "original-password", "dbname", false, null);
@@ -2675,7 +2761,7 @@ class RdsServiceTest {
         assertEquals("rotated-password", modified.getMasterPassword());
         verify(containerManager, never()).rotateMasterPassword(
                 anyString(), anyString(), any(), anyString(), anyString(), anyString());
-        verify(proxyManager, never()).updateMasterPassword(anyString(), anyString());
+        verify(proxyManager).updateMasterPassword("rds-resource:" + modified.getDbClusterArn(), "rotated-password");
     }
 
     @Test
@@ -3328,7 +3414,7 @@ class RdsServiceTest {
     }
 
     private static DbInstance createMember(RdsService service, String id, String instanceClass, String clusterId) {
-        return service.createDbInstance(id, "aurora-postgresql", "16.3", "admin", "password", "dbname",
+        return service.createDbInstance(id, "aurora-postgresql", "16.3", null, null, "dbname",
                 instanceClass, 20, false, null, null, clusterId);
     }
 
@@ -3469,7 +3555,7 @@ class RdsServiceTest {
                 "admin", "password", "dbname", false, null);
 
         DbInstance instance = rdsService.createDbInstance("inst1", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.serverless",
+                null, null, "dbname", "db.serverless",
                 0, false, null, null, "cluster1");
 
         assertEquals(DbInstanceStatus.AVAILABLE, instance.getStatus());
@@ -3563,7 +3649,7 @@ class RdsServiceTest {
         DbCluster cluster = rdsService.createDbCluster("probe-cluster", "aurora-postgresql", "16.3",
                 "admin", "password", "dbname", false, null);
         DbInstance member = rdsService.createDbInstance("probe-member", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.serverless",
+                null, null, "dbname", "db.serverless",
                 0, false, null, null, "probe-cluster");
 
         assertEquals(DbInstanceStatus.AVAILABLE, cluster.getStatus());
@@ -3661,7 +3747,7 @@ class RdsServiceTest {
         DbCluster cluster = rdsService.createDbCluster("probe-cluster", "aurora-postgresql", "16.3",
                 "admin", "password", "dbname", false, null);
         DbInstance member = rdsService.createDbInstance("probe-member", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.serverless",
+                null, null, "dbname", "db.serverless",
                 0, false, null, null, "probe-cluster");
 
         cluster.setStatus(DbInstanceStatus.FAILED);
@@ -3752,7 +3838,7 @@ class RdsServiceTest {
         initialService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
                 "admin", "secret", "app", false, null, null, null, false);
         initialService.createDbInstance("member1", "aurora-postgresql", "16.3",
-                "admin", "secret", "app", "db.t3.medium",
+                null, null, "app", "db.t3.medium",
                 20, false, null, null, "cluster1", null, false);
 
         RdsContainerManager daemonlessContainerManager = mock(RdsContainerManager.class);
@@ -3905,7 +3991,7 @@ class RdsServiceTest {
         rdsService.createDbCluster("aurora-cluster", "aurora-postgresql", "16.3",
                 "admin", "password", "dbname", false, null);
         rdsService.createDbInstance("aurora-member", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.r6g.large",
+                null, null, "dbname", "db.r6g.large",
                 20, false, null, null, "aurora-cluster", null, false, false, null,
                 Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
         AwsException member = assertThrows(AwsException.class, () -> rdsService.stopDbInstance("aurora-member", null));
@@ -3936,7 +4022,7 @@ class RdsServiceTest {
         DbCluster created = rdsService.createDbCluster("aurora-cluster", "aurora-postgresql", "16.3",
                 "admin", "password", "dbname", false, null);
         rdsService.createDbInstance("aurora-member", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.r6g.large",
+                null, null, "dbname", "db.r6g.large",
                 20, false, null, null, "aurora-cluster", null, false, false, null,
                 Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
         int port = created.getEndpoint().port();
@@ -4680,7 +4766,7 @@ class RdsServiceTest {
         DbCluster cluster = initialService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
                 "admin", "secret", "app", false, null, null, null, false);
         DbInstance member = initialService.createDbInstance("member1", "aurora-postgresql", "16.3",
-                "admin", "secret", "app", "db.t3.medium",
+                null, null, "app", "db.t3.medium",
                 20, false, null, null, "cluster1", null, false);
 
         RdsContainerManager restoredContainerManager = mock(RdsContainerManager.class);
@@ -5854,11 +5940,11 @@ class RdsServiceTest {
         DbCluster cluster = rdsService.createDbCluster("retry-cluster", "aurora-postgresql", "16.3",
                 "admin", "password", "dbname", false, null);
         DbInstance first = rdsService.createDbInstance("first-member", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.serverless", 0, false, null, null, "retry-cluster");
+                null, null, "dbname", "db.serverless", 0, false, null, null, "retry-cluster");
         DbInstance second = rdsService.createDbInstance("second-member", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.serverless", 0, false, null, null, "retry-cluster");
+                null, null, "dbname", "db.serverless", 0, false, null, null, "retry-cluster");
         DbInstance stopped = rdsService.createDbInstance("stopped-member", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.serverless", 0, false, null, null, "retry-cluster");
+                null, null, "dbname", "db.serverless", 0, false, null, null, "retry-cluster");
         stopped.setStatus(DbInstanceStatus.STOPPED);
         first.setEndpoint(null);
         first.setProxyPort(0);
@@ -5897,9 +5983,9 @@ class RdsServiceTest {
         DbCluster cluster = rdsService.createDbCluster("log-cluster", "aurora-postgresql", "16.3",
                 "admin", "password", "dbname", false, null);
         DbInstance first = rdsService.createDbInstance("log-first", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.serverless", 0, false, null, null, "log-cluster");
+                null, null, "dbname", "db.serverless", 0, false, null, null, "log-cluster");
         DbInstance second = rdsService.createDbInstance("log-second", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.serverless", 0, false, null, null, "log-cluster");
+                null, null, "dbname", "db.serverless", 0, false, null, null, "log-cluster");
         IllegalStateException firstFailure = new IllegalStateException("first relay failed");
         IllegalStateException secondFailure = new IllegalStateException("second relay failed");
         IllegalStateException afterRecoveryFailure = new IllegalStateException("relay failed again");
@@ -5939,7 +6025,7 @@ class RdsServiceTest {
         DbCluster cluster = rdsService.createDbCluster("restart-log-cluster", "aurora-postgresql", "16.3",
                 "admin", "password", "dbname", false, null);
         DbInstance member = rdsService.createDbInstance("restart-log-member", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.serverless", 0, false, null, null,
+                null, null, "dbname", "db.serverless", 0, false, null, null,
                 "restart-log-cluster");
         IllegalStateException firstFailure = new IllegalStateException("first relay failed");
         IllegalStateException ongoingFailure = new IllegalStateException("relay still failed after restart");
@@ -5981,9 +6067,9 @@ class RdsServiceTest {
         DbCluster cluster = rdsService.createDbCluster("control-cluster", "aurora-postgresql", "16.3",
                 "admin", "password", "dbname", false, null);
         DbInstance first = rdsService.createDbInstance("control-first", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.serverless", 0, false, null, null, "control-cluster");
+                null, null, "dbname", "db.serverless", 0, false, null, null, "control-cluster");
         DbInstance second = rdsService.createDbInstance("control-second", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", "db.serverless", 0, false, null, null, "control-cluster");
+                null, null, "dbname", "db.serverless", 0, false, null, null, "control-cluster");
         doThrow(new IllegalStateException("temporary member relay error")).doNothing()
                 .when(proxyManager).startProxy(eq("rds-resource:" + first.getDbInstanceArn()),
                         any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
@@ -9036,10 +9122,10 @@ class RdsServiceTest {
         rdsService.createDbCluster("aurora", "aurora-postgresql", null, "admin", "secret99password",
                 null, false, null);
         rdsService.createDbInstance("member", "aurora-postgresql", "16",
-                "admin", "password", null, "db.t3.medium",
+                null, null, null, "db.t3.medium",
                 20, false, null, null, "aurora", null, false);
         rdsService.createDbInstance("member-2", null, "16",
-                "admin", "password", null, "db.t3.medium",
+                null, null, null, "db.t3.medium",
                 20, false, null, null, "aurora", null, false);
         rdsService.createDbInstance("plain", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
@@ -9935,7 +10021,7 @@ class RdsServiceTest {
         rdsService.createDbCluster("Mixed-Cluster", "aurora-postgresql", "16.3", "admin", "password", "appdb", false, null);
         for (String member : List.of("Writer-1", "Reader-1")) {
             rdsService.createDbInstance(member, "aurora-postgresql", "16.3",
-                    "admin", "password", "appdb", "db.r5.large",
+                    null, null, "appdb", "db.r5.large",
                     20, false, null, null, "Mixed-Cluster", null, false, false, null,
                     Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
         }

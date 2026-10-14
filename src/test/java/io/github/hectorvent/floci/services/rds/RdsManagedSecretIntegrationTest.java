@@ -15,8 +15,10 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.rds.RdsClient;
+import software.amazon.awssdk.services.rds.model.CreateDbInstanceRequest;
 import software.amazon.awssdk.services.rds.model.DBCluster;
 import software.amazon.awssdk.services.rds.model.DBInstance;
+import software.amazon.awssdk.services.rds.model.RdsException;
 
 import java.net.URI;
 import java.util.Map;
@@ -25,6 +27,8 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestProfile(RdsMockProfile.class)
@@ -37,17 +41,69 @@ class RdsManagedSecretIntegrationTest {
     RdsService rdsService;
 
     @ParameterizedTest
+    @CsvSource({"aurora-postgresql, username, true", "aurora-postgresql, username, false",
+            "aurora-postgresql, password, true", "aurora-postgresql, password, false",
+            "aurora-mysql, username, true", "aurora-mysql, username, false",
+            "aurora-mysql, password, true", "aurora-mysql, password, false"})
+    void sdkRejectsMemberCredentialParametersAndAllowsOmittedRetry(String engine, String field, boolean matching) {
+        String id = "member-input-" + UUID.randomUUID().toString().substring(0, 8);
+        String memberId = id + "-member";
+        try (RdsClient rds = client("us-east-1", "000000000000")) {
+            rds.createDBCluster(request -> request.dbClusterIdentifier(id).engine(engine)
+                    .masterUsername("clusteradmin").masterUserPassword("ClusterPassword!"));
+            try {
+                CreateDbInstanceRequest.Builder request = CreateDbInstanceRequest.builder()
+                        .dbInstanceIdentifier(memberId).dbClusterIdentifier(id).engine(engine)
+                        .dbInstanceClass("db.serverless");
+                if ("username".equals(field)) {
+                    request.masterUsername(matching ? "clusteradmin" : "differentadmin");
+                } else {
+                    request.masterUserPassword(matching ? "ClusterPassword!" : "DifferentPassword!");
+                }
+                RdsException error = assertThrows(RdsException.class, () -> rds.createDBInstance(request.build()));
+                assertEquals("InvalidParameterCombination", error.awsErrorDetails().errorCode());
+                assertEquals(400, error.statusCode());
+                if ("password".equals(field)) {
+                    assertEquals("The requested DB Instance will be a member of a DB Cluster. "
+                            + "Set master user password for the DB Cluster.", error.awsErrorDetails().errorMessage());
+                }
+                assertEquals("DBInstanceNotFound", assertThrows(RdsException.class,
+                        () -> rds.describeDBInstances(value -> value.dbInstanceIdentifier(memberId)))
+                        .awsErrorDetails().errorCode());
+                assertTrue(rds.describeDBClusters(value -> value.dbClusterIdentifier(id))
+                        .dbClusters().getFirst().dbClusterMembers().isEmpty());
+                request.masterUsername(null).masterUserPassword(null);
+                DBInstance member = rds.createDBInstance(request.build()).dbInstance();
+                assertEquals("clusteradmin", member.masterUsername());
+            } finally {
+                try {
+                    try {
+                        rds.deleteDBInstance(value -> value.dbInstanceIdentifier(memberId).skipFinalSnapshot(true));
+                    } catch (RdsException error) {
+                        if (!"DBInstanceNotFound".equals(error.awsErrorDetails().errorCode())) {
+                            throw error;
+                        }
+                    }
+                } finally {
+                    rds.deleteDBCluster(value -> value.dbClusterIdentifier(id).skipFinalSnapshot(true));
+                }
+            }
+        }
+    }
+
+    private static RdsClient client(String region, String account) {
+        return RdsClient.builder().endpointOverride(URI.create("http://localhost:" + RestAssured.port))
+                .httpClientBuilder(UrlConnectionHttpClient.builder()).region(Region.of(region))
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create(account, "test-secret-key"))).build();
+    }
+
+    @ParameterizedTest
     @CsvSource({"us-east-1,000000000000", "cn-north-1,000000000000",
             "us-east-1,222222222222", "cn-north-1,222222222222"})
     void sdkReportsTheActualDefaultManagedKeyForInstancesAndClusters(String region, String account) {
         String id = "managed-key-" + UUID.randomUUID().toString().substring(0, 8);
-        try (RdsClient rds = RdsClient.builder()
-                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .region(Region.of(region))
-                .credentialsProvider(StaticCredentialsProvider.create(
-                        AwsBasicCredentials.create(account, "test-secret-key")))
-                .build()) {
+        try (RdsClient rds = client(region, account)) {
             DBInstance instance = rds.createDBInstance(request -> request
                     .dbInstanceIdentifier(id)
                     .dbInstanceClass("db.t4g.small")
@@ -95,11 +151,7 @@ class RdsManagedSecretIntegrationTest {
     void sdkClusterMemberLeavesTheManagedSecretOnTheCluster(String engine, String region, String account)
             throws Exception {
         String id = "cluster-managed-" + UUID.randomUUID().toString().substring(0, 8);
-        try (RdsClient rds = RdsClient.builder()
-                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .httpClientBuilder(UrlConnectionHttpClient.builder()).region(Region.of(region))
-                .credentialsProvider(StaticCredentialsProvider.create(
-                        AwsBasicCredentials.create(account, "test-secret-key"))).build()) {
+        try (RdsClient rds = client(region, account)) {
             DBCluster cluster = rds.createDBCluster(request -> request.dbClusterIdentifier(id).engine(engine)
                     .masterUsername("clusteradmin").manageMasterUserPassword(true)).dbCluster();
             try {

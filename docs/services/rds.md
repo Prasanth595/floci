@@ -750,13 +750,17 @@ IAM database authentication is also supported. Set `--enable-iam-database-authen
 
 Aurora members use their cluster's IAM database authentication setting and master
 username and password for backend connections. `EnableIAMDatabaseAuthentication`
-on `CreateDBInstance` does not override the cluster setting. Omitting member
-credentials or providing different valid credentials does not create an independent
-master user; credential input checks still apply. Configure and rotate master
-credentials on the cluster. Managed master secrets belong to the cluster;
-`ManageMasterUserPassword` on a member does not create a separate member secret.
-When a cluster record lacks a credential, the member retains its supplied value or
-normalized default for that field.
+on `CreateDBInstance` does not override the cluster setting. A member request with
+`MasterUsername` or `MasterUserPassword` returns `InvalidParameterCombination`;
+configure those credentials on the cluster and omit them from the member request.
+Managed master secrets belong to the cluster; `ManageMasterUserPassword` on a member
+does not create a separate member secret. When a cluster record lacks a credential,
+the member retains its normalized default for that field.
+
+Accepted cluster password changes update stored member credentials even when the
+cluster has no backend or runs in mock mode. An unchanged password does not update
+relays. Rotating an initialized data volume requires a running backend; changing
+stored metadata alone does not rotate that volume.
 
 Changing `EnableIAMDatabaseAuthentication` with `ModifyDBCluster` updates existing
 Aurora members and applies to new connections through the cluster and member
