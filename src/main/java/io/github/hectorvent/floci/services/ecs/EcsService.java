@@ -2658,11 +2658,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         boolean forceNewDeployment = request.isForceNewDeployment();
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
-        // A name that was never created takes no lock, so probing unknown names retains nothing.
-        if (!services.containsKey(key)) {
-            throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
-        }
-        synchronized (serviceLocks.computeIfAbsent(key, k -> new Object())) {
+        synchronized (lockForExisting(key, serviceName)) {
             EcsServiceModel svc = services.get(key);
             if (svc == null) {
                 throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
@@ -2906,17 +2902,21 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return operatingSystemFamily;
     }
 
+    // A name that was never created takes no lock, so probing unknown names retains nothing.
+    private Object lockForExisting(String key, String serviceName) {
+        if (!services.containsKey(key)) {
+            throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
+        }
+        return serviceLocks.computeIfAbsent(key, k -> new Object());
+    }
+
     public EcsServiceModel deleteService(String clusterRef, String serviceName, boolean force, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
 
         serviceName = extractServiceName(serviceName);
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
-        // A name that was never created takes no lock, so probing unknown names retains nothing.
-        if (!services.containsKey(key)) {
-            throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
-        }
-        synchronized (serviceLocks.computeIfAbsent(key, k -> new Object())) {
+        synchronized (lockForExisting(key, serviceName)) {
             EcsServiceModel svc = services.get(key);
             if (svc == null) {
                 throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
