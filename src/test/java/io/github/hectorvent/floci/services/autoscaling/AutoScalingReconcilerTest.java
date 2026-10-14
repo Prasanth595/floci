@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -99,6 +100,32 @@ class AutoScalingReconcilerTest {
         reconciler.reconcile(asg);
 
         verify(asgService).completeInstanceRefreshIfSettled("us-east-1", "app-asg");
+    }
+
+    @Test
+    void malformedSavedConfigurationDoesNotSkipGroupPersistenceOrRefreshCheck() {
+        AutoScalingService service = scalingService();
+        Ec2Service ec2 = mock(Ec2Service.class);
+        AutoScalingGroup group = new AutoScalingGroup();
+        group.setRegion("us-east-1");
+        group.setAutoScalingGroupName("bad-data");
+        group.setDesiredCapacity(1);
+        group.setLaunchConfigurationName("saved-bad-data");
+        LaunchConfiguration configuration = new LaunchConfiguration();
+        configuration.setImageId("ami-test");
+        configuration.setInstanceType("t3.micro");
+        configuration.setUserData("not base64!");
+        configuration.setUserDataBase64Encoded(true);
+        when(service.describeLaunchConfigurations("us-east-1", List.of("saved-bad-data")))
+                .thenReturn(List.of(configuration));
+        when(service.saveAutoScalingGroupIfPresent(group)).thenReturn(true);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(service, ec2, mock(ElbV2Service.class));
+        assertDoesNotThrow(() -> reconciler.reconcile(group));
+        assertEquals(0, group.getInstances().size());
+        verify(service).saveAutoScalingGroupIfPresent(group);
+        verify(service).completeInstanceRefreshIfSettled("us-east-1", "bad-data");
+        verify(ec2, never()).runInstances(any(), any(), any(), any(Integer.class), any(Integer.class), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(Integer.class), any(), any(), any(), any());
     }
 
     @Test

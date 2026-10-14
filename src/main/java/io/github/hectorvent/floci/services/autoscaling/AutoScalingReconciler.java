@@ -563,6 +563,16 @@ public class AutoScalingReconciler {
     private LaunchSource resolveLaunchSource(AutoScalingGroup asg) {
         LaunchConfiguration lc = resolveLaunchConfiguration(asg);
         if (lc != null) {
+            String userData = lc.getUserData();
+            if (Boolean.TRUE.equals(lc.getUserDataBase64Encoded())) {
+                try {
+                    userData = Ec2UserDataDecoder.decode(userData);
+                } catch (AwsException e) {
+                    LOG.warnv("ASG {0}: cannot decode user data for launch configuration {1}: {2}",
+                            asg.getAutoScalingGroupName(), lc.getLaunchConfigurationName(), e.getMessage());
+                    return null;
+                }
+            }
             return new LaunchSource(
                     lc.getLaunchConfigurationName(),
                     lc.getImageId(),
@@ -570,8 +580,7 @@ public class AutoScalingReconciler {
                     lc.getKeyName(),
                     lc.getSecurityGroups(),
                     List.of(),
-                    Boolean.TRUE.equals(lc.getUserDataBase64Encoded())
-                            ? Ec2UserDataDecoder.decode(lc.getUserData()) : lc.getUserData(),
+                    userData,
                     Boolean.TRUE.equals(lc.getUserDataBase64Encoded()) ? lc.getUserData() : null,
                     lc.getIamInstanceProfile(),
                     null,

@@ -149,7 +149,11 @@ binary and gzip payloads. Configurations derived from an instance retain its ori
 available. Existing stored configurations retain their previous interpretation because older records
 mixed encoded input and decoded text; recreate a configuration to use byte-preserving launches.
 When deriving a configuration from an instance, omitted and blank user-data overrides continue to
-inherit the source instance's data.
+inherit the source instance's data. Creation checks the final selected data before saving: it must
+pass the shared EC2 decoder's base64 and 16 KiB raw-data checks. The decoder also rejects malformed
+gzip and expansion beyond 10 MiB; this is Floci's execution safety limit, not an AWS API limit.
+Invalid marked data in an older saved configuration is contained as a launch failure so reconciliation
+can still save the group and check refresh progress.
 
 Auto Scaling groups preserve either a launch configuration, a top-level launch template, or a `MixedInstancesPolicy`. These launch sources are mutually exclusive in create/update requests. When a mixed instances policy is supplied, Floci stores and returns:
 

@@ -5,12 +5,15 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
+import software.amazon.awssdk.services.autoscaling.model.AutoScalingException;
 import software.amazon.awssdk.services.autoscaling.model.LaunchConfiguration;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 
+import java.util.Base64;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @DisplayName("Auto Scaling launch-configuration user data")
 class AutoScalingConfigurationUserDataTest {
@@ -18,6 +21,28 @@ class AutoScalingConfigurationUserDataTest {
         return Stream.of(false, true).flatMap(fromInstance -> Stream.of(null, "", "YQ", "/w",
                 "H4sIAAAAAAAC/1NW1E/KzNMvzuBKTc7IV8hIzcnJ5wIAedQ/FxUAAAA=")
                 .map(encoded -> Arguments.of(fromInstance, encoded)));
+    }
+
+    static Stream<String> rejectedData() {
+        return Stream.of("not base64!", "H4sI", Base64.getEncoder().encodeToString(new byte[16385]));
+    }
+
+    @ParameterizedTest
+    @MethodSource("rejectedData")
+    void rejectedDataLeavesConfigurationNameReusable(String encoded) {
+        String name = TestFixtures.uniqueName("asg-invalid-data");
+        try (AutoScalingClient asg = TestFixtures.autoScalingClient()) {
+            AutoScalingException error = assertThrows(AutoScalingException.class, () ->
+                    asg.createLaunchConfiguration(r -> r.launchConfigurationName(name)
+                            .imageId("ami-amazonlinux2023").instanceType("t3.micro").userData(encoded)));
+            assertThat(error.statusCode()).isEqualTo(400);
+            assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterValue");
+            assertThat(asg.describeLaunchConfigurations(r -> r.launchConfigurationNames(name))
+                    .launchConfigurations()).isEmpty();
+            asg.createLaunchConfiguration(r -> r.launchConfigurationName(name)
+                    .imageId("ami-amazonlinux2023").instanceType("t3.micro").userData("YQ=="));
+            asg.deleteLaunchConfiguration(r -> r.launchConfigurationName(name));
+        }
     }
 
     @ParameterizedTest

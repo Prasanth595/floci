@@ -44,7 +44,7 @@ class AutoScalingConfigurationUserDataIntegrationTest {
 
     static Stream<Arguments> launchSources() {
         return Stream.concat(Stream.of("query", "cfn").flatMap(source ->
-                Stream.of(null, "", "YQ==", "YQ", "/w", "H4sIAAAAAAAC/1NW1E/KzNMvzuBKTc7IV8hIzcnJ5wIAedQ/FxUAAAA=")
+                Stream.of(null, "", "YQ==", "YQ", "/w", Base64.getEncoder().encodeToString(new byte[16384]), "H4sIAAAAAAAC/1NW1E/KzNMvzuBKTc7IV8hIzcnJ5wIAedQ/FxUAAAA=")
                         .map(data -> Arguments.of(source, data))), Stream.of(Arguments.of("cfn-intrinsic", "YQ==")));
     }
 
@@ -106,6 +106,40 @@ class AutoScalingConfigurationUserDataIntegrationTest {
         } finally {
             deleteConfiguration(source, name);
         }
+    }
+
+    static Stream<Arguments> rejectedConfigurations() {
+        return Stream.of("query", "cfn").flatMap(source -> Stream.of("not base64!", "H4sI",
+                Base64.getEncoder().encodeToString(new byte[16385])).map(data -> Arguments.of(source, data)));
+    }
+
+    @ParameterizedTest
+    @MethodSource("rejectedConfigurations")
+    void invalidConfigurationFailsWithoutLeavingLaunchSource(String source, String data) {
+        String name = "rejected-" + UUID.randomUUID().toString().substring(0, 8);
+        if (source.equals("query")) {
+            String code = request("autoscaling", "CreateLaunchConfiguration")
+                    .formParam("LaunchConfigurationName", name).formParam("ImageId", "ami-amazonlinux2023")
+                    .formParam("InstanceType", "t3.micro").formParam("UserData", data)
+                    .post("/").then().statusCode(400).extract().xmlPath().getString("ErrorResponse.Error.Code");
+            assertEquals("InvalidParameterValue", code);
+        } else {
+            createConfiguration(source, name, data);
+            try {
+                String status = request("cloudformation", "DescribeStacks").formParam("StackName", name)
+                        .post("/").then().statusCode(200).extract().xmlPath()
+                        .getString("DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus");
+                assertEquals("ROLLBACK_COMPLETE", status);
+                String events = request("cloudformation", "DescribeStackEvents").formParam("StackName", name)
+                        .post("/").then().statusCode(200).extract().asString();
+                assertTrue(events.contains("UserData"));
+            } finally {
+                deleteConfiguration(source, name);
+            }
+        }
+        assertTrue(asg.describeLaunchConfigurations("us-east-1", List.of(name)).isEmpty());
+        createConfiguration("query", name, "YQ==");
+        deleteConfiguration("query", name);
     }
 
     private void createConfiguration(String source, String name, String encoded) {
