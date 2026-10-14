@@ -289,6 +289,24 @@ class CognitoServiceTest {
         assertNull(service.adminGetUser(pool.getId(), "alice").getAttributes().get("email"));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "\t\r\n", "\u2003"})
+    @SuppressWarnings("unchecked")
+    void blankSelfServiceEmailUpdateDeletesAttributeAndVerifiedFlag(String email) {
+        UserPool pool = createPoolAndUser();
+        service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("email_verified", "true"));
+        UserPoolClient client = openClient(service, pool.getId(), "blank-email-client", false);
+        Map<String, Object> auth = (Map<String, Object>) service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")).get("AuthenticationResult");
+
+        assertTrue(service.updateUserAttributes((String) auth.get("AccessToken"), Map.of("email", email)).isEmpty());
+
+        CognitoUser updated = service.adminGetUser(pool.getId(), "alice");
+        assertFalse(updated.getAttributes().containsKey("email"));
+        assertFalse(updated.getAttributes().containsKey("email_verified"));
+    }
+
     @Test
     void emailSeparatorAfterAQuotedLocalPartOrEscapedBackslashRemainsValid() {
         UserPool pool = createPoolAndUser();
@@ -2589,6 +2607,33 @@ class CognitoServiceTest {
         verify(verificationCodeService, never()).invalidatePrevious(
                 fixture.pool().getId(), "alice",
                 VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "\t\r\n", "\u2003"})
+    void blankAdminEmailUpdateDeletesAttributesAndClearsOnlyMatchingVerification(String email) {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        PendingContactFixture fixture = createPendingContactFixture(verificationCodeService, messageDispatcher);
+        clearInvocations(verificationCodeService, messageDispatcher);
+
+        fixture.service().adminUpdateUserAttributes(fixture.pool().getId(), "alice", Map.of(
+                "email", email, "custom:note", email, "name", "updated"));
+
+        CognitoUser updated = fixture.service().adminGetUser(fixture.pool().getId(), "alice");
+        assertFalse(updated.getAttributes().containsKey("email"));
+        assertFalse(updated.getAttributes().containsKey("email_verified"));
+        assertFalse(updated.getAttributes().containsKey("custom:note"));
+        assertEquals("updated", updated.getAttributes().get("name"));
+        assertFalse(updated.getPendingAttributes().containsKey("email"));
+        assertEquals("+12025550100", updated.getAttributes().get("phone_number"));
+        assertEquals("true", updated.getAttributes().get("phone_number_verified"));
+        assertEquals("+12025550101", updated.getPendingAttributes().get("phone_number"));
+        verify(verificationCodeService).invalidatePrevious(fixture.pool().getId(), "alice",
+                VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION);
+        verify(verificationCodeService, never()).invalidatePrevious(any(), any(),
+                eq(VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION));
+        verifyNoInteractions(messageDispatcher);
     }
 
     @Test

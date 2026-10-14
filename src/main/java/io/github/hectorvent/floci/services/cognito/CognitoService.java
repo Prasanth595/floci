@@ -2638,7 +2638,7 @@ public class CognitoService implements ResourceProvider {
         if (usesAliasUsernames(pool)) {
             for (String aliasAttribute : pool.getUsernameAttributes()) {
                 String newValue = attributes.get(aliasAttribute);
-                if (newValue == null || newValue.equals(user.getAttributes().get(aliasAttribute))) {
+                if (blankToNull(newValue) == null || newValue.equals(user.getAttributes().get(aliasAttribute))) {
                     continue;
                 }
                 CognitoUser other = findUserByAlias(userPoolId, aliasAttribute, newValue);
@@ -2650,7 +2650,16 @@ public class CognitoService implements ResourceProvider {
         }
         attributes.keySet().forEach(attributeName ->
                 clearPendingAttributeVerification(userPoolId, user, attributeName));
-        user.getAttributes().putAll(attributes);
+        for (Map.Entry<String, String> attribute : attributes.entrySet()) {
+            String attributeName = attribute.getKey();
+            String value = attribute.getValue();
+            if (blankToNull(value) == null) {
+                user.getAttributes().remove(attributeName);
+                user.getAttributes().remove(attributeName + "_verified");
+            } else {
+                user.getAttributes().put(attributeName, value);
+            }
+        }
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(userPoolId, user.getUsername()), user);
     }
@@ -4128,7 +4137,7 @@ public class CognitoService implements ResourceProvider {
             return;
         }
         String email = attributes.get("email");
-        if (allowDeletion && "".equals(email)) {
+        if (allowDeletion && email != null && email.isBlank()) {
             return;
         }
         // Use Cognito's 2048-character attribute limit, not SES's envelope-address limit.

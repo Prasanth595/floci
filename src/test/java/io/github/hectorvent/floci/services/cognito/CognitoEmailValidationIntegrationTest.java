@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cognito;
 
+import com.fasterxml.jackson.core.json.JsonWriteFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -17,11 +19,57 @@ import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
 class CognitoEmailValidationIntegrationTest {
-    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ObjectMapper JSON = JsonMapper.builder().enable(JsonWriteFeature.ESCAPE_NON_ASCII).build();
 
     @BeforeAll
     static void setUpJson() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "\t\r\n", "\u2003"})
+    void bothUpdateApisDeleteBlankEmailsButCreationStillRejectsThem(String email) throws Exception {
+        String poolId = cognitoJson("CreateUserPool", JSON.writeValueAsString(Map.of(
+                "PoolName", "blank-email-" + UUID.randomUUID()))).path("UserPool").path("Id").asText();
+        try {
+            String clientId = cognitoJson("CreateUserPoolClient", JSON.writeValueAsString(Map.of(
+                    "UserPoolId", poolId, "ClientName", "email-client",
+                    "ExplicitAuthFlows", List.of("ALLOW_USER_PASSWORD_AUTH"))))
+                    .path("UserPoolClient").path("ClientId").asText();
+            for (String operation : List.of("AdminUpdateUserAttributes", "UpdateUserAttributes")) {
+                cognitoAction("AdminCreateUser", JSON.writeValueAsString(Map.of("UserPoolId", poolId,
+                        "Username", operation, "MessageAction", "SUPPRESS", "UserAttributes", List.of(
+                                Map.of("Name", "email", "Value", "alice@example.com"),
+                                Map.of("Name", "email_verified", "Value", "true")))))
+                        .then().statusCode(200);
+                cognitoAction("AdminSetUserPassword", JSON.writeValueAsString(Map.of("UserPoolId", poolId,
+                        "Username", operation, "Password", "Passw0rd!x", "Permanent", true)))
+                        .then().statusCode(200);
+                String token = cognitoJson("InitiateAuth", JSON.writeValueAsString(Map.of("ClientId", clientId,
+                        "AuthFlow", "USER_PASSWORD_AUTH", "AuthParameters",
+                        Map.of("USERNAME", operation, "PASSWORD", "Passw0rd!x"))))
+                        .path("AuthenticationResult").path("AccessToken").asText();
+                List<Map<String, String>> attributes = List.of(Map.of("Name", "email", "Value", email));
+                Map<String, Object> request = operation.equals("AdminUpdateUserAttributes")
+                        ? Map.of("UserPoolId", poolId, "Username", operation, "UserAttributes", attributes)
+                        : Map.of("AccessToken", token, "UserAttributes", attributes);
+                cognitoAction(operation, JSON.writeValueAsString(request)).then().statusCode(200);
+                cognitoAction("AdminGetUser", JSON.writeValueAsString(Map.of("UserPoolId", poolId,
+                        "Username", operation))).then().statusCode(200)
+                        .body("UserAttributes.findAll { it.Name == 'email' || it.Name == 'email_verified' }.size()",
+                                equalTo(0));
+            }
+            List<Map<String, String>> attributes = List.of(Map.of("Name", "email", "Value", email));
+            cognitoAction("AdminCreateUser", JSON.writeValueAsString(Map.of("UserPoolId", poolId,
+                    "Username", "bad-admin", "MessageAction", "SUPPRESS", "UserAttributes", attributes)))
+                    .then().statusCode(400).body("__type", equalTo("InvalidParameterException"));
+            cognitoAction("SignUp", JSON.writeValueAsString(Map.of("ClientId", clientId,
+                    "Username", "bad-signup", "Password", "Passw0rd!x", "UserAttributes", attributes)))
+                    .then().statusCode(400).body("__type", equalTo("InvalidParameterException"));
+        } finally {
+            cognitoAction("DeleteUserPool", JSON.writeValueAsString(Map.of("UserPoolId", poolId)))
+                    .then().statusCode(200);
+        }
     }
 
     @ParameterizedTest
