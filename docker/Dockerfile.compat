@@ -52,16 +52,13 @@ ENV AWS_PAGER=""
 # a v2 install against real AWS. A hook passing raw bytes (e.g.
 # aws lambda invoke --payload) needs --cli-binary-format raw-in-base64-out.
 ARG AWSCLI_VERSION=2.36.24
-# Python 3.12 from AppStream rather than the platform python3 (3.9): botocore requires
-# Python >= 3.10 from 1.43 on, so on 3.9 pip resolves boto3/botocore 1.42.x, which never
-# learn newer AWS APIs, and the urllib3<1.27 pin botocore applies below 3.10.
-# python3, pip3, python and pip on PATH point at 3.12, so `.py` hooks (run as python3)
-# and `#!/usr/bin/env python3` scripts keep working unchanged.
+# Not the platform python3 (3.9): botocore 1.43+ needs 3.10, and on 3.9 it pins urllib3 to 1.26.
+# The python3, python, pip3 and pip links keep hooks that call them by name or path working.
 ARG PYTHON=python3.12
 RUN useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci \
     && microdnf install -y --nodocs ${PYTHON} ${PYTHON}-pip unzip \
-    && for name in python3 python; do ln -s /usr/bin/${PYTHON} /usr/local/bin/${name}; done \
-    && for name in pip3 pip; do ln -s /usr/bin/pip${PYTHON#python} /usr/local/bin/${name}; done \
+    && for name in python3 python; do ln -s ${PYTHON} /usr/bin/${name}; done \
+    && for name in pip3 pip; do ln -s pip${PYTHON#python} /usr/bin/${name}; done \
     && pip3 install --no-cache-dir boto3 \
     && case "$(uname -m)" in \
          x86_64)  arch=x86_64 ;; \
