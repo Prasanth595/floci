@@ -8,7 +8,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -1512,20 +1518,20 @@ class BackupIntegrationTest {
     @Test
     @Order(171)
     void aFailedPublishIsLoggedWithItsStackTraceAndDoesNotUndoTheJob() {
-        java.util.List<java.util.logging.LogRecord> records = new java.util.concurrent.CopyOnWriteArrayList<>();
-        java.util.logging.Handler capture = new java.util.logging.Handler() {
-            @Override public void publish(java.util.logging.LogRecord r) { records.add(r); }
+        List<LogRecord> records = new CopyOnWriteArrayList<>();
+        Handler capture = new Handler() {
+            @Override public void publish(LogRecord r) { records.add(r); }
             @Override public void flush() { }
             @Override public void close() { }
         };
-        java.util.logging.Logger log = java.util.logging.Logger.getLogger(BackupService.class.getName());
+        Logger log = Logger.getLogger(BackupService.class.getName());
         log.addHandler(capture);
         try {
             String missingTopic = "arn:aws:sns:us-east-1:000000000000:backup-notify-no-such-topic";
             String jid = startJobInNotifiedVault("notify-broken-vault", missingTopic, "BACKUP_JOB_COMPLETED");
             awaitJobCompleted(jid);
             await().atMost(Duration.ofSeconds(10)).until(() -> records.stream()
-                .anyMatch(r -> r.getLevel().intValue() >= java.util.logging.Level.WARNING.intValue()
+                .anyMatch(r -> r.getLevel().intValue() >= Level.WARNING.intValue()
                     && String.valueOf(r.getMessage()).contains("BACKUP_JOB_COMPLETED")));
             assertThat("the warning carries the exception, not just its message",
                 records.stream().filter(r -> String.valueOf(r.getMessage()).contains("BACKUP_JOB_COMPLETED"))
