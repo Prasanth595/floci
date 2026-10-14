@@ -41,6 +41,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -94,6 +95,8 @@ class RedpandaManagerTest {
         lenient().when(storage.hostPersistentPath()).thenReturn(tempDir.toAbsolutePath().toString());
 
         lenient().when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
+        // The real retry loop, driven by the stubbed allocate() and verified release().
+        lenient().when(portAllocator.allocateAndStart(eq(9300), eq(9399), any())).thenCallRealMethod();
 
         ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
         manager = new RedpandaManager(containerBuilder, lifecycleManager, logStreamer, containerDetector,
@@ -353,6 +356,33 @@ class RedpandaManagerTest {
 
         verify(portAllocator).release(9306);
         verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void movesToTheNextHostPortWhenDockerReportsTheChosenOneInUse() {
+        // From inside a container, allocate() cannot see a host process holding a port, so the
+        // collision only shows up when Docker tries to bind it.
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(9307, 9308);
+        when(lifecycleManager.createAndStart(any()))
+                .thenThrow(new RuntimeException("listen tcp4 0.0.0.0:9307: bind: address already in use"))
+                .thenReturn(new ContainerInfo("container-461",
+                        Map.of(KAFKA_PORT, new EndpointInfo("172.18.0.9", KAFKA_PORT))));
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+
+        MskCluster cluster = newCluster();
+        manager.startContainer(cluster);
+
+        verify(lifecycleManager, times(2)).createAndStart(specCaptor.capture());
+        ContainerSpec retried = specCaptor.getAllValues().get(1);
+        assertEquals("internal://floci-aws-msk-abc123:9092,host://localhost:9308",
+                retried.cmd().get(retried.cmd().indexOf("--advertise-kafka-addr") + 1),
+                "the listener args are rebuilt for the new port");
+        assertEquals(Integer.valueOf(9308), retried.portBindings().get(RedpandaManager.KAFKA_HOST_LISTENER_PORT));
+        assertEquals("container-461", cluster.getContainerId());
+        verify(portAllocator).release(9307);
+        verify(portAllocator, never()).release(9308);
     }
 
     @Test
