@@ -84,10 +84,17 @@ class AutoScalingLaunchConfigurationIdentityIntegrationTest {
         String original = given().header("Authorization", AUTH).formParam("Action", "DescribeAutoScalingGroups")
                 .formParam("AutoScalingGroupNames.member.1", name).post("/").then().statusCode(200)
                 .extract().path(instancePath);
-        given().header("Authorization", AUTH).formParam("Action", "StartInstanceRefresh")
-                .formParam("AutoScalingGroupName", name).post("/").then().statusCode(200);
+        String refreshId = given().header("Authorization", AUTH).formParam("Action", "StartInstanceRefresh")
+                .formParam("AutoScalingGroupName", name).post("/").then().statusCode(200).extract().path(
+                        "StartInstanceRefreshResponse.StartInstanceRefreshResult.InstanceRefreshId");
         reconciler.reconcileAll();
         reconciler.reconcileAll();
+        // The refresh itself must have launched the replacement, not an ordinary scale-out.
+        given().header("Authorization", AUTH).formParam("Action", "DescribeInstanceRefreshes")
+                .formParam("AutoScalingGroupName", name).formParam("InstanceRefreshIds.member.1", refreshId)
+                .post("/").then().statusCode(200)
+                .body("DescribeInstanceRefreshesResponse.DescribeInstanceRefreshesResult"
+                        + ".InstanceRefreshes.member.Status", equalTo("Successful"));
         String replacement = given().header("Authorization", AUTH).formParam("Action", "DescribeAutoScalingGroups")
                 .formParam("AutoScalingGroupNames.member.1", name).post("/").then().statusCode(200)
                 .extract().path(instancePath);
