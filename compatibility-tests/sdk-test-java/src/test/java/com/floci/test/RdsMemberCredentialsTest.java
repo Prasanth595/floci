@@ -37,7 +37,7 @@ class RdsMemberCredentialsTest {
                 DBInstance created = rds.createDBInstance(request.build()).dbInstance();
                 assertThat(created.masterUsername()).isEqualTo("clusteradmin");
                 assertThat(rds.describeDBInstances(b -> b.dbInstanceIdentifier(memberId))
-                        .dbInstances().getFirst().masterUsername()).isEqualTo("clusteradmin");
+                        .dbInstances().get(0).masterUsername()).isEqualTo("clusteradmin");
             } finally {
                 try {
                     rds.deleteDBInstance(b -> b.dbInstanceIdentifier(memberId).skipFinalSnapshot(true));
