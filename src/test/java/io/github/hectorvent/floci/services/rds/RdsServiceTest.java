@@ -784,6 +784,73 @@ class RdsServiceTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"aurora-postgresql", "aurora-mysql"})
+    void memberCreationUsesCredentialsRotatedBeforePublication(String engine) throws Exception {
+        when(rdsConfig.mock()).thenReturn(false);
+        DbCluster cluster = rdsService.createDbCluster("credential-race-cluster", engine, null,
+                "clusteradmin", "OriginalPassword!", "dbname", true, null);
+        clearInvocations(proxyManager);
+        CountDownLatch endpoint = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean first = new AtomicBoolean(true);
+        when(rdsConfig.endpointHost()).thenAnswer(call -> {
+            if (first.compareAndSet(true, false)) {
+                endpoint.countDown();
+                assertTrue(release.await(5, TimeUnit.SECONDS));
+            }
+            return Optional.empty();
+        });
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<DbInstance> creation = worker.submit(() -> rdsService.createDbInstance("credential-race-member",
+                    engine, null, null, null, "dbname", "db.serverless", 0, true, null, null,
+                    "credential-race-cluster"));
+            assertTrue(endpoint.await(5, TimeUnit.SECONDS));
+            rdsService.modifyDbCluster("credential-race-cluster", "RotatedPassword!", null);
+            assertEquals("RotatedPassword!", cluster.getMasterPassword());
+            release.countDown();
+            DbInstance member = creation.get(5, TimeUnit.SECONDS);
+            assertEquals("clusteradmin", member.getMasterUsername());
+            assertEquals("RotatedPassword!", member.getMasterPassword());
+            assertEquals("RotatedPassword!", rdsService.getDbInstance("credential-race-member").getMasterPassword());
+            verify(proxyManager).startProxy(eq("rds-resource:" + member.getDbInstanceArn()), any(), eq(true),
+                    anyInt(), any(), anyInt(), any(), eq("clusteradmin"), eq("RotatedPassword!"),
+                    eq("dbname"), any(), any());
+        } finally {
+            release.countDown();
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "aurora-postgresql, false, false", "aurora-postgresql, false, true",
+            "aurora-postgresql, true, false", "aurora-postgresql, true, true",
+            "aurora-mysql, false, false", "aurora-mysql, false, true",
+            "aurora-mysql, true, false", "aurora-mysql, true, true"
+    })
+    void newClusterMemberUsesClusterMasterCredentials(String engine, boolean mockMode, boolean conflicting) {
+        when(rdsConfig.mock()).thenReturn(mockMode);
+        DbCluster cluster = rdsService.createDbCluster("credentials-cluster", engine, null,
+                "clusteradmin", "ClusterPassword!", "dbname", true, null);
+        clearInvocations(proxyManager);
+        DbInstance member = rdsService.createDbInstance("credentials-member", engine, null,
+                conflicting ? "differentuser" : null, conflicting ? "DifferentPassword!" : null,
+                "dbname", "db.serverless", 0, true, null, null, "credentials-cluster");
+        assertEquals(cluster.getMasterUsername(), member.getMasterUsername());
+        assertEquals(cluster.getMasterPassword(), member.getMasterPassword());
+        assertEquals("clusteradmin", rdsService.getDbInstance("credentials-member").getMasterUsername());
+        if (mockMode) {
+            verifyNoInteractions(proxyManager);
+        } else {
+            verify(proxyManager).startProxy(eq("rds-resource:" + member.getDbInstanceArn()),
+                    any(), eq(true), anyInt(), any(), anyInt(), any(),
+                    eq("clusteradmin"), eq("ClusterPassword!"), eq("dbname"), any(), any());
+        }
+    }
+
     @Test
     void createDbInstanceLeavesPostgresIamTokensUnboundWhenTheBindingIsTurnedOff() {
         when(rdsConfig.iamTokenEndpointBinding()).thenReturn(false);

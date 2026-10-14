@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
@@ -198,6 +199,54 @@ class RdsIamAuthLambdaSessionIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void auroraMemberUsesClusterCredentialsForIamLogin(boolean conflicting) throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String clusterId = "iam-creds-cluster-" + suffix;
+        String memberId = "iam-creds-member-" + suffix;
+        String accessKeyId = "ASIA" + suffix.toUpperCase();
+        try {
+            rds("CreateDBCluster").formParam("DBClusterIdentifier", clusterId)
+                    .formParam("Engine", "aurora-postgresql")
+                    .formParam("MasterUsername", MASTER_USER)
+                    .formParam("MasterUserPassword", MASTER_PASSWORD)
+                    .formParam("DatabaseName", DATABASE)
+                    .formParam("EnableIAMDatabaseAuthentication", "true")
+                    .when().post("/").then().statusCode(200);
+            RequestSpecification createMember = rds("CreateDBInstance")
+                    .formParam("DBInstanceIdentifier", memberId)
+                    .formParam("DBClusterIdentifier", clusterId)
+                    .formParam("DBInstanceClass", "db.serverless")
+                    .formParam("Engine", "aurora-postgresql")
+                    .formParam("DBName", DATABASE);
+            if (conflicting) {
+                createMember.formParam("MasterUsername", "differentuser")
+                        .formParam("MasterUserPassword", "DifferentPassword!");
+            }
+            int port = createMember.when().post("/").then().statusCode(200).extract().xmlPath()
+                    .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+            iamService.registerLambdaExecutionRoleSession(ACCOUNT_ID, accessKeyId, SESSION_SECRET, SESSION_TOKEN,
+                    "arn:aws:iam::" + ACCOUNT_ID + ":role/connect-with-iam");
+            awaitPasswordReady(port);
+            String token = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, MASTER_USER,
+                    accessKeyId, SESSION_SECRET, Instant.now().minusSeconds(60), 900, SESSION_TOKEN);
+            assertCurrentUser(port, token);
+            rds("DescribeDBInstances").formParam("DBInstanceIdentifier", memberId)
+                    .when().post("/").then().statusCode(200)
+                    .body(containsString("<MasterUsername>" + MASTER_USER + "</MasterUsername>"));
+            rds("RebootDBInstance").formParam("DBInstanceIdentifier", memberId)
+                    .when().post("/").then().statusCode(200);
+            assertCurrentUser(port, token);
+        } finally {
+            iamService.unregisterSession(ACCOUNT_ID, accessKeyId);
+            rds("DeleteDBInstance").formParam("DBInstanceIdentifier", memberId)
+                    .formParam("SkipFinalSnapshot", "true").when().post("/");
+            rds("DeleteDBCluster").formParam("DBClusterIdentifier", clusterId)
+                    .formParam("SkipFinalSnapshot", "true").when().post("/");
+        }
+    }
+
     private static void awaitPasswordReady(int port) {
         await().atMost(Duration.ofSeconds(60)).ignoreExceptions().until(() -> {
             try (Connection connection = connect(port, MASTER_PASSWORD)) {
@@ -210,14 +259,18 @@ class RdsIamAuthLambdaSessionIntegrationTest {
         String token = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, MASTER_USER,
                 accessKeyId, SESSION_SECRET, Instant.now().minusSeconds(60), 900, SESSION_TOKEN);
         if (enabled) {
-            try (Connection connection = connect(port, token);
-                 Statement statement = connection.createStatement();
-                 ResultSet rows = statement.executeQuery("SELECT current_user")) {
-                assertTrue(rows.next());
-                assertEquals(MASTER_USER, rows.getString(1));
-            }
+            assertCurrentUser(port, token);
         } else {
             assertThrows(SQLException.class, () -> connect(port, token).close());
+        }
+    }
+
+    private static void assertCurrentUser(int port, String password) throws SQLException {
+        try (Connection connection = connect(port, password);
+             Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT current_user")) {
+            assertTrue(rows.next());
+            assertEquals(MASTER_USER, rows.getString(1));
         }
     }
 

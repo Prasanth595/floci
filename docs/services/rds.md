@@ -751,8 +751,10 @@ IAM database authentication is also supported. Set `--enable-iam-database-authen
 New Aurora members inherit IAM database authentication from their cluster.
 `EnableIAMDatabaseAuthentication` on `CreateDBInstance` does not override the
 cluster setting, including when the instance parameter is omitted.
-Member IAM connections currently require the cluster master username and password
-to be supplied when creating the member; those credentials are not yet inherited.
+New members also use the cluster master username and password for backend connections.
+Omitting member credentials, or providing different valid credentials, does not give
+an Aurora member an independent master user. Existing credential input checks remain
+in effect; configure and rotate master credentials on the cluster.
 
 Changing `EnableIAMDatabaseAuthentication` with `ModifyDBCluster` updates existing
 Aurora members and applies to new connections through the cluster and member

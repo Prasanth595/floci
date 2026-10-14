@@ -860,6 +860,8 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.setContainerPort(backendPort);
                     iamEnabled = currentCluster.isIamDatabaseAuthenticationEnabled();
                     instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
+                    instance.setMasterUsername(currentCluster.getMasterUsername());
+                    instance.setMasterPassword(currentCluster.getMasterPassword());
                 }
             }
             if (manageMasterUserPassword) {
@@ -873,7 +875,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
                             engine, iamEnabled, proxyPort, backendHost, backendPort,
                             instance.getEndpoint().address(),
-                            masterUsername, masterPassword, dbName,
+                            instance.getMasterUsername(), instance.getMasterPassword(), dbName,
                             (user, pw) -> validateDbPasswordForScope(
                                     accountId, instanceRegion, id, user, pw),
                             proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
