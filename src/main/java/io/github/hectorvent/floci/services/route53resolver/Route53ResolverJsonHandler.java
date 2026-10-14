@@ -148,10 +148,7 @@ public class Route53ResolverJsonHandler {
 
     private Response handleListResolverEndpointIpAddresses(String endpointId) {
         ObjectNode result = objectMapper.createObjectNode();
-        ArrayNode addresses = result.putArray("IpAddresses");
-        for (ObjectNode address : service.listResolverEndpointIpAddresses(endpointId)) {
-            addresses.add(address);
-        }
+        result.putArray("IpAddresses").addAll(service.listResolverEndpointIpAddresses(endpointId));
         return Response.ok(result).build();
     }
 
