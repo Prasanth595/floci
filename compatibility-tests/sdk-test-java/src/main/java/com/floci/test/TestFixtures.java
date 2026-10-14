@@ -5,6 +5,8 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
 import software.amazon.awssdk.core.exception.SdkClientException;
+import software.amazon.awssdk.core.retry.backoff.FixedDelayBackoffStrategy;
+import software.amazon.awssdk.core.waiters.WaiterOverrideConfiguration;
 import software.amazon.awssdk.endpoints.Endpoint;
 import software.amazon.awssdk.http.Protocol;
 import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient;
@@ -224,6 +226,23 @@ public final class TestFixtures {
     public static void await(BooleanSupplier condition, String resourceName, String expected,
                              long timeoutNanos, long pollMillis) throws InterruptedException {
         await(condition, resourceName, expected, timeoutNanos, pollMillis, () -> "");
+    }
+
+    /**
+     * A waiter override that bounds the wait by {@code timeout} and, against Floci, checks once a
+     * second. A waiter otherwise sleeps out the published AWS cadence between checks, from 6
+     * seconds for ECS {@code TasksStopped} and 15 for {@code ServicesStable} to 30 for the
+     * CloudFormation and EKS waiters, where Floci has usually settled within one. The attempt limit
+     * grows to match, since the published one is sized for the published delay. Against real AWS
+     * the waiter keeps its own cadence.
+     */
+    public static WaiterOverrideConfiguration waiterOverride(Duration timeout) {
+        WaiterOverrideConfiguration.Builder override = WaiterOverrideConfiguration.builder().waitTimeout(timeout);
+        if (!isRealAws()) {
+            override.backoffStrategy(FixedDelayBackoffStrategy.create(Duration.ofSeconds(1)))
+                    .maxAttempts((int) timeout.toSeconds() + 1);
+        }
+        return override.build();
     }
 
     /** Polls a condition and appends lazily produced diagnostics when the wait expires. */
