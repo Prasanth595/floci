@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Address;
@@ -23,6 +24,7 @@ import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
+import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceListResult;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
@@ -692,6 +694,53 @@ class Ec2ServiceTest {
         assertEquals("Resource.AlreadyAssociated", e.getErrorCode());
     }
 
+    /** AssociateAddress refuses an allocation a NAT gateway holds; the gateway keeps it. */
+    @Test
+    void associateAddressRefusesANatGatewaysElasticIp() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of()).getFirst().getSubnetId();
+        String allocationId = service.allocateAddress("us-east-1").getAllocationId();
+        NatGateway nat = service.createNatGateway("us-east-1", subnetId, allocationId, null, null);
+        String gatewayAssociation = nat.getNatGatewayAddresses().getFirst().getAssociationId();
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.associateAddress("us-east-1", allocationId, "i-0123456789abcdef0"));
+        assertEquals("Resource.AlreadyAssociated", e.getErrorCode());
+
+        Address after = service.describeAddresses("us-east-1", List.of(allocationId), Map.of()).getFirst();
+        assertEquals(gatewayAssociation, after.getAssociationId());
+        assertNull(after.getInstanceId());
+        service.deleteNatGateway("us-east-1", nat.getNatGatewayId());
+        assertNull(service.describeAddresses("us-east-1", List.of(allocationId), Map.of())
+                .getFirst().getAssociationId(), "delete must still release the gateway's Elastic IP");
+    }
+
+    /** A gateway persisted before account isolation (unprefixed key) still holds its Elastic IP. */
+    @Test
+    void createNatGatewayRefusesALegacyUnprefixedGatewaysElasticIp() {
+        InMemoryStorage<String, NatGateway> rawGateways = new InMemoryStorage<>();
+        Map<String, AccountAwareStorageBackend<?>> stores = Map.of("ec2-nat-gateways.json",
+                new AccountAwareStorageBackend<>(rawGateways, null, "000000000000"));
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(stores));
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of()).getFirst().getSubnetId();
+        String allocationId = service.allocateAddress("us-east-1").getAllocationId();
+        NatGateway legacy = new NatGateway();
+        legacy.setNatGatewayId("nat-0legacy000000000");
+        legacy.setSubnetId(subnetId);
+        legacy.setAllocationId(allocationId);
+        legacy.setState("available");
+        legacy.setRegion("us-east-1");
+        rawGateways.put("us-east-1::nat-0legacy000000000", legacy);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createNatGateway("us-east-1", subnetId, allocationId, null, null));
+        assertEquals("Resource.AlreadyAssociated", e.getErrorCode());
+    }
+
     /** DeleteNatGateway releases the Elastic IP under the lock CreateNatGateway takes. */
     @Test
     void deleteNatGatewayReleasesTheElasticIpUnderTheAllocationLock() throws Exception {
@@ -701,7 +750,7 @@ class Ec2ServiceTest {
         String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of()).getFirst().getSubnetId();
         String allocationId = service.allocateAddress("us-east-1").getAllocationId();
         String natId = service.createNatGateway("us-east-1", subnetId, allocationId, null, null).getNatGatewayId();
-        java.lang.reflect.Field field = Ec2Service.class.getDeclaredField("privateIpAllocationLock");
+        Field field = Ec2Service.class.getDeclaredField("privateIpAllocationLock");
         field.setAccessible(true);
         Object lock = field.get(service);
 

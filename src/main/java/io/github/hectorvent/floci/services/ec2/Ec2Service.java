@@ -8998,13 +8998,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public Address associateAddress(String region, String allocationId, String instanceId) {
         ensureDefaultResources(region);
-        Address addr = getRequiredAddress(region, allocationId);
+        // Under the lock createNatGateway and deleteNatGateway take, so the gateway check and the
+        // write cannot interleave with a gateway claiming or releasing the same allocation.
+        synchronized (privateIpAllocationLock) {
+            Address addr = getRequiredAddress(region, allocationId);
+            // A NAT gateway holds its Elastic IP until DeleteNatGateway; reassociation would leave
+            // the gateway claiming an address an instance now holds.
+            if (isHeldByNatGateway(region, allocationId)) {
+                throw new AwsException("Resource.AlreadyAssociated",
+                        "Elastic IP address " + allocationId + " is already associated with a NAT gateway.", 400);
+            }
 
-        addr.setInstanceId(instanceId);
-        addr.setAssociationId("eipassoc-" + randomHex(17));
-        pointAddressAtInstance(addr, region, instanceId);
-        addresses.put(key(region, allocationId), addr);
-        return addr;
+            addr.setInstanceId(instanceId);
+            addr.setAssociationId("eipassoc-" + randomHex(17));
+            pointAddressAtInstance(addr, region, instanceId);
+            addresses.put(key(region, allocationId), addr);
+            return addr;
+        }
     }
 
     /**
@@ -9088,15 +9098,31 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /**
+     * The caller's gateways, including unmigrated pre-account-isolation records when the caller is
+     * the default account (they belong to it); never another account's.
+     */
+    private List<NatGateway> callerNatGateways() {
+        if (natGateways instanceof AccountAwareStorageBackend<NatGateway> aware) {
+            String caller = callerAccountId();
+            // ponytail: reads every account's gateways; scope to caller + unprefixed keys if this gets hot.
+            return aware.scanAllAccountEntries(k -> true).stream()
+                    .filter(e -> caller.equals(e.accountId()))
+                    .map(AccountAwareStorageBackend.AccountEntry::value)
+                    .toList();
+        }
+        return natGateways.scan(k -> true);
+    }
+
     private boolean isHeldByNatGateway(String region, String allocationId) {
-        return natGateways.scan(k -> true).stream()
+        return callerNatGateways().stream()
                 .filter(g -> region.equals(g.getRegion()) && !"deleted".equals(g.getState()))
                 .anyMatch(g -> allocationId.equals(g.getAllocationId())
                         || g.getNatGatewayAddresses().stream().anyMatch(a -> allocationId.equals(a.getAllocationId())));
     }
 
     private boolean isNatGatewayAssociation(String region, String associationId) {
-        return natGateways.scan(k -> true).stream()
+        return callerNatGateways().stream()
                 .filter(g -> region.equals(g.getRegion()))
                 .flatMap(g -> g.getNatGatewayAddresses().stream())
                 .anyMatch(a -> associationId.equals(a.getAssociationId()));
