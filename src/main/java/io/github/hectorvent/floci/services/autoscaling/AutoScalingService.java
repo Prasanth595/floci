@@ -595,15 +595,18 @@ public class AutoScalingService {
         return new TagPage(matches.subList(0, limit), token);
     }
 
-    // Signed so a forged or edited token is refused as AWS refuses one; the key is per process,
-    // so a token does not outlive a restart. A genuine token past the end (groups deleted since)
-    // still resumes, returning what remains.
-    private static final byte[] TAG_CURSOR_KEY = new SecureRandom().generateSeed(32);
+    // Signed so a forged or edited token is refused as AWS refuses one, and bound to the account
+    // and region that issued it. The key is per bean instance, not static: a static initializer can
+    // run at native-image build time and bake one key into every process. A token does not outlive
+    // a restart; a genuine token past the end (groups deleted since) still resumes.
+    private final byte[] tagCursorKey = new SecureRandom().generateSeed(32);
 
-    private static byte[] signTagCursor(String region, byte[] cursor) {
+    private byte[] signTagCursor(String region, byte[] cursor) {
         try {
             Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(TAG_CURSOR_KEY, "HmacSHA256"));
+            mac.init(new SecretKeySpec(tagCursorKey, "HmacSHA256"));
+            mac.update(regionResolver.getAccountId().getBytes(StandardCharsets.UTF_8));
+            mac.update((byte) 0);
             mac.update(region.getBytes(StandardCharsets.UTF_8));
             mac.update((byte) 0);
             return mac.doFinal(cursor);
@@ -612,7 +615,7 @@ public class AutoScalingService {
         }
     }
 
-    private static String[] parseTagCursor(String region, String nextToken) {
+    private String[] parseTagCursor(String region, String nextToken) {
         if (nextToken == null || nextToken.isBlank()) {
             return null;
         }

@@ -252,6 +252,24 @@ class AutoScalingDescribeTagsIntegrationTest {
                 + genuine.substring(genuine.indexOf('.')));
     }
 
+    // A token is bound to the account that issued it: replayed under another account it must not
+    // resume a listing there.
+    @Test
+    void nextTokenFromAnotherAccountIsInvalidNextToken() {
+        String token = describe().formParam("MaxRecords", "1")
+            .when().post("/")
+            .then().statusCode(200).extract().xmlPath()
+                .getString("DescribeTagsResponse.DescribeTagsResult.NextToken");
+        assertNotNull(token);
+        given().formParam("Action", "DescribeTags")
+                .header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential=333333333333/20260501/us-east-1/autoscaling/aws4_request")
+                .formParam("NextToken", token)
+            .when().post("/")
+            .then().statusCode(400)
+                .body(containsString("InvalidNextToken"));
+    }
+
     private static void assertInvalidNextToken(String token) {
         describe()
                 .formParam("NextToken", token)
