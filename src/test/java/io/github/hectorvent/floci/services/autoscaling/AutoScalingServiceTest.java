@@ -5,6 +5,9 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
+import io.github.hectorvent.floci.services.autoscaling.model.AvailabilityZoneDistribution;
+import io.github.hectorvent.floci.services.autoscaling.model.CapacityReservationSpecification;
+import io.github.hectorvent.floci.services.autoscaling.model.InstanceMaintenancePolicy;
 import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefresh;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfigurationBlockDeviceMapping;
@@ -18,9 +21,16 @@ import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
+import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.doThrow;
@@ -135,6 +145,49 @@ class AutoScalingServiceTest {
         assertTrue(service.describeAutoScalingGroups(REGION, List.of("missing-image-asg")).isEmpty());
     }
 
+    static Stream<String> rejectedUserData() throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(bytes)) {
+            gzip.write(new byte[10 * 1024 * 1024 + 1]);
+        }
+        return Stream.of("not base64!", "YQ==\n", "H4sI", Base64.getEncoder().encodeToString(new byte[16385]),
+                Base64.getEncoder().encodeToString(bytes.toByteArray()));
+    }
+
+    @ParameterizedTest
+    @MethodSource("rejectedUserData")
+    void createLaunchConfigurationRejectsUnlaunchableDataBeforeSaving(String data) {
+        AwsException error = assertThrows(AwsException.class, () -> service.createLaunchConfiguration(REGION,
+                "invalid-data", null, "ami-test", "t3.micro", null, List.of(), data, null, null));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.describeLaunchConfigurations(REGION, List.of("invalid-data")).isEmpty());
+        service.createLaunchConfiguration(REGION, "invalid-data", null, "ami-test", "t3.micro", null,
+                List.of(), "YQ==", null, null);
+        assertEquals("YQ==", service.describeLaunchConfigurations(REGION, List.of("invalid-data"))
+                .getFirst().getUserData());
+    }
+
+    @Test
+    void createLaunchConfigurationChecksSelectedInheritedDataAndAllowsValidOverride() {
+        Ec2Service ec2 = mock(Ec2Service.class);
+        service.ec2Service = ec2;
+        Instance source = new Instance();
+        source.setImageId("ami-test");
+        source.setInstanceType("t3.micro");
+        source.setEncodedUserData("not base64!");
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(source));
+        when(ec2.describeInstances(REGION, List.of("i-source"), Map.of())).thenReturn(List.of(reservation));
+        assertThrows(AwsException.class, () -> service.createLaunchConfiguration(REGION, "inherited-invalid",
+                "i-source", null, null, null, List.of(), null, null, null));
+        assertTrue(service.describeLaunchConfigurations(REGION, List.of("inherited-invalid")).isEmpty());
+        LaunchConfiguration overridden = service.createLaunchConfiguration(REGION, "overridden-valid",
+                "i-source", null, null, null, List.of(), "Yg==", null, null);
+        assertEquals("Yg==", overridden.getUserData());
+        assertEquals("not base64!", source.getEncodedUserData());
+    }
+
     @Test
     void createLaunchConfigurationRejectsMissingImageOrInstanceTypeWithoutInstanceId() {
         AwsException missingImage = assertThrows(AwsException.class, () -> service.createLaunchConfiguration(REGION,
@@ -204,7 +257,8 @@ class AutoScalingServiceTest {
         assertEquals("m7g.large", launchConfiguration.getInstanceType());
         assertEquals("source-key", launchConfiguration.getKeyName());
         assertEquals(List.of("sg-source"), launchConfiguration.getSecurityGroups());
-        assertEquals("source-user-data", launchConfiguration.getUserData());
+        assertEquals("c291cmNlLXVzZXItZGF0YQ==", launchConfiguration.getUserData());
+        assertEquals(Boolean.TRUE, launchConfiguration.getUserDataBase64Encoded());
         assertEquals("arn:aws:iam::000000000000:instance-profile/source",
                 launchConfiguration.getIamInstanceProfile());
         assertEquals(launchConfiguration,
@@ -1215,6 +1269,205 @@ class AutoScalingServiceTest {
                 null, null, null, null, null, null, null, null, null, AsgOptionalFields.none()));
 
         assertEquals(AutoScalingService.INSTANCE_REQUIREMENTS_MISSING_RANGES_MESSAGE, error.getMessage());
+    }
+
+    @Test
+    void createAndUpdateCarryTheOptionalStructuresAndUpdateLeavesUnsetOnesAlone() {
+        CapacityReservationSpecification reservation = new CapacityReservationSpecification();
+        reservation.setCapacityReservationPreference("capacity-reservations-first");
+        reservation.setCapacityReservationResourceGroupArns(List.of("arn:aws:resource-groups:us-east-1:000000000000:group/cr"));
+        createWithStructures("structures-asg", new AsgOptionalFields(null, null, null, null,
+                "role-arn", new InstanceMaintenancePolicy(90, 120),
+                new AvailabilityZoneDistribution("balanced-only"), reservation));
+
+        service.updateAutoScalingGroup(REGION, "structures-asg", null, null, null, null, null,
+                null, null, null, null, null, null, null, null, null,
+                new AsgOptionalFields(null, null, null, null, "other-role-arn", null, null, null));
+
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("structures-asg")).getFirst();
+        assertEquals("other-role-arn", group.getServiceLinkedRoleArn());
+        assertEquals(90, group.getInstanceMaintenancePolicy().getMinHealthyPercentage());
+        assertEquals(120, group.getInstanceMaintenancePolicy().getMaxHealthyPercentage());
+        assertEquals("balanced-only", group.getAvailabilityZoneDistribution().getCapacityDistributionStrategy());
+        assertEquals("capacity-reservations-first",
+                group.getCapacityReservationSpecification().getCapacityReservationPreference());
+    }
+
+    @Test
+    void instanceMaintenancePolicyRemovalSentinelClearsTheStoredPolicy() {
+        createWithStructures("maintenance-asg", new AsgOptionalFields(null, null, null, null,
+                null, new InstanceMaintenancePolicy(100, 110), null, null));
+
+        service.updateAutoScalingGroup(REGION, "maintenance-asg", null, null, null, null, null,
+                null, null, null, null, null, null, null, null, null,
+                new AsgOptionalFields(null, null, null, null, null,
+                        new InstanceMaintenancePolicy(-1, -1), null, null));
+
+        assertNull(service.describeAutoScalingGroups(REGION, List.of("maintenance-asg"))
+                .getFirst().getInstanceMaintenancePolicy());
+    }
+
+    @Test
+    void instanceMaintenancePolicyEnforcesTheModelBounds() {
+        assertMaintenancePolicyRejected(null, 110, AutoScalingService.INSTANCE_MAINTENANCE_POLICY_BOTH_REQUIRED_MESSAGE);
+        assertMaintenancePolicyRejected(-1, 110, AutoScalingService.INSTANCE_MAINTENANCE_POLICY_PARTIAL_CLEAR_MESSAGE);
+        assertMaintenancePolicyRejected(101, 150, AutoScalingService.INVALID_MIN_HEALTHY_PERCENTAGE_MESSAGE);
+        assertMaintenancePolicyRejected(50, 99, AutoScalingService.INVALID_MAX_HEALTHY_PERCENTAGE_MESSAGE);
+        assertMaintenancePolicyRejected(50, 201, AutoScalingService.INVALID_MAX_HEALTHY_PERCENTAGE_MESSAGE);
+        assertMaintenancePolicyRejected(0, 101, AutoScalingService.INSTANCE_MAINTENANCE_POLICY_RANGE_MESSAGE);
+
+        createWithStructures("maintenance-bounds-asg", new AsgOptionalFields(null, null, null, null,
+                null, new InstanceMaintenancePolicy(0, 100), null, null));
+        assertEquals(0, service.describeAutoScalingGroups(REGION, List.of("maintenance-bounds-asg"))
+                .getFirst().getInstanceMaintenancePolicy().getMinHealthyPercentage());
+    }
+
+    @Test
+    void capacityStructuresRejectValuesOutsideTheirEnums() {
+        AwsException strategy = assertThrows(AwsException.class, () -> createWithStructures("bad-strategy-asg",
+                new AsgOptionalFields(null, null, null, null, null, null,
+                        new AvailabilityZoneDistribution("round-robin"), null)));
+        assertEquals(AutoScalingService.INVALID_CAPACITY_DISTRIBUTION_STRATEGY_MESSAGE, strategy.getMessage());
+
+        CapacityReservationSpecification badPreference = new CapacityReservationSpecification();
+        badPreference.setCapacityReservationPreference("open");
+        AwsException preference = assertThrows(AwsException.class, () -> createWithStructures("bad-preference-asg",
+                new AsgOptionalFields(null, null, null, null, null, null, null, badPreference)));
+        assertEquals(AutoScalingService.INVALID_CAPACITY_RESERVATION_PREFERENCE_MESSAGE, preference.getMessage());
+    }
+
+    @Test
+    void capacityReservationPreferenceNoneRejectsATarget() {
+        CapacityReservationSpecification specification = new CapacityReservationSpecification();
+        specification.setCapacityReservationPreference("none");
+        specification.setCapacityReservationIds(List.of("cr-0123456789abcdef0"));
+
+        AwsException error = assertThrows(AwsException.class, () -> createWithStructures("none-target-asg",
+                new AsgOptionalFields(null, null, null, null, null, null, null, specification)));
+
+        assertEquals(AutoScalingService.CAPACITY_RESERVATION_TARGET_WITH_NONE_MESSAGE, error.getMessage());
+    }
+
+    @Test
+    void capacityReservationTargetMembersFollowTheirModelShapes() {
+        CapacityReservationSpecification badId = new CapacityReservationSpecification();
+        badId.setCapacityReservationPreference("capacity-reservations-only");
+        badId.setCapacityReservationIds(List.of("cr 0123"));
+        AwsException idError = assertThrows(AwsException.class, () -> createWithStructures("bad-id-asg",
+                new AsgOptionalFields(null, null, null, null, null, null, null, badId)));
+        assertEquals("ValidationError", idError.getErrorCode());
+
+        CapacityReservationSpecification longId = new CapacityReservationSpecification();
+        longId.setCapacityReservationPreference("capacity-reservations-only");
+        longId.setCapacityReservationIds(List.of("c".repeat(256)));
+        assertThrows(AwsException.class, () -> createWithStructures("long-id-asg",
+                new AsgOptionalFields(null, null, null, null, null, null, null, longId)));
+
+        CapacityReservationSpecification longArn = new CapacityReservationSpecification();
+        longArn.setCapacityReservationPreference("capacity-reservations-only");
+        longArn.setCapacityReservationResourceGroupArns(List.of("a".repeat(1601)));
+        assertThrows(AwsException.class, () -> createWithStructures("long-arn-asg",
+                new AsgOptionalFields(null, null, null, null, null, null, null, longArn)));
+    }
+
+    @Test
+    void serviceLinkedRoleArnMustBeOneTo1600Characters() {
+        AwsException empty = assertThrows(AwsException.class, () -> createWithStructures("empty-role-asg",
+                new AsgOptionalFields(null, null, null, null, "", null, null, null)));
+        assertEquals(AutoScalingService.INVALID_SERVICE_LINKED_ROLE_ARN_MESSAGE, empty.getMessage());
+
+        AwsException tooLong = assertThrows(AwsException.class, () -> createWithStructures("long-role-asg",
+                new AsgOptionalFields(null, null, null, null, "a".repeat(1601), null, null, null)));
+        assertEquals(AutoScalingService.INVALID_SERVICE_LINKED_ROLE_ARN_MESSAGE, tooLong.getMessage());
+    }
+
+    @Test
+    void weightedCapacityMustBeOneTo999AndSetOnEveryOverrideOrNone() {
+        AwsException outOfRange = assertThrows(AwsException.class, () -> createWithStructures("weight-range-asg",
+                AsgOptionalFields.none(), weightedPolicy("0", "2")));
+        assertEquals(AutoScalingService.INVALID_WEIGHTED_CAPACITY_MESSAGE, outOfRange.getMessage());
+
+        AwsException notANumber = assertThrows(AwsException.class, () -> createWithStructures("weight-text-asg",
+                AsgOptionalFields.none(), weightedPolicy("two", "2")));
+        assertEquals(AutoScalingService.INVALID_WEIGHTED_CAPACITY_MESSAGE, notANumber.getMessage());
+
+        AwsException tooLong = assertThrows(AwsException.class, () -> createWithStructures("weight-long-asg",
+                AsgOptionalFields.none(), weightedPolicy("0".repeat(32) + "1", "2")));
+        assertEquals(AutoScalingService.INVALID_WEIGHTED_CAPACITY_MESSAGE, tooLong.getMessage());
+
+        AwsException partial = assertThrows(AwsException.class, () -> createWithStructures("weight-partial-asg",
+                AsgOptionalFields.none(), weightedPolicy("2", null)));
+        assertEquals(AutoScalingService.PARTIAL_WEIGHTED_CAPACITY_MESSAGE, partial.getMessage());
+
+        createWithStructures("weight-ok-asg", AsgOptionalFields.none(), weightedPolicy("1", "999"));
+        assertEquals("999", service.describeAutoScalingGroups(REGION, List.of("weight-ok-asg")).getFirst()
+                .getMixedInstancesPolicy().getLaunchTemplate().getOverrides().get(1).getWeightedCapacity());
+    }
+
+    @Test
+    void enableAndDisableMetricsCollectionMaintainEnabledMetrics() {
+        service.enableMetricsCollection(REGION, "test-asg", List.of("GroupMinSize", "GroupMaxSize"), "1Minute");
+        service.enableMetricsCollection(REGION, "test-asg", List.of("GroupMaxSize", "GroupTotalInstances"), "1Minute");
+        assertEquals(List.of("GroupMinSize", "GroupMaxSize", "GroupTotalInstances"), enabledMetrics());
+
+        service.disableMetricsCollection(REGION, "test-asg", List.of("GroupMaxSize"));
+        assertEquals(List.of("GroupMinSize", "GroupTotalInstances"), enabledMetrics());
+
+        service.disableMetricsCollection(REGION, "test-asg", List.of());
+        assertEquals(List.of(), enabledMetrics());
+
+        service.enableMetricsCollection(REGION, "test-asg", List.of(), "1Minute");
+        assertEquals(AutoScalingService.GROUP_METRICS, enabledMetrics());
+    }
+
+    @Test
+    void enableMetricsCollectionRequiresOneMinuteGranularityAndKnownMetrics() {
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.enableMetricsCollection(REGION, "test-asg", List.of(), null));
+        assertEquals(AutoScalingService.MISSING_GRANULARITY_MESSAGE, missing.getMessage());
+
+        AwsException wrong = assertThrows(AwsException.class,
+                () -> service.enableMetricsCollection(REGION, "test-asg", List.of(), "5Minute"));
+        assertEquals(AutoScalingService.INVALID_GRANULARITY_MESSAGE, wrong.getMessage());
+
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> service.enableMetricsCollection(REGION, "test-asg", List.of("CPUUtilization"), "1Minute"));
+        assertEquals("ValidationError", unknown.getErrorCode());
+        assertEquals(List.of(), enabledMetrics());
+    }
+
+    private List<String> enabledMetrics() {
+        return service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst().getEnabledMetrics();
+    }
+
+    private void assertMaintenancePolicyRejected(Integer min, Integer max, String message) {
+        AwsException error = assertThrows(AwsException.class, () -> createWithStructures("maintenance-bad-asg",
+                new AsgOptionalFields(null, null, null, null, null,
+                        new InstanceMaintenancePolicy(min, max), null, null)));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(message, error.getMessage());
+    }
+
+    private void createWithStructures(String name, AsgOptionalFields optionalFields) {
+        service.createAutoScalingGroup(REGION, name, null, "lt-original", null, "1", null,
+                0, 3, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(), "EC2", 0,
+                List.of("Default"), Map.of(), Map.of(), optionalFields);
+    }
+
+    private void createWithStructures(String name, AsgOptionalFields optionalFields, MixedInstancesPolicy policy) {
+        service.createAutoScalingGroup(REGION, name, null, null, null, null, policy,
+                0, 3, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(), "EC2", 0,
+                List.of("Default"), Map.of(), Map.of(), optionalFields);
+    }
+
+    private static MixedInstancesPolicy weightedPolicy(String firstWeight, String secondWeight) {
+        MixedInstancesPolicy.LaunchTemplateOverride first = new MixedInstancesPolicy.LaunchTemplateOverride();
+        first.setInstanceType("t3.micro");
+        first.setWeightedCapacity(firstWeight);
+        MixedInstancesPolicy.LaunchTemplateOverride second = new MixedInstancesPolicy.LaunchTemplateOverride();
+        second.setInstanceType("t3.small");
+        second.setWeightedCapacity(secondWeight);
+        return policyWithOverrides(List.of(first, second));
     }
 
     private static MixedInstancesPolicy attributeBasedPolicy(int minVCpuCount, int minMemoryMiB) {

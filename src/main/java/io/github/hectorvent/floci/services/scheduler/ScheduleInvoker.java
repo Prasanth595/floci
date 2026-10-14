@@ -2,15 +2,18 @@ package io.github.hectorvent.floci.services.scheduler;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
 import io.github.hectorvent.floci.services.scheduler.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.scheduler.model.EcsParameters;
 import io.github.hectorvent.floci.services.scheduler.model.EventBridgeParameters;
@@ -28,7 +31,6 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -39,7 +41,8 @@ import java.util.UUID;
  * Delivers an EventBridge Scheduler target invocation to the underlying service.
  * Supports templated SQS, Lambda, SNS, Step Functions, and EventBridge PutEvents targets, plus
  * universal targets ({@code arn:aws:scheduler:::aws-sdk:<service>:<action>}) for
- * {@code sns:publish} and {@code sqs:sendMessage}. Mirrors the subset handled by
+ * {@code sns:publish}, {@code sqs:sendMessage}, {@code redshiftdata:executeStatement} and
+ * {@code redshiftdata:batchExecuteStatement}. Mirrors the subset handled by
  * {@code EventBridgeInvoker} but using Scheduler's {@link Target} model (raw
  * {@code input} string, no JSONPath/template).
  */
@@ -59,9 +62,11 @@ public class ScheduleInvoker {
     private final EventBridgeService eventBridgeService;
     private final EcsService ecsService;
     private final StepFunctionsService stepFunctionsService;
+    private final RedshiftDataService redshiftDataService;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
     private final String defaultRegion;
+    private final ServiceRegistry serviceRegistry;
 
     @Inject
     public ScheduleInvoker(SqsService sqsService,
@@ -70,17 +75,21 @@ public class ScheduleInvoker {
                            EventBridgeService eventBridgeService,
                            EcsService ecsService,
                            StepFunctionsService stepFunctionsService,
+                           RedshiftDataService redshiftDataService,
                            ObjectMapper objectMapper,
-                           EmulatorConfig config) {
+                           EmulatorConfig config,
+                           ServiceRegistry serviceRegistry) {
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
         this.snsService = snsService;
         this.eventBridgeService = eventBridgeService;
         this.ecsService = ecsService;
         this.stepFunctionsService = stepFunctionsService;
+        this.redshiftDataService = redshiftDataService;
         this.objectMapper = objectMapper;
         this.baseUrl = config.baseUrl();
         this.defaultRegion = config.defaultRegion();
+        this.serviceRegistry = serviceRegistry;
     }
 
     /**
@@ -107,7 +116,7 @@ public class ScheduleInvoker {
         String input = contextualInput(schedule, scheduledAt, executionId, attemptNumber);
         if (isUniversalTarget(arn)) {
             invokeUniversalTarget(arn.substring(arn.indexOf(":aws-sdk:") + ":aws-sdk:".length()),
-                    input, region);
+                    input, region, schedule.getAccountId(), target.getRoleArn());
             return universalTargetRequest(input);
         }
 
@@ -401,9 +410,11 @@ public class ScheduleInvoker {
      * Dispatches an EventBridge Scheduler universal target ({@code aws-sdk:<service>:<action>}),
      * reading the call parameters from the target's {@code Input} payload. Supports the
      * common {@code sns:publish} and {@code sqs:sendMessage} actions; other actions fail
-     * as unsupported.
+     * as unsupported. {@code scheduleAccountId} scopes the Redshift Data calls, whose cluster and
+     * statement storage is account-aware and the dispatcher thread carries no request account.
      */
-    private void invokeUniversalTarget(String serviceAction, String input, String region) {
+    private void invokeUniversalTarget(String serviceAction, String input, String region,
+                                       String scheduleAccountId, String principal) {
         JsonNode params;
         try {
             params = objectMapper.readTree(input == null || input.isBlank() ? "{}" : input);
@@ -436,8 +447,38 @@ public class ScheduleInvoker {
                         messageAttributes, region);
                 LOG.debugv("Scheduler delivered to SQS (universal target): {0}", queueUrl);
             }
+            case "redshiftdata:executeStatement" -> {
+                requireRedshiftData();
+                JsonNode executeParams = withoutWait(params);
+                RequestScopes.callAs(scheduleAccountId, region,
+                        () -> redshiftDataService.executeStatement(executeParams, region, principal));
+                LOG.debugv("Scheduler submitted to the Redshift Data API (universal target): {0}", serviceAction);
+            }
+            case "redshiftdata:batchExecuteStatement" -> {
+                requireRedshiftData();
+                JsonNode batchParams = withoutWait(params);
+                RequestScopes.callAs(scheduleAccountId, region,
+                        () -> redshiftDataService.batchExecuteStatement(batchParams, region, principal));
+                LOG.debugv("Scheduler submitted to the Redshift Data API (universal target): {0}", serviceAction);
+            }
             default -> throw new UnsupportedOperationException(
                     "Scheduler: unsupported universal target action: " + serviceAction);
+        }
+    }
+
+    // The shared dispatcher thread must never wait for a statement to finish.
+    private static JsonNode withoutWait(JsonNode params) {
+        if (params instanceof ObjectNode object && object.has("WaitTimeSeconds")) {
+            ObjectNode copy = object.deepCopy();
+            copy.remove("WaitTimeSeconds");
+            return copy;
+        }
+        return params;
+    }
+
+    private void requireRedshiftData() {
+        if (!serviceRegistry.isServiceEnabled("redshift-data")) {
+            throw new AwsException("ServiceNotAvailableException", "Service redshift-data is not enabled.", 400);
         }
     }
 
@@ -450,19 +491,15 @@ public class ScheduleInvoker {
             JsonNode valueNode = entry.getValue();
             String dataType = valueNode.path("DataType").asText(null);
             String stringValue = valueNode.path("StringValue").asText(null);
-            String binaryValueBase64 = valueNode.path("BinaryValue").asText(null);
+            String binaryValueText = valueNode.path("BinaryValue").asText(null);
             if (dataType == null) {
                 return;
             }
-            if (binaryValueBase64 != null) {
-                byte[] binaryValue;
-                try {
-                    binaryValue = Base64.getDecoder().decode(binaryValueBase64);
-                } catch (IllegalArgumentException e) {
-                    throw new AwsException("InvalidParameterValue",
-                            "Invalid binary value for message attribute '" + entry.getKey()
-                                    + "': not valid base64.", 400);
-                }
+            if (binaryValueText != null) {
+                // Unlike the SQS JSON protocol, AWS does not base64-decode BinaryValue in a universal
+                // target Input: the attribute bytes are the UTF-8 encoding of the JSON string, and a
+                // base64 string is delivered as its own text.
+                byte[] binaryValue = binaryValueText.getBytes(StandardCharsets.UTF_8);
                 attributes.put(entry.getKey(), new MessageAttributeValue(binaryValue, dataType));
             } else if (stringValue != null) {
                 attributes.put(entry.getKey(), new MessageAttributeValue(

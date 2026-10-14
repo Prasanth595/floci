@@ -38,6 +38,7 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class RedshiftServerlessService implements Resettable {
@@ -215,8 +216,7 @@ public class RedshiftServerlessService implements Resettable {
         validateNamespaceName(namespaceName);
         String key = storageKey(region, namespaceName);
         if (namespaces.get(key).isPresent()) {
-            throw new AwsException("ConflictException",
-                    "The namespace " + namespaceName + " already exists.", 409);
+            throw conflict("The namespace " + namespaceName + " already exists.");
         }
 
         Namespace namespace = new Namespace();
@@ -339,8 +339,7 @@ public class RedshiftServerlessService implements Resettable {
         // A workgroup cannot outlive its namespace; the model lists ConflictException for this call
         // but not its trigger, so this guard is the single place to relax if AWS turns out to differ.
         if (workgroupOf(namespaceName, region).isPresent()) {
-            throw new AwsException("ConflictException",
-                    "The namespace " + namespaceName + " still has a workgroup. Delete the workgroup first.", 409);
+            throw conflict("The namespace " + namespaceName + " still has a workgroup. Delete the workgroup first.");
         }
         namespaces.delete(storageKey(region, namespaceName));
         deleted.setStatus("DELETING");
@@ -362,8 +361,7 @@ public class RedshiftServerlessService implements Resettable {
         Namespace namespace = getNamespace(namespaceName, region);
         String key = storageKey(region, snapshotName);
         if (snapshots.get(key).isPresent()) {
-            throw new AwsException("ConflictException",
-                    "The snapshot " + snapshotName + " already exists.", 409);
+            throw conflict("The snapshot " + snapshotName + " already exists.");
         }
         RedshiftServerlessSnapshot snapshot = new RedshiftServerlessSnapshot();
         snapshot.setSnapshotName(snapshotName);
@@ -458,8 +456,7 @@ public class RedshiftServerlessService implements Resettable {
     public RedshiftServerlessSnapshot getSnapshot(String snapshotName, String region) {
         requireSnapshotName(snapshotName);
         return snapshots.get(storageKey(region, snapshotName))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The snapshot " + snapshotName + " was not found.", 404));
+                .orElseThrow(() -> snapshotNotFound(snapshotName));
     }
 
     /**
@@ -472,6 +469,21 @@ public class RedshiftServerlessService implements Resettable {
             throw validation("snapshotArn does not identify a snapshot in this account and Region.");
         }
         return snapshotArn.substring(prefix.length());
+    }
+
+    /**
+     * Changes a snapshot's retention. An omitted period leaves the snapshot as it is, and -1 makes
+     * it indefinite. {@code snapshotRemainingDays} keeps counting from the creation time, because
+     * the snapshot carries no separate retention start.
+     */
+    public synchronized RedshiftServerlessSnapshot updateSnapshot(String snapshotName, Integer retentionPeriod,
+                                                                  String region) {
+        RedshiftServerlessSnapshot snapshot = new RedshiftServerlessSnapshot(getSnapshot(snapshotName, region));
+        if (retentionPeriod != null) {
+            snapshot.setRetentionPeriod(validateRetentionPeriod(retentionPeriod));
+            snapshots.put(storageKey(region, snapshotName), snapshot);
+        }
+        return snapshot;
     }
 
     public synchronized RedshiftServerlessSnapshot deleteSnapshot(String snapshotName, String region) {
@@ -515,8 +527,7 @@ public class RedshiftServerlessService implements Resettable {
         validateNamespaceName(namespaceName);
         RedshiftServerlessSnapshot snapshot = getSnapshot(snapshotName, region);
         if (ownerAccount != null && !ownerAccount.isBlank() && !ownerAccount.equals(snapshot.getOwnerAccount())) {
-            throw new AwsException("ResourceNotFoundException",
-                    "The snapshot " + snapshotName + " was not found.", 404);
+            throw snapshotNotFound(snapshotName);
         }
         Workgroup workgroup = getWorkgroup(workgroupName, region);
         if (!namespaceName.equals(workgroup.getNamespaceName())) {
@@ -615,6 +626,17 @@ public class RedshiftServerlessService implements Resettable {
                 .findFirst();
     }
 
+    public Optional<Workgroup> findWorkgroupByArn(String resourceArn, String region) {
+        return workgroupByArn(resourceArn, region);
+    }
+
+    /** ARNs of every workgroup in the Region, for callers that test many resources against them at once. */
+    public Set<String> workgroupArns(String region) {
+        return workgroups.scan(key -> key.startsWith(region + "::")).stream()
+                .map(Workgroup::getWorkgroupArn)
+                .collect(Collectors.toSet());
+    }
+
     private Optional<Workgroup> workgroupByArn(String resourceArn, String region) {
         return workgroups.scan(key -> key.startsWith(region + "::")).stream()
                 .filter(workgroup -> resourceArn.equals(workgroup.getWorkgroupArn()))
@@ -629,7 +651,7 @@ public class RedshiftServerlessService implements Resettable {
 
     private static AwsException resourceNotFound(String resourceArn) {
         return new AwsException("ResourceNotFoundException",
-                "The resource " + resourceArn + " was not found.", 404);
+                "The resource " + resourceArn + " was not found.", 400);
     }
 
     public synchronized Workgroup createWorkgroup(String workgroupName, String namespaceName,
@@ -640,12 +662,10 @@ public class RedshiftServerlessService implements Resettable {
         Namespace namespace = getNamespace(namespaceName, region);
         String key = storageKey(region, workgroupName);
         if (workgroups.get(key).isPresent()) {
-            throw new AwsException("ConflictException",
-                    "The workgroup " + workgroupName + " already exists.", 409);
+            throw conflict("The workgroup " + workgroupName + " already exists.");
         }
         if (workgroupOf(namespaceName, region).isPresent()) {
-            throw new AwsException("ConflictException",
-                    "The namespace " + namespaceName + " already has a workgroup.", 409);
+            throw conflict("The namespace " + namespaceName + " already has a workgroup.");
         }
 
         Workgroup workgroup = new Workgroup();
@@ -1010,7 +1030,7 @@ public class RedshiftServerlessService implements Resettable {
 
     private static AwsException workgroupNotFound(String workgroupName) {
         return new AwsException("ResourceNotFoundException",
-                "The workgroup " + workgroupName + " was not found.", 404);
+                "The workgroup " + workgroupName + " was not found.", 400);
     }
 
     private static String storageKey(String region, String namespaceName) {
@@ -1019,7 +1039,16 @@ public class RedshiftServerlessService implements Resettable {
 
     private static AwsException notFound(String namespaceName) {
         return new AwsException("ResourceNotFoundException",
-                "The namespace " + namespaceName + " was not found.", 404);
+                "The namespace " + namespaceName + " was not found.", 400);
+    }
+
+    private static AwsException snapshotNotFound(String snapshotName) {
+        return new AwsException("ResourceNotFoundException",
+                "The snapshot " + snapshotName + " was not found.", 400);
+    }
+
+    private static AwsException conflict(String message) {
+        return new AwsException("ConflictException", message, 400);
     }
 
     private static AwsException validation(String message) {

@@ -77,12 +77,17 @@ class CodeArtifactPypiDockerIntegrationTest {
     @Order(1)
     void uploadThenDownloadRoundTripsTheExactBytesThroughTheSimpleIndex() {
         byte[] content = "real-sdist-bytes".getBytes(StandardCharsets.UTF_8);
+        long assetSizeBytesBeforeUpload = describeDomainAssetSizeBytes();
 
         given().header("Authorization", "Bearer " + bearerToken)
                 .contentType("multipart/form-data; boundary=boundary123")
                 .body(twineUploadBody("boundary123", PACKAGE_NAME, FILENAME, content))
                 .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
                 .then().statusCode(200);
+
+        // assetSizeBytes used to be hardcoded to 0 regardless of what was actually published; this
+        // is the real pypiserver round trip proving a real twine upload now counts.
+        assertEquals(assetSizeBytesBeforeUpload + content.length, describeDomainAssetSizeBytes());
 
         String indexHtml = given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/simple/" + PACKAGE_NAME + "/")
@@ -112,6 +117,8 @@ class CodeArtifactPypiDockerIntegrationTest {
     @Test
     @Order(2)
     void reuploadingTheExactSameFileSucceedsIdempotently() {
+        long assetSizeBytesBeforeReupload = describeDomainAssetSizeBytes();
+
         given().header("Authorization", "Bearer " + bearerToken)
                 .contentType("multipart/form-data; boundary=boundary123")
                 .body(twineUploadBody("boundary123", PACKAGE_NAME, FILENAME, "real-sdist-bytes".getBytes(StandardCharsets.UTF_8)))
@@ -123,6 +130,16 @@ class CodeArtifactPypiDockerIntegrationTest {
                 .then().statusCode(200)
                 .extract().asByteArray();
         assertEquals("real-sdist-bytes", new String(fetched, StandardCharsets.UTF_8));
+        // The idempotent-match short-circuit never forwards to pypiserver, so no new bytes were
+        // written; assetSizeBytes must not count this file a second time.
+        assertEquals(assetSizeBytesBeforeReupload, describeDomainAssetSizeBytes());
+    }
+
+    private static long describeDomainAssetSizeBytes() {
+        return given().header("Authorization", AUTH)
+                .get("/v1/domain?domain=" + DOMAIN)
+                .then().statusCode(200)
+                .extract().jsonPath().getLong("domain.assetSizeBytes");
     }
 
     @Test
@@ -354,6 +371,36 @@ class CodeArtifactPypiDockerIntegrationTest {
                 .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
                         + "&package=" + PACKAGE_NAME + "&version=1.0.0&asset=does-not-exist.tar.gz")
                 .then().statusCode(404);
+    }
+
+    /**
+     * pypiserver has no single whole-package delete route the way Verdaccio and Reposilite do, but
+     * its own management endpoint ({@code POST /} with {@code :action=remove_pkg}) does delete a
+     * named version for real, confirmed live: {@code DeletePackage} lists every version through
+     * that same container and removes each one, so this asserts the real removal rather than a
+     * refusal, and that the file this class's earlier tests uploaded is genuinely gone afterward.
+     */
+    @Test
+    @Order(13)
+    void deletePackageRemovesTheFileFromTheRealPypiserverSidecar() {
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi&package="
+                        + PACKAGE_NAME)
+                .then().statusCode(200).body("deletedPackage.package", equalTo(PACKAGE_NAME));
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/simple/" + PACKAGE_NAME + "/")
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + PACKAGE_NAME + "&version=1.0.0&asset=" + FILENAME)
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi&package="
+                        + PACKAGE_NAME)
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     /**

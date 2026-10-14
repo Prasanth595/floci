@@ -1,12 +1,15 @@
 package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbConditionKeys;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbTableNames;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -24,8 +27,10 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Builds the IAM request context: the condition keys a policy's Condition block can match,
@@ -53,6 +58,7 @@ public class IamConditionContextResolver {
     private static final String RESOURCE_TAG_PREFIX = "aws:ResourceTag/";
     public static final String EXISTING_OBJECT_TAG_PREFIX = "s3:ExistingObjectTag/";
     public static final String REQUEST_OBJECT_TAG_PREFIX = "s3:RequestObjectTag/";
+    public static final String REQUEST_OBJECT_TAG_KEYS = "s3:RequestObjectTagKeys";
 
     private final Instance<DynamoDbFacade> dynamoDbFacade;
     private final Instance<Ec2Service> ec2Service;
@@ -79,6 +85,18 @@ public class IamConditionContextResolver {
             case "s3" -> s3ConditionContext(action, ctx);
             case "ec2" -> ec2ConditionContext(action, ctx);
             case "dynamodb" -> dynamoDbConditionContext(action, ctx);
+            case "iam" -> iamConditionContext(action, ctx);
+            default -> null;
+        };
+    }
+
+    private static Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {
+        return switch (action) {
+            case "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:AttachUserPolicy",
+                    "iam:DetachUserPolicy", "iam:AttachGroupPolicy", "iam:DetachGroupPolicy" -> {
+                String policyArn = formParameters(ctx).get("PolicyArn");
+                yield policyArn == null ? null : Map.of("iam:PolicyARN", List.of(policyArn));
+            }
             default -> null;
         };
     }
@@ -183,15 +201,20 @@ public class IamConditionContextResolver {
     }
 
     /**
-     * {@code s3:RequestObjectTag/<key>} from a PutObject's {@code x-amz-tagging} header, which the
-     * S3 model documents as a URL query parameter encoding of the tag-set.
+     * {@code s3:RequestObjectTag/<key>} from a PutObject's {@code x-amz-tagging} header, or the
+     * query parameter where a presigner may place it. The header takes precedence, including
+     * an empty header, matching the source the S3 controller applies to the object.
      */
     private Map<String, List<String>> s3RequestObjectTagConditionContext(ContainerRequestContext ctx) {
         String header = ctx.getHeaderString("x-amz-tagging");
+        if (header == null && ctx.getUriInfo() != null) {
+            header = ctx.getUriInfo().getQueryParameters().getFirst("x-amz-tagging");
+        }
         if (header == null || header.isBlank()) {
             return null;
         }
         Map<String, List<String>> conditions = new LinkedHashMap<>();
+        Set<String> requestedKeys = new LinkedHashSet<>();
         for (String pair : header.split("&")) {
             int eq = pair.indexOf('=');
             if (eq <= 0) {
@@ -203,6 +226,10 @@ public class IamConditionContextResolver {
                 continue;
             }
             conditions.put(REQUEST_OBJECT_TAG_PREFIX + name, List.of(value));
+            requestedKeys.add(name);
+        }
+        if (!requestedKeys.isEmpty()) {
+            conditions.put(REQUEST_OBJECT_TAG_KEYS, new ArrayList<>(requestedKeys));
         }
         return conditions.isEmpty() ? null : conditions;
     }
@@ -220,6 +247,7 @@ public class IamConditionContextResolver {
         }
         Map<String, List<String>> conditions = new LinkedHashMap<>();
         tags.forEach((k, v) -> conditions.put(REQUEST_OBJECT_TAG_PREFIX + k, List.of(v)));
+        conditions.put(REQUEST_OBJECT_TAG_KEYS, new ArrayList<>(tags.keySet()));
         return conditions;
     }
 
@@ -286,6 +314,9 @@ public class IamConditionContextResolver {
                 new String(body, StandardCharsets.UTF_8), "Tag", "Key", "Value");
         Map<String, List<String>> conditions = new LinkedHashMap<>();
         requested.forEach((key, value) -> conditions.put(REQUEST_TAG_PREFIX + key, List.of(value)));
+        if (!requested.isEmpty()) {
+            conditions.put("aws:TagKeys", List.copyOf(requested.keySet()));
+        }
         return conditions.isEmpty() ? null : conditions;
     }
 
@@ -408,7 +439,12 @@ public class IamConditionContextResolver {
                                        String prefix) {
         for (int i = 1; form.containsKey(prefix + i + ".Key"); i++) {
             String value = form.get(prefix + i + ".Value");
-            conditions.put(REQUEST_TAG_PREFIX + form.get(prefix + i + ".Key"),
+            String key = form.get(prefix + i + ".Key");
+            List<String> keys = conditions.computeIfAbsent("aws:TagKeys", ignored -> new ArrayList<>());
+            if (!keys.contains(key)) {
+                keys.add(key);
+            }
+            conditions.put(REQUEST_TAG_PREFIX + key,
                     List.of(value == null ? "" : value));
         }
     }
@@ -499,16 +535,19 @@ public class IamConditionContextResolver {
      * {@code dynamodb:Select} from the buffered request body.
      *
      * <p>A key that cannot be resolved (unknown table, a Key that omits the partition
-     * attribute, an unparseable KeyConditionExpression) is omitted rather than guessed. A
-     * policy scoping access through the missing key then does not match, so the request is
-     * denied: a request that cannot be proven in scope is treated as out of scope.
+     * attribute, an unparseable KeyConditionExpression) is omitted rather than guessed.
+     * A {@code ForAllValues} condition matches an absent key; policies must pair it with
+     * {@code Null:false} to require a resolved key.
      */
     Map<String, List<String>> dynamoDbConditionContext(String action, ContainerRequestContext ctx) {
         JsonNode body = bufferedJsonBody(ctx);
         if (body == null || !body.isObject()) {
             return null;
         }
-        TableDefinition table = describeTargetTable(body);
+        if (isDynamoDbBatch(action)) {
+            return dynamoDbBatchConditionContext(action, ctx, null);
+        }
+        TableDefinition table = describeTargetTable(targetTableName(body));
         DynamoDbConditionKeys.Result keys = DynamoDbConditionKeys.extract(action, body, table);
 
         Map<String, List<String>> conditions = new LinkedHashMap<>();
@@ -524,6 +563,108 @@ public class IamConditionContextResolver {
         return conditions.isEmpty() ? null : conditions;
     }
 
+    /** One transaction item keeps its action, table and condition keys together. */
+    record DynamoDbTransactionItem(String action, String resource, Map<String, List<String>> context) {
+    }
+
+    /**
+     * Resolves every recognized item before the handler can mutate anything. Unknown envelope fields
+     * cannot turn item checks back into a transaction-verb permission check.
+     */
+    List<DynamoDbTransactionItem> dynamoDbTransactionItems(String action, ContainerRequestContext ctx,
+                                                         String region, String accountId) {
+        boolean read = "dynamodb:TransactGetItems".equals(action);
+        if (!read && !"dynamodb:TransactWriteItems".equals(action)) {
+            return List.of();
+        }
+        JsonNode body = bufferedJsonBody(ctx);
+        JsonNode items = body == null ? null : body.get("TransactItems");
+        if (items == null || !items.isArray()) {
+            return List.of();
+        }
+        List<DynamoDbTransactionItem> checks = new ArrayList<>();
+        List<String> operations = read ? List.of("Get") : List.of("Put", "Delete", "Update", "ConditionCheck");
+        for (JsonNode item : items) {
+            for (String operation : operations) {
+                JsonNode request = item.get(operation);
+                if (request == null || !request.isObject()) {
+                    continue;
+                }
+                String tableName = targetTableName(request);
+                if (tableName == null) {
+                    continue;
+                }
+                // Execution resolves ARN inputs within the request account; authorize that same table.
+                String executionTable = DynamoDbTableNames.resolveWithRegion(tableName, region).name();
+                String itemAction = "dynamodb:" + operation + "Item";
+                DynamoDbConditionKeys.Result keys = DynamoDbConditionKeys.extract(
+                        itemAction, request, describeTargetTable(executionTable));
+                Map<String, List<String>> context = new LinkedHashMap<>();
+                context.put("dynamodb:EnclosingOperation", List.of(read ? "TransactGetItems" : "TransactWriteItems"));
+                if (!keys.leadingKeys().isEmpty()) {
+                    context.put("dynamodb:LeadingKeys", keys.leadingKeys());
+                }
+                if (!keys.attributes().isEmpty()) {
+                    context.put("dynamodb:Attributes", keys.attributes());
+                }
+                if (!read && request.hasNonNull("ReturnValuesOnConditionCheckFailure")) {
+                    context.put("dynamodb:ReturnValues",
+                            List.of(request.path("ReturnValuesOnConditionCheckFailure").asText()));
+                }
+                checks.add(new DynamoDbTransactionItem(itemAction,
+                        ResourceArnBuilder.toDynamoDbTableArn(executionTable, region, accountId), context));
+            }
+        }
+        return checks;
+    }
+
+    /** Resolves each batch entry with its own schema, optionally restricted to one resource. */
+    Map<String, List<String>> dynamoDbBatchConditionContext(String action, ContainerRequestContext ctx,
+                                                            String resourceArn) {
+        if (!isDynamoDbBatch(action)) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        JsonNode body = bufferedJsonBody(ctx);
+        JsonNode items = body == null ? null : body.get("RequestItems");
+        if (items == null || !items.isObject()) {
+            return conditions;
+        }
+        List<String> leadingKeys = new ArrayList<>();
+        Set<String> attributes = new LinkedHashSet<>();
+        items.properties().forEach(entry -> {
+            String reference = entry.getKey().trim();
+            if (resourceArn != null && !matchesTableResource(reference, resourceArn)) {
+                return;
+            }
+            ObjectNode single = ((ObjectNode) body).objectNode();
+            single.setAll((ObjectNode) body);
+            single.putObject("RequestItems").set(entry.getKey(), entry.getValue());
+            DynamoDbConditionKeys.Result keys = DynamoDbConditionKeys.extract(
+                    action, single, describeTargetTable(reference));
+            leadingKeys.addAll(keys.leadingKeys());
+            attributes.addAll(keys.attributes());
+        });
+        if (!leadingKeys.isEmpty()) {
+            conditions.put("dynamodb:LeadingKeys", List.copyOf(leadingKeys));
+        }
+        if (!attributes.isEmpty()) {
+            conditions.put("dynamodb:Attributes", List.copyOf(attributes));
+        }
+        return conditions;
+    }
+
+    private static boolean isDynamoDbBatch(String action) {
+        return "dynamodb:BatchGetItem".equals(action) || "dynamodb:BatchWriteItem".equals(action);
+    }
+
+    private static boolean matchesTableResource(String reference, String resourceArn) {
+        if (AwsArnUtils.isArn(reference)) {
+            return reference.equals(resourceArn);
+        }
+        return AwsArnUtils.parse(resourceArn).resource().equals("table/" + reference);
+    }
+
     private JsonNode bufferedJsonBody(ContainerRequestContext ctx) {
         Object cached = ctx.getProperty(BUFFERED_JSON_BODY);
         return cached instanceof JsonNode node ? node : null;
@@ -535,8 +676,7 @@ public class IamConditionContextResolver {
      * {@code findTable} rather than {@code describeTable} so the O(items) item-count refresh
      * never runs on the enforcement hot path.
      */
-    private TableDefinition describeTargetTable(JsonNode body) {
-        String tableName = targetTableName(body);
+    private TableDefinition describeTargetTable(String tableName) {
         if (tableName == null || !dynamoDbFacade.isResolvable()) {
             return null;
         }
@@ -546,21 +686,13 @@ public class IamConditionContextResolver {
         return dynamoDb.tables().findTable(dynamoDb.scope(region), tableName).orElse(null);
     }
 
-    /**
-     * The single table this request targets: the TableName field, or the sole RequestItems
-     * entry for the batch operations. A multi-table batch has no single key schema, so it
-     * gets no leading keys and fails closed.
-     */
+    /** The table targeted by a non-batch request. */
     private String targetTableName(JsonNode body) {
         if (body.hasNonNull("TableName")) {
             String tableName = body.get("TableName").asText().trim();
             if (!tableName.isEmpty()) {
                 return tableName;
             }
-        }
-        JsonNode requestItems = body.get("RequestItems");
-        if (requestItems != null && requestItems.isObject() && requestItems.size() == 1) {
-            return requestItems.fieldNames().next();
         }
         return null;
     }
