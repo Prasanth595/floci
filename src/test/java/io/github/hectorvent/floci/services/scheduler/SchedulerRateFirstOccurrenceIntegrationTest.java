@@ -6,7 +6,6 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
-import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -17,7 +16,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
-import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -28,7 +26,6 @@ import static io.github.hectorvent.floci.services.scheduler.SchedulerTestHarness
 import static io.github.hectorvent.floci.services.scheduler.SchedulerTestHarness.ROLE_ARN;
 import static io.github.hectorvent.floci.services.scheduler.SchedulerTestHarness.uniqueName;
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -52,13 +49,10 @@ class SchedulerRateFirstOccurrenceIntegrationTest {
     @Inject
     SqsService sqsService;
     @Inject
-    StepFunctionsService stepFunctionsService;
-    @Inject
     EmulatorConfig config;
 
     private SchedulerTestHarness harness;
     private final List<String> queues = new ArrayList<>();
-    private final List<String> machines = new ArrayList<>();
 
     @BeforeEach
     void setUp() {
@@ -71,9 +65,6 @@ class SchedulerRateFirstOccurrenceIntegrationTest {
         harness.cleanUp();
         for (String queue : queues) {
             sqsService.deleteQueue(queue, REGION);
-        }
-        for (String machine : machines) {
-            stepFunctionsService.deleteStateMachine(machine);
         }
     }
 
@@ -141,22 +132,8 @@ class SchedulerRateFirstOccurrenceIntegrationTest {
         task.put("Resource", "arn:aws:states:::aws-sdk:scheduler:" + (update ? "updateSchedule" : "createSchedule"));
         task.set("Parameters", request);
         task.put("End", true);
-        ObjectNode create = MAPPER.createObjectNode();
-        create.put("name", uniqueName("rate-first-task"));
-        create.put("roleArn", ROLE_ARN);
-        create.put("definition", definition.toString());
-        String machine = given().header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
-                .contentType("application/x-amz-json-1.0").body(create.toString()).when().post("/")
-                .then().statusCode(200).extract().path("stateMachineArn");
-        machines.add(machine);
-        String execution = given().header("X-Amz-Target", "AWSStepFunctions.StartExecution")
-                .contentType("application/x-amz-json-1.0").body(Map.of("stateMachineArn", machine))
-                .when().post("/").then().statusCode(200).extract().path("executionArn");
-        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
-            String status = given().header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
-                    .contentType("application/x-amz-json-1.0").body(Map.of("executionArn", execution))
-                    .when().post("/").then().statusCode(200).extract().path("status");
-            assertEquals("SUCCEEDED", status);
-        });
+        String machine = harness.createStateMachine(uniqueName("rate-first-task"), definition.toString());
+        String execution = harness.startExecution(machine);
+        assertEquals("SUCCEEDED", harness.waitForTerminalExecution(execution).jsonPath().getString("status"));
     }
 }
