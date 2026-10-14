@@ -79,6 +79,7 @@ public class ServiceQuotasService {
 
     private final ObjectMapper objectMapper;
     private final StorageBackend<String, ObjectNode> requestedQuotaStore;
+    private final Object openRequestLock = new Object();
 
     @Inject
     public ServiceQuotasService(StorageFactory storageFactory, ObjectMapper objectMapper) {
@@ -294,11 +295,31 @@ public class ServiceQuotasService {
             requestedQuota.set("QuotaContext", context);
         }
 
-        requestedQuotaStore.put(region + "/" + id, requestedQuota.deepCopy());
+        storeOpenRequest(region, serviceCode, quotaCode, id, requestedQuota);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("RequestedQuota", requestedQuota);
         return response;
+    }
+
+    /**
+     * AWS allows only one open increase request per quota, so the duplicate check and the
+     * write must stand or fall as a unit: concurrent callers for the same quota must not
+     * both pass the check.
+     */
+    private void storeOpenRequest(String region, String serviceCode, String quotaCode, String id,
+                                  ObjectNode requestedQuota) {
+        synchronized (openRequestLock) {
+            boolean hasOpen = requestedQuotaStore.scan(key -> key.startsWith(region + "/")).stream()
+                    .anyMatch(r -> serviceCode.equals(r.path("ServiceCode").asText())
+                            && quotaCode.equals(r.path("QuotaCode").asText())
+                            && "PENDING".equals(r.path("Status").asText()));
+            if (hasOpen) {
+                throw new AwsException("ResourceAlreadyExistsException",
+                        "Only one open service quota increase request is allowed per quota.", 400);
+            }
+            requestedQuotaStore.put(region + "/" + id, requestedQuota.deepCopy());
+        }
     }
 
     public ObjectNode getRequestedServiceQuotaChange(String requestId, String region) {

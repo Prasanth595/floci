@@ -1,12 +1,10 @@
 package io.github.hectorvent.floci.services.servicequotas;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -22,7 +20,7 @@ class ServiceQuotasServiceTest {
     private static final String ACCOUNT_ID = "000000000000";
 
     private final ServiceQuotasService service =
-            new ServiceQuotasService(new InMemoryStorageFactory(), new ObjectMapper());
+            new ServiceQuotasService(new InMemoryStorageFactory(ACCOUNT_ID), new ObjectMapper());
 
     @Test
     void syntheticQuotaCodesAreStableAndWellFormed() {
@@ -133,24 +131,13 @@ class ServiceQuotasServiceTest {
     }
 
     @Test
-    void repeatedRequestsForTheSameQuotaGetDistinctIds() {
-        ObjectNode first = service.requestServiceQuotaIncrease(
-                "codebuild", "L-2DC20C30", 9000.0, null, "us-east-1", ACCOUNT_ID)
-                .withObject("RequestedQuota");
-        ObjectNode second = service.requestServiceQuotaIncrease(
-                "codebuild", "L-2DC20C30", 9500.0, null, "us-east-1", ACCOUNT_ID)
-                .withObject("RequestedQuota");
-
-        String firstId = first.path("Id").asText();
-        String secondId = second.path("Id").asText();
-        assertEquals(firstId, service.getRequestedServiceQuotaChange(firstId, "us-east-1")
-                .path("RequestedQuota").path("Id").asText());
-        assertEquals(secondId, service.getRequestedServiceQuotaChange(secondId, "us-east-1")
-                .path("RequestedQuota").path("Id").asText());
-        assertEquals(9000.0, service.getRequestedServiceQuotaChange(firstId, "us-east-1")
-                .path("RequestedQuota").path("DesiredValue").asDouble());
-        assertEquals(9500.0, service.getRequestedServiceQuotaChange(secondId, "us-east-1")
-                .path("RequestedQuota").path("DesiredValue").asDouble());
+    void repeatedRequestsForTheSameQuotaReturnResourceAlreadyExists() {
+        service.requestServiceQuotaIncrease(
+                "codebuild", "L-2DC20C30", 9000.0, null, "us-east-1", ACCOUNT_ID);
+        AwsException e = assertThrows(AwsException.class, () -> service.requestServiceQuotaIncrease(
+                "codebuild", "L-2DC20C30", 9500.0, null, "us-east-1", ACCOUNT_ID));
+        assertEquals("ResourceAlreadyExistsException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
     }
 
     @Test
@@ -199,18 +186,5 @@ class ServiceQuotasServiceTest {
                 () -> service.getRequestedServiceQuotaChange("DEADBEEF", "us-east-1"));
         assertEquals("NoSuchResourceException", e.getErrorCode());
         assertEquals(400, e.getHttpStatus());
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-
-        InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
-                                                        TypeReference<Map<String, V>> typeReference) {
-            return AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
-        }
     }
 }

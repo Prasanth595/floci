@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -34,6 +35,11 @@ class ServiceQuotasIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @BeforeEach
+    void resetState() {
+        given().post("/_floci/state/reset").then().statusCode(200);
     }
 
     @Test
@@ -353,56 +359,27 @@ class ServiceQuotasIntegrationTest {
     }
 
     @Test
-    void repeatedRequestsForSameQuotaGetDistinctIds() {
-        String first =
-            given()
-                .contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "ServiceQuotasV20190624.RequestServiceQuotaIncrease")
-                .header("Authorization", AUTH_HEADER)
-                .body("{\"ServiceCode\":\"lambda\",\"QuotaCode\":\"L-B99A9384\",\"DesiredValue\":7000}")
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract()
-                .path("RequestedQuota.Id");
-
-        String second =
-            given()
-                .contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "ServiceQuotasV20190624.RequestServiceQuotaIncrease")
-                .header("Authorization", AUTH_HEADER)
-                .body("{\"ServiceCode\":\"lambda\",\"QuotaCode\":\"L-B99A9384\",\"DesiredValue\":8000}")
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract()
-                .path("RequestedQuota.Id");
-
-        assertNotEquals(first, second);
-
+    void repeatedRequestsForSameQuotaReturnResourceAlreadyExists() {
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "ServiceQuotasV20190624.GetRequestedServiceQuotaChange")
+            .header("X-Amz-Target", "ServiceQuotasV20190624.RequestServiceQuotaIncrease")
             .header("Authorization", AUTH_HEADER)
-            .body("{\"RequestId\":\"" + first + "\"}")
+            .body("{\"ServiceCode\":\"lambda\",\"QuotaCode\":\"L-B99A9384\",\"DesiredValue\":7000}")
         .when()
             .post("/")
         .then()
-            .statusCode(200)
-            .body("RequestedQuota.DesiredValue", equalTo(7000.0f));
+            .statusCode(200);
 
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "ServiceQuotasV20190624.GetRequestedServiceQuotaChange")
+            .header("X-Amz-Target", "ServiceQuotasV20190624.RequestServiceQuotaIncrease")
             .header("Authorization", AUTH_HEADER)
-            .body("{\"RequestId\":\"" + second + "\"}")
+            .body("{\"ServiceCode\":\"lambda\",\"QuotaCode\":\"L-B99A9384\",\"DesiredValue\":8000}")
         .when()
             .post("/")
         .then()
-            .statusCode(200)
-            .body("RequestedQuota.DesiredValue", equalTo(8000.0f));
+            .statusCode(400)
+            .body("__type", equalTo("ResourceAlreadyExistsException"));
     }
 
     @Test
