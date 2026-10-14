@@ -362,12 +362,31 @@ change away and straight back that the setting exists for. History is recorded w
 window is set, so switching the policy on has something to compare against, bounded at the 24 the
 policy can ask for, and it goes with the profile when `DeleteLoginProfile` removes it.
 
-`AllowUsersToChangePassword` is accepted and reported but grants nothing. The user
-guide says the option gives all users in the account "access to the iam:ChangePassword action for
-only their user and to the iam:GetAccountPasswordPolicy action", applied at the account level
-rather than by attaching a policy to each user. Floci authorizes both actions from identity
-policies alone, so under [enforcement](#iam-enforcement-mode) a caller needs a policy naming their
-own user however the flag is set.
+`AllowUsersToChangePassword` authorizes. The user guide says the option gives all users in the
+account "access to the iam:ChangePassword action for only their user and to the
+iam:GetAccountPasswordPolicy action", and that it "does not attach a permissions policy to each
+user. Rather, IAM applies the permissions at the account-level for all users". So under
+[enforcement](#iam-enforcement-mode) an IAM user carrying no policy at all may change its own
+password and read the policy while the flag is set, and neither call is authorized once it is
+cleared. The grant is assembled for the caller it applies to, naming that user's own ARN, so it
+authorizes `iam:ChangePassword` for them and for nobody else, and it reaches no other action: not
+`UpdateLoginProfile`, not `GetUser`. The flag that answers for a user is their own account's, so a
+`PolicySourceArn` naming another account's user simulates with that account's grant, over that
+account's user ARNs.
+
+Being account-level rather than attached, the grant appears in nothing that lists a user's
+policies, `ListUserPolicies`, `ListAttachedUserPolicies` and `GetAccountAuthorizationDetails`
+included, nor in `ListPoliciesGrantingServiceAccess`, which reports policies by name and type and
+has none to report here. A last-accessed report answers a different question, "every AWS service
+that the resource could access using permissions policies", so `GenerateServiceLastAccessedDetails`
+does list `iam` for a user carrying no policy of their own while the flag is set, and lists nothing
+for that same user once it is cleared. `GetContextKeysForPrincipalPolicy` stays with the attached
+set, returning "only context keys referenced by the identity-based policies attached to the
+specified entity, and any additional policies that you provide", so it does not name the
+`${aws:username}` the grant's own resource uses, which a simulation populates anyway. In
+authorization it is an identity-based grant like any other: an explicit `Deny` still refuses the
+call and a permissions boundary still caps it. It belongs to IAM users: a role session has no
+console password to change, and the root user is not an IAM user.
 
 `DeleteUser` returns `DeleteConflict`, as on AWS, while the user still has a login profile, access
 keys, inline policies, attached managed policies, group memberships, an
@@ -395,6 +414,20 @@ stripped, and the three single-character escapes (`${*}`, `${?}`, `${$}`) are ex
 they substitute a literal character rather than naming a context key. The list is neither sorted
 nor de-duplicated, matching AWS's own documented
 example response, which repeats a key referenced by more than one statement.
+
+`SimulatePrincipalPolicy` populates the principal keys itself when the policy source is an IAM
+user, as AWS's simulator does: the guide lists `aws:PrincipalAccount`, `aws:PrincipalId`,
+`aws:PrincipalType`, `aws:Type`, `aws:UserId` and `aws:UserName` as "populated for you", with the
+caller providing "the values for all other condition keys", so a policy scoped to
+`${aws:username}` simulates the way it is evaluated. What a simulation gets is the principal half
+of the request context, the same keys the enforcement filter writes: `aws:PrincipalArn`,
+`aws:PrincipalType`, `aws:username`, `aws:userid` and the account. `aws:PrincipalId` and
+`aws:Type` are in no request context here, so a simulation does not populate them either; a
+statement matching on one matches nothing, as it would on an enforced request. A value passed in
+`ContextEntries` wins, being the one the call asked to simulate with, whatever case it spells the
+key in. A role named as the policy source is not a session, so there is no session name for an
+`aws:userid` and no documented `aws:PrincipalType` for it; those keys stay absent and a statement
+matching on one does not match.
 
 `PolicySourceArn` on `SimulatePrincipalPolicy` and `GetContextKeysForPrincipalPolicy` resolves an IAM
 user or role only, not a group. `SimulateCustomPolicy` accepts only one
