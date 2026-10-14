@@ -16,7 +16,12 @@ import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.*;
 import java.util.Base64;
@@ -564,7 +569,7 @@ public class AutoScalingService {
                 throw new AwsException("ValidationError", "Filter name '" + name + "' is not valid.", 400);
             }
         }
-        String[] after = parseTagCursor(nextToken);
+        String[] after = parseTagCursor(region, nextToken);
         int limit = maxRecords != null ? Math.min(Math.max(maxRecords, 1), 100) : 50;
         List<TagDescription> matches = groups.values().stream()
                 .filter(Objects::nonNull) // group deleted between key snapshot and value read
@@ -584,20 +589,42 @@ public class AutoScalingService {
             return new TagPage(matches, null);
         }
         TagDescription last = matches.get(limit - 1);
-        String token = Base64.getUrlEncoder().withoutPadding().encodeToString(
-                (last.resourceId() + "\0" + last.key()).getBytes(StandardCharsets.UTF_8));
+        Base64.Encoder b64 = Base64.getUrlEncoder().withoutPadding();
+        byte[] cursor = (last.resourceId() + "\0" + last.key()).getBytes(StandardCharsets.UTF_8);
+        String token = b64.encodeToString(cursor) + "." + b64.encodeToString(signTagCursor(region, cursor));
         return new TagPage(matches.subList(0, limit), token);
     }
 
-    private static String[] parseTagCursor(String nextToken) {
+    // Signed so a forged or edited token is refused as AWS refuses one; the key is per process,
+    // so a token does not outlive a restart. A genuine token past the end (groups deleted since)
+    // still resumes, returning what remains.
+    private static final byte[] TAG_CURSOR_KEY = new SecureRandom().generateSeed(32);
+
+    private static byte[] signTagCursor(String region, byte[] cursor) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(TAG_CURSOR_KEY, "HmacSHA256"));
+            mac.update(region.getBytes(StandardCharsets.UTF_8));
+            mac.update((byte) 0);
+            return mac.doFinal(cursor);
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("HmacSHA256 is not available", e);
+        }
+    }
+
+    private static String[] parseTagCursor(String region, String nextToken) {
         if (nextToken == null || nextToken.isBlank()) {
             return null;
         }
         try {
-            String[] cursor = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8)
-                    .split("\0", 2);
-            if (cursor.length == 2) {
-                return cursor;
+            String[] parts = nextToken.split("\\.", -1);
+            if (parts.length == 2) {
+                byte[] cursor = Base64.getUrlDecoder().decode(parts[0]);
+                byte[] mac = Base64.getUrlDecoder().decode(parts[1]);
+                String[] fields = new String(cursor, StandardCharsets.UTF_8).split("\0", 2);
+                if (fields.length == 2 && MessageDigest.isEqual(mac, signTagCursor(region, cursor))) {
+                    return fields;
+                }
             }
         } catch (IllegalArgumentException ignored) {
             // falls through to InvalidNextToken

@@ -6,6 +6,8 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
@@ -230,6 +232,29 @@ class AutoScalingDescribeTagsIntegrationTest {
     void garbageNextTokenIsInvalidNextToken() {
         describe()
                 .formParam("NextToken", "!!not-a-token!!")
+            .when().post("/")
+            .then().statusCode(400)
+                .body(containsString("InvalidNextToken"));
+    }
+
+    // A token that decodes to a plausible (group, key) but was never issued, or an issued one
+    // whose cursor was edited, is refused as AWS refuses a token it did not mint.
+    @Test
+    void forgedOrEditedNextTokenIsInvalidNextToken() {
+        Base64.Encoder b64 = Base64.getUrlEncoder().withoutPadding();
+        assertInvalidNextToken(b64.encodeToString(
+                (GROUP_A + "\0AsgId").getBytes(StandardCharsets.UTF_8)));
+        String genuine = describe().formParam("MaxRecords", "1")
+            .when().post("/")
+            .then().statusCode(200).extract().xmlPath()
+                .getString("DescribeTagsResponse.DescribeTagsResult.NextToken");
+        assertInvalidNextToken(b64.encodeToString("zzzz\0zzzz".getBytes(StandardCharsets.UTF_8))
+                + genuine.substring(genuine.indexOf('.')));
+    }
+
+    private static void assertInvalidNextToken(String token) {
+        describe()
+                .formParam("NextToken", token)
             .when().post("/")
             .then().statusCode(400)
                 .body(containsString("InvalidNextToken"));
