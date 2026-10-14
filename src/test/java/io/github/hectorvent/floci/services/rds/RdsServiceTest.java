@@ -455,6 +455,33 @@ class RdsServiceTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"aurora-postgresql,16.3,false,false", "aurora-postgresql,16.3,true,false",
+            "aurora-mysql,8.0,false,false", "aurora-mysql,8.0,true,false",
+            "aurora-postgresql,16.3,false,true", "aurora-postgresql,16.3,true,true",
+            "aurora-mysql,8.0,false,true", "aurora-mysql,8.0,true,true"})
+    void newClusterMembersInheritIamAuthentication(String engine, String version,
+                                                  boolean clusterEnabled, boolean mockMode) {
+        when(rdsConfig.mock()).thenReturn(mockMode);
+        rdsService.createDbCluster("iam-cluster", engine, version,
+                "admin", "password", "dbname", clusterEnabled, null);
+        clearInvocations(proxyManager);
+
+        DbInstance member = rdsService.createDbInstance("iam-member", engine, version,
+                "admin", "password", "dbname", "db.r5.large", 20, !clusterEnabled,
+                null, null, "iam-cluster", null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertEquals(clusterEnabled, member.isIamDatabaseAuthenticationEnabled());
+        assertEquals(clusterEnabled, rdsService.getDbInstance("iam-member").isIamDatabaseAuthenticationEnabled());
+        if (mockMode) {
+            verifyNoInteractions(proxyManager);
+        } else {
+            verify(proxyManager).startProxy(eq("rds-resource:" + member.getDbInstanceArn()), any(),
+                    eq(clusterEnabled), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
+        }
+    }
+
     @Test
     void createDbInstanceLeavesPostgresIamTokensUnboundWhenTheBindingIsTurnedOff() {
         when(rdsConfig.iamTokenEndpointBinding()).thenReturn(false);

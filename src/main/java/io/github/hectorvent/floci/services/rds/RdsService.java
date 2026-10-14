@@ -757,6 +757,7 @@ public class RdsService implements Resettable, ResourceProvider {
             if (engineIdentifier == null && cluster.getEngineIdentifier() != null) {
                 engineIdentifier = cluster.getEngineIdentifier().toLowerCase();
             }
+            iamEnabled = cluster.isIamDatabaseAuthenticationEnabled();
             backendHost = cluster.getContainerHost();
             backendPort = cluster.getContainerPort();
             containerId = cluster.getContainerId();

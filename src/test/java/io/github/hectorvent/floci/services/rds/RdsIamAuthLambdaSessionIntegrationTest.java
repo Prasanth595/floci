@@ -8,6 +8,8 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -173,6 +175,62 @@ class RdsIamAuthLambdaSessionIntegrationTest {
                         assertTrue(connection.isValid(5));
                     }
                 }
+            }
+        } finally {
+            iamService.unregisterSession(ACCOUNT_ID, accessKeyId);
+            rds("DeleteDBInstance").formParam("DBInstanceIdentifier", memberId)
+                    .formParam("SkipFinalSnapshot", "true").when().post("/");
+            rds("DeleteDBCluster").formParam("DBClusterIdentifier", clusterId)
+                    .formParam("SkipFinalSnapshot", "true").when().post("/");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void newClusterMemberUsesClusterIamAuthentication(boolean enabled) throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String clusterId = "inherit-cluster-" + suffix;
+        String memberId = "inherit-member-" + suffix;
+        String accessKeyId = "ASIA" + suffix.toUpperCase();
+        try {
+            rds("CreateDBCluster")
+                    .formParam("DBClusterIdentifier", clusterId)
+                    .formParam("Engine", "aurora-postgresql")
+                    .formParam("MasterUsername", MASTER_USER)
+                    .formParam("MasterUserPassword", MASTER_PASSWORD)
+                    .formParam("DatabaseName", DATABASE)
+                    .formParam("EnableIAMDatabaseAuthentication", Boolean.toString(enabled))
+                    .when().post("/").then().statusCode(200);
+            int port = rds("CreateDBInstance")
+                    .formParam("DBInstanceIdentifier", memberId)
+                    .formParam("DBClusterIdentifier", clusterId)
+                    .formParam("DBInstanceClass", "db.r5.large")
+                    .formParam("Engine", "aurora-postgresql")
+                    .formParam("MasterUsername", MASTER_USER)
+                    .formParam("MasterUserPassword", MASTER_PASSWORD)
+                    .formParam("DBName", DATABASE)
+                    .formParam("EnableIAMDatabaseAuthentication", Boolean.toString(!enabled))
+                    .when().post("/").then().statusCode(200)
+                    .extract().xmlPath()
+                    .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+            iamService.registerLambdaExecutionRoleSession(ACCOUNT_ID, accessKeyId, SESSION_SECRET, SESSION_TOKEN,
+                    "arn:aws:iam::" + ACCOUNT_ID + ":role/member-connect-with-iam");
+            await().atMost(Duration.ofSeconds(60)).ignoreExceptions().until(() -> {
+                try (Connection connection = connect(port, MASTER_PASSWORD)) {
+                    return connection.isValid(5);
+                }
+            });
+            String token = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, MASTER_USER,
+                    accessKeyId, SESSION_SECRET, Instant.now().minusSeconds(60), 900, SESSION_TOKEN);
+            if (enabled) {
+                try (Connection connection = connect(port, token);
+                     Statement statement = connection.createStatement();
+                     ResultSet rows = statement.executeQuery("SELECT current_user")) {
+                    assertTrue(rows.next());
+                    assertEquals(MASTER_USER, rows.getString(1));
+                }
+            } else {
+                assertThrows(SQLException.class, () -> connect(port, token).close());
             }
         } finally {
             iamService.unregisterSession(ACCOUNT_ID, accessKeyId);
