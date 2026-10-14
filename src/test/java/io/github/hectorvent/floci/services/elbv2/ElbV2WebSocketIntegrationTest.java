@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.junit.mockito.InjectSpy;
+import io.restassured.response.Response;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpServer;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -61,6 +63,10 @@ class ElbV2WebSocketIntegrationTest {
                     if (!"websocket".equalsIgnoreCase(request.getHeader("Upgrade"))) {
                         request.response().setStatusCode(400).end("not an upgrade");
                     } else if (!request.path().startsWith("/socket.io/")) {
+                        request.response().headers().add("Set-Cookie", "a=1; Path=/");
+                        request.response().headers().add("Set-Cookie", "b=2; Path=/");
+                        request.response().headers().add("X-Multi", "one");
+                        request.response().headers().add("X-Multi", "two");
                         request.response().setStatusCode(404).end();
                     } else {
                         String query = request.query();
@@ -137,6 +143,19 @@ class ElbV2WebSocketIntegrationTest {
 
         UpgradeRejectedException rejected = assertInstanceOf(UpgradeRejectedException.class, failure.getCause());
         assertEquals(404, rejected.getStatus());
+
+        Response response = given()
+                .baseUri("http://127.0.0.1")
+                .port(LISTENER_PORT)
+                .header("Connection", "Upgrade")
+                .header("Upgrade", "websocket")
+            .when()
+                .get("/elsewhere/?transport=websocket")
+            .then()
+                .statusCode(404)
+                .extract().response();
+        assertEquals(List.of("a=1; Path=/", "b=2; Path=/"), response.getHeaders().getValues("Set-Cookie"));
+        assertEquals(List.of("one", "two"), response.getHeaders().getValues("X-Multi"));
     }
 
     @Test

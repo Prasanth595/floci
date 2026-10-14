@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.elbv2;
 import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.Response;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClientRequest;
@@ -20,6 +21,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -54,6 +56,12 @@ class ElbV2PreserveHostHeaderIntegrationTest {
                             request.response().write("stream-");
                             request.response().end(body.toString());
                         });
+                    } else if ("/headers".equals(request.path())) {
+                        request.response().headers().add("Set-Cookie", "a=1; Path=/");
+                        request.response().headers().add("Set-Cookie", "b=2; Path=/");
+                        request.response().headers().add("X-Multi", "one");
+                        request.response().headers().add("X-Multi", "two");
+                        request.response().end("ok");
                     } else {
                         request.response().end(request.getHeader("Host"));
                     }
@@ -73,6 +81,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
             listenerArn = createListener(loadBalancerArn, targetGroupArn);
 
             assertStreamsRequestAndResponse(loadBalancerArn);
+            assertRepeatedResponseHeaders();
             assertForwardedHost("127.0.0.1:" + backend.actualPort());
 
             enableHostHeaderPreservation(loadBalancerArn);
@@ -182,6 +191,19 @@ class ElbV2PreserveHostHeaderIntegrationTest {
         assertEquals(200, response.statusCode());
         assertEquals("11", response.getHeader("X-Received-Content-Length"));
         assertEquals("stream-hello world", bodyFuture.get(2, TimeUnit.SECONDS).toString());
+    }
+
+    private static void assertRepeatedResponseHeaders() {
+        Response response = given()
+                .baseUri("http://127.0.0.1")
+                .port(LISTENER_PORT)
+            .when()
+                .get("/headers")
+            .then()
+                .statusCode(200)
+                .extract().response();
+        assertEquals(List.of("a=1; Path=/", "b=2; Path=/"), response.getHeaders().getValues("Set-Cookie"));
+        assertEquals(List.of("one", "two"), response.getHeaders().getValues("X-Multi"));
     }
 
     private static String createLoadBalancer() {

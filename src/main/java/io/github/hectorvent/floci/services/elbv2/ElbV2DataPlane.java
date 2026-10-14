@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.vertx.core.MultiMap;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
@@ -23,6 +24,7 @@ import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
+import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.http.HttpVersion;
 import io.vertx.core.http.RequestOptions;
 import io.vertx.core.net.NetSocket;
@@ -738,11 +740,7 @@ public class ElbV2DataPlane {
                         }
                         responseStarted.set(true);
                         req.response().setStatusCode(resp.statusCode());
-                        resp.headers().forEach(entry -> {
-                            if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
-                                req.response().putHeader(entry.getKey(), entry.getValue());
-                            }
-                        });
+                        copyTargetResponseHeaders(req.response(), resp.headers());
                         if (resp.getHeader("Content-Length") == null) {
                             req.response().setChunked(true);
                         }
@@ -773,6 +771,14 @@ public class ElbV2DataPlane {
                     req.resume();
                     req.response().setStatusCode(503).end("Service unavailable");
                 });
+    }
+
+    private static void copyTargetResponseHeaders(HttpServerResponse response, MultiMap headers) {
+        headers.names().forEach(name -> {
+            if (!HOP_BY_HOP_HEADERS.contains(name.toLowerCase())) {
+                headers.getAll(name).forEach(value -> response.headers().add(name, value));
+            }
+        });
     }
 
     /**
@@ -842,11 +848,7 @@ public class ElbV2DataPlane {
                     clientReq.connect()
                             .onSuccess(resp -> {
                                 req.response().setStatusCode(resp.statusCode());
-                                resp.headers().forEach(entry -> {
-                                    if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
-                                        req.response().putHeader(entry.getKey(), entry.getValue());
-                                    }
-                                });
+                                copyTargetResponseHeaders(req.response(), resp.headers());
                                 if (resp.statusCode() != 101) {
                                     req.resume();
                                     if (resp.getHeader("Content-Length") == null) {
