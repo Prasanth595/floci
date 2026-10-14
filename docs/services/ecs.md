@@ -379,7 +379,9 @@ aws ecs execute-command --cluster my-cluster --task <task-arn> \
 
 Floci plays the SSM agent's half of the Session Manager protocol on that channel (the binary
 `AgentMessage` framing, the handshake, sequenced acknowledgements and terminal resizes) and bridges
-it to a `docker exec` in the container. Deliberate limits:
+it to a `docker exec` in the container. Output is forwarded as bytes, including leading control
+bytes and invalid UTF-8, without interpreting the process's PTY output as Docker multiplexed headers.
+Deliberate limits:
 
 - The session runs as root (uid 0) whatever the container definition's `user`, as the real ECS Exec
   agent does.

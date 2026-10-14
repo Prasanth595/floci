@@ -615,7 +615,7 @@ public class AutoScalingReconciler {
                     version.getData().getInstanceTags(),
                     Ec2UserDataDecoder.decodeIfMissing(
                             version.getData().getUserData(), version.getData().getEncodedUserData()),
-                    null,
+                    version.getData().getEncodedUserData(),
                     ec2Service.iamInstanceProfileArn(version.getData()),
                     asg.getLaunchTemplateId(),
                     asg.getLaunchTemplateName(),
@@ -648,7 +648,7 @@ public class AutoScalingReconciler {
                         version.getData().getInstanceTags(),
                         Ec2UserDataDecoder.decodeIfMissing(
                                 version.getData().getUserData(), version.getData().getEncodedUserData()),
-                        null,
+                        version.getData().getEncodedUserData(),
                         ec2Service.iamInstanceProfileArn(version.getData()),
                         specification.getLaunchTemplateId() == null
                                 ? mixedLaunchTemplate.getLaunchTemplateId()

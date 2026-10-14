@@ -552,7 +552,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private ResolvedAuthorization resolveAuthorization(String auth, String claimedScope,
                                                         ContainerRequestContext ctx) {
         Object claimValue = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY);
-        // Authorization must not depend on the pre-matching claim filter running first.
+        // Form POSTs are also recognized without a claim; GET dispatch requires the Query claim.
         if (IamActionRegistry.isQueryRequest(ctx)) {
             String queryAction = actionRegistry.queryAction(ctx);
             if (queryAction == null || queryAction.isBlank()) {
@@ -774,7 +774,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // Sorting the rest keeps the choice stable, since credentialScopes is a Set.of whose
         // iteration order changes per JVM run.
         if (descriptor.credentialScopes().contains(descriptor.externalKey())) {
-            return descriptor.externalKey();
+            return catalog.canonicalCredentialScope(descriptor.externalKey());
         }
         return descriptor.credentialScopes().stream()
                 .filter(scope -> scope.equals(catalog.canonicalCredentialScope(scope)))
@@ -1454,7 +1454,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (isCbor(protocol)) {
             return cborError(ctx, code, message, status);
         }
-        if (isFormEncoded(ctx.getMediaType())) {
+        if (protocol == WireProtocol.AWS_QUERY || isFormEncoded(ctx.getMediaType())) {
             return queryXmlError(queryCode, message, status);
         }
         return jsonError(code, message, status);
