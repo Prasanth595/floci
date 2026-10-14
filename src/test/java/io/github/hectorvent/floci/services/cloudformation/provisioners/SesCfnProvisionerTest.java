@@ -424,6 +424,17 @@ class SesCfnProvisionerTest {
     }
 
     @Test
+    void recoveredReplacementFailureRetainsAttemptedResourceForRollbackWalker() {
+        StackResource resource = resource();
+        resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
+
+        assertTrue(provisioner.retainsFailedUpdateState(resource));
+
+        resource.getAttributes().remove(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR);
+        assertFalse(provisioner.retainsFailedUpdateState(resource));
+    }
+
+    @Test
     void failedDisplacedIdentityCleanupDoesNotReportStackDeleteSuccess() throws Exception {
         Identity replacement = domain("other.example.com");
         when(ses.createEmailIdentity(eq("other.example.com"), isNull(), eq(List.of()), eq("us-east-1")))

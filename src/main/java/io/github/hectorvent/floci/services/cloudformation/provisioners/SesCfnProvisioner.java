@@ -46,29 +46,33 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
         Properties desired = readProperties(props, ctx);
+        boolean recoveredSnapshot = false;
         if (resource.getAttributes().containsKey(UPDATE_SNAPSHOT_ATTR)) {
             // A previous rollback may have failed to persist the last successful identity. Restore
             // it before either an in-place update or replacement can overwrite its snapshot.
             rollbackUpdate(resource);
+            recoveredSnapshot = true;
             ctx = new ProvisionContext(ctx.engine(), ctx.region(), ctx.accountId(), ctx.stackName(),
                     resource.getPhysicalId(), ctx.progress(), ctx.priorProperties());
         }
         String identityName = desired.identity();
         boolean updating = ctx.reusesPriorEntity(identityName);
         Map<String, String> attributesBefore = new HashMap<>(resource.getAttributes());
-        Identity identity;
-        if (updating) {
-            identity = identityService.getIdentityVerificationAttributes(identityName, ctx.region());
-            if (identity == null) {
-                throw new AwsException("NotFoundException", "Email identity " + identityName + " does not exist.", 404);
-            }
-            snapshotUpdate(resource, identity, ctx);
-        } else {
-            identity = sesService.createEmailIdentity(identityName, desired.configurationSet(),
-                    desired.tags(), ctx.region());
-        }
-
+        boolean created = false;
         try {
+            Identity identity;
+            if (updating) {
+                identity = identityService.getIdentityVerificationAttributes(identityName, ctx.region());
+                if (identity == null) {
+                    throw new AwsException("NotFoundException", "Email identity " + identityName
+                            + " does not exist.", 404);
+                }
+                snapshotUpdate(resource, identity, ctx);
+            } else {
+                identity = sesService.createEmailIdentity(identityName, desired.configurationSet(),
+                        desired.tags(), ctx.region());
+                created = true;
+            }
             reconcile(resource, identity, desired, ctx);
             Identity current = identityService.getIdentityVerificationAttributes(identityName, ctx.region());
             if (current == null) {
@@ -84,7 +88,7 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
                 resource.getAttributes().put(UPDATE_SNAPSHOT_ATTR, snapshot.toString());
             }
         } catch (RuntimeException failure) {
-            if (!updating) {
+            if (!updating && created) {
                 try {
                     sesService.deleteIdentity(identityName, ctx.region());
                     resource.setPhysicalId(ctx.priorPhysicalId());
@@ -98,6 +102,11 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
                     ReplacementCleanup.recordOrphan(resource, identityName, TYPE, ctx.region());
                     failure.addSuppressed(cleanupFailure);
                 }
+            }
+            if (recoveredSnapshot && !resource.getAttributes().containsKey(UPDATE_SNAPSHOT_ATTR)) {
+                // The prior recovery already restored the live identity. Keep the attempted
+                // resource so the rollback walker does not put the stale snapshot back over it.
+                resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
             }
             throw failure;
         }
@@ -162,9 +171,11 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public boolean retainsFailedUpdateState(StackResource resource) {
-        // Orphan cleanup is additive ownership, not a mutation of the prior identity. Without a
-        // current snapshot, let the engine restore the prior resource and carry that ownership over.
-        return resource.getAttributes().containsKey(UPDATE_SNAPSHOT_ATTR);
+        // Orphan cleanup is additive ownership, not a mutation of the prior identity. A completed
+        // recovery also keeps the attempted resource when a replacement then fails, so the engine
+        // must not restore the stale snapshot from the previous resource object.
+        return resource.getAttributes().containsKey(UPDATE_SNAPSHOT_ATTR)
+                || resource.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR);
     }
 
     @Override

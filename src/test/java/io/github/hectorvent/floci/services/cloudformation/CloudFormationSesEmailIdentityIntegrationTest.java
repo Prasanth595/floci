@@ -37,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doCallRealMethod;
@@ -621,6 +622,52 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             }
         } finally {
             doCallRealMethod().when(identityService).save(any(Identity.class), eq("us-east-1"));
+        }
+    }
+
+    @Test
+    void failedReplacementAfterRecoveryDoesNotReplayConsumedIdentitySnapshot() throws Exception {
+        String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        String replacement = "replacement-" + identityName;
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        createIdentityStack(identityName);
+        List<String> originalTokens = sesIdentity(identityName).jsonPath()
+                .getList("DkimAttributes.Tokens", String.class);
+        ObjectNode failed = (ObjectNode) MAPPER.readTree(template(identityName, true));
+        failed.withObject("/Resources").set("BadSecret", MAPPER.valueToTree(Map.of(
+                "Type", "AWS::SecretsManager::Secret", "DependsOn", "Identity",
+                "Properties", Map.of("SecretString", "first-attempt",
+                        "GenerateSecretString", Map.of("PasswordLength", 32)))));
+        doThrow(new AwsException("ServiceUnavailableException", "temporary restore failure", 503))
+                .doCallRealMethod().when(identityService).save(
+                        argThat(identity -> isOriginalSnapshot(identity, identityName, originalTokens)),
+                        eq("us-east-1"));
+
+        try {
+            cfn("UpdateStack", failed.toString()).then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_FAILED");
+            doThrow(new AwsException("ServiceUnavailableException", "replacement unavailable", 503))
+                    .when(sesService).createEmailIdentity(eq(replacement), isNull(), any(), eq("us-east-1"));
+
+            cfn("UpdateStack", template(replacement, false)).then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_COMPLETE");
+            assertEquals(originalTokens, sesIdentity(identityName).jsonPath()
+                    .getList("DkimAttributes.Tokens", String.class));
+            assertEquals("old", sesIdentity(identityName).jsonPath()
+                    .getString("Tags.find { it.Key == 'purpose' }.Value"));
+            assertEquals(404, sesIdentity(replacement).statusCode());
+
+            clearInvocations(identityService);
+            ObjectNode finalAttempt = (ObjectNode) MAPPER.readTree(template(identityName, true));
+            finalAttempt.withObject("/Resources/Identity/Properties").set("Tags",
+                    MAPPER.valueToTree(List.of(Map.of("Key", "purpose", "Value", "final-attempt"))));
+            cfn("UpdateStack", finalAttempt.toString()).then().statusCode(200);
+            awaitStatus("UPDATE_COMPLETE");
+            verify(identityService, never()).save(any(Identity.class), eq("us-east-1"));
+        } finally {
+            doCallRealMethod().when(identityService).save(any(Identity.class), eq("us-east-1"));
+            doCallRealMethod().when(sesService).createEmailIdentity(eq(replacement), isNull(), any(),
+                    eq("us-east-1"));
         }
     }
 
