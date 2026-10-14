@@ -251,15 +251,15 @@ public class IamActionRegistry {
         if (isQueryRequest(ctx)) {
             String queryAction = queryAction(ctx);
             if (queryAction != null && !queryAction.isBlank()) {
-                return credentialScope + ":" + queryAction;
+                return IamAuthorizedActions.actionFor(credentialScope, queryAction);
             }
         }
 
-        // JSON 1.1: X-Amz-Target → service:OperationName
+        // JSON 1.1: X-Amz-Target → the action AWS checks for the operation it names
         String target = ctx.getHeaderString("X-Amz-Target");
         if (target != null && target.contains(".")) {
             String operationName = target.substring(target.lastIndexOf('.') + 1);
-            return credentialScope + ":" + operationName;
+            return IamAuthorizedActions.actionFor(credentialScope, operationName);
         }
 
         return resolveRoute(credentialScope, ctx);
@@ -326,6 +326,14 @@ public class IamActionRegistry {
         return AwsQueryServiceResolver.action(
                 RequestBodyReader.formField(ctx, "Action"),
                 RequestBodyReader.formField(ctx, "Operation"));
+    }
+
+    /**
+     * Returns the API version a Query request declares, from the form body for the same reason as
+     * {@link #queryAction}: it is the value the controller routes on.
+     */
+    public String queryVersion(ContainerRequestContext ctx) {
+        return RequestBodyReader.formField(ctx, "Version");
     }
 
     /** The same form POST at the root that the Query controller dispatches. */

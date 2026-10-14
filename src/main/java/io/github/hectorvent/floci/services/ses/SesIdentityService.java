@@ -45,6 +45,8 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class SesIdentityService implements SesTaggable {
 
+    static final String DKIM_SIGNING_HOSTED_ZONE = "dkim.amazonses.com";
+
     private static final Logger LOG = Logger.getLogger(SesIdentityService.class);
 
     private static final Duration DKIM_LOOKUP_CACHE_TTL = Duration.ofSeconds(5);
@@ -170,7 +172,12 @@ public class SesIdentityService implements SesTaggable {
         return refreshIdentityState(identity, region);
     }
 
-    /** True when the address itself or its parent domain is a verified identity. */
+    /**
+     * True when the address itself, its domain or one of that domain's parents is a verified
+     * identity: "if you create and verify an identity for example.com, you don't need to create
+     * separate identities for a.example.com, a.b.example.com, user@example.com, user@a.example.com".
+     * The walk stops before a bare top-level domain.
+     */
     public boolean isVerifiedSender(String fromEmail, String region) {
         if (fromEmail == null) {
             return false;
@@ -179,8 +186,20 @@ public class SesIdentityService implements SesTaggable {
             return true;
         }
         int at = fromEmail.indexOf('@');
-        return at >= 0 && at < fromEmail.length() - 1
-                && isIdentityVerified(fromEmail.substring(at + 1), region);
+        if (at < 0 || at == fromEmail.length() - 1) {
+            return false;
+        }
+        String domain = fromEmail.substring(at + 1);
+        while (true) {
+            if (isIdentityVerified(domain, region)) {
+                return true;
+            }
+            int dot = domain.indexOf('.');
+            if (dot < 0 || domain.indexOf('.', dot + 1) < 0) {
+                return false;
+            }
+            domain = domain.substring(dot + 1);
+        }
     }
 
     boolean isIdentityVerified(String identity, String region) {
@@ -714,7 +733,7 @@ public class SesIdentityService implements SesTaggable {
 
     private boolean hasExpectedDkimRecord(String domain, String token) {
         String expectedName = normalizeDnsName(token + "._domainkey." + domain);
-        String expectedValue = normalizeDnsName(token + ".dkim.amazonses.com");
+        String expectedValue = normalizeDnsName(token + "." + DKIM_SIGNING_HOSTED_ZONE);
         for (HostedZone zone : route53Service.listHostedZones(null, Integer.MAX_VALUE)) {
             for (ResourceRecordSet recordSet : route53Service.listResourceRecordSets(zone.getId(), null, null,
                     Integer.MAX_VALUE)) {
