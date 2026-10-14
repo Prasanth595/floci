@@ -754,7 +754,9 @@ cluster setting, including when the instance parameter is omitted.
 New members also use the cluster master username and password for backend connections.
 Omitting member credentials, or providing different valid credentials, does not give
 an Aurora member an independent master user. Existing credential input checks remain
-in effect; configure and rotate master credentials on the cluster.
+in effect; configure and rotate master credentials on the cluster. If a cluster
+record lacks a credential, that missing value retains the member's previous default
+or supplied value; this change does not repair incomplete cluster records.
 
 Changing `EnableIAMDatabaseAuthentication` with `ModifyDBCluster` updates existing
 Aurora members and applies to new connections through the cluster and member

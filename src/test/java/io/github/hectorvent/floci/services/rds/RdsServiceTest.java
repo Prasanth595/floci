@@ -785,6 +785,29 @@ class RdsServiceTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"aurora-postgresql, username", "aurora-postgresql, password", "aurora-postgresql, both",
+            "aurora-mysql, username", "aurora-mysql, password", "aurora-mysql, both"})
+    void missingClusterCredentialsDoNotEraseExistingMemberDefaults(String engine, String missing) {
+        when(rdsConfig.mock()).thenReturn(false);
+        String clusterUser = "username".equals(missing) || "both".equals(missing) ? null : "clusteradmin";
+        String clusterPassword = "password".equals(missing) || "both".equals(missing) ? null : "ClusterPassword!";
+        rdsService.createDbCluster("incomplete-credentials-cluster", engine, null,
+                clusterUser, clusterPassword, "dbname", true, null);
+        clearInvocations(proxyManager);
+        DbInstance member = rdsService.createDbInstance("incomplete-credentials-member", engine, null,
+                "memberadmin", "MemberPassword!", "dbname", "db.serverless", 0, true,
+                null, null, "incomplete-credentials-cluster");
+        String expectedUser = clusterUser != null ? clusterUser : "memberadmin";
+        String expectedPassword = clusterPassword != null ? clusterPassword : "MemberPassword!";
+        assertEquals(expectedUser, member.getMasterUsername());
+        assertEquals(expectedPassword, member.getMasterPassword());
+        assertTrue(rdsService.validateDbPassword("incomplete-credentials-member", expectedUser, expectedPassword));
+        verify(proxyManager).startProxy(eq("rds-resource:" + member.getDbInstanceArn()), any(), eq(true),
+                anyInt(), any(), anyInt(), any(), eq(expectedUser), eq(expectedPassword),
+                eq("dbname"), any(), any());
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"aurora-postgresql", "aurora-mysql"})
     void memberCreationUsesCredentialsRotatedBeforePublication(String engine) throws Exception {
         when(rdsConfig.mock()).thenReturn(false);

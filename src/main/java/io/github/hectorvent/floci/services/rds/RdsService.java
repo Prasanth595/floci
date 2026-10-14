@@ -860,8 +860,13 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.setContainerPort(backendPort);
                     iamEnabled = currentCluster.isIamDatabaseAuthenticationEnabled();
                     instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
-                    instance.setMasterUsername(currentCluster.getMasterUsername());
-                    instance.setMasterPassword(currentCluster.getMasterPassword());
+                    // Incomplete cluster records retain the member's existing defaults for missing credentials.
+                    if (currentCluster.getMasterUsername() != null) {
+                        instance.setMasterUsername(currentCluster.getMasterUsername());
+                    }
+                    if (currentCluster.getMasterPassword() != null) {
+                        instance.setMasterPassword(currentCluster.getMasterPassword());
+                    }
                 }
             }
             if (manageMasterUserPassword) {
