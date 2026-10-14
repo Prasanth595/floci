@@ -15,6 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
@@ -79,6 +80,103 @@ class S3CfnProvisionerTest {
         StackResource r = resource("Bucket", "AWS::S3::Bucket");
         provisioner.provision(r, props(json), ctx);
         return r;
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"BucketOwnerEnforced", "BucketOwnerPreferred", "ObjectWriter"})
+    void ownershipControlsUseTheSameBucketConfigurationAsTheS3Api(String ownership) {
+        provisionBucket("""
+                {"BucketName":"my-bucket","OwnershipControls":{"Rules":[
+                  {"ObjectOwnership":"%s"}]}}
+                """.formatted(ownership));
+        verify(s3).putBucketOwnershipControls("my-bucket",
+                "<OwnershipControls xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+                + "<Rule><ObjectOwnership>" + ownership + "</ObjectOwnership></Rule></OwnershipControls>");
+    }
+
+    /** The registry schema's constraints at each level, reported before the bucket exists. */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            "BucketOwnerEnforced"                                                              | #/OwnershipControls: expected type: JSONObject, found: String
+            [{"Rules": []}]                                                                    | #/OwnershipControls: expected type: JSONObject, found: JSONArray
+            {}                                                                                 | #/OwnershipControls: required key [Rules] not found
+            {"Rules": [], "Rule": []}                                                          | #/OwnershipControls: extraneous key [Rule] is not permitted
+            {"Rules": {"ObjectOwnership": "ObjectWriter"}}                                     | #/OwnershipControls/Rules: expected type: JSONArray, found: JSONObject
+            {"Rules": [{"ObjectOwnership": "ObjectWriter"}, {"ObjectOwnership": "ObjectWriter"}]} | #/OwnershipControls/Rules: array items are not unique
+            {"Rules": ["ObjectWriter"]}                                                        | #/OwnershipControls/Rules/0: expected type: JSONObject, found: String
+            {"Rules": [{"Objectownership": "ObjectWriter"}]}                                   | #/OwnershipControls/Rules/0: extraneous key [Objectownership] is not permitted
+            {"Rules": [{"ObjectOwnership": "public"}]}                                         | #/OwnershipControls/Rules/0/ObjectOwnership: failed validation constraint for keyword [enum]
+            {"Rules": [{"ObjectOwnership": ["ObjectWriter"]}]}                                 | #/OwnershipControls/Rules/0/ObjectOwnership: expected type: String, found: JSONArray
+            {"Rules": [{"ObjectOwnership": "ObjectWriter"}, {"ObjectOwnership": "objectwriter"}]} | #/OwnershipControls/Rules/1/ObjectOwnership: failed validation constraint for keyword [enum]
+            """)
+    void aMalformedOwnershipControlsFailsTheResource(String ownershipControls, String reason) {
+        AwsException e = assertThrows(AwsException.class, () -> provisionBucket("""
+                {"BucketName": "b", "OwnershipControls": %s}
+                """.formatted(ownershipControls)));
+
+        assertEquals("InvalidRequest", e.getErrorCode());
+        assertEquals("Model validation failed (" + reason + ")", e.getMessage());
+        verify(s3, never()).createBucket(anyString(), anyString());
+        verify(s3, never()).putBucketOwnershipControls(anyString(), anyString());
+    }
+
+    /** What the schema allows but S3 refuses: no rule, more than one, or a rule without its mode. */
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"Rules\": []}", "{\"Rules\": [{}]}",
+            "{\"Rules\": [{\"ObjectOwnership\": \"ObjectWriter\"}, {\"ObjectOwnership\": \"BucketOwnerPreferred\"}]}"})
+    void ownershipControlsS3CannotTakeFailTheResource(String ownershipControls) {
+        AwsException e = assertThrows(AwsException.class, () -> provisionBucket("""
+                {"BucketName": "b", "OwnershipControls": %s}
+                """.formatted(ownershipControls)));
+
+        assertEquals("MalformedXML", e.getErrorCode());
+        assertEquals("The XML you provided was not well-formed or did not validate against our published schema",
+                e.getMessage());
+        verify(s3, never()).createBucket(anyString(), anyString());
+        verify(s3, never()).putBucketOwnershipControls(anyString(), anyString());
+    }
+
+    @Test
+    void anUpdateThatRemovesTheOwnershipControlsDeletesThem() {
+        updateBucket("""
+                {"BucketName": "b", "OwnershipControls": {"Rules": [{"ObjectOwnership": "ObjectWriter"}]}}
+                """, """
+                {"BucketName": "b"}
+                """);
+
+        verify(s3).deleteBucketOwnershipControls("b");
+    }
+
+    /** Neither a create nor an update of a bucket whose template never declared them touches its controls. */
+    @Test
+    void undeclaredOwnershipControlsAreLeftAlone() {
+        provisionBucket("""
+                {"BucketName": "b"}
+                """);
+        updateBucket("""
+                {"BucketName": "b"}
+                """, """
+                {"BucketName": "b", "Tags": [{"Key": "k", "Value": "v"}]}
+                """);
+
+        verify(s3, never()).deleteBucketOwnershipControls(anyString());
+        verify(s3, never()).putBucketOwnershipControls(anyString(), anyString());
+    }
+
+    /**
+     * The earlier template's declaration was about the bucket it configured. A rename provisions
+     * another bucket, so dropping the property there deletes nothing.
+     */
+    @Test
+    void aRenameThatDropsTheOwnershipControlsDeletesNothing() {
+        updateBucket("""
+                {"BucketName": "b", "OwnershipControls": {"Rules": [{"ObjectOwnership": "ObjectWriter"}]}}
+                """, """
+                {"BucketName": "c"}
+                """);
+
+        verify(s3).createBucket("c", REGION);
+        verify(s3, never()).deleteBucketOwnershipControls(anyString());
     }
 
     @Test

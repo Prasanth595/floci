@@ -375,6 +375,21 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
 - On `UpdateStack` (no interruption, as in AWS), a cluster's list is checked first, then the roles the template gained are added, and the roles the previous template declared and the new one drops are removed. A role associated outside the stack is kept while the template leaves it out; declaring it fails the update with `DBClusterRoleAlreadyExists`, as in AWS. If any step of an update is refused, the roles it already added are removed and the ones it removed are put back, so the database matches what the stack still records and a retry starts from there. A rolled-back cluster replacement restores the record of which roles the stack declared.
 - An Aurora cluster member (`AWS::RDS::DBInstance` with `DBClusterIdentifier`) cannot carry `AssociatedRoles`: the schema documents the property as not applicable there, since the cluster manages its roles. The resource fails with a `ValidationError` pointing at the cluster's `AssociatedRoles`.
 
+## S3 ownership controls
+
+`AWS::S3::Bucket.OwnershipControls` takes one rule naming `BucketOwnerEnforced`,
+`BucketOwnerPreferred` or `ObjectWriter`, applied on create and in place on update. A rule the
+resource schema refuses, or one S3 refuses (no rule, two rules, or no `ObjectOwnership`), fails the
+resource before the bucket is created or changed. An update that removes `OwnershipControls` from a
+template that declared it deletes the controls, as a removed `NotificationConfiguration` is
+cleared; real AWS's answer for that removal is unmeasured. An `Fn::If` that chooses
+`AWS::NoValue` counts as not declaring the property, and controls set outside the stack are left
+alone while neither the previous nor the new template declares it.
+
+Floci's S3 gives a new bucket no ownership controls, so a bucket that never declares the property
+answers `GetBucketOwnershipControls` with `OwnershipControlsNotFoundError`, where AWS reports its
+default, `BucketOwnerEnforced`.
+
 ## Account-Aware Provisioning
 
 Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's account** namespace

@@ -19,6 +19,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 
@@ -27,18 +29,21 @@ import java.util.Set;
  *
  * <p>A property this class covers is translated into the XML its own S3 API call takes and handed
  * to the same service method, so the service validates and stores it exactly as it would a direct
- * {@code PutBucket*} request. A property the template does not declare is left alone, except that
- * an update removing {@code NotificationConfiguration} clears it.
+ * {@code PutBucket*} request. {@code OwnershipControls} is checked here as well, because the service
+ * stores that document unchecked. A property the template does not declare is left alone, except
+ * that {@code CorsConfiguration} is cleared whenever the bucket is provisioned without it, and an
+ * update removing {@code NotificationConfiguration} or {@code OwnershipControls} clears it.
  *
  * <p>Covered on {@code AWS::S3::Bucket}: {@code BucketName}, {@code CorsConfiguration},
  * {@code VersioningConfiguration}, {@code PublicAccessBlockConfiguration},
- * {@code BucketEncryption}, {@code LifecycleConfiguration}, {@code NotificationConfiguration} and
- * {@code Tags}. {@code NotificationConfiguration} is the exception to the XML translation: its
- * service method takes the parsed model, so the provisioner builds that model instead.
+ * {@code BucketEncryption}, {@code LifecycleConfiguration}, {@code OwnershipControls},
+ * {@code NotificationConfiguration} and {@code Tags}. {@code NotificationConfiguration} is the
+ * exception to the XML translation: its service method takes the parsed model, so the provisioner
+ * builds that model instead.
  *
  * <p><b>Silently dropped</b>, each of which has a service method waiting for it:
  * {@code WebsiteConfiguration}, {@code LoggingConfiguration},
- * {@code ObjectLockConfiguration}, {@code OwnershipControls}, {@code ReplicationConfiguration},
+ * {@code ObjectLockConfiguration}, {@code ReplicationConfiguration},
  * {@code AccelerateConfiguration}, {@code AccessControl}, and the four numbered configuration
  * lists ({@code AnalyticsConfigurations}, {@code IntelligentTieringConfigurations},
  * {@code InventoryConfigurations}, {@code MetricsConfigurations}). Declaring one of these still
@@ -56,6 +61,8 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
     private static final String BUCKET = "AWS::S3::Bucket";
     private static final String BUCKET_POLICY = "AWS::S3::BucketPolicy";
     private static final int BUCKET_NAME_MAX_LENGTH = 63;
+    private static final Set<String> OBJECT_OWNERSHIP_MODES =
+            Set.of("BucketOwnerEnforced", "BucketOwnerPreferred", "ObjectWriter");
 
     private final S3Service s3Service;
 
@@ -90,6 +97,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         try {
             // Built before anything is created, so a configuration that fails validation creates nothing.
             NotificationConfiguration notifications = notificationConfiguration(props, ctx);
+            String ownershipControls = ownershipControlsXml(props, ctx);
             if (!ctx.reusesPriorEntity(bucketName)) {
                 // In us-east-1 CreateBucket also answers for a bucket the account already owns,
                 // which this resource must never delete.
@@ -113,6 +121,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             applyBucketEncryption(bucketName, props, ctx);
             applyLifecycleConfiguration(bucketName, props, ctx);
             applyBucketTags(bucketName, props, ctx);
+            applyOwnershipControls(bucketName, ownershipControls, ctx);
         } catch (RuntimeException failure) {
             unwind(r, bucketName, unwind, ctx, failure);
             throw failure;
@@ -233,6 +242,63 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             return;
         }
         s3Service.putBucketTagging(bucketName, ctx.resolveTags(props, "Tags"));
+    }
+
+    /**
+     * The {@code PutBucketOwnershipControls} document the template declares, or null when it
+     * declares none. Validated before the bucket is created or changed, as the notification
+     * configuration is, so a malformed rule leaves the bucket as it was. The service stores the
+     * document unchecked, so both checks are made here. First the registry schema's: an object
+     * holding only a required {@code Rules} list of distinct objects, each holding only an
+     * {@code ObjectOwnership} that names one of three modes. Then S3's, which answers
+     * {@code MalformedXML} for no rule, for more than one, and for a rule without its
+     * {@code ObjectOwnership}.
+     */
+    private static String ownershipControlsXml(JsonNode props, ProvisionContext ctx) {
+        JsonNode declaredControls = declared(props, "OwnershipControls");
+        JsonNode controls = declaredControls == null
+                ? null : ctx.engine().resolveNodeOmittingNoValue(declaredControls);
+        if (controls == null || controls.isNull() || controls.isMissingNode()) {
+            return null;
+        }
+        String path = "#/OwnershipControls";
+        requireObject(controls, path);
+        requiredNode(controls, "Rules", path);
+        requireOnly(controls, path, "Rules");
+        JsonNode rules = declaredArray(controls, "Rules", path);
+        Set<JsonNode> distinctRules = new HashSet<>();
+        rules.forEach(distinctRules::add);
+        if (distinctRules.size() != rules.size()) {
+            throw new AwsException("InvalidRequest",
+                    "Model validation failed (" + path + "/Rules: array items are not unique)", 400);
+        }
+        for (int index = 0; index < rules.size(); index++) {
+            String rulePath = path + "/Rules/" + index;
+            JsonNode rule = requireOnly(requireObject(rules.get(index), rulePath), rulePath, "ObjectOwnership");
+            JsonNode mode = declared(rule, "ObjectOwnership");
+            if (mode != null && mode.isContainerNode()) {
+                throw typeMismatch(rulePath + "/ObjectOwnership", "String", mode);
+            } else if (mode != null && !OBJECT_OWNERSHIP_MODES.contains(mode.asText())) {
+                throw new AwsException("InvalidRequest", "Model validation failed (" + rulePath
+                        + "/ObjectOwnership: failed validation constraint for keyword [enum])", 400);
+            }
+        }
+        JsonNode ownership = rules.size() == 1 ? declared(rules.get(0), "ObjectOwnership") : null;
+        if (ownership == null) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema", 400);
+        }
+        return new XmlBuilder().start("OwnershipControls", AwsNamespaces.S3)
+                .start("Rule").elem("ObjectOwnership", ownership.asText()).end("Rule").end("OwnershipControls").build();
+    }
+
+    /** Puts the declared controls, or removes the ones an earlier template declared and this one drops. */
+    private void applyOwnershipControls(String bucketName, String ownershipControls, ProvisionContext ctx) {
+        if (ownershipControls != null) {
+            s3Service.putBucketOwnershipControls(bucketName, ownershipControls);
+        } else if (ctx.reusesPriorEntity(bucketName) && ctx.previouslyDeclared("OwnershipControls")) {
+            s3Service.deleteBucketOwnershipControls(bucketName);
+        }
     }
 
     /** What a provision changed that a failure has to undo. */
@@ -400,6 +466,23 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             throw typeMismatch(pointer, "JSONObject", value);
         }
         return value;
+    }
+
+    /**
+     * The object itself when it holds no key besides {@code keys}. Any other key fails, as the
+     * schema's {@code additionalProperties: false} does, rather than being dropped unread.
+     */
+    private static JsonNode requireOnly(JsonNode object, String pointer, String... keys) {
+        Set<String> allowed = Set.of(keys);
+        Iterator<String> names = object.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            if (!allowed.contains(name)) {
+                throw new AwsException("InvalidRequest", "Model validation failed (" + pointer
+                        + ": extraneous key [" + name + "] is not permitted)", 400);
+            }
+        }
+        return object;
     }
 
     private static AwsException typeMismatch(String pointer, String expected, JsonNode value) {

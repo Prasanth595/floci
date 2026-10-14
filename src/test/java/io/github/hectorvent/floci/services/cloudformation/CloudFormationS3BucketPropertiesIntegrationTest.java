@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -158,6 +159,131 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
         given().when().get("/" + bucket + "?policy").then().statusCode(404);
     }
 
+    /** A bucket named {@code bucket} carrying {@code properties}, each entry prefixed with a comma. */
+    private static String bareBucketTemplate(String bucket, String properties) {
+        return """
+            { "Resources": { "b": { "Type": "AWS::S3::Bucket",
+              "Properties": { "BucketName": "%s"%s } } } }
+            """.formatted(bucket, properties);
+    }
+
+    private static String ownershipControls(String objectOwnership) {
+        return ", \"OwnershipControls\": { \"Rules\": [ { \"ObjectOwnership\": \"" + objectOwnership + "\" } ] }";
+    }
+
+    @Test
+    void ownershipControlsFollowTheTemplate() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-props-own-" + suffix;
+        String stackName = "cfn-props-own-stack-" + suffix;
+        String stackId = stack("CreateStack", stackName,
+                bareBucketTemplate(bucket, ownershipControls("BucketOwnerEnforced")));
+        await(stackId, "CREATE_COMPLETE");
+        bucketGet(bucket, "ownershipControls")
+            .body(containsString("<ObjectOwnership>BucketOwnerEnforced</ObjectOwnership>"));
+
+        stack("UpdateStack", stackName, bareBucketTemplate(bucket, ownershipControls("ObjectWriter")));
+        await(stackId, "UPDATE_COMPLETE");
+        bucketGet(bucket, "ownershipControls").body(containsString("<ObjectOwnership>ObjectWriter</ObjectOwnership>"));
+
+        // Dropping the property takes the controls off the bucket.
+        stack("UpdateStack", stackName, bareBucketTemplate(bucket, ""));
+        await(stackId, "UPDATE_COMPLETE");
+        given().when().get("/" + bucket + "?ownershipControls").then().statusCode(404)
+            .body(containsString("OwnershipControlsNotFoundError"));
+
+        // Controls put outside the stack stay through an update when no template declares them.
+        given().body("""
+            <OwnershipControls xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+              <Rule><ObjectOwnership>BucketOwnerPreferred</ObjectOwnership></Rule>
+            </OwnershipControls>
+            """).when().put("/" + bucket + "?ownershipControls").then().statusCode(200);
+        stack("UpdateStack", stackName,
+                bareBucketTemplate(bucket, ", \"Tags\": [ { \"Key\": \"purpose\", \"Value\": \"records\" } ]"));
+        await(stackId, "UPDATE_COMPLETE");
+        bucketGet(bucket, "ownershipControls")
+            .body(containsString("<ObjectOwnership>BucketOwnerPreferred</ObjectOwnership>"));
+    }
+
+    @Test
+    void theOwnershipModeCanComeFromAParameter() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-props-own-ref-" + suffix;
+        String stackId = stack("CreateStack", "cfn-props-own-ref-stack-" + suffix, """
+            { "Parameters": { "Mode": { "Type": "String", "Default": "BucketOwnerPreferred" } },
+              "Resources": { "b": { "Type": "AWS::S3::Bucket", "Properties": { "BucketName": "%s",
+                "OwnershipControls": { "Rules": [ { "ObjectOwnership": { "Ref": "Mode" } } ] } } } } }
+            """.formatted(bucket));
+        await(stackId, "CREATE_COMPLETE");
+        bucketGet(bucket, "ownershipControls")
+            .body(containsString("<ObjectOwnership>BucketOwnerPreferred</ObjectOwnership>"));
+    }
+
+    /**
+     * An {@code Fn::If} that chooses {@code AWS::NoValue} leaves the property undeclared. The update
+     * that turns it off removes the controls the stack put; the next one leaves alone the controls
+     * put outside the stack, since the template before it did not declare the property either.
+     */
+    @Test
+    void ownershipControlsAConditionTurnsOffAreRemovedOnce() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-props-own-if-" + suffix;
+        String stackName = "cfn-props-own-if-stack-" + suffix;
+        String template = """
+            { "Parameters": { "Enforce": { "Type": "String", "Default": "true" } },
+              "Conditions": { "Enforced": { "Fn::Equals": [ { "Ref": "Enforce" }, "true" ] } },
+              "Resources": { "b": { "Type": "AWS::S3::Bucket", "Properties": { "BucketName": "%s",
+                "OwnershipControls": { "Fn::If": [ "Enforced",
+                  { "Rules": [ { "ObjectOwnership": "BucketOwnerEnforced" } ] }, { "Ref": "AWS::NoValue" } ] }%s } } } }
+            """;
+        String stackId = stack("CreateStack", stackName, template.formatted(bucket, ""));
+        await(stackId, "CREATE_COMPLETE");
+        bucketGet(bucket, "ownershipControls")
+            .body(containsString("<ObjectOwnership>BucketOwnerEnforced</ObjectOwnership>"));
+
+        stack("UpdateStack", stackName, template.formatted(bucket, ""), "Enforce", "false");
+        await(stackId, "UPDATE_COMPLETE");
+        given().when().get("/" + bucket + "?ownershipControls").then().statusCode(404)
+            .body(containsString("OwnershipControlsNotFoundError"));
+
+        given().body("""
+            <OwnershipControls xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+              <Rule><ObjectOwnership>BucketOwnerPreferred</ObjectOwnership></Rule>
+            </OwnershipControls>
+            """).when().put("/" + bucket + "?ownershipControls").then().statusCode(200);
+        stack("UpdateStack", stackName, template.formatted(bucket,
+                ", \"Tags\": [ { \"Key\": \"purpose\", \"Value\": \"records\" } ]"), "Enforce", "false");
+        await(stackId, "UPDATE_COMPLETE");
+        bucketGet(bucket, "ownershipControls")
+            .body(containsString("<ObjectOwnership>BucketOwnerPreferred</ObjectOwnership>"));
+    }
+
+    @Test
+    void aMalformedOwnershipRuleFailsTheUpdateBeforeTheBucketChanges() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-props-own-bad-" + suffix;
+        String stackName = "cfn-props-own-bad-stack-" + suffix;
+        String stackId = stack("CreateStack", stackName, bareBucketTemplate(bucket,
+                ownershipControls("ObjectWriter") + ", \"Tags\": [ { \"Key\": \"purpose\", \"Value\": \"before\" } ]"));
+        await(stackId, "CREATE_COMPLETE");
+
+        // The tag changes too, as a canary: the rule is checked before anything is applied, so the
+        // rolled-back stack still describes the bucket.
+        stack("UpdateStack", stackName, bareBucketTemplate(bucket,
+                ownershipControls("public") + ", \"Tags\": [ { \"Key\": \"purpose\", \"Value\": \"after\" } ]"));
+        await(stackId, "UPDATE_ROLLBACK_COMPLETE");
+
+        String events = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stackId)
+        .when().post("/").then().statusCode(200).extract().asString();
+        assertTrue(events.contains("#/OwnershipControls/Rules/0/ObjectOwnership: failed validation constraint"),
+                "the update failed on the rule: " + events);
+        bucketGet(bucket, "tagging").body(containsString("<Value>before</Value>")).body(not(containsString("after")));
+        bucketGet(bucket, "ownershipControls").body(containsString("<ObjectOwnership>ObjectWriter</ObjectOwnership>"));
+    }
+
     @Test
     void thePolicyResourceIsIdentifiedByItsBucket() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
@@ -195,11 +321,21 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
     }
 
     private static String stack(String action, String stackName, String template) {
-        String xml = given()
+        return stack(action, stackName, template, null, null);
+    }
+
+    /** Runs {@code action}, setting the template parameter {@code parameter} when it is not null. */
+    private static String stack(String action, String stackName, String template, String parameter, String value) {
+        RequestSpecification request = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", action)
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
+            .formParam("TemplateBody", template);
+        if (parameter != null) {
+            request.formParam("Parameters.member.1.ParameterKey", parameter)
+                .formParam("Parameters.member.1.ParameterValue", value);
+        }
+        String xml = request
         .when()
             .post("/")
         .then()
