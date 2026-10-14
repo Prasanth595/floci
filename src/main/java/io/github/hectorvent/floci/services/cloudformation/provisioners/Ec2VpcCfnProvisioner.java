@@ -152,7 +152,9 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
     /**
      * A replacement is undone through the cleanup record: the displaced VPC was never touched. A
      * reused VPC that an update changed in place is put back from the snapshot taken before the
-     * change. Without either, the update changed nothing about the VPC.
+     * change; the snapshot is removed only after the restore succeeds, so a restore that throws
+     * keeps it for a ContinueUpdateRollback retry. Without either, the update changed nothing
+     * about the VPC.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
@@ -160,10 +162,7 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
             resource.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
             return true;
         }
-        String snapshot = resource.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
-        if (snapshot != null) {
-            restoreInPlace(resource, snapshot);
-        }
+        undoInPlace(resource);
         return true;
     }
 
@@ -182,10 +181,7 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
      */
     private void snapshotInPlace(StackResource r, Vpc vpc, String desiredTenancy, boolean dnsSupport,
                                  boolean dnsHostnames, Map<String, String> desiredTags, String region) {
-        Map<String, String> currentTags = new LinkedHashMap<>();
-        for (Map<String, String> entry : ec2Service.describeTags(region, Map.of("resource-id", List.of(vpc.getVpcId())))) {
-            currentTags.put(entry.get("key"), entry.get("value"));
-        }
+        Map<String, String> currentTags = Ec2Tags.current(ec2Service, region, vpc.getVpcId());
         boolean tenancyChanges = isDedicatedToDefault(vpc, desiredTenancy);
         boolean changed = tenancyChanges
                 || vpc.isEnableDnsSupport() != dnsSupport

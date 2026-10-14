@@ -321,6 +321,27 @@ class Ec2VpcCfnProvisionerTest {
     }
 
     @Test
+    void aRestoreThatThrowsKeepsTheSnapshotForTheRetry() {
+        Vpc existing = vpc("vpc-existing", "10.0.0.0/16");
+        existing.setEnableDnsSupport(true);
+        existing.setEnableDnsHostnames(false);
+        when(ec2.describeVpcs(REGION, List.of("vpc-existing"), Map.of())).thenReturn(List.of(existing));
+        when(ec2.describeTags(REGION, Map.of("resource-id", List.of("vpc-existing")))).thenReturn(List.of());
+        StackResource r = provision("vpc-existing", """
+                {"CidrBlock": "10.0.0.0/16", "EnableDnsHostnames": true}""");
+        String snapshot = r.getAttributes().get(Ec2VpcCfnProvisioner.IN_PLACE_PRIOR_ATTR);
+        assertTrue(snapshot != null, "the prior state is snapshotted");
+        doThrow(new AwsException("InternalError", "ec2 is down", 500))
+                .when(ec2).modifyVpcAttribute(REGION, "vpc-existing", "enableDnsHostnames", "false");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertEquals("InternalError", failure.getErrorCode());
+        assertEquals(snapshot, r.getAttributes().get(Ec2VpcCfnProvisioner.IN_PLACE_PRIOR_ATTR),
+                "a failed restore keeps the snapshot for a ContinueUpdateRollback retry");
+    }
+
+    @Test
     void anUnchangedReuseLeavesNoSnapshotAndRollsBackAsComplete() {
         Vpc existing = vpc("vpc-existing", "10.0.0.0/16");
         existing.setEnableDnsSupport(true);
