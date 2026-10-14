@@ -19,6 +19,24 @@ class CloudFrontEdgeDomainTest {
     }
 
     @Test
+    void anUnconfiguredSuffixIsThePartitionsOwn() {
+        assertTrue(CloudFrontEdgeDomain.create("us-east-1", null).domainName().endsWith(".cloudfront.net"));
+        assertTrue(CloudFrontEdgeDomain.create("cn-northwest-1", null).domainName().endsWith(".cloudfront.cn"));
+        assertEquals("cloudfront.net", CloudFrontEdgeDomain.domainSuffix(null, "aws"));
+        assertEquals("cloudfront.cn", CloudFrontEdgeDomain.domainSuffix(null, "aws-cn"));
+        assertEquals("cloudfront.cn", CloudFrontEdgeDomain.domainSuffix(" ", "aws-cn"), "blank is unset");
+        assertEquals("cloudfront.net", CloudFrontEdgeDomain.domainSuffix(null, "aws-us-gov"),
+                "a partition without CloudFront keeps the commercial suffix");
+        assertEquals("cloudfront.net", CloudFrontEdgeDomain.domainSuffix(null, null));
+    }
+
+    @Test
+    void aConfiguredSuffixWinsInEveryPartition() {
+        assertEquals("cloudfront.local", CloudFrontEdgeDomain.domainSuffix("cloudfront.local", "aws-cn"));
+        assertTrue(CloudFrontEdgeDomain.create("cn-north-1", "cloudfront.net").domainName().endsWith(".cloudfront.net"));
+    }
+
+    @Test
     void hostedZoneIsThePartitionsCloudFrontZone() {
         assertEquals("Z2FDTNDATAQYW2", CloudFrontEdgeDomain.create("eu-west-1", "cloudfront.net").hostedZoneId());
         assertEquals("Z3RFFRIM2A3IF5", CloudFrontEdgeDomain.create("cn-north-1", "cloudfront.net").hostedZoneId());

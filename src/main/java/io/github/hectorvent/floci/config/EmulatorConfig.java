@@ -2369,8 +2369,11 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        @WithDefault("cloudfront.net") // partition-literal: configurable; the China CDN suffix has no published source
-        String domainSuffix();
+        /**
+         * Suffix of generated distribution domain names, in every partition when set. Unset, the
+         * suffix follows the request's partition ({@code CloudFrontEdgeDomain#domainSuffix}).
+         */
+        Optional<String> domainSuffix();
 
         /**
          * Exact custom-origin hostnames allowed to resolve to private or otherwise non-routable

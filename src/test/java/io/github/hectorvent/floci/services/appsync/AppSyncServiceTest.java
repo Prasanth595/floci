@@ -30,6 +30,7 @@ import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -59,7 +60,8 @@ class AppSyncServiceTest {
     /**
      * AppSync fronts a custom domain with CloudFront, so a DNS alias to {@code appsyncDomainName}
      * lives in the partition's CloudFront hosted zone, as the CDK's AppSyncTarget builds it. A
-     * random zone id made every such alias point nowhere.
+     * random zone id made every such alias point nowhere. With no suffix configured the
+     * distribution name takes the partition's own.
      */
     @Test
     void customDomainIsFrontedByTheCloudFrontZoneOfItsPartition() {
@@ -72,6 +74,8 @@ class AppSyncServiceTest {
         DomainName china = newService(Clock.fixed(NOW, ZoneOffset.UTC))
                 .createDomainName(Map.of("domainName", "api.example.cn"));
         assertEquals("Z3RFFRIM2A3IF5", china.getHostedZoneId());
+        assertTrue(china.getAppsyncDomainName().matches("d[0-9a-f]{13}\\.cloudfront\\.cn"),
+                china.getAppsyncDomainName());
     }
 
     @Test
@@ -406,7 +410,7 @@ class AppSyncServiceTest {
         lambdaAuthorizerCache = new LambdaAuthorizerCache();
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.effectiveBaseUrl()).thenReturn(baseUrl);
-        when(config.services().cloudfront().domainSuffix()).thenReturn("cloudfront.net");
+        when(config.services().cloudfront().domainSuffix()).thenReturn(Optional.empty());
         return new AppSyncService(
                 storageFactory,
                 config,
