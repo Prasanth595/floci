@@ -5726,6 +5726,28 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(334)
+    void runInstancesRequestEntryForATemplateDeviceChangesOnlyWhatItSets() {
+        String templateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "gp3-root-size-override-template")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        // The request resizes the root but names no type, so the template's gp3 stands.
+        assertEquals("gp3", rootVolumeType(launch(Map.of(
+            "LaunchTemplate.LaunchTemplateId", templateId,
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.Ebs.VolumeSize", "20"))));
+    }
+
+    @Test
     @Order(333)
     void launchTemplateWithAnUnknownVolumeTypeIsStoredButFailsAtLaunch() {
         String templateId = given()
