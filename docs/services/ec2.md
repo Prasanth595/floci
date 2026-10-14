@@ -670,7 +670,8 @@ Within `NetworkInterfaces`, `ConnectionTrackingSpecification` is stored and read
 three of its timeout members.
 
 At launch, `RunInstances` and `CreateFleet` apply the template's `BlockDeviceMappings` under the
-request's: a request mapping for a device replaces the template's for that device. The root
+request's: a request mapping for a device replaces the template's for that device; an Auto Scaling group launching from a template gets the template's
+mappings the same way. The root
 volume's type comes from the mapping for the AMI's root device, else from the AMI's own root
 mapping, else `gp3`, and `CreateImage` records that type on the new AMI's root mapping. A mapping
 naming a `VolumeType` outside the service model's enum fails with `InvalidParameterValue`, as
