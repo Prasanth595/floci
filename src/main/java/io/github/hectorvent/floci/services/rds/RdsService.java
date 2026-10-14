@@ -4678,6 +4678,25 @@ public class RdsService implements Resettable, ResourceProvider {
             }
         }
 
+        if (iamEnabled != null) {
+            if (!config.services().rds().mock()) {
+                proxyManager.updateIamEnabled(
+                        rdsResourceRelayKey(cluster.getDbClusterArn(), id), iamEnabled);
+            }
+            for (String memberId : cluster.getDbClusterMembers()) {
+                DbInstance member = findInstanceForScope(currentAccountId(), effectiveRegion, memberId);
+                if (member == null) {
+                    continue;
+                }
+                member.setIamDatabaseAuthenticationEnabled(iamEnabled);
+                putInstanceForScope(currentAccountId(), effectiveRegion, memberId, member);
+                if (!config.services().rds().mock()) {
+                    proxyManager.updateIamEnabled(
+                            rdsResourceRelayKey(member.getDbInstanceArn(), memberId), iamEnabled);
+                }
+            }
+        }
+
         LOG.infov("DB cluster {0} modified", id);
         return cluster;
     }
