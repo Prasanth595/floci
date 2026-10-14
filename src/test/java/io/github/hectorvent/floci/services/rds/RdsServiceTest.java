@@ -624,6 +624,36 @@ class RdsServiceTest {
         }
     }
 
+    @Test
+    void standaloneRebootDoesNotBlockUnrelatedMetadataDuringBackendStop() throws Exception {
+        rdsService.createGlobalCluster("reboot-unrelated", null, "aurora-postgresql", "16.3",
+                "dbname", false, false, Map.of(), "us-east-1");
+        rdsService.createDbInstance("reboot-progress", "postgres", "16.3",
+                "admin", "password", "dbname", "db.t3.micro", 20,
+                false, null, null, null, null, false);
+        CountDownLatch stopping = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(call -> {
+            stopping.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return null;
+        }).when(containerManager).stop(any());
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<DbInstance> reboot = workers.submit(() -> rdsService.rebootDbInstance("reboot-progress"));
+            assertTrue(stopping.await(5, TimeUnit.SECONDS));
+            Future<GlobalCluster> unrelated = workers.submit(() -> rdsService.describeGlobalCluster("reboot-unrelated"));
+            assertEquals("reboot-unrelated", unrelated.get(1, TimeUnit.SECONDS).getGlobalClusterIdentifier());
+            release.countDown();
+            assertEquals(DbInstanceStatus.AVAILABLE, reboot.get(5, TimeUnit.SECONDS).getStatus());
+            assertEquals("localhost", rdsService.getDbInstance("reboot-progress").getContainerHost());
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"delete", "modify", "stop", "reboot"})
     void memberLifecycleWaitsForPublicationWithoutBlockingMetadata(String operation) throws Exception {

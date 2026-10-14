@@ -2962,7 +2962,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 settings, publiclyAccessible, scaling, deletionProtection));
     }
 
-    private DbInstance doModifyDbInstance(
+    private synchronized DbInstance doModifyDbInstance(
             String id, String newPassword, Boolean iamEnabled,
             String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
             String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
@@ -3736,7 +3736,7 @@ public class RdsService implements Resettable, ResourceProvider {
         return withInstancePublication(id, region, () -> doEnsureInstanceBackend(id, region));
     }
 
-    private DbInstance doEnsureInstanceBackend(String id, String region) {
+    private synchronized DbInstance doEnsureInstanceBackend(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
         if (config.services().rds().mock()) {
@@ -4028,8 +4028,8 @@ public class RdsService implements Resettable, ResourceProvider {
                             && findClusterForScope(accountId, scopeRegion, clusterId) != cluster)) {
                         continue;
                     }
-                    return operation.get();
                 }
+                return operation.get();
             }
         }
     }
@@ -4045,7 +4045,7 @@ public class RdsService implements Resettable, ResourceProvider {
         });
     }
 
-    private void doDeleteDbInstance(String id, String region) {
+    private synchronized void doDeleteDbInstance(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = Optional.ofNullable(
                         findInstanceForScope(currentAccountId(), effectiveRegion, id))
