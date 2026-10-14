@@ -50,3 +50,7 @@ AWS_ENDPOINT_URL=http://localhost:4566 aws lambda-web deploy --name my-app --hel
 ```
 
 The command passes `--endpoint-url` only to the Lambda Web client. Its STS, S3 and IAM calls use the default endpoints, so the environment variable is what routes them to Floci. The `endpointUrl` it prints is the Floci domain name behind `https://`, which Floci does not serve.
+
+## CloudFormation
+
+`AWS::Lambda::WebFunction`, `AWS::Lambda::WebFunctionRevision` and `AWS::Lambda::WebFunctionEndpoint` provision through the resource registry. `Ref` of each is its ARN. Every property of a revision is createOnly, so a changed revision mints a new one and the displaced revision is deleted once the update commits. An endpoint keeps its identity while its name, type, regions and function stay the same. `Fn::GetAtt` on `RegionalEndpoints` is not supported.

@@ -87,6 +87,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaEve
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaEventSourceMappingCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaMicrovmsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaVersionAliasCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaWebCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsLogStreamCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsMetricFilterCfnProvisioner;
@@ -141,6 +142,7 @@ import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
@@ -234,6 +236,7 @@ final class CfnProvisionerFixture {
         private IotDomainConfigurationService iotDomainConfigurationService;
         private IotService iotService;
         private LambdaMicrovmsService lambdaMicrovmsService;
+        private LambdaWebService lambdaWebService;
         private AwsConfigService awsConfigService;
         private OrganizationsService organizationsService;
         private SqsService sqsService;
@@ -414,6 +417,9 @@ final class CfnProvisionerFixture {
             }
             if (lambdaMicrovmsService != null) {
                 discovered.add(new LambdaMicrovmsCfnProvisioner(lambdaMicrovmsService));
+            }
+            if (lambdaWebService != null) {
+                discovered.add(new LambdaWebCfnProvisioner(lambdaWebService));
             }
             if (awsConfigService != null) {
                 discovered.add(new ConfigCfnProvisioner(awsConfigService));
@@ -721,6 +727,11 @@ final class CfnProvisionerFixture {
 
         public Builder lambdaMicrovms(LambdaMicrovmsService v) {
             this.lambdaMicrovmsService = v;
+            return this;
+        }
+
+        public Builder lambdaWeb(LambdaWebService v) {
+            this.lambdaWebService = v;
             return this;
         }
 
