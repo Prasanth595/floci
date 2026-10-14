@@ -9584,6 +9584,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
         requireAvailableCluster(cluster, clusterId);
+        requireSupportedFeature(engineName(cluster), featureName);
         requireRoleNotAssociated(cluster, clusterId, roleArn);
         cluster.getAssociatedRoles().add(new DbRoleAssociation(roleArn, blankToNull(featureName)));
         putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
@@ -9602,6 +9603,7 @@ public class RdsService implements Resettable, ResourceProvider {
         DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
         requireAvailableCluster(cluster, clusterId);
         for (DbRoleAssociation role : roles) {
+            requireSupportedFeature(engineName(cluster), role.getFeatureName());
             requireRoleNotAssociated(cluster, clusterId, role.getRoleArn());
         }
         for (DbRoleAssociation role : roles) {
@@ -9657,6 +9659,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(instanceId, effectiveRegion);
         requireAvailableInstance(instance, instanceId);
+        requireSupportedFeature(engineName(instance), featureName);
         for (DbRoleAssociation existing : instance.getAssociatedRoles()) {
             if (existing.getRoleArn().equals(roleArn) || featureName.equals(existing.getFeatureName())) {
                 throw new AwsException("DBInstanceRoleAlreadyExists", "Role ARN " + existing.getRoleArn()
@@ -9693,12 +9696,17 @@ public class RdsService implements Resettable, ResourceProvider {
     /**
      * Checks the roles a {@code CreateDBCluster} request names before the cluster exists, by the
      * rules {@link #addRoleToDbCluster} applies one at a time, so a list that would be refused part
-     * way through refuses the create instead of leaving a cluster with half its roles.
+     * way through refuses the create instead of leaving a cluster with half its roles. The feature
+     * names are checked against {@code engine} when the request names one; a create that takes its
+     * engine from a global cluster has them checked once the cluster exists.
      */
-    public void validateClusterRoleAssociations(String clusterId, List<DbRoleAssociation> roles) {
+    public void validateClusterRoleAssociations(String clusterId, String engine, List<DbRoleAssociation> roles) {
         Set<String> roleArns = new HashSet<>();
         for (DbRoleAssociation role : roles) {
             requireParameter(role.getRoleArn(), "AssociatedRoles.RoleArn");
+            if (!isBlank(engine)) {
+                requireSupportedFeature(engine, role.getFeatureName());
+            }
             if (!roleArns.add(role.getRoleArn())) {
                 throw new AwsException("DBClusterRoleAlreadyExists", "Role ARN " + role.getRoleArn()
                         + " is named more than once for DB cluster " + clusterId + ".", 400);
@@ -9708,6 +9716,35 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private static String blankToNull(String value) {
         return isBlank(value) ? null : value;
+    }
+
+    /**
+     * Refuses a feature name the engine's {@code SupportedFeatureNames} does not list, matched
+     * without regard to case. No feature name (a cluster role may have none) and an engine the
+     * catalogue does not list pass, so Floci never refuses a feature it cannot judge.
+     */
+    private static void requireSupportedFeature(String engine, String featureName) {
+        if (isBlank(featureName)) {
+            return;
+        }
+        List<String> supported = RdsEngineCatalog.featureNamesForEngine(engine);
+        if (supported == null || supported.stream().anyMatch(name -> name.equalsIgnoreCase(featureName))) {
+            return;
+        }
+        throw new AwsException("InvalidParameterValue", "The feature " + featureName
+                + " is not supported for engine " + engine.toLowerCase(Locale.ROOT) + ". Supported features: "
+                + (supported.isEmpty() ? "none" : String.join(", ", supported)) + ".", 400);
+    }
+
+    /** The engine name the request gave, or the engine's own name for state recorded without one. */
+    private static String engineName(DbCluster cluster) {
+        return !isBlank(cluster.getEngineIdentifier()) ? cluster.getEngineIdentifier()
+                : cluster.getEngine() != null ? cluster.getEngine().name() : null;
+    }
+
+    private static String engineName(DbInstance instance) {
+        return !isBlank(instance.getEngineIdentifier()) ? instance.getEngineIdentifier()
+                : instance.getEngine() != null ? instance.getEngine().name() : null;
     }
 
     private static void requireParameter(String value, String name) {
