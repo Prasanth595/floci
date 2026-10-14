@@ -52,6 +52,7 @@ import io.github.hectorvent.floci.services.marketplace.MarketplaceDiscoveryContr
 import io.github.hectorvent.floci.services.marketplace.MarketplaceReportingController;
 import io.github.hectorvent.floci.services.mwaa.MwaaController;
 import io.github.hectorvent.floci.services.oam.OamController;
+import io.github.hectorvent.floci.services.opensearch.ElasticsearchController;
 import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
@@ -103,6 +104,7 @@ public class ResolvedServiceCatalog {
             java.util.Map.of(
                     "s3express", "s3",
                     "iot-jobs-data", "iot",
+                    "monitoring", "cloudwatch",
                     "awsssoportal", "sso");
 
     private final ServiceCatalog catalog;
@@ -331,7 +333,8 @@ public class ResolvedServiceCatalog {
                         "opensearch", storageMode(config.storage().services().opensearch().mode(), config.storage().mode()),
                         config.storage().services().opensearch().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("es"), Set.of(), Set.of(OpenSearchController.class)),
+                        Set.of(), Set.of("es"), Set.of(),
+                        Set.of(OpenSearchController.class, ElasticsearchController.class)),
                 descriptor("ec2", "ec2", config.services().ec2().enabled(), true,
                         "ec2", storageMode(config.storage().services().ec2().mode(), config.storage().mode()),
                         5000L, AwsNamespaces.EC2, ServiceProtocol.QUERY,

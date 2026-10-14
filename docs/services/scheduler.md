@@ -27,7 +27,10 @@ background dispatcher fires schedule targets on time. Supported expressions:
 
 - `at(YYYY-MM-DDTHH:mm:ss)`: one-time fire; honors `ScheduleExpressionTimezone`
   (default UTC) and `ActionAfterCompletion=DELETE`.
-- `rate(N unit)`: repeating fire (`minutes`, `hours`, `days`).
+- `rate(N unit)`: repeating fire (`minutes`, `hours`, `days`). The first
+  occurrence uses `StartDate`, or creation time when `StartDate` is omitted,
+  and is delivered on the first eligible dispatcher tick. Later occurrences
+  retain the interval from the previous actual dispatch time.
 - `cron(minute hour day-of-month month day-of-week year)`: AWS 6-field cron;
   honors `ScheduleExpressionTimezone`. Day-of-week is `1-7` or `SUN-SAT`, so
   `2` is Monday and `cron(30 2 ? * 2#1 *)` is the first Monday of the month.
@@ -39,6 +42,12 @@ background dispatcher fires schedule targets on time. Supported expressions:
 `State=DISABLED` schedules and schedules outside their `StartDate`/`EndDate`
 window are skipped. The dispatcher ticks every
 `floci.services.scheduler.tick-interval-seconds` (default `10`).
+
+Rate schedules use the same dispatcher whether created or updated directly or
+through Step Functions. A changed future `StartDate` takes effect before the
+first dispatch. The dispatcher keeps its last-fire state in memory; past dates,
+restart, post-dispatch updates and re-enable timing have not been verified
+against live AWS. Fixed-anchor recurrence is not implemented.
 
 Supported target types: SQS, Lambda, SNS, ECS `RunTask`, EventBridge
 `PutEvents`, and unqualified Step Functions state machine ARNs. Templated

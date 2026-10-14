@@ -76,6 +76,7 @@ public class RedshiftServerlessJsonHandler {
                 case "CreateSnapshot" -> handleCreateSnapshot(request, region);
                 case "GetSnapshot" -> handleGetSnapshot(request, region);
                 case "ListSnapshots" -> handleListSnapshots(request, region);
+                case "UpdateSnapshot" -> handleUpdateSnapshot(request, region);
                 case "DeleteSnapshot" -> handleDeleteSnapshot(request, region);
                 case "RestoreFromSnapshot" -> handleRestoreFromSnapshot(request, region);
                 case "CreateUsageLimit" -> handleCreateUsageLimit(request, region);
@@ -229,6 +230,11 @@ public class RedshiftServerlessJsonHandler {
             response.put("nextToken", page.nextToken());
         }
         return Response.ok(response).build();
+    }
+
+    private Response handleUpdateSnapshot(JsonNode request, String region) {
+        return snapshotResponse(service.updateSnapshot(
+                text(request, "snapshotName"), ServerlessSupport.integer(request, "retentionPeriod"), region));
     }
 
     private Response handleDeleteSnapshot(JsonNode request, String region) {

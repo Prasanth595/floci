@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Totp;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -24,6 +25,7 @@ import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import io.github.hectorvent.floci.testing.MutableClock;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -45,6 +47,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiPredicate;
 import java.util.function.Predicate;
 
@@ -149,6 +152,130 @@ class IamServiceTest {
         assertEquals(1, iamService.listRolePolicies("R").size());
     }
 
+    @Test
+    void userInlinePolicyQuotaIgnoresWhitespaceAndPreservesRejectedReplacement() {
+        iamService.createUser("R", "/");
+        String exactLimit = policyWithNonWhitespaceLength(2_048);
+        String padded = exactLimit.substring(0, 1) + " \n\t\r ".repeat(1_000) + exactLimit.substring(1);
+        iamService.putUserPolicy("R", "inline-exec", padded);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.putUserPolicy("R", "inline-exec", policyWithNonWhitespaceLength(2_049)));
+
+        assertEquals("LimitExceeded", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
+        assertEquals(padded, iamService.getUserPolicy("R", "inline-exec"));
+        iamService.putUserPolicy("R", "inline-exec", exactLimit);
+        assertEquals(exactLimit, iamService.getUserPolicy("R", "inline-exec"));
+    }
+
+    @Test
+    void userInlinePolicyQuotaCountsAllPolicies() {
+        iamService.createUser("R", "/");
+        iamService.putUserPolicy("R", "first", policyWithNonWhitespaceLength(1_200));
+        iamService.putUserPolicy("R", "second", policyWithNonWhitespaceLength(649));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.putUserPolicy("R", "third", policyWithNonWhitespaceLength(200)));
+
+        assertEquals("LimitExceeded", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
+        assertEquals(List.of("first", "second"), iamService.listUserPolicies("R").stream().sorted().toList());
+    }
+
+    @Test
+    void userInlinePolicyQuotaIsAtomicAcrossConcurrentWrites() throws Exception {
+        iamService.createUser("R", "/");
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger accepted = new AtomicInteger();
+        AtomicInteger rejected = new AtomicInteger();
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            for (String policyName : List.of("first", "second")) {
+                executor.submit(() -> {
+                    start.await();
+                    try {
+                        iamService.putUserPolicy("R", policyName, policyWithNonWhitespaceLength(1_200));
+                        accepted.incrementAndGet();
+                    } catch (AwsException error) {
+                        assertEquals("LimitExceeded", error.getErrorCode());
+                        rejected.incrementAndGet();
+                    }
+                    return null;
+                });
+            }
+            start.countDown();
+            executor.shutdown();
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+        }
+
+        assertEquals(1, accepted.get());
+        assertEquals(1, rejected.get());
+        assertEquals(1, iamService.listUserPolicies("R").size());
+    }
+
+    @Test
+    void groupInlinePolicyQuotaIgnoresWhitespaceAndPreservesRejectedReplacement() {
+        iamService.createGroup("R", "/");
+        String exactLimit = policyWithNonWhitespaceLength(5_120);
+        String padded = exactLimit.substring(0, 1) + " \n\t\r ".repeat(1_000) + exactLimit.substring(1);
+        iamService.putGroupPolicy("R", "inline-exec", padded);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.putGroupPolicy("R", "inline-exec", policyWithNonWhitespaceLength(5_121)));
+
+        assertEquals("LimitExceeded", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
+        assertEquals(padded, iamService.getGroupPolicy("R", "inline-exec"));
+        iamService.putGroupPolicy("R", "inline-exec", exactLimit);
+        assertEquals(exactLimit, iamService.getGroupPolicy("R", "inline-exec"));
+    }
+
+    @Test
+    void groupInlinePolicyQuotaCountsAllPolicies() {
+        iamService.createGroup("R", "/");
+        iamService.putGroupPolicy("R", "first", policyWithNonWhitespaceLength(3_000));
+        iamService.putGroupPolicy("R", "second", policyWithNonWhitespaceLength(1_921));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.putGroupPolicy("R", "third", policyWithNonWhitespaceLength(200)));
+
+        assertEquals("LimitExceeded", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
+        assertEquals(List.of("first", "second"), iamService.listGroupPolicies("R").stream().sorted().toList());
+    }
+
+    @Test
+    void groupInlinePolicyQuotaIsAtomicAcrossConcurrentWrites() throws Exception {
+        iamService.createGroup("R", "/");
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger accepted = new AtomicInteger();
+        AtomicInteger rejected = new AtomicInteger();
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            for (String policyName : List.of("first", "second")) {
+                executor.submit(() -> {
+                    start.await();
+                    try {
+                        iamService.putGroupPolicy("R", policyName, policyWithNonWhitespaceLength(3_000));
+                        accepted.incrementAndGet();
+                    } catch (AwsException error) {
+                        assertEquals("LimitExceeded", error.getErrorCode());
+                        rejected.incrementAndGet();
+                    }
+                    return null;
+                });
+            }
+            start.countDown();
+            executor.shutdown();
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+        }
+
+        assertEquals(1, accepted.get());
+        assertEquals(1, rejected.get());
+        assertEquals(1, iamService.listGroupPolicies("R").size());
+    }
+
     /** The STS global endpoint, and so the token version it reports, exists only in the commercial partition. */
     @Test
     void accountSummaryReportsTheGlobalEndpointTokenVersionOnlyWhereStsHasAGlobalHost() {
@@ -242,11 +369,31 @@ class IamServiceTest {
                 null, "123456789012", "s", "AROATESTROLEID:s");
 
         // The session ARN carries only the role's name; aws:PrincipalArn is the role's own ARN.
+        // The principal keys ride along from the same lookup: a role session is typed as an
+        // assumed role, its aws:userid is the stored role-id:session-name, and it has no
+        // aws:username, which the guide lists as not present for a role.
         assertEquals(new IamService.CallerArns("arn:aws:sts::123456789012:assumed-role/TestRole/s",
-                        "arn:aws:iam::123456789012:role/team/TestRole"),
+                        "arn:aws:iam::123456789012:role/team/TestRole",
+                        IamService.CallerArns.TYPE_ASSUMED_ROLE, "AROATESTROLEID:s", null),
                 service.resolveCallerArns("ASIALIVESESSION").orElseThrow());
         // An expired session answers for neither, never for one and not the other.
         assertTrue(service.resolveCallerArns("ASIAEXPIREDSESSION").isEmpty());
+    }
+
+    @Test
+    void anIamUsersCallerArnsCarryItsNameIdAndType() {
+        IamService service = iamService(false, new InMemoryStorage<>(), new InMemoryStorage<>());
+        IamUser user = service.createUser("alice", "/");
+        AccessKey key = service.createAccessKey("alice");
+
+        IamService.CallerArns arns = service.resolveCallerArns(key.getAccessKeyId()).orElseThrow();
+
+        // The one principal the guide gives an aws:username, and its aws:userid is the user's own
+        // id rather than anything the ARN carries.
+        assertEquals(IamService.CallerArns.TYPE_USER, arns.principalType());
+        assertEquals("alice", arns.userName());
+        assertEquals(user.getUserId(), arns.userId());
+        assertEquals(user.getArn(), arns.callerArn());
     }
 
     @Test
@@ -378,7 +525,10 @@ class IamServiceTest {
 
         assertEquals(List.of(READ_S3), context.identityPolicies());
         assertNull(context.sessionPolicyDocument());
-        assertEquals(new IamService.CallerArns(alice.getArn(), alice.getArn()),
+        // Acting as the user means carrying the user's principal keys, aws:username included:
+        // the guide gives one to an IAM user and to no other principal.
+        assertEquals(new IamService.CallerArns(alice.getArn(), alice.getArn(),
+                        IamService.CallerArns.TYPE_USER, alice.getUserId(), "alice"),
                 service.resolveCallerArns("ASIASESSIONTOKEN").orElseThrow());
         assertEquals(alice.getUserId(), service.resolveCallerUserId("ASIASESSIONTOKEN", "token").orElseThrow());
     }
@@ -393,7 +543,11 @@ class IamServiceTest {
         // account's SCPs, rather than the null that lets a credential through unevaluated.
         CallerContext context = service.resolveCallerContext("ASIAROOTSESSION");
         assertEquals(1, context.identityPolicies().size());
-        assertEquals(new IamService.CallerArns("arn:aws:iam::000000000000:root", "arn:aws:iam::000000000000:root"),
+        // "aws:userid: AWS account ID" and no aws:username, which the guide lists as not
+        // present for the account root.
+        assertEquals(new IamService.CallerArns("arn:aws:iam::000000000000:root",
+                        "arn:aws:iam::000000000000:root", IamService.CallerArns.TYPE_ACCOUNT,
+                        "000000000000", null),
                 service.resolveCallerArns("ASIAROOTSESSION").orElseThrow());
     }
 
@@ -500,7 +654,10 @@ class IamServiceTest {
         assertEquals(READ_S3, withPolicy.identityPolicies().getFirst());
         assertFederatedUserLimits(withPolicy.identityPolicies().getLast());
         assertEquals(ALL_S3, withPolicy.sessionPolicyDocument());
-        assertEquals(new IamService.CallerArns(federatedArn, federatedArn),
+        // The same aws:userid both ways, since one derivation now serves both readers, and no
+        // aws:username: the guide lists it as not present for a federated user.
+        assertEquals(new IamService.CallerArns(federatedArn, federatedArn,
+                        IamService.CallerArns.TYPE_FEDERATED_USER, "000000000000:Bob", null),
                 service.resolveCallerArns("ASIAWITHPOLICY").orElseThrow());
         assertEquals("000000000000:Bob", service.resolveCallerUserId("ASIAWITHPOLICY", "token").orElseThrow());
     }
@@ -636,6 +793,9 @@ class IamServiceTest {
         assertEquals(10L, empty.get("AttachedPoliciesPerGroupQuota"));
         assertEquals(20L, empty.get("AttachedPoliciesPerRoleQuota"));
         assertEquals(6144L, empty.get("PolicySizeQuota"));
+        assertEquals(2048L, empty.get("UserPolicySizeQuota"));
+        assertEquals(5120L, empty.get("GroupPolicySizeQuota"));
+        assertEquals(10240L, empty.get("RolePolicySizeQuota"));
         assertEquals(0L, empty.get("Providers"));
         assertEquals(0L, empty.get("AccountAccessKeysPresent"));
 
@@ -872,6 +1032,194 @@ class IamServiceTest {
     }
 
     @Test
+    void changePasswordReplacesThePasswordAndClearsTheResetFlag() {
+        iamService.createUser("alice", "/");
+        iamService.createLoginProfile("alice", "Sup3r$ecret!", true);
+
+        iamService.changePassword("alice", "Sup3r$ecret!", "An0ther$ecret!");
+
+        LoginProfile profile = iamService.getLoginProfile("alice");
+        assertFalse(profile.isPasswordResetRequired(),
+                "a self-service change is what clears the reset an administrator required");
+        assertNotNull(profile.getPasswordLastChanged());
+        // The proof the write took is behavioural rather than a read of the stored field: the
+        // new password is now the current one and the old one is not.
+        iamService.changePassword("alice", "An0ther$ecret!", "Th1rd$ecret!");
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> iamService.changePassword("alice", "An0ther$ecret!", "F0urth$ecret!"))
+                .getErrorCode());
+    }
+
+    @Test
+    void changePasswordWithTheWrongOldPasswordChangesNothing() {
+        iamService.createUser("alice", "/");
+        iamService.createLoginProfile("alice", "Sup3r$ecret!", false);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.changePassword("alice", "N0tTheOne!", "An0ther$ecret!"));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        // The refusal left the password alone, so the original still changes it.
+        iamService.changePassword("alice", "Sup3r$ecret!", "An0ther$ecret!");
+    }
+
+    @Test
+    void changePasswordChecksTheOldPasswordBeforeTheAccountPolicy() {
+        iamService.createUser("alice", "/");
+        iamService.createLoginProfile("alice", "Sup3r$ecret!", false);
+        AccountPasswordPolicy policy = new AccountPasswordPolicy();
+        policy.setMinimumPasswordLength(12);
+        iamService.updateAccountPasswordPolicy(policy);
+
+        // Both halves of the request are wrong. A caller who cannot prove the current password is
+        // told that and nothing about what the policy would have required.
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.changePassword("alice", "N0tTheOne!", "short"));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void changePasswordHoldsTheNewPasswordToTheAccountPolicy() {
+        iamService.createUser("alice", "/");
+        iamService.createLoginProfile("alice", "Sup3r$ecret!", false);
+        AccountPasswordPolicy policy = new AccountPasswordPolicy();
+        policy.setMinimumPasswordLength(12);
+        policy.setRequireSymbols(true);
+        policy.setRequireNumbers(true);
+        iamService.updateAccountPasswordPolicy(policy);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.changePassword("alice", "Sup3r$ecret!", "short"));
+
+        assertEquals("PasswordPolicyViolation", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        iamService.changePassword("alice", "Sup3r$ecret!", "An0ther$ecret!");
+    }
+
+    @Test
+    void changePasswordNamesTheMemberThatFailedItsConstraint() {
+        iamService.createUser("alice", "/");
+        iamService.createLoginProfile("alice", "Sup3r$ecret!", false);
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> iamService.changePassword("alice", null, "An0ther$ecret!"));
+        assertEquals("ValidationError", missing.getErrorCode());
+        assertTrue(missing.getMessage().contains("Value null at 'oldPassword'"), missing.getMessage());
+
+        // An empty member is a value that fails the pattern rather than a member never supplied,
+        // and the message names the one that failed, there being two password members here.
+        AwsException empty = assertThrows(AwsException.class,
+                () -> iamService.changePassword("alice", "Sup3r$ecret!", ""));
+        assertEquals("ValidationError", empty.getErrorCode());
+        assertTrue(empty.getMessage().contains("Value at 'newPassword'"), empty.getMessage());
+    }
+
+    @Test
+    void changePasswordRefusesAPasswordTheReuseWindowStillHolds() {
+        iamService.createUser("alice", "/");
+        iamService.createLoginProfile("alice", "Sup3r$ecret!", false);
+        AccountPasswordPolicy policy = new AccountPasswordPolicy();
+        policy.setPasswordReusePrevention(1);
+        iamService.updateAccountPasswordPolicy(policy);
+
+        iamService.changePassword("alice", "Sup3r$ecret!", "An0ther$ecret!");
+
+        // The window is one superseded password, and the one in hand counts alongside it, so
+        // neither going back nor standing still is allowed.
+        assertEquals("PasswordPolicyViolation", assertThrows(AwsException.class,
+                () -> iamService.changePassword("alice", "An0ther$ecret!", "Sup3r$ecret!"))
+                .getErrorCode());
+        assertEquals("PasswordPolicyViolation", assertThrows(AwsException.class,
+                () -> iamService.changePassword("alice", "An0ther$ecret!", "An0ther$ecret!"))
+                .getErrorCode());
+    }
+
+    @Test
+    void changePasswordAllowsAPasswordThatHasLeftTheReuseWindow() {
+        iamService.createUser("alice", "/");
+        iamService.createLoginProfile("alice", "Sup3r$ecret!", false);
+        AccountPasswordPolicy policy = new AccountPasswordPolicy();
+        policy.setPasswordReusePrevention(1);
+        iamService.updateAccountPasswordPolicy(policy);
+
+        iamService.changePassword("alice", "Sup3r$ecret!", "An0ther$ecret!");
+        iamService.changePassword("alice", "An0ther$ecret!", "Th1rd$ecret!");
+
+        // A window of one reaches the current password and the one before it, and the first is
+        // now two back, so it is reachable again.
+        iamService.changePassword("alice", "Th1rd$ecret!", "Sup3r$ecret!");
+        assertNotNull(iamService.getLoginProfile("alice").getPasswordLastChanged());
+    }
+
+    @Test
+    void changePasswordWithNoReusePolicyTakesTheOldPasswordBack() {
+        iamService.createUser("alice", "/");
+        iamService.createLoginProfile("alice", "Sup3r$ecret!", false);
+        AccountPasswordPolicy policy = new AccountPasswordPolicy();
+        policy.setMinimumPasswordLength(8);
+        iamService.updateAccountPasswordPolicy(policy);
+
+        // A policy that sets no window prevents nothing: the reference's default is that users
+        // "are not prevented from reusing previous passwords".
+        iamService.changePassword("alice", "Sup3r$ecret!", "An0ther$ecret!");
+        iamService.changePassword("alice", "An0ther$ecret!", "Sup3r$ecret!");
+    }
+
+    @Test
+    void updateLoginProfileIsHeldToTheSameReuseWindow() {
+        iamService.createUser("alice", "/");
+        iamService.createLoginProfile("alice", "Sup3r$ecret!", false);
+        AccountPasswordPolicy policy = new AccountPasswordPolicy();
+        policy.setPasswordReusePrevention(2);
+        iamService.updateAccountPasswordPolicy(policy);
+        iamService.updateLoginProfile("alice", "An0ther$ecret!", null);
+
+        // An administrator reset is a password the policy applies to as much as a self-service
+        // change, and the two share one history.
+        assertEquals("PasswordPolicyViolation", assertThrows(AwsException.class,
+                () -> iamService.updateLoginProfile("alice", "Sup3r$ecret!", null)).getErrorCode());
+        assertEquals("PasswordPolicyViolation", assertThrows(AwsException.class,
+                () -> iamService.changePassword("alice", "An0ther$ecret!", "Sup3r$ecret!"))
+                .getErrorCode());
+    }
+
+    @Test
+    void loginProfileHistoryStopsAtTheWidestWindowThePolicyAccepts() {
+        iamService.createUser("alice", "/");
+        iamService.createLoginProfile("alice", "Passw0rd$0", false);
+        for (int i = 1; i <= 30; i++) {
+            iamService.updateLoginProfile("alice", "Passw0rd$" + i, null);
+        }
+
+        // Nothing can be asked about a password further back than the largest window, so the
+        // history stops there rather than growing with every change.
+        assertEquals(24, iamService.getLoginProfile("alice").getPreviousPasswords().size());
+        assertEquals("Passw0rd$29",
+                iamService.getLoginProfile("alice").getPreviousPasswords().get(0));
+    }
+
+    @Test
+    void changePasswordForAUserWithoutAConsolePasswordIsNoSuchEntity() {
+        iamService.createUser("alice", "/");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.changePassword("alice", "Sup3r$ecret!", "An0ther$ecret!"));
+
+        assertEquals("NoSuchEntity", ex.getErrorCode());
+        assertEquals(404, ex.getHttpStatus());
+    }
+
+    @Test
+    void changePasswordForAnUnknownUserIsNoSuchEntity() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.changePassword("nobody", "Sup3r$ecret!", "An0ther$ecret!"));
+
+        assertEquals("NoSuchEntity", ex.getErrorCode());
+    }
+
+    @Test
     void deleteUserWithLoginProfileIsDeleteConflict() {
         iamService.createUser("alice", "/");
         iamService.createLoginProfile("alice", "Sup3r$ecret!", false);
@@ -923,6 +1271,44 @@ class IamServiceTest {
         iamService.createUser("alice", "/");
         assertTrue(iamService.listAccessKeys("alice").isEmpty());
         assertEquals("alicia", iamService.findUserNameByAccessKeyId(keyId).orElseThrow());
+    }
+
+    @Test
+    void anotherAccountCannotClaimALegacyAccessKeyThroughItsOwnerLookup() {
+        assertLegacyKeyStaysWithTheDefaultAccount(false);
+    }
+
+    @Test
+    void aSameNamedUserInAnotherAccountCannotClaimALegacyAccessKey() {
+        assertLegacyKeyStaysWithTheDefaultAccount(true);
+    }
+
+    /** One shared key store, two accounts told apart by the request context, as in a real boot. */
+    @SuppressWarnings("unchecked")
+    private static void assertLegacyKeyStaysWithTheDefaultAccount(boolean strangerHasSameNamedUser) {
+        AtomicReference<String> caller = new AtomicReference<>("000000000000");
+        RequestContext context = Mockito.mock(RequestContext.class);
+        Mockito.when(context.getAccountId()).thenAnswer(inv -> caller.get());
+        Instance<RequestContext> contexts = Mockito.mock(Instance.class);
+        Mockito.when(contexts.get()).thenReturn(context);
+        InMemoryStorage<String, AccessKey> raw = new InMemoryStorage<>();
+        raw.put("AKIALEGACYEXAMPLE", new AccessKey("AKIALEGACYEXAMPLE", "secret", "worker"));
+        AccountAwareStorageBackend<AccessKey> keys = new AccountAwareStorageBackend<>(raw, contexts, "000000000000");
+        IamService owner = iamService(false, keys);
+        IamService stranger = iamService(false, keys);
+        owner.createUser("worker", "/");
+
+        caller.set("111122223333");
+        if (strangerHasSameNamedUser) {
+            stranger.createUser("worker", "/");
+        }
+        assertTrue(stranger.findAccessKeyOwnerInThisAccount("AKIALEGACYEXAMPLE").isEmpty());
+        assertTrue(raw.get("AKIALEGACYEXAMPLE").isPresent(), "the stranger's lookup must leave the key unmoved");
+        assertTrue(raw.get("111122223333/AKIALEGACYEXAMPLE").isEmpty(), "the stranger's lookup must not copy the key");
+
+        caller.set("000000000000");
+        assertEquals("worker", owner.findAccessKeyOwnerInThisAccount("AKIALEGACYEXAMPLE").orElseThrow());
+        assertTrue(raw.get("AKIALEGACYEXAMPLE").isPresent(), "the owner's read must not migrate either");
     }
 
     @Test

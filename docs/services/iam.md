@@ -20,6 +20,17 @@ follows the AWS Sign-In `AuthorizeOAuth2Access` and `CreateOAuth2Token` wire sha
 one-time codes, PKCE verification, refresh-token expiry, and the `aws_sigv4` temporary credential
 type.
 
+The cross-device flow works too, for a CLI that cannot open a browser on the same machine:
+
+```bash
+aws login --remote --endpoint-url http://localhost:4566 --region us-east-1
+```
+
+The CLI prints the authorize URL and waits for a code. After the consent page, Floci lands on
+`/v1/sessions/confirmation` on the same endpoint, the path AWS Sign-In uses, and shows the
+verification code to paste back. The redirect must point at the endpoint the request arrived on
+or at the AWS Sign-In host of a region in the deployment's partition; any other origin is refused.
+
 ## Supported Actions
 
 ### Users
@@ -133,6 +144,22 @@ policies are listed in name order so a `Marker` resumes where the previous page 
 | GetRolePolicy | Returns an inline policy stored on a role. |
 | DeleteRolePolicy | Deletes an inline policy from a role. |
 | ListRolePolicies | Lists inline policy names stored on a role. |
+
+Inline policies share an aggregate size limit per principal: 2,048 characters for a user,
+5,120 for a group, and 10,240 for a role. Whitespace does not count. A replacement counts
+instead of the previous document with the same policy name; exceeding the limit returns
+`LimitExceeded` (HTTP 409) and preserves the stored policies. These limits match the
+[AWS IAM quotas](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_iam-quotas.html).
+
+When CloudFormation renames an inline policy, Floci releases its tracked old name on
+retained principals before writing the replacement. Failed updates restore the captured
+previous policies, including historical documents saved before these limits were enforced.
+Compensation checks the current principal, document and mutation ownership before restoration.
+A later write to the same policy prevents restoration even when it writes the same document;
+nested compensations can still unwind in reverse order. Mutation ownership lasts only within
+the current process and active rollback handles. Historical
+oversized documents can be restored only when the other policies still match their captured
+state. A failed compensation is reported as a rollback failure.
 
 ### Instance Profiles
 
@@ -294,6 +321,7 @@ validation.
 | GetLoginProfile | Returns a user's login profile. |
 | UpdateLoginProfile | Updates a user's login profile password and/or reset-required flag. |
 | DeleteLoginProfile | Deletes a user's login profile. |
+| ChangePassword | Changes the console password of the user who is calling. |
 
 `UserName` is optional on `CreateLoginProfile`, `GetLoginProfile` and `DeleteLoginProfile`: it
 defaults to the user resolved from the signing access key, the same fallback `GetUser` uses. It is
@@ -309,6 +337,37 @@ class, and when the account has an [account password policy](#account-password-p
 also checked against that policy's length and character-class requirements, with
 `PasswordPolicyViolation` returned on either action if it doesn't comply. The password itself is never
 echoed back by any of these actions, matching AWS.
+
+`ChangePassword` is the self-service half of `UpdateLoginProfile`. It takes no `UserName` and acts
+only on the user whose access key signed the request, which is what the API reference means by "the
+IAM user who is calling this operation", and the account root password is not affected by it. A
+caller with no IAM user behind its key, which is Floci's stand-in for account root credentials, is
+refused with `InvalidUserType`, the error the CLI reference documents for that case. `OldPassword`
+must match the stored password, and the reference publishes no error for a mismatch, so Floci
+answers `InvalidParameterValue`, the common error type for a parameter value the service cannot
+accept. It is checked before the new password is held to the account policy, so a caller who cannot
+prove the current password learns nothing about what the policy requires. A successful change
+clears `PasswordResetRequired`, which is what lets a user whose password an administrator reset
+restore their own console access programmatically, and it updates the `password_last_changed` the
+credential report reads.
+
+`PasswordReusePrevention` is enforced on `ChangePassword` and on `UpdateLoginProfile`, which share
+one history per login profile, so an administrator reset cannot put back a password a user has just
+been refused. The reference defines the value as "the number of previous passwords that IAM users
+are prevented from reusing", and says that with no value set users "are not prevented from reusing
+previous passwords". The password the profile currently holds is refused alongside the superseded
+ones, which the reference does not spell out: read the other way, the smallest window the policy
+accepts would still allow setting a password to the value it already has, and would not refuse the
+change away and straight back that the setting exists for. History is recorded whether or not a
+window is set, so switching the policy on has something to compare against, bounded at the 24 the
+policy can ask for, and it goes with the profile when `DeleteLoginProfile` removes it.
+
+`AllowUsersToChangePassword` is accepted and reported but grants nothing. The user
+guide says the option gives all users in the account "access to the iam:ChangePassword action for
+only their user and to the iam:GetAccountPasswordPolicy action", applied at the account level
+rather than by attaching a policy to each user. Floci authorizes both actions from identity
+policies alone, so under [enforcement](#iam-enforcement-mode) a caller needs a policy naming their
+own user however the flag is set.
 
 `DeleteUser` returns `DeleteConflict`, as on AWS, while the user still has a login profile, access
 keys, inline policies, attached managed policies, group memberships, an
@@ -1055,6 +1114,17 @@ a Query `Action` field on it does not change the action it is checked as, and it
 still percent-encoded, as the router matches it, so an encoded `/` inside a parameter cannot make
 the route's rule miss.
 
+A request that names its operation, in a Query `Action` or an `X-Amz-Target` header, is authorized
+as the action AWS checks for that operation, which is usually the operation's own name. Where AWS
+authorizes an operation as a single action of another name, Floci does the same: `SendMessageBatch`
+is checked as `sqs:SendMessage` and `PublishBatch` as `sns:Publish`, so a policy granting the
+single-message action covers the batch call, and one naming the batch operation, which is not an
+IAM action, grants nothing. The mapping is taken from AWS's Service Reference and vendored in
+`src/main/resources/aws/iam-authorized-actions.json`. DynamoDB `TransactGetItems`, which AWS checks
+as `dynamodb:GetItem`, is checked item by item, as described under
+[Condition keys floci populates](#condition-keys-floci-populates): each `Get` as
+`dynamodb:GetItem` on its own table, with its own `dynamodb:LeadingKeys`.
+
 ### Resource-based policies
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries registered `ResourcePolicyProvider` SPI implementations (such as S3 bucket policies) during request authorization:
@@ -1223,6 +1293,9 @@ account key carries no identity policies of its own.
 A `Condition` operator can only match a key floci actually places in the request context.
 floci populates:
 
+- `iam:PolicyARN`: the managed policy ARN in the form body for `AttachRolePolicy`,
+  `DetachRolePolicy`, `AttachUserPolicy`, `DetachUserPolicy`, `AttachGroupPolicy` and
+  `DetachGroupPolicy`. The target role, user or group remains the authorized resource.
 - `s3:prefix`, `s3:delimiter`, `s3:max-keys`: from the S3 request parameters.
 - `aws:RequestTag/<key>`: the tags named in the request itself, before they are applied, for
   `ec2:RunInstances` (`TagSpecification.N`), `ec2:CreateTags` (`Tag.N`) and
@@ -1260,6 +1333,26 @@ floci populates:
   `assumed-role` session ARN, as AWS reports it ("For IAM roles, the request context returns the
   ARN of the role"); a condition naming the session ARN does not match. It is **absent** only for
   unknown keys, where nothing about the caller can be resolved.
+- `aws:PrincipalType` and `aws:userid`: resolved from the same lookup as `aws:PrincipalArn`, so
+  they always describe the same credential. The values follow the user guide's principal key
+  values list: `Account` with the account id for the account-root principal and for a session
+  token it minted, `User` with the user's own id for an IAM user access key and for a session
+  token that user minted, `FederatedUser` with `account:name` for a `GetFederationToken` session,
+  and `AssumedRole` with `role-id:session-name` for a role session, which for a role assigned to
+  an EC2 instance is `role-id:instance-id`. The guide renders the role-session type both as
+  `AssumedRole` and as "Assumed role"; floci uses the unspaced form, which is the one that fits
+  the vocabulary of every other value in that list and the one AWS publishes machine-side. The
+  guide's fifth value, `Anonymous`, is **not** populated: it applies to unsigned callers on S3,
+  SQS and SNS, which reach a resource policy through its own evaluation path rather than through
+  the enforcement filter, so a bucket policy conditioned on `aws:PrincipalType` being `Anonymous`
+  does not match an unsigned request.
+- `aws:username`: the IAM user's name, and **only** for an IAM user, whether it signed with its
+  own access key or with a session token it minted. The guide is explicit that it is "always
+  included in the request context for IAM users" while "anonymous requests and requests that are
+  made using the AWS account root user or IAM roles do not include this key", so for a role
+  session, a federated user or the account root it is absent, and a statement that matches on it
+  cannot match: an absent key has no equal or like value. That absence is the enforcement rather
+  than a gap in it.
 - `aws:TagKeys`: the case-sensitive requested tag keys for EC2 `RunInstances` and
   `CreateTags`, and S3 `PutBucketTagging`. `ForAllValues:StringEquals` can restrict the
   complete requested set without a `Null` guard; no tags still means absent context.
@@ -1289,8 +1382,23 @@ being bounded by SCPs (below): both forms of root enforcement now agree. A negat
 absent key cannot equal what the policy names, so the condition holds, and a `Deny` written
 that way applies when the key is missing.
 
-**Not yet supported**: `dynamodb:LeadingKeys` for `Scan`, `TransactWriteItems` / `TransactGetItems`
-and the PartiQL operations.
+The keys that say who is calling are written onto every context a request is evaluated against:
+the one the enforcement filter builds, one per resource the request names, one per transaction
+item, and the one S3 builds when it evaluates a bucket policy itself under `s3.enforce-auth`. A
+role trust policy is the exception: `sts:AssumeRole` evaluates its conditions with
+`aws:PrincipalArn` alone, so a trust policy keyed on `aws:userid`, `aws:PrincipalType` or
+`aws:username` does not match yet.
+
+Transactions check each item as `PutItem`, `UpdateItem`, `DeleteItem`, `GetItem`, or
+`ConditionCheckItem` before executing the request. Each item uses its own table, leading key
+and requested attributes. `dynamodb:EnclosingOperation` identifies `TransactWriteItems` or
+`TransactGetItems`; write items expose `ReturnValuesOnConditionCheckFailure` as
+`dynamodb:ReturnValues` only when the request supplies a non-null value. An omitted value leaves
+the condition key absent. Transaction API names alone do not grant item access.
+Transaction item authorization uses the effective local table ARN, matching execution.
+A permission on a foreign account table cannot grant access to a same-named local table.
+
+**Not yet supported**: `dynamodb:LeadingKeys` for `Scan` and the PartiQL operations.
 
 ### Assumed roles
 

@@ -5,6 +5,8 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
 import software.amazon.awssdk.core.exception.SdkClientException;
+import software.amazon.awssdk.core.retry.backoff.FixedDelayBackoffStrategy;
+import software.amazon.awssdk.core.waiters.WaiterOverrideConfiguration;
 import software.amazon.awssdk.endpoints.Endpoint;
 import software.amazon.awssdk.http.Protocol;
 import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient;
@@ -121,6 +123,14 @@ import software.amazon.awssdk.services.route53.model.ResourceRecordSet;
 import software.amazon.awssdk.services.rum.RumClient;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.DeleteMarkerEntry;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectVersionsRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectVersionsResponse;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.ObjectVersion;
+import software.amazon.awssdk.services.s3.model.S3Object;
 import software.amazon.awssdk.services.s3control.S3ControlClient;
 import software.amazon.awssdk.services.s3control.endpoints.S3ControlEndpointProvider;
 import software.amazon.awssdk.services.s3tables.S3TablesClient;
@@ -162,8 +172,11 @@ import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -206,9 +219,58 @@ public final class TestFixtures {
         return "aws".equalsIgnoreCase(System.getenv("FLOCI_TARGET"));
     }
 
+    /**
+     * Polls a compatibility condition while preserving each test's timeout and AWS/local cadence.
+     * Terminal-state and service-exception handling stays in the condition supplied by the test.
+     */
+    public static void await(BooleanSupplier condition, String resourceName, String expected,
+                             long timeoutNanos, long pollMillis) throws InterruptedException {
+        await(condition, resourceName, expected, timeoutNanos, pollMillis, () -> "");
+    }
+
+    /**
+     * A waiter override that bounds the wait by {@code timeout} and, against Floci, checks once a
+     * second. A waiter otherwise sleeps out the published AWS cadence between checks, from 6
+     * seconds for ECS {@code TasksStopped} and 15 for {@code ServicesStable} to 30 for the
+     * CloudFormation and EKS waiters, where Floci has usually settled within one. The attempt limit
+     * grows to match, since the published one is sized for the published delay. Against real AWS
+     * the waiter keeps its own cadence.
+     */
+    public static WaiterOverrideConfiguration waiterOverride(Duration timeout) {
+        WaiterOverrideConfiguration.Builder override = WaiterOverrideConfiguration.builder().waitTimeout(timeout);
+        if (!isRealAws()) {
+            override.backoffStrategy(FixedDelayBackoffStrategy.create(Duration.ofSeconds(1)))
+                    .maxAttempts((int) timeout.toSeconds() + 1);
+        }
+        return override.build();
+    }
+
+    /** Polls a condition and appends lazily produced diagnostics when the wait expires. */
+    public static void await(BooleanSupplier condition, String resourceName, String expected,
+                             long timeoutNanos, long pollMillis, Supplier<String> timeoutDetails)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + timeoutNanos;
+        while (System.nanoTime() < deadline) {
+            if (condition.getAsBoolean()) {
+                return;
+            }
+            Thread.sleep(pollMillis);
+        }
+        throw new AssertionError(resourceName + " timed out waiting for " + expected + timeoutDetails.get());
+    }
+
     /** The region every fixture client signs for, for tests that build or compare region-scoped values. */
     public static Region region() {
         return REGION;
+    }
+
+    /**
+     * The first availability zone of {@link #region()} ({@code us-east-1a}, {@code cn-north-1a}, ...),
+     * for tests that must place a resource in a zone. A zone literal only exists in one region, so a
+     * hardcoded one fails as soon as the suite runs anywhere else.
+     */
+    public static String availabilityZone() {
+        return REGION.id() + "a";
     }
 
     /**
@@ -617,6 +679,42 @@ public final class TestFixtures {
                 .credentialsProvider(CREDENTIALS)
                 .forcePathStyle(true)
                 .build();
+    }
+
+    /** Removes objects, versions and delete markers before a test deletes its bucket. */
+    public static void deleteBucketContents(S3Client s3, String bucket) {
+        String token = null;
+        do {
+            ListObjectsV2Response response = s3.listObjectsV2(ListObjectsV2Request.builder()
+                    .bucket(bucket).continuationToken(token).build());
+            for (S3Object object : response.contents()) {
+                s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(object.key()).build());
+            }
+            token = response.isTruncated() ? response.nextContinuationToken() : null;
+        } while (token != null);
+
+        // Collect every page before deleting: deleting a page invalidates its resume marker.
+        List<ObjectVersion> versions = new ArrayList<>();
+        List<DeleteMarkerEntry> markers = new ArrayList<>();
+        String keyMarker = null;
+        String versionMarker = null;
+        do {
+            ListObjectVersionsResponse response = s3.listObjectVersions(
+                    ListObjectVersionsRequest.builder()
+                            .bucket(bucket).keyMarker(keyMarker).versionIdMarker(versionMarker).build());
+            versions.addAll(response.versions());
+            markers.addAll(response.deleteMarkers());
+            keyMarker = response.isTruncated() ? response.nextKeyMarker() : null;
+            versionMarker = response.isTruncated() ? response.nextVersionIdMarker() : null;
+        } while (keyMarker != null);
+        for (ObjectVersion version : versions) {
+            s3.deleteObject(DeleteObjectRequest.builder()
+                    .bucket(bucket).key(version.key()).versionId(version.versionId()).build());
+        }
+        for (DeleteMarkerEntry marker : markers) {
+            s3.deleteObject(DeleteObjectRequest.builder()
+                    .bucket(bucket).key(marker.key()).versionId(marker.versionId()).build());
+        }
     }
 
     /** Async client with the Java-based multipart support enabled (5 MiB threshold and parts), for the transfer manager. */

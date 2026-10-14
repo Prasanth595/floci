@@ -129,7 +129,36 @@ Floci runs a background reconciler (10 s fixed rate) that keeps each group's InS
 - **Scale-in**: selects InService instances not protected from scale-in, deregisters them from target groups, then calls `TerminateInstances`.
 - Activity records are written on each scale-out and scale-in event.
 
+`SuspendProcesses` pauses desired-capacity scale-out for `Launch` and scale-in for
+`Terminate`. The desired count remains stored, and `ResumeProcesses` allows the
+next reconciliation pass to continue toward it. Omitting process names suspends
+or resumes all processes. Suspending another process does not pause these capacity
+adjustments. Suspension and resumption wait for any desired-capacity adjustment already
+in progress for that group, so a completed suspension cannot be bypassed by an earlier
+reconciliation check.
+
+Suspension does not yet pause instance-refresh selection or replacement cleanup.
+Explicitly requested termination and stale-instance cleanup continue independently.
+Other suspended process names are stored and returned but do not pause their
+associated activities.
+
 ## Launch Source Compatibility
+
+New launch configurations preserve their original base64 user data when launching instances, including
+binary and gzip payloads. Configurations derived from an instance retain its original encoding when
+available. Existing stored configurations retain their previous interpretation because older records
+mixed encoded input and decoded text; recreate a configuration to use byte-preserving launches.
+When deriving a configuration from an instance, omitted and blank user-data overrides continue to
+inherit the source instance's data. Creation checks the final selected data before saving: it must
+pass the shared EC2 decoder's base64 and 16 KiB raw-data checks. The decoder also rejects malformed
+gzip and expansion beyond 10 MiB; this is Floci's execution safety limit, not an AWS API limit.
+Invalid marked data in an older saved configuration is contained as a launch failure so reconciliation
+can still save the group and check refresh progress.
+
+Direct and mixed launch templates retain the selected version's original user-data
+encoding for instance attributes and metadata, including compressed and binary
+payloads. Execution still uses decoded text. Older templates that store only
+execution text retain that text through a UTF-8 fallback.
 
 Auto Scaling groups preserve either a launch configuration, a top-level launch template, or a `MixedInstancesPolicy`. These launch sources are mutually exclusive in create/update requests. When a mixed instances policy is supplied, Floci stores and returns:
 

@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
@@ -152,6 +154,7 @@ public class CognitoService implements ResourceProvider {
     private final StorageBackend<String, UserPool> poolStore;
     private final StorageBackend<String, UserPoolClient> clientStore;
     private final StorageBackend<String, ResourceServer> resourceServerStore;
+    private final Object resourceServerCreateLock = new Object();
     private final StorageBackend<String, UserPoolDomain> domainStore;
     private final StorageBackend<String, IdentityProvider> identityProviderStore;
     private final StorageBackend<String, CognitoUser> userStore;
@@ -1502,17 +1505,19 @@ public class CognitoService implements ResourceProvider {
         }
 
         String key = resourceServerKey(userPoolId, identifier);
-        if (resourceServerStore.get(key).isPresent()) {
-            throw new AwsException("ResourceConflictException", "Resource server already exists", 400);
-        }
+        synchronized (resourceServerCreateLock) {
+            if (resourceServerStore.get(key).isPresent()) {
+                throw new AwsException("ResourceConflictException", "Resource server already exists", 400);
+            }
 
-        ResourceServer server = new ResourceServer();
-        server.setUserPoolId(userPoolId);
-        server.setIdentifier(identifier);
-        server.setName(name);
-        server.setScopes(normalizeScopes(scopes));
-        resourceServerStore.put(key, server);
-        return server;
+            ResourceServer server = new ResourceServer();
+            server.setUserPoolId(userPoolId);
+            server.setIdentifier(identifier);
+            server.setName(name);
+            server.setScopes(normalizeScopes(scopes));
+            resourceServerStore.put(key, server);
+            return server;
+        }
     }
 
     public ResourceServer describeResourceServer(String userPoolId, String identifier) {
@@ -1680,6 +1685,8 @@ public class CognitoService implements ResourceProvider {
     private static final String CERTIFICATE_REGION = "us-east-1"; // partition-literal: CloudFront certificates live in us-east-1 by AWS's rule
     private static final String CERTIFICATE_NOT_USABLE = "The specified SSL certificate doesn't exist, "
             + "isn't in us-east-1 region, isn't valid, or doesn't include a valid certificate chain."; // partition-literal: AWS's message text
+    /** The partitions where AWS documents user pool custom domains as not available. */
+    private static final Set<String> CUSTOM_DOMAIN_UNAVAILABLE_PARTITIONS = Set.of("aws-us-gov", "aws-eusc");
 
     /**
      * Creates either an Amazon Cognito prefix domain ({@code customDomainConfig == null})
@@ -1707,6 +1714,7 @@ public class CognitoService implements ResourceProvider {
         userPoolDomain.setS3Bucket("aws-cognito-prod-" + regionResolver.getRegion() + "-assets");
 
         if (customDomainConfig != null) {
+            requireCustomDomainsAvailable(regionResolver.getRegion());
             String certificateArn = (String) customDomainConfig.get("CertificateArn");
             if (certificateArn == null || certificateArn.isBlank()) {
                 throw new AwsException("InvalidParameterException",
@@ -1832,6 +1840,7 @@ public class CognitoService implements ResourceProvider {
         String previousCertificateArn = userPoolDomain.getCertificateArn();
         String certificateArn = previousCertificateArn;
         if (customDomainConfig != null) {
+            requireCustomDomainsAvailable(regionResolver.getRegion());
             if (!userPoolDomain.isCustomDomain()) {
                 throw new AwsException("InvalidParameterException",
                         "CustomDomainConfig cannot be set on an Amazon Cognito prefix domain", 400);
@@ -1894,6 +1903,21 @@ public class CognitoService implements ResourceProvider {
                 throw e;
             }
             throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
+        }
+    }
+
+    /**
+     * User pool custom domains are not available in AWS GovCloud (US) or in the AWS European
+     * Sovereign Cloud: both guides say "Custom domains for user pools are not available"
+     * (https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-cog.html,
+     * https://docs.aws.eu/esc/latest/userguide/cognito.html). Prefix domains are. No source shows
+     * AWS's message for the refusal, so the wording is Floci's own.
+     */
+    private static void requireCustomDomainsAvailable(String region) {
+        AwsPartition partition = AwsPartitions.forRegionOrCommercial(region);
+        if (CUSTOM_DOMAIN_UNAVAILABLE_PARTITIONS.contains(partition.id())) {
+            throw new AwsException("InvalidParameterException",
+                    "Custom domains for user pools are not available in partition " + partition.id() + ".", 400);
         }
     }
 

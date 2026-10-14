@@ -130,6 +130,7 @@ public class IamQueryHandler {
             case "GetLoginProfile" -> handleGetLoginProfile(params, authorization);
             case "UpdateLoginProfile" -> handleUpdateLoginProfile(params);
             case "DeleteLoginProfile" -> handleDeleteLoginProfile(params, authorization);
+            case "ChangePassword" -> handleChangePassword(params, authorization);
 
             // Multi-factor authentication
             case "CreateVirtualMFADevice" -> handleCreateVirtualMFADevice(params);
@@ -569,6 +570,40 @@ public class IamQueryHandler {
         String userName = resolveUserName(params, authorization);
         iamService.deleteLoginProfile(userName);
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteLoginProfile", AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * Changes the calling user's console password. The operation takes no {@code UserName}: the
+     * reference says it "changes the password of the IAM user who is calling this operation", and
+     * the CLI reference adds that it "can be called by IAM users only. If this command is called
+     * using AWS account (root) credentials, the command returns an InvalidUserType error". A
+     * signing key that belongs to no stored user is Floci's stand-in for exactly that caller, so
+     * it answers the same way rather than reporting the key as missing.
+     */
+    private Response handleChangePassword(MultivaluedMap<String, String> params,
+                                          String authorization) {
+        // Both members are required, and read through getParam rather than requireParam because
+        // requireParam refuses a blank value where passwordType permits one: the pattern starts
+        // at \u0020, so a password of spaces is a value the model accepts. The shape check
+        // therefore stays with the pattern, which also names which of the two members failed.
+        iamService.changePassword(callingIamUser(authorization),
+                getParam(params, "OldPassword"), getParam(params, "NewPassword"));
+        return Response.ok(
+                AwsQueryResponse.envelopeNoResult("ChangePassword", AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * The IAM user whose access key signed the request, for the one operation that acts on the
+     * caller and gives no way to name anyone else. Unlike {@link #resolveUserName}, a key with no
+     * user behind it is not a missing entity here: the caller is not an IAM user, which is the
+     * case {@code InvalidUserType} is published for.
+     */
+    private String callingIamUser(String authorization) {
+        String accessKeyId = accountResolver.extractAccessKeyId(authorization);
+        return iamService.findUserNameByAccessKeyId(accessKeyId)
+                .orElseThrow(() -> new AwsException("InvalidUserType",
+                        "The request was rejected because the type of user for the transaction "
+                                + "was incorrect.", 400));
     }
 
     private String loginProfileXml(LoginProfile profile) {
@@ -1920,12 +1955,14 @@ public class IamQueryHandler {
     private Response handleGetAccessKeyLastUsed(MultivaluedMap<String, String> params) {
         // Access-key usage is not modeled, so return the IAM API's documented
         // "never used" shape: an AccessKeyLastUsed with ServiceName=N/A and Region=N/A
-        // and NO LastUsedDate. UserName is optional and its type is non-empty
-        // (length 1-128); since the emulator exposes no AccessKeyId→UserName lookup,
-        // the element is omitted rather than emitted empty — an empty string could be
-        // rejected by a strict client, and callers that need the owner already have it
-        // from the preceding ListAccessKeys call.
-        String result = new XmlBuilder()
+        // and NO LastUsedDate. UserName names the key's owner; Terraform's
+        // aws_iam_access_key import reads it and fails on "empty response" without it.
+        // Its type is non-empty (length 1-128), so for a key the emulator does not
+        // hold the element is omitted rather than emitted empty.
+        XmlBuilder xml = new XmlBuilder();
+        iamService.findAccessKeyOwnerInThisAccount(getParam(params, "AccessKeyId"))
+                .ifPresent(userName -> xml.elem("UserName", userName));
+        String result = xml
                 .start("AccessKeyLastUsed")
                 .elem("ServiceName", "N/A")
                 .elem("Region", "N/A")
