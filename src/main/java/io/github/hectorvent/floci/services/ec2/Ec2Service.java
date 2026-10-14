@@ -3241,31 +3241,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
                 securityGroupIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, availabilityZone,
-                metadataOptions, creditSpecificationCpuCredits, encodedUserData, dryRun, null, null);
+                metadataOptions, creditSpecificationCpuCredits, encodedUserData, dryRun, null, null, null);
     }
 
     /**
      * @param hostId  Placement.HostId: the Dedicated Host to launch onto. It must exist and not be
      *                released; with no subnet or zone named, the launch lands in the host's zone.
      * @param tenancy Placement.Tenancy; defaults to {@code host} when a host is named.
-     */
-    public Reservation runInstances(String region, String imageId, String instanceType,
-                                    int minCount, int maxCount, String keyName,
-                                    List<String> securityGroupIds, String subnetId,
-                                    String clientToken, List<Tag> instanceTags,
-                                    String userData, String iamInstanceProfileArn,
-                                    Boolean associatePublicIp, String networkInterfaceId,
-                                    int networkInterfaceDeviceIndex, String availabilityZone,
-                                    LaunchTemplateData.MetadataOptions metadataOptions,
-                                    String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun,
-                                    String hostId, String tenancy) {
-        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
-                securityGroupIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
-                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, availabilityZone,
-                metadataOptions, creditSpecificationCpuCredits, encodedUserData, dryRun, hostId, tenancy, null);
-    }
-
-    /**
      * @param blockDeviceMappings the request's BlockDeviceMappings, or null. An entry naming the
      *                            AMI's root device overrides the root volume type, as on AWS.
      */

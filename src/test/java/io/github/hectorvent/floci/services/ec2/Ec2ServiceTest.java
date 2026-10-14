@@ -5939,7 +5939,7 @@ class Ec2ServiceTest {
 
         AwsException e = assertThrows(AwsException.class, () -> service.runInstances("us-east-1",
                 "ami-ubuntu2404-amd64", "m5.large", 1, 1, null, List.of(), null, null, List.of(), null, null,
-                null, null, 0, null, null, null, null, false, hostId[0], null));
+                null, null, 0, null, null, null, null, false, hostId[0], null, null));
 
         assertTrue(released[0], "the hook must have released the host between the two checks");
         assertEquals("InvalidHostID.NotFound", e.getErrorCode());
