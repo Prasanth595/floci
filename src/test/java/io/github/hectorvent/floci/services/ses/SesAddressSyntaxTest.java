@@ -155,6 +155,8 @@ class SesAddressSyntaxTest {
                 SesAddressSyntax.javaMailString("=?UTF-8?B?5bGx55Sw?= <probe.example.invalid>"));
         assertEquals("Alice <probe.example.invalid>",
                 SesAddressSyntax.javaMailString("Alice <probe.example.invalid> (Bob)"));
+        assertEquals("\"Alice (Bob)\" <probe.example.invalid>",
+                SesAddressSyntax.javaMailString("Alice (Bob) <probe.example.invalid>"));
         assertEquals("probe.example.invalid", SesAddressSyntax.javaMailString("<probe.example.invalid>"));
     }
 

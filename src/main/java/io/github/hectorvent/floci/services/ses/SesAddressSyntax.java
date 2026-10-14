@@ -110,7 +110,8 @@ final class SesAddressSyntax {
 
     /**
      * A mailbox as JavaMail's {@code InternetAddress.toString()} writes it once parsed: the display
-     * name, or else the first comment, unquoted, dropped when blank, and quoted again only when it
+     * name as written before the angle bracket, comments included, or else the first comment
+     * (probe-confirmed both ways), unquoted, dropped when blank, and quoted again only when it
      * holds a special character, then the addr-spec in angle brackets; a bare addr-spec keeps no
      * brackets unless it holds a special character. A raw non-ASCII name comes out as
      * {@link SesEncodedWord} writes it and an encoded-word stays as written (probe-confirmed for a
@@ -128,10 +129,8 @@ final class SesAddressSyntax {
 
     private static String personal(String mailbox) {
         Stripped stripped = stripComments(mailbox);
-        String withoutComments = stripped.text().trim();
-        int open = SesSendAddresses.lastUnquotedAngle(withoutComments);
-        if (open >= 0 && withoutComments.endsWith(">")) {
-            String phrase = unquote(withoutComments.substring(0, open).trim());
+        if (stripped.lastAngle() >= 0 && stripped.text().trim().endsWith(">")) {
+            String phrase = unquote(mailbox.substring(0, stripped.lastAngle()).trim());
             if (!phrase.isBlank()) {
                 return phrase;
             }
@@ -268,13 +267,14 @@ final class SesAddressSyntax {
         return withoutComments;
     }
 
-    private record Stripped(String text, String firstComment) {
+    private record Stripped(String text, String firstComment, int lastAngle) {
     }
 
     private static Stripped stripComments(String mailbox) {
         StringBuilder out = new StringBuilder();
         String firstComment = null;
         int commentStart = -1;
+        int lastAngle = -1;
         boolean quoted = false;
         int commentDepth = 0;
         for (int i = 0; i < mailbox.length(); i++) {
@@ -300,9 +300,11 @@ final class SesAddressSyntax {
                 commentDepth = 1;
                 commentStart = i + 1;
                 continue;
+            } else if (!quoted && c == '<') {
+                lastAngle = i;
             }
             out.append(c);
         }
-        return new Stripped(out.toString(), firstComment);
+        return new Stripped(out.toString(), firstComment, lastAngle);
     }
 }
