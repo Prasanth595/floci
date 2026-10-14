@@ -4,7 +4,6 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -15,6 +14,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.zip.GZIPOutputStream;
 
@@ -5652,31 +5652,73 @@ class Ec2IntegrationTest {
     @Order(329)
     void runInstancesRootBlockDeviceMappingOverridesAmiRootVolumeType() {
         // ami-0abcdef1234567890 is gp2-rooted at /dev/xvda; a root mapping overrides it.
-        assertEquals("gp3", launchedRootVolumeType("gp3"));
-        assertEquals("gp2", launchedRootVolumeType(null));
+        assertEquals("gp3", rootVolumeType(launch(Map.of(
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.Ebs.VolumeSize", "8",
+            "BlockDeviceMapping.1.Ebs.VolumeType", "gp3"))));
+        assertEquals("gp2", rootVolumeType(launch(Map.of())));
     }
 
-    private String launchedRootVolumeType(String rootOverride) {
-        RequestSpecification request = given()
+    @Test
+    @Order(330)
+    void runInstancesLaunchTemplateRootMappingOverridesAmiAndYieldsToRequest() {
+        String templateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "gp3-root-template")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        assertEquals("gp3", rootVolumeType(launch(Map.of("LaunchTemplate.LaunchTemplateId", templateId))));
+        // A request mapping for the same device wins over the template's.
+        assertEquals("io1", rootVolumeType(launch(Map.of(
+            "LaunchTemplate.LaunchTemplateId", templateId,
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.Ebs.VolumeType", "io1"))));
+    }
+
+    @Test
+    @Order(331)
+    void runInstancesRejectsAnUnknownBlockDeviceMappingVolumeType() {
+        given()
             .formParam("Action", "RunInstances")
             .formParam("ImageId", "ami-0abcdef1234567890")
             .formParam("InstanceType", "t2.micro")
             .formParam("MinCount", "1")
-            .formParam("MaxCount", "1");
-        if (rootOverride != null) {
-            request = request
-                .formParam("BlockDeviceMapping.1.DeviceName", "/dev/xvda")
-                .formParam("BlockDeviceMapping.1.Ebs.VolumeSize", "8")
-                .formParam("BlockDeviceMapping.1.Ebs.VolumeType", rootOverride);
-        }
-        String instanceId = request
+            .formParam("MaxCount", "1")
+            .formParam("BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("BlockDeviceMapping.1.Ebs.VolumeType", "gp9")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidParameterValue</Code>"))
+            .body(containsString("Value (gp9) for parameter volumeType is invalid. Unknown volume type."));
+    }
+
+    private String launch(Map<String, String> params) {
+        return given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-0abcdef1234567890")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParams(params)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+    }
 
+    private String rootVolumeType(String instanceId) {
         return given()
             .formParam("Action", "DescribeVolumes")
             .formParam("Filter.1.Name", "attachment.instance-id")

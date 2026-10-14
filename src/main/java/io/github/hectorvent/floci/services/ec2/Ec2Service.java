@@ -3248,8 +3248,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * @param hostId  Placement.HostId: the Dedicated Host to launch onto. It must exist and not be
      *                released; with no subnet or zone named, the launch lands in the host's zone.
      * @param tenancy Placement.Tenancy; defaults to {@code host} when a host is named.
-     * @param blockDeviceMappings the request's BlockDeviceMappings, or null. An entry naming the
-     *                            AMI's root device overrides the root volume type, as on AWS.
+     * @param blockDeviceMappings the launch's BlockDeviceMappings (request merged over launch
+     *                            template), or null. An entry naming the AMI's root device
+     *                            overrides the root volume type, as on AWS.
      */
     public Reservation runInstances(String region, String imageId, String instanceType,
                                     int minCount, int maxCount, String keyName,
@@ -3260,7 +3261,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                     int networkInterfaceDeviceIndex, String availabilityZone,
                                     LaunchTemplateData.MetadataOptions metadataOptions,
                                     String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun,
-                                    String hostId, String tenancy, List<BlockDeviceMapping> blockDeviceMappings) {
+                                    String hostId, String tenancy,
+                                    List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings) {
         if (hostId != null && !hostId.isBlank()) {
             Host host = getRequiredAvailableHost(region, hostId);
             if ((availabilityZone == null || availabilityZone.isBlank())
@@ -3357,6 +3359,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         validateArchitectureCompatibility(region, imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
         String architecture = architectureFor(region, imageId, effectiveInstanceType);
+        if (blockDeviceMappings != null) {
+            blockDeviceMappings.stream()
+                    .filter(m -> m.getEbs() != null && m.getEbs().getVolumeType() != null)
+                    .forEach(m -> requireValidVolumeType(m.getEbs().getVolumeType()));
+        }
         String rootVolumeType = rootVolumeTypeFor(findImageForCapture(region, imageId), blockDeviceMappings);
         List<Instance> launched = new ArrayList<>();
         // Resolving the AMI, building the instances that depend on it and publishing them is one
@@ -6693,6 +6700,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private List<BlockDeviceMapping> captureBlockDeviceMappings(String region, Instance source,
                                                                 Image sourceImage) {
         List<BlockDeviceMapping> mappings = new ArrayList<>(sourceImageMappings(sourceImage));
+        // The root is captured from the volume the instance actually has, which a launch mapping
+        // may have given a different type from the source AMI's.
+        Volume rootVolume = source.getRootVolumeId() == null ? null
+                : volumes.get(key(region, source.getRootVolumeId())).orElse(null);
+        if (rootVolume != null && sourceImage != null) {
+            mappings.stream()
+                    .filter(m -> m.getEbs() != null
+                            && Objects.equals(m.getDeviceName(), sourceImage.getRootDeviceName()))
+                    .forEach(m -> m.getEbs().setVolumeType(rootVolume.getVolumeType()));
+        }
         Set<String> devices = mappings.stream()
                 .map(BlockDeviceMapping::getDeviceName)
                 .filter(Objects::nonNull)
@@ -6784,11 +6801,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * The root volume takes the type a request mapping for the AMI's root device names, else the
      * type the AMI's root mapping declares, as on AWS.
      */
-    private static String rootVolumeTypeFor(Image image, List<BlockDeviceMapping> requestMappings) {
+    private static String rootVolumeTypeFor(Image image,
+                                            List<LaunchTemplateData.BlockDeviceMapping> requestMappings) {
         String rootDeviceName = image != null && image.getRootDeviceName() != null
                 ? image.getRootDeviceName() : new Instance().getRootDeviceName();
         if (requestMappings != null) {
-            for (BlockDeviceMapping m : requestMappings) {
+            for (LaunchTemplateData.BlockDeviceMapping m : requestMappings) {
                 if (m.getEbs() != null && m.getEbs().getVolumeType() != null
                         && Objects.equals(m.getDeviceName(), rootDeviceName)) {
                     return m.getEbs().getVolumeType();
@@ -10265,6 +10283,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return false;
     }
 
+    private static void requireValidVolumeType(String volumeType) {
+        if (!VALID_VOLUME_TYPES.contains(volumeType)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + volumeType + ") for parameter volumeType is invalid. Unknown volume type.", 400);
+        }
+    }
+
     public VolumeModification modifyVolume(String region, String volumeId, Integer size,
                                            String volumeType, Integer iops, Integer throughput,
                                            Boolean multiAttachEnabled, boolean dryRun) {
@@ -10285,9 +10310,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
 
             String targetVolumeType = volumeType != null ? volumeType : volume.getVolumeType();
-            if (volumeType != null && !VALID_VOLUME_TYPES.contains(volumeType)) {
-                throw new AwsException("InvalidParameterValue",
-                        "Value (" + volumeType + ") for parameter volumeType is invalid. Unknown volume type.", 400);
+            if (volumeType != null) {
+                requireValidVolumeType(volumeType);
             }
 
             if (throughput != null && !"gp3".equals(targetVolumeType)) {

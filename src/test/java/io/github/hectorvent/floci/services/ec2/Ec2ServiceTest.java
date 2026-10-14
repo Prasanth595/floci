@@ -1710,6 +1710,33 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void createImageRecordsTheInstanceRootVolumeTypeNotTheSourceAmis() {
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                new AmiImageResolver(imageCatalog), imageCatalog, new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+        ebs.setVolumeType("gp3");
+        LaunchTemplateData.BlockDeviceMapping root = new LaunchTemplateData.BlockDeviceMapping();
+        root.setDeviceName("/dev/xvda");
+        root.setEbs(ebs);
+
+        // ami-0abcdef1234567890 declares a gp2 root; the launch asked for gp3.
+        Instance instance = service.runInstances("us-east-1", "ami-0abcdef1234567890", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null, null, null, 0, null, null, null,
+                null, false, null, null, List.of(root)).getInstances().getFirst();
+        String imageId = service.createImage("us-east-1", instance.getInstanceId(), "gp3-capture", null, true)
+                .getImageId();
+
+        Image captured = service.describeImages("us-east-1", List.of(imageId), List.of(), Map.of()).getFirst();
+        BlockDeviceMapping capturedRoot = captured.getBlockDeviceMappings().stream()
+                .filter(m -> "/dev/xvda".equals(m.getDeviceName()))
+                .findFirst().orElseThrow();
+        assertEquals("gp3", capturedRoot.getEbs().getVolumeType());
+    }
+
+    @Test
     void describeImagesFiltersRegisteredImagesByBlockDeviceMappingVolumeType() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),

@@ -669,6 +669,13 @@ These members of `RequestLaunchTemplateData` are stored and read back unchanged 
 Within `NetworkInterfaces`, `ConnectionTrackingSpecification` is stored and read back with all
 three of its timeout members.
 
+At launch, `RunInstances` and `CreateFleet` apply the template's `BlockDeviceMappings` under the
+request's: a request mapping for a device replaces the template's for that device. The root
+volume's type comes from the mapping for the AMI's root device, else from the AMI's own root
+mapping, else `gp3`, and `CreateImage` records that type on the new AMI's root mapping. A mapping
+naming a `VolumeType` outside the service model's enum fails with `InvalidParameterValue`, as
+`ModifyVolume` does.
+
 Both blocks are validated by `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` before
 anything is stored. An `InstanceRequirements` block must carry `VCpuCount` and `MemoryMiB`, each
 with its `Min`, which the service model declares required; a request missing either fails with

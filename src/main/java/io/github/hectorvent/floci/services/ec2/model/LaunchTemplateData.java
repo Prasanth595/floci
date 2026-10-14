@@ -6,7 +6,9 @@ import com.fasterxml.jackson.annotation.JsonSetter;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The subset of EC2 {@code RequestLaunchTemplateData} / {@code ResponseLaunchTemplateData} that
@@ -387,6 +389,18 @@ public class LaunchTemplateData {
 
         public Ebs getEbs() { return ebs; }
         public void setEbs(Ebs ebs) { this.ebs = ebs; }
+
+        /**
+         * A launch's mappings: the request's entry for a device replaces the template's, and the
+         * template's other devices still apply.
+         */
+        public static List<BlockDeviceMapping> merge(List<BlockDeviceMapping> template,
+                                                     List<BlockDeviceMapping> request) {
+            Map<String, BlockDeviceMapping> byDevice = new LinkedHashMap<>();
+            template.forEach(m -> byDevice.put(m.deviceName, m));
+            request.forEach(m -> byDevice.put(m.deviceName, m));
+            return new ArrayList<>(byDevice.values());
+        }
     }
 
     @RegisterForReflection

@@ -453,28 +453,6 @@ public class Ec2QueryHandler {
         return mappings;
     }
 
-    /**
-     * RunInstances' BlockDeviceMappings, reduced to device name and volume type: all the launch
-     * consumes (the root override). Unlike RegisterImage, the model marks no member required, so
-     * nothing here rejects.
-     */
-    private List<BlockDeviceMapping> parseRunInstancesRootTypeMappings(MultivaluedMap<String, String> p) {
-        List<BlockDeviceMapping> mappings = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String prefix = "BlockDeviceMapping." + i + ".";
-            if (p.keySet().stream().noneMatch(k -> k.startsWith(prefix))) {
-                break;
-            }
-            BlockDeviceMapping mapping = new BlockDeviceMapping();
-            mapping.setDeviceName(p.getFirst(prefix + "DeviceName"));
-            EbsBlockDevice ebs = new EbsBlockDevice();
-            ebs.setVolumeType(p.getFirst(prefix + "Ebs.VolumeType"));
-            mapping.setEbs(ebs);
-            mappings.add(mapping);
-        }
-        return mappings;
-    }
-
     private Integer parseOptionalInt(String value, String name) {
         if (value == null || value.isBlank()) {
             return null;
@@ -828,9 +806,14 @@ public class Ec2QueryHandler {
         LaunchTemplateData.MetadataOptions metadataOptions = parseMetadataOptions(p, "MetadataOptions.");
         String creditSpecificationCpuCredits = p.getFirst("CreditSpecification.CpuCredits");
 
+        List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings =
+                parseLaunchTemplateBlockDeviceMappings(p, "");
+
         LaunchTemplateData launchTemplateData = resolveRunInstancesLaunchTemplateData(
                 p, region, userDataEncoded == null || userDataEncoded.isBlank());
         if (launchTemplateData != null) {
+            blockDeviceMappings = LaunchTemplateData.BlockDeviceMapping.merge(
+                    launchTemplateData.getBlockDeviceMappings(), blockDeviceMappings);
             if (launchTemplateData.getMetadataOptions() != null) {
                 metadataOptions = LaunchTemplateData.MetadataOptions.merge(
                         launchTemplateData.getMetadataOptions(), metadataOptions);
@@ -864,7 +847,7 @@ public class Ec2QueryHandler {
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
                 creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")),
-                p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), parseRunInstancesRootTypeMappings(p));
+                p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings);
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
@@ -988,7 +971,8 @@ public class Ec2QueryHandler {
                         null,
                         null,
                         0,
-                        launch.availabilityZone(), null, null, launch.encodedUserData());
+                        launch.availabilityZone(), null, null, launch.encodedUserData(), false,
+                        null, null, launch.blockDeviceMappings());
                 Instance instance = reservation.getInstances().get(0);
                 launchedInstanceIds.add(instance.getInstanceId());
                 results.add(new FleetLaunchResult(instance, launch));
@@ -1146,7 +1130,8 @@ public class Ec2QueryHandler {
                 template.getEncodedUserData(),
                 service.iamInstanceProfileArn(template),
                 template.effectiveSecurityGroupIds(),
-                new ArrayList<>(tags.values()));
+                new ArrayList<>(tags.values()),
+                template.getBlockDeviceMappings());
     }
 
     /**
@@ -1191,7 +1176,8 @@ public class Ec2QueryHandler {
     private record FleetLaunch(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
                                String instanceType, String imageId, String subnetId, String availabilityZone,
                                String keyName, String userData, String encodedUserData, String iamInstanceProfileArn,
-                               List<String> securityGroupIds, List<Tag> instanceTags) {}
+                               List<String> securityGroupIds, List<Tag> instanceTags,
+                               List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings) {}
 
     private record FleetLaunchKey(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
                                   String instanceType, String imageId, String subnetId, String availabilityZone) {
@@ -5747,7 +5733,8 @@ public class Ec2QueryHandler {
             MultivaluedMap<String, String> p, String prefix) {
         List<LaunchTemplateData.BlockDeviceMapping> mappings = new ArrayList<>();
         for (int i = 1; ; i++) {
-            String base = prefix + ".BlockDeviceMapping." + i;
+            // An empty prefix reads RunInstances' own top-level BlockDeviceMapping.N members.
+            String base = (prefix.isEmpty() ? "" : prefix + ".") + "BlockDeviceMapping." + i;
             if (!anyParamStartsWith(p, base + ".")) {
                 break;
             }
