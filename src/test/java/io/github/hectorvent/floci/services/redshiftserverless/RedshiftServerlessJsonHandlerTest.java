@@ -381,10 +381,19 @@ class RedshiftServerlessJsonHandlerTest {
 
     @Test
     void anUnknownActionIsReportedAsUnknownOperation() {
-        Response response = handler.handle("CreateScheduledAction", mapper.createObjectNode(), REGION);
+        Response response = handler.handle("GetIdentityCenterAuthToken",
+                parse("{\"workgroupNames\":[\"some-workgroup\"]}"), REGION);
 
         assertEquals(400, response.getStatus());
         assertEquals("UnknownOperationException", errorType(response));
+    }
+
+    @Test
+    void aRequestBreakingTheModelConstraintsIsRejectedBeforeTheHandlerRuns() {
+        Response response = handler.handle("GetWorkgroup", parse("{}"), REGION);
+
+        assertEquals(400, response.getStatus());
+        assertEquals("ValidationException", errorType(response));
     }
 
     @Test

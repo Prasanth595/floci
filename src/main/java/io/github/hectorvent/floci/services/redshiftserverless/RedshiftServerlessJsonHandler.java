@@ -23,8 +23,6 @@ import org.jboss.logging.Logger;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -39,16 +37,6 @@ import java.util.Map;
 public class RedshiftServerlessJsonHandler {
 
     private static final Logger LOG = Logger.getLogger(RedshiftServerlessJsonHandler.class);
-
-    /**
-     * {@code Namespace.creationDate} carries {@code TimestampFormatTrait(ISO_8601)}, which
-     * overrides the epoch-seconds default that awsJson1.1 would otherwise apply. Do not
-     * generalise: roughly half the timestamp members in this model carry no format trait and
-     * use the epoch default, so check each member's trait before emitting it. Emitting a number here is accepted by the CLI, because
-     * botocore coerces it, but strict SDKs reject the response outright.
-     */
-    private static final DateTimeFormatter CREATION_DATE_FORMAT =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     private final RedshiftServerlessService service;
     private final ObjectMapper objectMapper;
@@ -72,6 +60,7 @@ public class RedshiftServerlessJsonHandler {
     public Response handle(String action, JsonNode request, String region, String authorizationHeader) {
         LOG.debugv("Redshift Serverless action: {0}", action);
         try {
+            RedshiftServerlessRequestShapes.check(action, request);
             return switch (action) {
                 case "CreateNamespace" -> handleCreateNamespace(request, region);
                 case "GetNamespace" -> handleGetNamespace(request, region);
@@ -119,8 +108,8 @@ public class RedshiftServerlessJsonHandler {
                 text(request, "dbName"),
                 text(request, "kmsKeyId"),
                 text(request, "defaultIamRoleArn"),
-                parseStringList(request.path("iamRoles"), "iamRoles"),
-                parseStringList(request.path("logExports"), "logExports"),
+                ServerlessSupport.stringList(request, "iamRoles"),
+                ServerlessSupport.stringList(request, "logExports"),
                 parseTagList(request.path("tags"), "tags"),
                 region);
         return namespaceResponse(namespace);
@@ -132,7 +121,7 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleListNamespaces(JsonNode request, String region) {
         PaginatedResult<Namespace> page = service.listNamespaces(
-                region, parseMaxResults(request), text(request, "nextToken"));
+                region, ServerlessSupport.maxResults(request), text(request, "nextToken"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("namespaces");
         page.items().forEach(namespace -> items.add(namespaceNode(namespace)));
@@ -149,8 +138,8 @@ public class RedshiftServerlessJsonHandler {
                 text(request, "adminUserPassword"),
                 text(request, "kmsKeyId"),
                 text(request, "defaultIamRoleArn"),
-                parseStringList(request.path("iamRoles"), "iamRoles"),
-                parseStringList(request.path("logExports"), "logExports"),
+                ServerlessSupport.stringList(request, "iamRoles"),
+                ServerlessSupport.stringList(request, "logExports"),
                 region);
         return namespaceResponse(namespace);
     }
@@ -175,7 +164,7 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleListWorkgroups(JsonNode request, String region) {
         PaginatedResult<Workgroup> page = service.listWorkgroups(
-                region, parseMaxResults(request), text(request, "nextToken"));
+                region, ServerlessSupport.maxResults(request), text(request, "nextToken"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("workgroups");
         page.items().forEach(workgroup -> items.add(workgroupNode(workgroup)));
@@ -201,12 +190,12 @@ public class RedshiftServerlessJsonHandler {
      */
     private Response handleGetCredentials(JsonNode request, String region, String authorizationHeader) {
         if (request.hasNonNull("customDomainName")) {
-            throw validation("customDomainName is not supported; use workgroupName.");
+            throw ServerlessSupport.validation("customDomainName is not supported; use workgroupName.");
         }
         TempCredential credential = service.getCredentials(
                 text(request, "workgroupName"),
                 text(request, "dbName"),
-                parseInteger(request, "durationSeconds"),
+                ServerlessSupport.integer(request, "durationSeconds"),
                 iamDbUserResolver.resolveDbUser(authorizationHeader),
                 region);
         ObjectNode response = objectMapper.createObjectNode();
@@ -220,7 +209,7 @@ public class RedshiftServerlessJsonHandler {
     private Response handleCreateSnapshot(JsonNode request, String region) {
         return snapshotResponse(service.createSnapshot(
                 text(request, "snapshotName"), text(request, "namespaceName"),
-                parseInteger(request, "retentionPeriod"), parseTagList(request.path("tags"), "tags"), region));
+                ServerlessSupport.integer(request, "retentionPeriod"), parseTagList(request.path("tags"), "tags"), region));
     }
 
     /**
@@ -234,8 +223,8 @@ public class RedshiftServerlessJsonHandler {
     private Response handleListSnapshots(JsonNode request, String region) {
         PaginatedResult<RedshiftServerlessSnapshot> page = service.listSnapshots(
                 text(request, "namespaceName"), text(request, "namespaceArn"), text(request, "ownerAccount"),
-                parseEpochSeconds(request, "startTime"), parseEpochSeconds(request, "endTime"), region,
-                parseMaxResults(request), text(request, "nextToken"));
+                ServerlessSupport.epochSeconds(request, "startTime"), ServerlessSupport.epochSeconds(request, "endTime"), region,
+                ServerlessSupport.maxResults(request), text(request, "nextToken"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("snapshots");
         page.items().forEach(snapshot -> items.add(snapshotNode(snapshot)));
@@ -247,7 +236,7 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleUpdateSnapshot(JsonNode request, String region) {
         return snapshotResponse(service.updateSnapshot(
-                text(request, "snapshotName"), parseInteger(request, "retentionPeriod"), region));
+                text(request, "snapshotName"), ServerlessSupport.integer(request, "retentionPeriod"), region));
     }
 
     private Response handleDeleteSnapshot(JsonNode request, String region) {
@@ -270,29 +259,29 @@ public class RedshiftServerlessJsonHandler {
         String snapshotName = text(request, "snapshotName");
         String snapshotArn = text(request, "snapshotArn");
         if (snapshotName != null && snapshotArn != null) {
-            throw validation("snapshotName and snapshotArn cannot both be specified.");
+            throw ServerlessSupport.validation("snapshotName and snapshotArn cannot both be specified.");
         }
         return snapshotArn == null ? snapshotName : service.snapshotNameFromArn(snapshotArn, region);
     }
 
     private Response handleCreateUsageLimit(JsonNode request, String region) {
         return usageLimitResponse(usageLimits.createUsageLimit(
-                optionalText(request, "resourceArn"),
-                optionalText(request, "usageType"),
+                ServerlessSupport.text(request, "resourceArn"),
+                ServerlessSupport.text(request, "usageType"),
                 parseLong(request, "amount"),
-                optionalText(request, "period"),
-                optionalText(request, "breachAction"),
+                ServerlessSupport.text(request, "period"),
+                ServerlessSupport.text(request, "breachAction"),
                 region));
     }
 
     private Response handleGetUsageLimit(JsonNode request, String region) {
-        return usageLimitResponse(usageLimits.getUsageLimit(optionalText(request, "usageLimitId"), region));
+        return usageLimitResponse(usageLimits.getUsageLimit(ServerlessSupport.text(request, "usageLimitId"), region));
     }
 
     private Response handleListUsageLimits(JsonNode request, String region) {
         PaginatedResult<UsageLimit> page = usageLimits.listUsageLimits(
-                optionalText(request, "resourceArn"), optionalText(request, "usageType"), region,
-                parseMaxResults(request), optionalText(request, "nextToken"));
+                ServerlessSupport.text(request, "resourceArn"), ServerlessSupport.text(request, "usageType"), region,
+                ServerlessSupport.maxResults(request), ServerlessSupport.text(request, "nextToken"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("usageLimits");
         page.items().forEach(limit -> items.add(usageLimitNode(limit)));
@@ -304,14 +293,14 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleUpdateUsageLimit(JsonNode request, String region) {
         return usageLimitResponse(usageLimits.updateUsageLimit(
-                optionalText(request, "usageLimitId"),
+                ServerlessSupport.text(request, "usageLimitId"),
                 parseLong(request, "amount"),
-                optionalText(request, "breachAction"),
+                ServerlessSupport.text(request, "breachAction"),
                 region));
     }
 
     private Response handleDeleteUsageLimit(JsonNode request, String region) {
-        return usageLimitResponse(usageLimits.deleteUsageLimit(optionalText(request, "usageLimitId"), region));
+        return usageLimitResponse(usageLimits.deleteUsageLimit(ServerlessSupport.text(request, "usageLimitId"), region));
     }
 
     private Response usageLimitResponse(UsageLimit limit) {
@@ -346,7 +335,7 @@ public class RedshiftServerlessJsonHandler {
     }
 
     private Response handleUntagResource(JsonNode request, String region) {
-        service.untagResource(text(request, "resourceArn"), parseStringList(request.path("tagKeys"), "tagKeys"), region);
+        service.untagResource(text(request, "resourceArn"), ServerlessSupport.stringList(request, "tagKeys"), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -385,7 +374,7 @@ public class RedshiftServerlessJsonHandler {
             node.put("defaultIamRoleArn", namespace.getDefaultIamRoleArn());
         }
         if (namespace.getCreationDate() != null) {
-            node.put("creationDate", CREATION_DATE_FORMAT.format(namespace.getCreationDate()));
+            node.put("creationDate", ServerlessSupport.ISO_8601.format(namespace.getCreationDate()));
         }
         ArrayNode iamRoles = node.putArray("iamRoles");
         namespace.getIamRoles().forEach(iamRoles::add);
@@ -418,7 +407,7 @@ public class RedshiftServerlessJsonHandler {
             node.put("snapshotRemainingDays", Math.max(0, snapshot.getRetentionPeriod() - elapsedDays));
         }
         if (snapshot.getSnapshotCreateTime() != null) {
-            node.put("snapshotCreateTime", CREATION_DATE_FORMAT.format(snapshot.getSnapshotCreateTime()));
+            node.put("snapshotCreateTime", ServerlessSupport.ISO_8601.format(snapshot.getSnapshotCreateTime()));
         }
         return node;
     }
@@ -480,47 +469,25 @@ public class RedshiftServerlessJsonHandler {
             endpointNode.put("port", workgroup.getEndpoint().getPort());
         }
         if (workgroup.getCreationDate() != null) {
-            node.put("creationDate", CREATION_DATE_FORMAT.format(workgroup.getCreationDate()));
+            node.put("creationDate", ServerlessSupport.ISO_8601.format(workgroup.getCreationDate()));
         }
         return node;
     }
 
     private WorkgroupSettings parseWorkgroupSettings(JsonNode request) {
         return new WorkgroupSettings(
-                parseInteger(request, "baseCapacity"),
-                parseInteger(request, "maxCapacity"),
-                parseBoolean(request, "enhancedVpcRouting"),
-                parseBoolean(request, "publiclyAccessible"),
-                parseBoolean(request, "extraComputeForAutomaticOptimization"),
+                ServerlessSupport.integer(request, "baseCapacity"),
+                ServerlessSupport.integer(request, "maxCapacity"),
+                ServerlessSupport.bool(request, "enhancedVpcRouting"),
+                ServerlessSupport.bool(request, "publiclyAccessible"),
+                ServerlessSupport.bool(request, "extraComputeForAutomaticOptimization"),
                 parseConfigParameters(request.path("configParameters")),
-                parseStringList(request.path("securityGroupIds"), "securityGroupIds"),
-                parseStringList(request.path("subnetIds"), "subnetIds"),
-                parseInteger(request, "port"),
+                ServerlessSupport.stringList(request, "securityGroupIds"),
+                ServerlessSupport.stringList(request, "subnetIds"),
+                ServerlessSupport.integer(request, "port"),
                 parsePricePerformanceTarget(request.path("pricePerformanceTarget")),
                 text(request, "ipAddressType"),
                 text(request, "trackName"));
-    }
-
-    private Integer parseInteger(JsonNode request, String field) {
-        JsonNode node = request.path(field);
-        if (node.isMissingNode() || node.isNull()) {
-            return null;
-        }
-        if (!node.isIntegralNumber() || !node.canConvertToInt()) {
-            throw validation(field + " must be an integer.");
-        }
-        return node.asInt();
-    }
-
-    private Boolean parseBoolean(JsonNode request, String field) {
-        JsonNode node = request.path(field);
-        if (node.isMissingNode() || node.isNull()) {
-            return null;
-        }
-        if (!node.isBoolean()) {
-            throw validation(field + " must be a boolean.");
-        }
-        return node.asBoolean();
     }
 
     private List<ConfigParameter> parseConfigParameters(JsonNode node) {
@@ -528,12 +495,12 @@ public class RedshiftServerlessJsonHandler {
             return null;
         }
         if (!node.isArray()) {
-            throw validation("configParameters must be an array of parameters.");
+            throw ServerlessSupport.validation("configParameters must be an array of parameters.");
         }
         List<ConfigParameter> parameters = new ArrayList<>();
         for (JsonNode element : node) {
             if (!element.isObject()) {
-                throw validation("configParameters must contain only parameter objects.");
+                throw ServerlessSupport.validation("configParameters must contain only parameter objects.");
             }
             parameters.add(new ConfigParameter(text(element, "parameterKey"), text(element, "parameterValue")));
         }
@@ -545,33 +512,9 @@ public class RedshiftServerlessJsonHandler {
             return null;
         }
         if (!node.isObject()) {
-            throw validation("pricePerformanceTarget must be an object.");
+            throw ServerlessSupport.validation("pricePerformanceTarget must be an object.");
         }
-        return new PricePerformanceTarget(text(node, "status"), parseInteger(node, "level"));
-    }
-
-    /** A timestamp request member, which awsJson1.1 sends as epoch seconds unless the model says otherwise. */
-    private Instant parseEpochSeconds(JsonNode request, String field) {
-        JsonNode node = request.path(field);
-        if (node.isMissingNode() || node.isNull()) {
-            return null;
-        }
-        if (!node.isNumber()) {
-            throw validation(field + " must be a timestamp.");
-        }
-        return Instant.ofEpochMilli(Math.round(node.asDouble() * 1000));
-    }
-
-    /** A string member: null when missing or null, a validation error when present with any other type. */
-    private String optionalText(JsonNode request, String field) {
-        JsonNode node = request.path(field);
-        if (node.isMissingNode() || node.isNull()) {
-            return null;
-        }
-        if (!node.isTextual()) {
-            throw validation(field + " must be a string.");
-        }
-        return node.textValue();
+        return new PricePerformanceTarget(text(node, "status"), ServerlessSupport.integer(node, "level"));
     }
 
     private Long parseLong(JsonNode request, String field) {
@@ -580,43 +523,9 @@ public class RedshiftServerlessJsonHandler {
             return null;
         }
         if (!node.isIntegralNumber() || !node.canConvertToLong()) {
-            throw validation(field + " must be an integer.");
+            throw ServerlessSupport.validation(field + " must be an integer.");
         }
         return node.asLong();
-    }
-
-    private Integer parseMaxResults(JsonNode request) {
-        JsonNode node = request.path("maxResults");
-        if (node.isMissingNode() || node.isNull()) {
-            return null;
-        }
-        if (!node.isIntegralNumber() || !node.canConvertToInt()) {
-            throw validation("maxResults must be an integer.");
-        }
-        return node.asInt();
-    }
-
-    /**
-     * Absent means absent and wrong means wrong: only a missing or null member returns null, so
-     * that callers can distinguish "omitted, keep the stored value" from "supplied". Treating a
-     * present member of the wrong type as absent would let a malformed UpdateNamespace silently
-     * keep the old roles instead of reporting the request as invalid.
-     */
-    private List<String> parseStringList(JsonNode node, String field) {
-        if (node == null || node.isMissingNode() || node.isNull()) {
-            return null;
-        }
-        if (!node.isArray()) {
-            throw validation(field + " must be an array of strings.");
-        }
-        List<String> list = new ArrayList<>();
-        for (JsonNode element : node) {
-            if (!element.isTextual()) {
-                throw validation(field + " must contain only strings.");
-            }
-            list.add(element.textValue());
-        }
-        return list;
     }
 
     private Map<String, String> parseTagList(JsonNode tagsNode, String field) {
@@ -624,12 +533,12 @@ public class RedshiftServerlessJsonHandler {
             return null;
         }
         if (!tagsNode.isArray()) {
-            throw validation(field + " must be an array of tags.");
+            throw ServerlessSupport.validation(field + " must be an array of tags.");
         }
         Map<String, String> tags = new LinkedHashMap<>();
         for (JsonNode tag : tagsNode) {
             if (!tag.isObject()) {
-                throw validation(field + " must contain only tag objects.");
+                throw ServerlessSupport.validation(field + " must contain only tag objects.");
             }
             String key = tag.path("key").asText(null);
             if (key != null) {
@@ -637,10 +546,6 @@ public class RedshiftServerlessJsonHandler {
             }
         }
         return tags;
-    }
-
-    private static AwsException validation(String message) {
-        return new AwsException("ValidationException", message, 400);
     }
 
     private static String text(JsonNode request, String field) {
