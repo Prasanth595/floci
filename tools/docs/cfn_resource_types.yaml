@@ -175,7 +175,7 @@ notes:
   AWS::Lambda::EventSourceMapping: 'SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored'
   AWS::Lambda::Alias: also what SAM's `AutoPublishAlias` expands into
   AWS::Lambda::EventInvokeConfig: also what a SAM function's `EventInvokeConfig` expands into
-  AWS::EC2::VPC: 'deleted on stack teardown; a VPC with dependents outside the stack fails the delete with `DependencyViolation`, as on AWS'
+  AWS::EC2::VPC: 'deleted on stack teardown; a VPC with dependents outside the stack, including instances that are not terminated and NAT gateways that are not deleted in its subnets, fails the delete with `DependencyViolation`, as on AWS'
   AWS::EC2::SecurityGroup: inline `SecurityGroupIngress`/`SecurityGroupEgress` supported
   AWS::ApplicationAutoScaling::ScalableTarget: '`ScheduledActions` are accepted and not run; Floci has no scheduled scaling'
   AWS::RDS::DBInstance: starts a real container

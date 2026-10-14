@@ -17,8 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The lifecycle of {@code AWS::EC2::VPC} beyond its first create: a changed CidrBlock replaces the
  * VPC and the displaced one (with the subnet it held) is removed once the update commits, an
- * in-place tag and DNS change next to a resource that fails the update is rolled back, and
- * DeleteStack removes the VPC together with its subnet.
+ * in-place tag and DNS change next to a resource that fails the update is rolled back, DeleteStack
+ * removes the VPC together with its subnet, and an instance launched into the subnet out of band
+ * fails that delete with {@code DependencyViolation} until it is terminated.
  */
 @QuarkusTest
 class CloudFormationVpcReplacementIntegrationTest {
@@ -53,10 +54,13 @@ class CloudFormationVpcReplacementIntegrationTest {
                 """.formatted(octet, name);
     }
 
-    /** A VPC alone; the second form flips the mutable properties and adds a resource that cannot be created. */
+    /**
+     * A VPC alone; the second form flips the mutable properties and adds a resource that cannot be
+     * created. Boom depends on the VPC so its failure lands after the in-place change was written.
+     */
     private static String rollbackTemplate(boolean changed) {
         String failing = changed
-                ? ",\n    \"Boom\": {\"Type\": \"AWS::SecretsManager::Secret\","
+                ? ",\n    \"Boom\": {\"Type\": \"AWS::SecretsManager::Secret\", \"DependsOn\": \"Vpc\","
                   + " \"Properties\": {\"SecretString\": \"x\", \"GenerateSecretString\": {\"SecretStringTemplate\": \"{}\", \"GenerateStringKey\": \"p\"}}}"
                 : "";
         return """
@@ -123,6 +127,39 @@ class CloudFormationVpcReplacementIntegrationTest {
         assertFalse(ec2("DescribeVpcs").contains(vpcId), "stack delete must remove the VPC");
     }
 
+    @Test
+    void anInstanceLaunchedIntoTheSubnetOutOfBandFailsTheDeleteUntilItIsTerminated() {
+        String stack = "cfn-vpc-resident-" + Long.toString(System.nanoTime(), 36);
+        cloudFormation(stack, "CreateStack", template("48", "resident"));
+        Map<String, String> created = outputs(stack, "CREATE_COMPLETE");
+        String subnetId = created.get("SubnetId");
+        String instanceId = XmlPath.from(ec2("RunInstances", Map.of(
+                        "ImageId", "ami-1234567890abcdef0", "InstanceType", "t3.micro",
+                        "MinCount", "1", "MaxCount", "1", "SubnetId", subnetId)))
+                .getString("RunInstancesResponse.instancesSet.item.instanceId");
+
+        cloudFormation(stack, "DeleteStack", null);
+
+        CfnStackWaits.StackState failed = CfnStackWaits.awaitTerminal(stack, CFN_AUTH);
+        assertEquals("DELETE_FAILED", failed.status(), failed.reason());
+        // The event carries the EC2 DependencyViolation message; the engine records the message, not the code.
+        String subnetFailure = XmlPath.from(cloudFormationQuery(stack, "DescribeStackEvents"))
+                .getString("DescribeStackEventsResponse.DescribeStackEventsResult.StackEvents.member"
+                        + ".find { it.LogicalResourceId == 'Subnet' && it.ResourceStatus == 'DELETE_FAILED' }"
+                        + ".ResourceStatusReason");
+        assertEquals("The subnet '" + subnetId + "' has dependencies and cannot be deleted.", subnetFailure,
+                "the subnet's delete must report the resident instance");
+        assertTrue(ec2("DescribeSubnets").contains(subnetId), "the pinned subnet must still exist");
+        assertTrue(ec2("DescribeVpcs").contains(created.get("VpcId")), "the VPC behind it must still exist");
+
+        ec2("TerminateInstances", Map.of("InstanceId.1", instanceId));
+        cloudFormation(stack, "DeleteStack", null);
+
+        CfnStackWaits.awaitStackDeleted(stack, CFN_AUTH);
+        assertFalse(ec2("DescribeSubnets").contains(subnetId), "stack delete must remove the subnet");
+        assertFalse(ec2("DescribeVpcs").contains(created.get("VpcId")), "stack delete must remove the VPC");
+    }
+
     private static String describeVpc(String vpcId) {
         return ec2("DescribeVpcs", Map.of("VpcId.1", vpcId));
     }
@@ -156,6 +193,16 @@ class CloudFormationVpcReplacementIntegrationTest {
             .formParam("StackName", stack)
         .when().post("/").then().statusCode(200)
             .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
+            .extract().asString();
+    }
+
+    private static String cloudFormationQuery(String stack, String action) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", action)
+            .formParam("StackName", stack)
+        .when().post("/").then().statusCode(200)
             .extract().asString();
     }
 
