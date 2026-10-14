@@ -375,6 +375,13 @@ disabled fails with Lambda's error as the resource status reason.
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
+Function URLs are not available in AWS GovCloud (US) or in the China Regions
+([GovCloud guide](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html),
+[China guide](https://docs.amazonaws.cn/en_us/aws/latest/userguide/lambda.html)), so
+`CreateFunctionUrlConfig` is an `InvalidParameterValueException` in those regions, and an
+`AWS::Lambda::Url` in a CloudFormation stack there fails with it. See
+[AWS Partitions](../configuration/partitions.md).
+
 **Versions:** `CreateFunction` and `UpdateFunctionCode` honour `Publish`, publishing a version
 and reporting it in the response's `Version`. The two differ in the ARN they return, matching the
 live service: `CreateFunction` keeps the unqualified `FunctionArn` while `UpdateFunctionCode`
