@@ -274,6 +274,66 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void singleItemWritesUseTheirReturnValuesAndExecutionDefault() {
+        for (String action : List.of("PutItem", "UpdateItem", "DeleteItem")) {
+            for (String value : List.of("NONE", "ALL_OLD", "UPDATED_OLD", "ALL_NEW", "UPDATED_NEW", "")) {
+                ContainerRequestContext request = mock(ContainerRequestContext.class);
+                when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json(
+                        "{\"ReturnValues\":\"" + value + "\"}"));
+                assertEquals(List.of(value), resolver.resolve("dynamodb", "dynamodb:" + action, request)
+                        .get("dynamodb:ReturnValues"));
+            }
+            for (String body : List.of("{}", "{\"ReturnValues\":null}")) {
+                ContainerRequestContext request = mock(ContainerRequestContext.class);
+                when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json(body));
+                assertEquals(List.of("NONE"), resolver.resolve("dynamodb", "dynamodb:" + action, request)
+                        .get("dynamodb:ReturnValues"));
+            }
+        }
+    }
+
+    @Test
+    void unrelatedActionsDoNotAcquireSpoofedReturnValues() {
+        for (String action : List.of("GetItem", "Query", "Scan", "BatchGetItem", "BatchWriteItem",
+                "TransactGetItems", "TransactWriteItems")) {
+            ContainerRequestContext request = mock(ContainerRequestContext.class);
+            when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json("{\"ReturnValues\":\"ALL_OLD\"}"));
+            Map<String, List<String>> context = resolver.resolve("dynamodb", "dynamodb:" + action, request);
+            assertFalse(context != null && context.containsKey("dynamodb:ReturnValues"));
+        }
+    }
+
+    @Test
+    void requestedReturnModesUseSeparateCompleteContextsWithoutNoneOrDuplicates() {
+        when(dynamoDbService.findTable("FgacTable", "us-east-1")).thenReturn(Optional.of(fgacTable()));
+        Map<String, List<String>> cases = Map.of(
+                "", List.of("NONE"),
+                ",\"ReturnValues\":null,\"ReturnValuesOnConditionCheckFailure\":null", List.of("NONE"),
+                ",\"ReturnValues\":\"NONE\",\"ReturnValuesOnConditionCheckFailure\":\"ALL_OLD\"", List.of("ALL_OLD"),
+                ",\"ReturnValues\":\"ALL_OLD\",\"ReturnValuesOnConditionCheckFailure\":\"NONE\"", List.of("ALL_OLD"),
+                ",\"ReturnValues\":\"ALL_OLD\",\"ReturnValuesOnConditionCheckFailure\":\"ALL_OLD\"", List.of("ALL_OLD"),
+                ",\"ReturnValues\":\"UPDATED_NEW\",\"ReturnValuesOnConditionCheckFailure\":\"ALL_OLD\"",
+                List.of("UPDATED_NEW", "ALL_OLD"));
+        for (Map.Entry<String, List<String>> entry : cases.entrySet()) {
+            ContainerRequestContext request = mock(ContainerRequestContext.class);
+            when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json(
+                    "{\"TableName\":\"FgacTable\",\"Key\":{\"PK\":{\"S\":\"USER_alice\"}}"
+                            + entry.getKey() + "}"));
+            Map<String, List<String>> primary = resolver.resolve("dynamodb", "dynamodb:UpdateItem", request);
+            List<Map<String, List<String>>> remaining =
+                    resolver.resolveRemainingTargets("dynamodb", "dynamodb:UpdateItem", request);
+            assertEquals(List.of(entry.getValue().getFirst()), primary.get("dynamodb:ReturnValues"));
+            assertEquals(entry.getValue().size() - 1, remaining.size());
+            assertEquals(List.of("USER_alice"), primary.get("dynamodb:LeadingKeys"));
+            for (int i = 0; i < remaining.size(); i++) {
+                assertEquals(List.of(entry.getValue().get(i + 1)), remaining.get(i).get("dynamodb:ReturnValues"));
+                assertEquals(primary.get("dynamodb:LeadingKeys"), remaining.get(i).get("dynamodb:LeadingKeys"));
+                assertEquals(primary.get("dynamodb:Attributes"), remaining.get(i).get("dynamodb:Attributes"));
+            }
+        }
+    }
+
+    @Test
     void returnsNullWhenNoBodyWasBuffered() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         when(containerRequest.getProperty("floci.bufferedJsonBody")).thenReturn(null);
@@ -626,6 +686,47 @@ class IamConditionContextResolverTest {
         assertFalse(conditions.containsKey("aws:ResourceAccount"),
                 "guessing the owner would authorize cross-account access a Condition meant to refuse");
         assertEquals(List.of("000000000000"), conditions.get("aws:PrincipalAccount"));
+    }
+
+    @Test
+    void aServiceCallCarriesTheServiceAndItsSourceButNoIamPrincipal() {
+        Map<String, List<String>> conditions = IamConditionContextResolver.serviceCallContext(
+                "ses.amazonaws.com", "arn:aws:sns:eu-west-2:111122223333:events", "111122223333",
+                "arn:aws:ses:eu-west-2:444455556666:configuration-set/my-set", "444455556666");
+
+        assertEquals(Map.of(
+                "aws:PrincipalIsAWSService", List.of("true"),
+                "aws:PrincipalServiceName", List.of("ses.amazonaws.com"),
+                "aws:PrincipalServiceNamesList", List.of("ses.amazonaws.com"),
+                "aws:SourceArn", List.of("arn:aws:ses:eu-west-2:444455556666:configuration-set/my-set"),
+                "aws:SourceAccount", List.of("444455556666"),
+                "aws:SourceOwner", List.of("444455556666"),
+                "aws:ResourceAccount", List.of("111122223333"),
+                "aws:RequestedRegion", List.of("eu-west-2")), conditions);
+    }
+
+    @Test
+    void onlyACallToATopicFromAServiceSnsListsCarriesSourceOwner() {
+        Map<String, List<String>> fromS3 = IamConditionContextResolver.serviceCallContext(
+                "s3.amazonaws.com", "arn:aws:sns:eu-west-2:111122223333:events", "111122223333",
+                "arn:aws:s3:::bucket", "111122223333");
+        Map<String, List<String>> toQueue = IamConditionContextResolver.serviceCallContext(
+                "ses.amazonaws.com", "arn:aws:sqs:eu-west-2:111122223333:events", "111122223333",
+                "arn:aws:ses:eu-west-2:111122223333:configuration-set/my-set", "111122223333");
+
+        assertFalse(fromS3.containsKey("aws:SourceOwner"));
+        assertEquals(List.of("111122223333"), fromS3.get("aws:SourceAccount"));
+        assertFalse(toQueue.containsKey("aws:SourceOwner"));
+    }
+
+    @Test
+    void aServiceCallWithNoSourceLeavesTheSourceKeysOut() {
+        Map<String, List<String>> conditions = IamConditionContextResolver.serviceCallContext(
+                "ses.amazonaws.com", "arn:aws:s3:::bucket", "111122223333", null, null);
+
+        assertFalse(conditions.containsKey("aws:SourceArn"));
+        assertFalse(conditions.containsKey("aws:SourceAccount"));
+        assertEquals(List.of("111122223333"), conditions.get("aws:ResourceAccount"));
     }
 
     private Decision decisionForEveryTarget(String policy, String action, ContainerRequestContext request) {

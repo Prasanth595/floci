@@ -1114,8 +1114,13 @@ a Query `Action` field on it does not change the action it is checked as, and it
 still percent-encoded, as the router matches it, so an encoded `/` inside a parameter cannot make
 the route's rule miss.
 
-A request that names its operation, in a Query `Action` or an `X-Amz-Target` header, is authorized
-as the action AWS checks for that operation, which is usually the operation's own name. Where AWS
+A request that names its operation, in a Query `Action`, an `X-Amz-Target` header or a Smithy RPC v2
+path (`/service/<service>/operation/<operation>`), is authorized as the action AWS checks for that
+operation, which is usually the operation's own name. An RPC v2 call is checked as the service and
+operation in its path, the ones Floci runs, whatever its `smithy-protocol` header says, and an
+`X-Amz-Target` header on it does not change the action it is checked as. A CBOR body, on that path
+or on the `x-amz-cbor-1.1` one, names its resource and condition keys (a queue URL, a table name,
+`dynamodb:LeadingKeys`) the way a JSON body does, and they are read from it the same way. Where AWS
 authorizes an operation as a single action of another name, Floci does the same: `SendMessageBatch`
 is checked as `sqs:SendMessage` and `PublishBatch` as `sns:Publish`, so a policy granting the
 single-message action covers the batch call, and one naming the batch operation, which is not an
@@ -1131,9 +1136,13 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries regi
 
 - Resource policy statements are matched against the caller (`Principal` and `NotPrincipal` clauses), each principal type naming only its own kind of caller, as on AWS: `"*"` matches anyone; `{"AWS": "*"}` matches IAM identities and AWS services; any other `AWS` entry (a user, role, account id or account root) matches IAM identities only, and a role session matches a `Principal` naming its role through the role's own ARN, path included; `{"Service": "<name>"}` matches that service exactly. `{"CanonicalUser": "<id>"}`, which S3 bucket policies accept, names an account by its S3 canonical user ID and matches that account's IAM identities, as an account principal does; Floci's canonical ID for an account is the account id, as its S3 ACLs report it. `{"Service": "*"}`, which AWS does not accept, matches nothing, and `Federated` entries never match an IAM caller.
 - An explicit **Deny** in a resource policy overrides any allows.
+- A Deny statement's `NotPrincipal` spares an IAM caller only when it names the caller's account as well as the caller itself, the user, role or role session (the account alone for the account root), and never spares a caller that has a permissions boundary attached, as the IAM User Guide's "AWS JSON policy elements: NotPrincipal" describes: without the account, AWS "might deny access to the entire account", and with a boundary it "will always deny". An Allow with `NotPrincipal`, which Access Analyzer warns can grant to anonymous callers, grants everyone it does not name.
 - In cross-account scenarios or resource-controlled access, an explicit **Allow** in a resource policy grants access to the principal.
+- A statement that names the caller only through its account, by its id, its root ARN or its S3 canonical user ID, delegates to the account, as the IAM User Guide's "AWS account principals" describes: across accounts it is the resource owner's half of the grant, and within the account it grants nothing on its own, so the caller's identity policies have to allow the request. A statement naming the user, role or role session itself, or `"*"`, grants on its own within the account.
 - For detailed S3 bucket policy behavior and configuration, see [S3 Bucket Policy Enforcement](s3.md#bucket-policy-enforcement).
 - Lambda function policies, the statements `AddPermission` adds, take part the same way. An invoke of another account's function by ARN runs it in that account, so its function policy has to allow the caller as well; see [Function policies under IAM enforcement](lambda.md#function-policies-under-iam-enforcement).
+- SNS topic policies take part the same way for a request that names the topic in a JSON-protocol body; a topic with no policy set has the default one AWS gives a new topic. See [SNS](sns.md).
+- A call an AWS service makes to another service's resource on its own behalf, such as SES publishing an event or a notification to an SNS topic, has no IAM principal, so the target's resource policy decides it alone and has to allow the calling service, through `{"Service": "<service>.amazonaws.com"}` or `{"AWS": "*"}`. A target with no policy refuses it. Its request context holds `aws:PrincipalIsAWSService` (`true`), `aws:PrincipalServiceName` and `aws:PrincipalServiceNamesList`, `aws:SourceArn` and `aws:SourceAccount` for the resource whose configuration triggered the call, `aws:ResourceAccount` and `aws:RequestedRegion`, and none of the keys that describe an IAM principal. A publish to an SNS topic from SES also carries `aws:SourceOwner`, the key the SNS Developer Guide lists SES among the services setting, which is what the default topic policy checks, so that policy admits SES acting for the topic owner's account and no other. SES is the one service checked this way so far; see [SES IAM enforcement](ses.md#iam-enforcement).
 
 ### Service control policies (SCPs)
 
@@ -1373,6 +1382,14 @@ floci populates:
   `Null:false` when the policy must require a resolved key. Malformed requests that pass
   authorization are still checked by the DynamoDB handler.
 
+- `dynamodb:ReturnValues`: standalone `PutItem`, `UpdateItem` and `DeleteItem` authorize each
+  distinct non-`NONE` mode requested by `ReturnValues` and `ReturnValuesOnConditionCheckFailure`
+  before execution. When neither requests a non-`NONE` mode, authorization uses `NONE`.
+  Each mode is checked separately, so a grant must cover both `UPDATED_NEW` and `ALL_OLD`
+  when they are requested together; `NONE` plus `ALL_OLD` needs only `ALL_OLD`. Omitted or
+  null parameters use the execution default. Read and batch operations do not acquire this
+  key from unrelated fields. Transaction failure-image context is described below.
+
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor
 blocks. A `DenyRootUser`-style guardrail keyed on `aws:PrincipalArn` therefore fires against
@@ -1469,7 +1486,8 @@ lazily-resolved `ScpProvider` exists to avoid.
 
 With enforcement on, a request carrying no `Authorization` header is refused with
 `403 MissingAuthenticationToken` when its wire shape names a management operation: a JSON, CBOR or
-Query request, identified by `X-Amz-Target`, an rpcv2 path or an `Action` parameter.
+Query request, identified by `X-Amz-Target`, an rpcv2 path or an `Action` parameter. A call routed
+to the rpcv2 endpoint is one whatever its `smithy-protocol` header says.
 
 Two carve-outs, both deliberate.
 

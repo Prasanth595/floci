@@ -634,9 +634,12 @@ the feature named; an association that does not exist is `DBClusterRoleNotFound`
 `DBInstanceRoleNotFound`. A stopped cluster or instance refuses both (`InvalidDBClusterStateFault` /
 `InvalidDBInstanceState`).
 
-Associations are recorded, not exercised: Floci does not check the role in IAM, does not check the
-feature name against the engine, and does not hand the role's credentials to the database, so an
-`aws_s3` import still needs credentials of its own. Deleting a cluster or instance drops its
+A `FeatureName` must be one the engine lists in `SupportedFeatureNames` (`DescribeDBEngineVersions`),
+matched without regard to case; any other is `InvalidParameterValue`, and a `CreateDBCluster` naming
+one creates nothing. MySQL, MariaDB and Aurora MySQL list none, so their roles take no feature name.
+
+Associations are recorded, not exercised: Floci does not check the role in IAM and does not hand the
+role's credentials to the database, so an `aws_s3` import still needs credentials of its own. Deleting a cluster or instance drops its
 associations, and snapshots, restores and read replicas start without any.
 
 ## Aurora managed password opt-out
@@ -747,6 +750,24 @@ FLOCI_STORAGE_HOST_PERSISTENT_PATH=/absolute/host/path/data
 The RDS auth proxy validates the master username and password at the proxy layer. All other database users are passed through directly to the backend engine — create them with standard SQL (`CREATE USER`) and connect as normal.
 
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
+
+Aurora members use their cluster's IAM database authentication setting and master
+username and password for backend connections. `EnableIAMDatabaseAuthentication`
+on `CreateDBInstance` does not override the cluster setting. A member request with
+`MasterUsername` or `MasterUserPassword` returns `InvalidParameterCombination`;
+configure those credentials on the cluster and omit them from the member request.
+Managed master secrets belong to the cluster; `ManageMasterUserPassword` on a member
+does not create a separate member secret. When a cluster record lacks a credential,
+the member retains its normalized default for that field.
+
+`ModifyDBInstance` preserves the cluster-owned master password when
+`MasterUserPassword` is supplied for a member; other supported instance settings
+still apply. Change the cluster password with `ModifyDBCluster`.
+
+Accepted cluster password changes update stored member credentials even when the
+cluster has no backend or runs in mock mode. An unchanged password does not update
+relays. Rotating an initialized data volume requires a running backend; changing
+stored metadata alone does not rotate that volume.
 
 Changing `EnableIAMDatabaseAuthentication` with `ModifyDBCluster` updates existing
 Aurora members and applies to new connections through the cluster and member

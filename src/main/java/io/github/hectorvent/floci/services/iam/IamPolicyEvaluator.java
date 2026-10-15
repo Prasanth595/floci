@@ -73,9 +73,20 @@ public class IamPolicyEvaluator {
     public enum ResourcePolicyDecision {
         ALLOW,
         ALLOW_DIRECT_IAM_USER,
+        /**
+         * An Allow that names the caller only through its account: an account ID, the account's
+         * root ARN or, in an S3 bucket policy, its canonical user ID. That "delegates authority to
+         * the account" (IAM User Guide, "AWS account principals"), so across accounts it is the
+         * owner's half of the grant, while within the account it grants nothing on its own and the
+         * caller's identity-based policies have to allow the request.
+         */
+        ALLOW_ACCOUNT,
         EXPLICIT_DENY,
         NEUTRAL
     }
+
+    /** How a resource policy statement's principal names a caller: itself, only its account, or not at all. */
+    private enum PrincipalMatch { NONE, ACCOUNT, CALLER }
 
     public enum ResourceAccountRelationship {
         SAME_ACCOUNT,
@@ -166,7 +177,8 @@ public class IamPolicyEvaluator {
      * Evaluates a principal-filtered resource policy with the caller/resource account relationship.
      * Cross-account access requires both identity and resource policy allows. A same-account resource
      * policy that directly names an IAM user ARN is not limited by an implicit permissions-boundary
-     * deny, although every explicit deny still wins.
+     * deny, although every explicit deny still wins. A same-account Allow that names only the
+     * caller's account ({@link ResourcePolicyDecision#ALLOW_ACCOUNT}) grants nothing on its own.
      */
     public Decision evaluateResolvedResourcePolicy(
             CallerContext caller,
@@ -183,15 +195,17 @@ public class IamPolicyEvaluator {
                 ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
         ResourcePolicyDecision resolvedDecision = resourcePolicyDecision == null
                 ? ResourcePolicyDecision.NEUTRAL : resourcePolicyDecision;
+        ResourceAccountRelationship relationship = accountRelationship == null
+                ? ResourceAccountRelationship.CROSS_ACCOUNT : accountRelationship;
         return evaluateParsed(
                 caller, identityStmts, sessionStmts, boundaryStmts,
                 resolvedDecision == ResourcePolicyDecision.EXPLICIT_DENY,
                 resolvedDecision == ResourcePolicyDecision.ALLOW
-                        || resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER,
+                        || resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER
+                        || resolvedDecision == ResourcePolicyDecision.ALLOW_ACCOUNT
+                                && relationship == ResourceAccountRelationship.CROSS_ACCOUNT,
                 resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER,
-                accountRelationship == null
-                        ? ResourceAccountRelationship.CROSS_ACCOUNT : accountRelationship,
-                lowercase(action), resource, ctx);
+                relationship, lowercase(action), resource, ctx);
     }
 
     /**
@@ -242,10 +256,11 @@ public class IamPolicyEvaluator {
         if (anyResourceDirectIamUserAllow(stmts, principal, loweredAction, resource, ctx)) {
             return ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER;
         }
-        if (anyResourceExplicitAllow(stmts, principal, loweredAction, resource, ctx)) {
-            return ResourcePolicyDecision.ALLOW;
-        }
-        return ResourcePolicyDecision.NEUTRAL;
+        return switch (strongestResourceAllow(stmts, principal, loweredAction, resource, ctx)) {
+            case CALLER -> ResourcePolicyDecision.ALLOW;
+            case ACCOUNT -> ResourcePolicyDecision.ALLOW_ACCOUNT;
+            case NONE -> ResourcePolicyDecision.NEUTRAL;
+        };
     }
 
     /**
@@ -820,21 +835,30 @@ public class IamPolicyEvaluator {
     private boolean anyResourceExplicitDeny(List<PolicyStatement> stmts, RequestPrincipal principal,
                                             String action, String resource, Map<String, List<String>> ctx) {
         for (PolicyStatement stmt : stmts) {
-            if (stmt.isDeny() && matchesResourceStatement(stmt, principal, action, resource, ctx)) {
+            if (stmt.isDeny() && resourceStatementMatch(stmt, principal, action, resource, ctx) != PrincipalMatch.NONE) {
                 return true;
             }
         }
         return false;
     }
 
-    private boolean anyResourceExplicitAllow(List<PolicyStatement> stmts, RequestPrincipal principal,
-                                             String action, String resource, Map<String, List<String>> ctx) {
+    /** How closely the closest matching Allow names the caller. */
+    private PrincipalMatch strongestResourceAllow(List<PolicyStatement> stmts, RequestPrincipal principal,
+                                                  String action, String resource, Map<String, List<String>> ctx) {
+        PrincipalMatch strongest = PrincipalMatch.NONE;
         for (PolicyStatement stmt : stmts) {
-            if (stmt.isAllow() && matchesResourceStatement(stmt, principal, action, resource, ctx)) {
-                return true;
+            if (!stmt.isAllow()) {
+                continue;
+            }
+            PrincipalMatch match = resourceStatementMatch(stmt, principal, action, resource, ctx);
+            if (match == PrincipalMatch.CALLER) {
+                return match;
+            }
+            if (match == PrincipalMatch.ACCOUNT) {
+                strongest = match;
             }
         }
-        return false;
+        return strongest;
     }
 
     private boolean anyResourceDirectIamUserAllow(List<PolicyStatement> stmts, RequestPrincipal principal,
@@ -911,28 +935,66 @@ public class IamPolicyEvaluator {
         return false;
     }
 
-    private boolean matchesResourceStatement(PolicyStatement stmt, RequestPrincipal principal,
-                                             String action, String resource, Map<String, List<String>> ctx) {
+    private PrincipalMatch resourceStatementMatch(PolicyStatement stmt, RequestPrincipal principal,
+                                                  String action, String resource, Map<String, List<String>> ctx) {
         // A resource-policy statement with no Principal matches nothing (per AWS specification)
         if (stmt.getPrincipals() == null && stmt.getNotPrincipals() == null) {
-            return false;
+            return PrincipalMatch.NONE;
         }
-        if (!matchesPrincipal(stmt, principal)) {
-            return false;
+        PrincipalMatch match = principalMatch(stmt, principal);
+        if (match == PrincipalMatch.NONE
+                || !matchesAction(stmt, action)
+                || !matchesResource(stmt, resource)
+                || !matchesConditions(stmt.getConditions(), ctx)) {
+            return PrincipalMatch.NONE;
         }
-        return matchesAction(stmt, action)
-                && matchesResource(stmt, resource)
-                && matchesConditions(stmt.getConditions(), ctx);
+        return match;
     }
 
-    private boolean matchesPrincipal(PolicyStatement stmt, RequestPrincipal principal) {
+    /** A {@code NotPrincipal} statement applies to every caller it does not spare. */
+    private PrincipalMatch principalMatch(PolicyStatement stmt, RequestPrincipal principal) {
         if (stmt.getPrincipals() != null) {
-            return matchesAnyPrincipal(stmt.getPrincipals(), principal);
+            return matchAnyPrincipal(stmt.getPrincipals(), principal);
         }
         if (stmt.getNotPrincipals() != null) {
-            return !matchesAnyPrincipal(stmt.getNotPrincipals(), principal);
+            boolean spared = stmt.isDeny()
+                    ? sparedFromDeny(stmt.getNotPrincipals(), principal)
+                    : matchAnyPrincipal(stmt.getNotPrincipals(), principal) != PrincipalMatch.NONE;
+            return spared ? PrincipalMatch.NONE : PrincipalMatch.CALLER;
         }
-        return false;
+        return PrincipalMatch.NONE;
+    }
+
+    /**
+     * Whether a Deny's {@code NotPrincipal} spares the caller. The IAM User Guide ("AWS JSON policy
+     * elements: NotPrincipal") says it "will always deny any IAM principal that has a permissions
+     * boundary policy attached, regardless of the values specified", and that AWS may check the
+     * caller's account before the caller, so a list naming a user or role without its account "might
+     * deny access to the entire account". Floci takes that reading: an IAM caller is spared only when
+     * the list names its account and the caller itself, user, role or role session, or only its
+     * account when the caller is the account root. Anyone else is spared when the list names it.
+     */
+    private boolean sparedFromDeny(Map<String, List<String>> notPrincipals, RequestPrincipal principal) {
+        if (principal.type() != RequestPrincipal.Type.IAM || principal.arn() == null) {
+            return matchAnyPrincipal(notPrincipals, principal) != PrincipalMatch.NONE;
+        }
+        if (principal.permissionsBoundary()) {
+            return false;
+        }
+        boolean accountNamed = false;
+        boolean callerNamed = false;
+        for (Map.Entry<String, List<String>> entry : notPrincipals.entrySet()) {
+            List<String> patterns = entry.getValue() == null ? List.of() : entry.getValue();
+            for (String pattern : patterns) {
+                PrincipalMatch match = matchAnyPrincipal(Map.of(entry.getKey(), List.of(pattern)), principal);
+                if (match == PrincipalMatch.CALLER && "*".equals(pattern)) {
+                    return true;
+                }
+                accountNamed |= match == PrincipalMatch.ACCOUNT;
+                callerNamed |= match == PrincipalMatch.CALLER;
+            }
+        }
+        return accountNamed && (callerNamed || ROOT_PRINCIPAL_ARN.matcher(principal.arn()).matches());
     }
 
     /**
@@ -946,9 +1008,11 @@ public class IamPolicyEvaluator {
      * by its S3 canonical user ID, and matches the IAM identities of that account as an account
      * principal does; Floci's canonical ID for an account is the account id, as its S3 ACLs report
      * it. {@code Federated} and any other type name callers this evaluator never sees, and so match
-     * nothing, rather than being compared with an IAM ARN.
+     * nothing, rather than being compared with an IAM ARN. An entry naming the caller itself wins
+     * over one naming only its account.
      */
-    private boolean matchesAnyPrincipal(Map<String, List<String>> principals, RequestPrincipal principal) {
+    private PrincipalMatch matchAnyPrincipal(Map<String, List<String>> principals, RequestPrincipal principal) {
+        PrincipalMatch strongest = PrincipalMatch.NONE;
         for (Map.Entry<String, List<String>> entry : principals.entrySet()) {
             String type = entry.getKey();
             List<String> patterns = entry.getValue();
@@ -958,27 +1022,32 @@ public class IamPolicyEvaluator {
             if ("*".equals(type)) {
                 for (String pattern : patterns) {
                     if ("*".equals(pattern)) {
-                        return true;
+                        return PrincipalMatch.CALLER;
                     }
                     if (principal.type() == RequestPrincipal.Type.IAM && principal.arn() != null
                             && globMatches(pattern, principal.arn())) {
-                        return true;
+                        return PrincipalMatch.CALLER;
                     }
                 }
             } else if ("AWS".equalsIgnoreCase(type)) {
                 if (patterns.contains("*") && principal.type() != RequestPrincipal.Type.ANONYMOUS) {
-                    return true;
+                    return PrincipalMatch.CALLER;
                 }
-                if (principal.type() == RequestPrincipal.Type.IAM && principal.arn() != null
-                        && matchesAwsPrincipal(patterns, principal)) {
-                    return true;
+                if (principal.type() == RequestPrincipal.Type.IAM && principal.arn() != null) {
+                    PrincipalMatch match = matchAwsPrincipal(patterns, principal);
+                    if (match == PrincipalMatch.CALLER) {
+                        return match;
+                    }
+                    if (match == PrincipalMatch.ACCOUNT) {
+                        strongest = match;
+                    }
                 }
             } else if ("Service".equalsIgnoreCase(type)) {
                 if (principal.type() == RequestPrincipal.Type.SERVICE && principal.servicePrincipal() != null) {
                     String wanted = ServicePrincipals.canonical(principal.servicePrincipal());
                     for (String pattern : patterns) {
                         if (!"*".equals(pattern) && ServicePrincipals.canonical(pattern).equals(wanted)) {
-                            return true;
+                            return PrincipalMatch.CALLER;
                         }
                     }
                 }
@@ -986,24 +1055,25 @@ public class IamPolicyEvaluator {
                 if (principal.type() == RequestPrincipal.Type.IAM && principal.arn() != null) {
                     String accountId = extractAccountId(principal.arn());
                     if (accountId != null && patterns.contains(accountId)) {
-                        return true;
+                        strongest = PrincipalMatch.ACCOUNT;
                     }
                 }
             }
         }
-        return false;
+        return strongest;
     }
 
-    private boolean matchesAwsPrincipal(List<String> patterns, RequestPrincipal principal) {
+    private PrincipalMatch matchAwsPrincipal(List<String> patterns, RequestPrincipal principal) {
         String principalArn = principal.arn();
         String accountId = extractAccountId(principalArn);
         String roleArn = principal.roleArn() != null
                 ? principal.roleArn()
                 : extractRoleArnFromAssumedRole(principalArn);
+        PrincipalMatch strongest = PrincipalMatch.NONE;
         for (String pattern : patterns) {
             if (pattern.matches("\\d{12}")) {
                 if (pattern.equals(accountId)) {
-                    return true;
+                    strongest = PrincipalMatch.ACCOUNT;
                 }
             } else if (ROOT_PRINCIPAL_ARN.matcher(pattern).matches()) {
                 // An account id is scoped to its partition: arn:aws-cn:iam::123:root names
@@ -1011,15 +1081,15 @@ public class IamPolicyEvaluator {
                 AwsArnUtils.Arn root = AwsArnUtils.parse(pattern);
                 if (root.accountId().equals(accountId)
                         && root.partition().equals(AwsArnUtils.parse(principalArn).partition())) {
-                    return true;
+                    strongest = PrincipalMatch.ACCOUNT;
                 }
             } else if (globMatches(pattern, principalArn)) {
-                return true;
+                return PrincipalMatch.CALLER;
             } else if (roleArn != null && globMatches(pattern, roleArn)) {
-                return true;
+                return PrincipalMatch.CALLER;
             }
         }
-        return false;
+        return strongest;
     }
 
     private static String extractAccountId(String arn) {

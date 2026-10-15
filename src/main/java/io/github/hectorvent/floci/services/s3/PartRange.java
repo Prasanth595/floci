@@ -43,16 +43,11 @@ record PartRange(long first, long length, Part part) {
 
     /** Parses an UploadPart or UploadPartCopy number, whose valid range is bounded by S3. */
     static int parseUploadPartNumber(String value) {
-        try {
-            BigInteger partNumber = new BigInteger(value.trim());
-            if (partNumber.compareTo(BigInteger.ONE) >= 0
-                    && partNumber.compareTo(BigInteger.valueOf(10000)) <= 0) {
-                return partNumber.intValue();
-            }
-        } catch (NumberFormatException ignored) {
-            // All malformed values use the same InvalidArgument response as out-of-range values.
+        BigInteger partNumber = parsePartNumber(value);
+        if (partNumber.compareTo(BigInteger.valueOf(10000)) > 0) {
+            throw invalidPartNumber(value);
         }
-        throw invalidPartNumber(value);
+        return partNumber.intValue();
     }
 
     static AwsException invalidPartNumber(String value) {
