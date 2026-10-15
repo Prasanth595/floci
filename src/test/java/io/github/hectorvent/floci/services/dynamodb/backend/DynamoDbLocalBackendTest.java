@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.A
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Call;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Reply;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess.TimeToLive;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
@@ -276,6 +277,32 @@ class DynamoDbLocalBackendTest {
         Reply reply = execute(Api.DYNAMODB_STREAMS, "GetRecords", "{\"ShardIterator\":\"it\"}");
 
         assertEquals(REGION, reply.body().path("Records").path(0).path("awsRegion").asText());
+    }
+
+    @Test
+    void timeToLiveDeletionReadsAsRemoveByTheDynamoDbService() throws Exception {
+        answer(Api.DYNAMODB_STREAMS, "GetRecords", 200, "{\"Records\":[{\"eventName\":\"UNKNOWN_TO_SDK_VERSION\","
+                + "\"awsRegion\":\"ddblocal\",\"dynamodb\":{\"Keys\":{\"pk\":{\"S\":\"a\"}},"
+                + "\"OldImage\":{\"pk\":{\"S\":\"a\"}}}}]}");
+
+        Reply reply = execute(Api.DYNAMODB_STREAMS, "GetRecords", "{\"ShardIterator\":\"it\"}");
+
+        JsonNode record = reply.body().path("Records").path(0);
+        assertEquals("REMOVE", record.path("eventName").asText());
+        assertEquals(json("{\"Type\":\"Service\",\"PrincipalId\":\"dynamodb.amazonaws.com\"}"),
+                record.path("userIdentity"));
+        assertEquals("a", record.path("dynamodb").path("OldImage").path("pk").path("S").asText());
+    }
+
+    @Test
+    void writeRecordsKeepTheirEventNameAndCarryNoIdentity() throws Exception {
+        String records = "[{\"eventName\":\"INSERT\",\"dynamodb\":{}},{\"eventName\":\"MODIFY\",\"dynamodb\":{}},"
+                + "{\"eventName\":\"REMOVE\",\"dynamodb\":{}}]";
+        answer(Api.DYNAMODB_STREAMS, "GetRecords", 200, "{\"Records\":" + records + "}");
+
+        Reply reply = execute(Api.DYNAMODB_STREAMS, "GetRecords", "{\"ShardIterator\":\"it\"}");
+
+        assertEquals(json(records), reply.body().path("Records"));
     }
 
     @Test
@@ -601,6 +628,35 @@ class DynamoDbLocalBackendTest {
         assertFalse(table.isStreamEnabled());
         assertNull(table.getStreamArn());
         neverSent("UpdateTable");
+    }
+
+    @Test
+    void timeToLiveReadsDescribeTimeToLive() throws Exception {
+        answer("DescribeTimeToLive", 200, "{\"TimeToLiveDescription\":"
+                + "{\"TimeToLiveStatus\":\"ENABLED\",\"AttributeName\":\"expiresAt\"}}");
+
+        TimeToLive ttl = backend.timeToLive(SCOPE, "orders");
+
+        assertEquals(new TimeToLive(true, "expiresAt"), ttl);
+        assertEquals(json("{\"TableName\":\"orders\"}"), sent("DescribeTimeToLive"));
+    }
+
+    @Test
+    void timeToLiveDisabledIsOff() throws Exception {
+        answer("DescribeTimeToLive", 200, "{\"TimeToLiveDescription\":{\"TimeToLiveStatus\":\"DISABLED\"}}");
+
+        assertEquals(new TimeToLive(false, null), backend.timeToLive(SCOPE, "orders"));
+    }
+
+    @Test
+    void updateTimeToLiveSendsTheSpecification() throws Exception {
+        answer("UpdateTimeToLive", 200, "{\"TimeToLiveSpecification\":"
+                + "{\"AttributeName\":\"expiresAt\",\"Enabled\":false}}");
+
+        backend.updateTimeToLive(SCOPE, "orders", "expiresAt", false);
+
+        assertEquals(json("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":"
+                + "{\"AttributeName\":\"expiresAt\",\"Enabled\":false}}"), sent("UpdateTimeToLive"));
     }
 
     @Test

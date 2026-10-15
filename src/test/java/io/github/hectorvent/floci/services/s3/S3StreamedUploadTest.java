@@ -207,8 +207,13 @@ class S3StreamedUploadTest {
 
         assertEquals("NoSuchUpload", assertThrows(AwsException.class, () -> s3Service.storePart("bucket",
                 "multipart.bin", "no-such-upload", 1, unreadable(), NO_CHECKSUMS, null, null, null)).getErrorCode());
-        assertEquals("InvalidArgument", assertThrows(AwsException.class, () -> s3Service.storePart("bucket",
-                "multipart.bin", upload.getUploadId(), 10001, unreadable(), NO_CHECKSUMS, null, null, null)).getErrorCode());
+        AwsException invalidPart = assertThrows(AwsException.class, () -> s3Service.storePart("bucket",
+                "multipart.bin", upload.getUploadId(), 10001, unreadable(), NO_CHECKSUMS, null, null, null));
+        assertEquals("InvalidArgument", invalidPart.getErrorCode());
+        assertEquals(400, invalidPart.getHttpStatus());
+        assertEquals("Part number must be an integer between 1 and 10000, inclusive", invalidPart.getMessage());
+        assertEquals(Map.of("ArgumentName", "partNumber", "ArgumentValue", "10001"),
+                invalidPart.getExtendedData());
     }
 
     @Test
@@ -284,7 +289,9 @@ class S3StreamedUploadTest {
 
             assertEquals("EntityTooLarge", error.getErrorCode());
             assertEquals(400, error.getHttpStatus());
-            assertEquals("Your proposed upload exceeds the maximum allowed object size.", error.getMessage());
+            assertEquals("Your proposed upload exceeds the maximum allowed size", error.getMessage());
+            assertEquals(Map.of("ProposedSize", overLimit, "MaxSizeAllowed", S3Service.MAX_PART_SIZE),
+                    error.getExtendedData());
         }
         assertTrue(s3Service.getMultipartUpload("bucket", "copy.bin", upload.getUploadId()).getParts().isEmpty());
         assertNothingStaged();

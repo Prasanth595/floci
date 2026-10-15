@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.testing;
 
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import org.eclipse.microprofile.config.ConfigProvider;
 import org.junit.jupiter.api.Assumptions;
@@ -7,7 +8,6 @@ import org.junit.jupiter.api.Assumptions;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetAddress;
-import java.net.ServerSocket;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -73,6 +73,15 @@ public class SidecarContainersProfile implements QuarkusTestProfile {
     }
 
     /**
+     * This run's namespace, for a profile of another kind whose classes start containers that need
+     * the same isolation. Its containers are then removed by {@link #requireDockerAndImage} too when
+     * a killed run leaves them behind.
+     */
+    public static String namespace() {
+        return NAMESPACE;
+    }
+
+    /**
      * Identifies this machine and process id namespace, the scope a process id is valid in. On
      * Linux the namespace is {@code /proc/self/ns/pid}; elsewhere the host name has to do alone.
      */
@@ -95,8 +104,8 @@ public class SidecarContainersProfile implements QuarkusTestProfile {
     }
 
     private static int freePort() {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
+        try {
+            return FreePorts.anyInterfacePort();
         } catch (IOException e) {
             throw new UncheckedIOException("No free port for the sidecar test application", e);
         }

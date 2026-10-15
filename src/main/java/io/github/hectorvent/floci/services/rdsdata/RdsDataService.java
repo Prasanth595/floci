@@ -19,6 +19,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.sql.Array;
 import java.sql.Blob;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -40,6 +41,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 @ApplicationScoped
 public class RdsDataService implements Resettable {
@@ -121,22 +123,28 @@ public class RdsDataService implements Resettable {
     void shutdown() {
         transactionCleanupExecutor.shutdownNow();
         transactions.forEach((id, tx) -> {
-            synchronized (tx) {
+            tx.lock.lock();
+            try {
                 if (transactions.remove(id, tx)) {
                     rollbackQuietly(tx.connection);
                     tx.close();
                 }
+            } finally {
+                tx.lock.unlock();
             }
         });
     }
 
     public void clear() {
         transactions.forEach((id, tx) -> {
-            synchronized (tx) {
+            tx.lock.lock();
+            try {
                 if (transactions.remove(id, tx)) {
                     rollbackQuietly(tx.connection);
                     tx.close();
                 }
+            } finally {
+                tx.lock.unlock();
             }
         });
         transactions.clear();
@@ -211,9 +219,10 @@ public class RdsDataService implements Resettable {
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
-        synchronized (tx) {
+        validateTransactionResource(tx, resourceArn, region);
+        acquireTransaction(tx);
+        try {
             requireActiveTransaction(transactionId, tx);
-            validateTransactionResource(tx, resourceArn, region);
             if (!transactions.remove(transactionId, tx)) {
                 throw transactionNotFound(transactionId);
             }
@@ -224,6 +233,8 @@ public class RdsDataService implements Resettable {
             } finally {
                 tx.close();
             }
+        } finally {
+            tx.lock.unlock();
         }
         ObjectNode response = objectMapper.createObjectNode();
         response.put("transactionStatus", "Transaction Committed");
@@ -235,9 +246,10 @@ public class RdsDataService implements Resettable {
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
-        synchronized (tx) {
+        validateTransactionResource(tx, resourceArn, region);
+        acquireTransaction(tx);
+        try {
             requireActiveTransaction(transactionId, tx);
-            validateTransactionResource(tx, resourceArn, region);
             if (!transactions.remove(transactionId, tx)) {
                 throw transactionNotFound(transactionId);
             }
@@ -248,6 +260,8 @@ public class RdsDataService implements Resettable {
             } finally {
                 tx.close();
             }
+        } finally {
+            tx.lock.unlock();
         }
         ObjectNode response = objectMapper.createObjectNode();
         response.put("transactionStatus", "Rollback Complete");
@@ -262,11 +276,14 @@ public class RdsDataService implements Resettable {
 
         if (transactionId != null && !transactionId.isBlank()) {
             TransactionContext tx = transaction(transactionId);
-            synchronized (tx) {
+            validateTransactionIdentity(tx, request, region);
+            acquireTransaction(tx);
+            try {
                 requireActiveTransaction(transactionId, tx);
-                validateTransactionIdentity(tx, request, region);
-                tx.refresh(transactionTtl);
                 return work.execute(tx.connection, tx.engine);
+            } finally {
+                tx.refresh(transactionTtl);
+                tx.lock.unlock();
             }
         }
 
@@ -486,10 +503,12 @@ public class RdsDataService implements Resettable {
             try (ResultSet rs = statement.getResultSet()) {
                 ResultSetMetaData meta = rs.getMetaData();
                 rejectUnsupportedResultTypes(meta, engine);
-                if (includeMetadata) {
-                    response.set("columnMetadata", RdsDataColumnMetadata.toColumnMetadata(objectMapper, meta));
+                ArrayNode columnMetadata = includeMetadata
+                        ? RdsDataColumnMetadata.toColumnMetadata(objectMapper, meta) : null;
+                if (columnMetadata != null) {
+                    response.set("columnMetadata", columnMetadata);
                 }
-                response.set("records", records(rs, meta));
+                response.set("records", records(rs, meta, columnMetadata));
             }
             response.put("numberOfRecordsUpdated", 0L);
         } else {
@@ -545,7 +564,7 @@ public class RdsDataService implements Resettable {
         }
     }
 
-    private ArrayNode records(ResultSet rs, ResultSetMetaData meta) throws SQLException {
+    private ArrayNode records(ResultSet rs, ResultSetMetaData meta, ArrayNode columnMetadata) throws SQLException {
         ArrayNode records = objectMapper.createArrayNode();
         int columnCount = meta.getColumnCount();
         // Serialized size of the records array: its two brackets plus one comma between rows.
@@ -555,6 +574,9 @@ public class RdsDataService implements Resettable {
             long rawRowBytes = 0;
             for (int i = 1; i <= columnCount; i++) {
                 Object value = rs.getObject(i);
+                if (columnMetadata != null && value instanceof Array array) {
+                    ((ObjectNode) columnMetadata.get(i - 1)).put("arrayBaseColumnType", array.getBaseType());
+                }
                 rawRowBytes += valueBytes(value);
                 row.add(RdsDataFieldMapper.toField(objectMapper, value, meta.getColumnType(i)));
             }
@@ -654,15 +676,24 @@ public class RdsDataService implements Resettable {
         }
     }
 
+    private void acquireTransaction(TransactionContext tx) {
+        if (!tx.lock.tryLock()) {
+            requireActiveTransaction(tx.id, tx);
+            throw new AwsException("DatabaseErrorException", "Transaction is still running a query", 400);
+        }
+    }
+
     private void cleanupExpiredTransactions() {
         Instant now = Instant.now();
         transactions.forEach((id, tx) -> {
-            if (tx.expiresAt.isBefore(now)) {
-                synchronized (tx) {
+            if (tx.expiresAt.isBefore(now) && tx.lock.tryLock()) {
+                try {
                     if (tx.expiresAt.isBefore(now) && transactions.remove(id, tx)) {
                         rollbackQuietly(tx.connection);
                         tx.close();
                     }
+                } finally {
+                    tx.lock.unlock();
                 }
             }
         });
@@ -816,6 +847,7 @@ public class RdsDataService implements Resettable {
         private final String database;
         private final String region;
         private final RdsBackendGate.Lease lease;
+        private final ReentrantLock lock = new ReentrantLock();
         private volatile Instant expiresAt;
 
         private TransactionContext(
