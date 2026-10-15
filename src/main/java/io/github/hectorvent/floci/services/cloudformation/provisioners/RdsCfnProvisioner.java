@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -439,7 +440,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         List<DbRoleAssociation> roles = parseAssociatedRoles(props, engine);
         if (!roles.isEmpty()) {
-            rdsService.validateClusterRoleAssociations(id, roles);
+            rdsService.validateClusterRoleAssociations(id, resolveOptional(props, "Engine", engine), roles);
         }
         boolean created = cluster == null;
         if (cluster != null) {
@@ -545,21 +546,30 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 }
             }
         } else {
-            List<DbRoleAssociation> current = cluster.getAssociatedRoles();
-            for (DbRoleAssociation dropped : droppedRoles(r, roles)) {
-                if (containsRole(current, dropped)) {
-                    cluster = rdsService.removeRoleFromDbCluster(region, id, dropped.getRoleArn(),
-                            dropped.getFeatureName());
+            List<DbRoleAssociation> removed = new ArrayList<>();
+            List<DbRoleAssociation> added = new ArrayList<>();
+            try {
+                List<DbRoleAssociation> current = cluster.getAssociatedRoles();
+                for (DbRoleAssociation dropped : droppedRoles(r, roles)) {
+                    if (containsRole(current, dropped)) {
+                        cluster = rdsService.removeRoleFromDbCluster(region, id, dropped.getRoleArn(),
+                                dropped.getFeatureName());
+                        removed.add(dropped);
+                    }
                 }
-            }
-            // A role the last template already declared is left as it is. One the template newly
-            // declares is always added, so a role attached by hand first fails the update with
-            // DBClusterRoleAlreadyExists, as it does on AWS.
-            List<DbRoleAssociation> declared = readAssociatedRoles(r.getAttributes().get(ASSOCIATED_ROLES_ATTR));
-            for (DbRoleAssociation role : roles) {
-                if (!containsRole(declared, role) || !containsRole(cluster.getAssociatedRoles(), role)) {
-                    cluster = rdsService.addRoleToDbCluster(region, id, role.getRoleArn(), role.getFeatureName());
+                // A role the last template already declared is left as it is. One the template newly
+                // declares is always added, so a role attached by hand first fails the update with
+                // DBClusterRoleAlreadyExists, as it does on AWS.
+                List<DbRoleAssociation> declared = readAssociatedRoles(r.getAttributes().get(ASSOCIATED_ROLES_ATTR));
+                for (DbRoleAssociation role : roles) {
+                    if (!containsRole(declared, role) || !containsRole(cluster.getAssociatedRoles(), role)) {
+                        cluster = rdsService.addRoleToDbCluster(region, id, role.getRoleArn(), role.getFeatureName());
+                        added.add(role);
+                    }
                 }
+            } catch (AwsException e) {
+                undoClusterRoleChanges(id, region, added, removed);
+                throw e;
             }
         }
         recordAssociatedRoles(r, roles, update);
@@ -580,21 +590,72 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 throw e;
             }
         } else {
-            List<DbRoleAssociation> current = instance.getAssociatedRoles();
-            for (DbRoleAssociation dropped : droppedRoles(r, roles)) {
-                if (containsRole(current, dropped)) {
-                    instance = rdsService.removeRoleFromDbInstance(region, id, dropped.getRoleArn(),
-                            dropped.getFeatureName());
+            List<DbRoleAssociation> removed = new ArrayList<>();
+            List<DbRoleAssociation> added = new ArrayList<>();
+            try {
+                List<DbRoleAssociation> current = instance.getAssociatedRoles();
+                for (DbRoleAssociation dropped : droppedRoles(r, roles)) {
+                    if (containsRole(current, dropped)) {
+                        instance = rdsService.removeRoleFromDbInstance(region, id, dropped.getRoleArn(),
+                                dropped.getFeatureName());
+                        removed.add(dropped);
+                    }
                 }
-            }
-            for (DbRoleAssociation role : roles) {
-                if (!containsRole(instance.getAssociatedRoles(), role)) {
-                    instance = addInstanceRole(instance, id, role, region);
+                for (DbRoleAssociation role : roles) {
+                    if (!containsRole(instance.getAssociatedRoles(), role)) {
+                        instance = addInstanceRole(instance, id, role, region);
+                        if (containsRole(instance.getAssociatedRoles(), role)) {
+                            added.add(role);
+                        }
+                    }
                 }
+            } catch (AwsException e) {
+                undoInstanceRoleChanges(id, region, added, removed);
+                throw e;
             }
         }
         recordAssociatedRoles(r, roles, update);
         return instance;
+    }
+
+    /**
+     * Puts a cluster's roles back as they were before a failed update: the roles it added are
+     * removed and the ones it removed are added again, so the cluster matches the record the stack
+     * restores and a retry starts from there. A step that fails here is logged and the rest go on,
+     * so the original refusal is what the stack reports.
+     */
+    private void undoClusterRoleChanges(String id, String region, List<DbRoleAssociation> added,
+                                        List<DbRoleAssociation> removed) {
+        for (DbRoleAssociation role : added) {
+            undoStep(() -> rdsService.removeRoleFromDbCluster(region, id, role.getRoleArn(), role.getFeatureName()),
+                    "remove", role, "DB cluster", id);
+        }
+        for (DbRoleAssociation role : removed) {
+            undoStep(() -> rdsService.addRoleToDbCluster(region, id, role.getRoleArn(), role.getFeatureName()),
+                    "restore", role, "DB cluster", id);
+        }
+    }
+
+    /** As {@link #undoClusterRoleChanges}, for an instance. */
+    private void undoInstanceRoleChanges(String id, String region, List<DbRoleAssociation> added,
+                                         List<DbRoleAssociation> removed) {
+        for (DbRoleAssociation role : added) {
+            undoStep(() -> rdsService.removeRoleFromDbInstance(region, id, role.getRoleArn(), role.getFeatureName()),
+                    "remove", role, "DB instance", id);
+        }
+        for (DbRoleAssociation role : removed) {
+            undoStep(() -> rdsService.addRoleToDbInstance(region, id, role.getRoleArn(), role.getFeatureName()),
+                    "restore", role, "DB instance", id);
+        }
+    }
+
+    private static void undoStep(Runnable step, String verb, DbRoleAssociation role, String kind, String id) {
+        try {
+            step.run();
+        } catch (AwsException e) {
+            LOG.warnv("Could not {0} role {1} on {2} {3} while undoing a failed update: {4}",
+                    verb, role.getRoleArn(), kind, id, e.getMessage());
+        }
     }
 
     /**
@@ -659,7 +720,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 roles.add(new DbRoleAssociation(entry.path("RoleArn").asText(null),
                         entry.path("FeatureName").asText(null)));
             }
-        } catch (Exception e) {
+        } catch (JsonProcessingException e) {
             LOG.warnv("Ignoring unreadable AssociatedRoles record: {0}", raw);
         }
         return roles;

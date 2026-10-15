@@ -236,6 +236,43 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
         }
     }
 
+    @Test
+    void aFailedUpdateUndoesItsOwnRoleChanges() {
+        // The update removes EXPORT_ROLE and adds LAMBDA_ROLE before MANUAL_ROLE, attached by hand,
+        // is refused. Both changes are undone, so the cluster matches the record the stack keeps
+        // and a retry without MANUAL_ROLE goes through.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-roles-undo-" + suffix;
+        String clusterId = "cfn-roles-undo-" + suffix;
+        String cluster = """
+                {"Resources": {"Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                  "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "password123",
+                  "AssociatedRoles": %s}}}}
+                """;
+        try {
+            stack("CreateStack", stackName, cluster.formatted(clusterId,
+                    "[{\"RoleArn\": \"%s\"}]".formatted(EXPORT_ROLE)));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            rds("AddRoleToDBCluster").formParam("DBClusterIdentifier", clusterId)
+                    .formParam("RoleArn", MANUAL_ROLE)
+            .when().post("/").then().statusCode(200);
+
+            stack("UpdateStack", stackName, cluster.formatted(clusterId,
+                    "[{\"RoleArn\": \"%s\"}, {\"RoleArn\": \"%s\"}]".formatted(LAMBDA_ROLE, MANUAL_ROLE)));
+            assertTrue(CfnStackWaits.awaitTerminal(stackName).status().startsWith("UPDATE_ROLLBACK"));
+            assertThat(clusterRoles(clusterId), containsInAnyOrder(EXPORT_ROLE, MANUAL_ROLE));
+
+            stack("UpdateStack", stackName, cluster.formatted(clusterId,
+                    "[{\"RoleArn\": \"%s\"}, {\"RoleArn\": \"%s\"}]".formatted(EXPORT_ROLE, LAMBDA_ROLE)));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertThat(clusterRoles(clusterId), containsInAnyOrder(EXPORT_ROLE, LAMBDA_ROLE, MANUAL_ROLE));
+        } finally {
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
     private static String template(String clusterId, String instanceId, String clusterRoles) {
         return """
                 {"Resources": {
