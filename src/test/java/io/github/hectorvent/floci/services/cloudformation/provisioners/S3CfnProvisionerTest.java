@@ -83,10 +83,10 @@ class S3CfnProvisionerTest {
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
-            {"Rules":[{"ObjectOwnership":"Bogus"}]}                    | Invalid ObjectOwnership at #/OwnershipControls/Rules/0: Bogus
+            {"Rules":[{"ObjectOwnership":"Bogus"}]}                    | The XML you provided was not well-formed or did not validate against our published schema.
             {"Rules":[{}]}                                               | Model validation failed (#/OwnershipControls/Rules/0: required key [ObjectOwnership] not found)
             {"Rules":[{"ObjectOwnership":["BucketOwnerEnforced"]}]}    | Model validation failed (#/OwnershipControls/Rules/0/ObjectOwnership: expected type: String, found: JSONArray)
-            {"Rules":[]}                                                 | OwnershipControls requires at least one rule
+            {"Rules":[]}                                                 | The XML you provided was not well-formed or did not validate against our published schema.
             {"Rules":"not-an-array"}                                     | Model validation failed (#/OwnershipControls/Rules: expected type: JSONArray, found: String)
             """)
     void invalidOwnershipControlsFailBeforeCreatingTheBucket(String controls, String message) {
@@ -106,7 +106,8 @@ class S3CfnProvisionerTest {
                   {"ObjectOwnership":"BucketOwnerEnforced"}]}}
                 """));
 
-        assertEquals("OwnershipControls requires exactly one rule", error.getMessage());
+        assertEquals("The XML you provided was not well-formed or did not validate against our published schema.",
+                error.getMessage());
         verify(s3, never()).createBucket(anyString(), anyString());
         verify(s3, never()).putBucketOwnershipControls(anyString(), anyString());
     }

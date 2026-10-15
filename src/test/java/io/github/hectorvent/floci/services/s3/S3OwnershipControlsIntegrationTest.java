@@ -21,6 +21,8 @@ class S3OwnershipControlsIntegrationTest {
                 </Rule>
             </OwnershipControls>
             """;
+    private static final String SCHEMA_MESSAGE =
+            "The XML you provided was not well-formed or did not validate against our published schema.";
 
     @Test
     @Order(1)
@@ -75,7 +77,26 @@ class S3OwnershipControlsIntegrationTest {
             .put("/" + BUCKET + "?ownershipControls")
         .then()
             .statusCode(400)
-            .body(containsString("InvalidRequest"));
+            .body(containsString("<Code>MalformedXML</Code>"))
+            .body(containsString(SCHEMA_MESSAGE));
+
+        given()
+            .body("<OwnershipControls xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>")
+        .when()
+            .put("/" + BUCKET + "?ownershipControls")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>MalformedXML</Code>"))
+            .body(containsString(SCHEMA_MESSAGE));
+
+        given()
+            .body(OWNERSHIP_CONTROLS_XML.replace("<ObjectOwnership>BucketOwnerPreferred</ObjectOwnership>", ""))
+        .when()
+            .put("/" + BUCKET + "?ownershipControls")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>MalformedXML</Code>"))
+            .body(containsString(SCHEMA_MESSAGE));
 
         given()
             .body(OWNERSHIP_CONTROLS_XML.replace("</OwnershipControls>",
@@ -84,7 +105,8 @@ class S3OwnershipControlsIntegrationTest {
             .put("/" + BUCKET + "?ownershipControls")
         .then()
             .statusCode(400)
-            .body(containsString("InvalidRequest"));
+            .body(containsString("<Code>MalformedXML</Code>"))
+            .body(containsString(SCHEMA_MESSAGE));
 
         given()
         .when()

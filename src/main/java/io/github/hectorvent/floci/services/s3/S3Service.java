@@ -113,6 +113,8 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
     private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
     private static final String LEGACY_ACCESS_KEY_ID = "test";
+    private static final String S3_XML_SCHEMA_ERROR =
+            "The XML you provided was not well-formed or did not validate against our published schema.";
     private static final Set<String> SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES = Set.of("AES256", "aws:kms", "aws:kms:dsse", "aws:fsx");
     private static final String SSE_C_ALGORITHM = "AES256";
     private static final int SSE_C_KEY_BYTES = 32;
@@ -5057,24 +5059,21 @@ public class S3Service implements Resettable, ResourceProvider {
     /** Validates the same ownership document for direct S3 calls and CloudFormation templates. */
     public static void validateOwnershipControls(String xml) {
         if (!"OwnershipControls".equals(XmlParser.rootElementName(xml))) {
-            throw new AwsException("MalformedXML", "Invalid OwnershipControls document", 400);
+            throw new AwsException("MalformedXML", S3_XML_SCHEMA_ERROR, 400);
         }
         XmlParser.XmlElement controls = XmlParser.extractElementTree(xml, "OwnershipControls");
         long ruleCount = controls.count("Rule");
         if (ruleCount != 1) {
-            throw new AwsException("InvalidRequest", ruleCount == 0
-                    ? "OwnershipControls requires at least one rule"
-                    : "OwnershipControls requires exactly one rule", 400);
+            throw new AwsException("MalformedXML", S3_XML_SCHEMA_ERROR, 400);
         }
         XmlParser.XmlElement rule = controls.child("Rule");
         XmlParser.XmlElement ownership = rule.child("ObjectOwnership");
         if (rule.count("ObjectOwnership") != 1 || ownership == null) {
-            throw new AwsException("MalformedXML", "OwnershipControls rule requires ObjectOwnership", 400);
+            throw new AwsException("MalformedXML", S3_XML_SCHEMA_ERROR, 400);
         }
         if (!Set.of("BucketOwnerPreferred", "ObjectWriter", "BucketOwnerEnforced")
                 .contains(ownership.text())) {
-            throw new AwsException("InvalidRequest",
-                    "Invalid ObjectOwnership at #/OwnershipControls/Rules/0: " + ownership.text(), 400);
+            throw new AwsException("MalformedXML", S3_XML_SCHEMA_ERROR, 400);
         }
     }
 
