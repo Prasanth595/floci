@@ -74,6 +74,9 @@ public class ContainerLifecycleManager {
     private static final Pattern KEYRING_QUOTA_PATTERN =
             Pattern.compile("join keyctl.*disk quota exceeded", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
+    /** Matches 3-4 octal digits (e.g. "0755", "755", "2775"), matching CreationInfo.Permissions. */
+    public static final Pattern PERMISSIONS_PATTERN = Pattern.compile("^[0-7]{3,4}$");
+
     private static final long NANO_CPUS_PER_CPU = 1_000_000_000L;
     private static final String CONTAINER_NETWORK_MODE_PREFIX = "container:";
 
@@ -647,6 +650,11 @@ public class ContainerLifecycleManager {
                 rootPermissions, initImage);
     }
 
+    /** True when {@code permissions} is 3 to 4 octal digits (e.g. "0755", "755", "2775"). */
+    public static boolean isValidPermissions(String permissions) {
+        return permissions != null && PERMISSIONS_PATTERN.matcher(permissions).matches();
+    }
+
     /** Initialises an access point's root without narrowing AWS's unsigned 32-bit POSIX ids. */
     public void ensureSharedVolume(String volumeName, long ownerUid, long ownerGid,
                                    String rootPermissions, String initImage) {
@@ -674,7 +682,7 @@ public class ContainerLifecycleManager {
         // Validate before splicing into the helper's `sh -c`, matching CreationInfo.Permissions
         // (^[0-7]{3,4}$), so a typo can't produce a mangled script that soft-fails.
         rootPermissions.ifPresent(p -> {
-            if (!p.matches("^[0-7]{3,4}$")) {
+            if (!isValidPermissions(p)) {
                 throw new IllegalArgumentException(
                         "floci.storage.efs root-permissions must be 3-4 octal digits (e.g. \"0777\","
                                 + " or \"2775\" for setgid): " + p);

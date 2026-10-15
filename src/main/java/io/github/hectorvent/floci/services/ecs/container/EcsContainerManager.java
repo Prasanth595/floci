@@ -2326,7 +2326,7 @@ public class EcsContainerManager {
                 throw new AwsException("ClientException",
                         "EFS access point " + efs.accessPointId() + " has incomplete CreationInfo", 400);
             }
-            if (!creation.getPermissions().matches("^[0-7]{3,4}$")) {
+            if (!ContainerLifecycleManager.isValidPermissions(creation.getPermissions())) {
                 throw new AwsException("ClientException",
                         "EFS access point " + efs.accessPointId() + " has invalid CreationInfo permissions: "
                                 + creation.getPermissions(), 400);
