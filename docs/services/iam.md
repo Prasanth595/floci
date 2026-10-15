@@ -1163,14 +1163,12 @@ An S3 object operation is checked as the action the S3 documentation gives it:
   - Reading or heading a version needs `s3:GetObjectVersion`; `s3:GetObject` is not needed.
   - Deleting a version needs `s3:DeleteObjectVersion`, so a deny on it stops permanent deletes
     while a plain delete still adds a delete marker.
-  - A version's ACL and annotations use `s3:GetObjectVersionAcl`, `s3:PutObjectVersionAcl` and the
-    `s3:*ObjectVersionAnnotation(s)` actions.
-  - Tagging a version is still checked as the `s3:*ObjectTagging` actions: the tagging operations
-    act on the current version whatever `versionId` names.
+  - A version's ACL, tags and annotations use `s3:GetObjectVersionAcl`, `s3:PutObjectVersionAcl`,
+    the `s3:*ObjectVersionTagging` actions and the `s3:*ObjectVersionAnnotation(s)` actions.
   - S3's own access check under `floci.services.s3.enforce-auth`, which evaluates bucket policies
     and ACLs, checks reading, selecting from or deleting a version as `s3:GetObjectVersion` or
-    `s3:DeleteObjectVersion`, but a version's ACL and annotation requests as the base actions, and
-    offers no `s3:versionid`.
+    `s3:DeleteObjectVersion`, but a version's ACL, tagging and annotation requests as the base
+    actions, and offers no `s3:versionid`.
   - Deleting a version with an `If-Match` ETag also needs `s3:GetObject`, as a plain conditional
     delete does: the S3 user guide says the condition is evaluated against the current version.
 - **Bucket configurations:**
@@ -1455,7 +1453,7 @@ floci populates:
 - `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
   `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
   `s3:DeleteObjectTagging`, `s3:PutObjectTagging` and the annotation actions, and for their
-  version actions (`s3:GetObjectVersion`, `s3:GetObjectVersionAcl` and so on). A `versionId` in the request
+  version actions (`s3:GetObjectVersion`, `s3:GetObjectVersionTagging` and so on). A `versionId` in the request
   selects the version whose tags are read. **`s3:DeleteObject` and `s3:PutObject` do not receive this key**, as measured on AWS.
   An allow conditioned on it denies the delete of a correctly tagged object, and a create cannot
   be gated on tags an object does not have yet.
