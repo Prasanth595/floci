@@ -30,6 +30,7 @@ import software.amazon.awssdk.services.lambdaweb.model.ServiceConfig;
 import software.amazon.awssdk.services.lambdaweb.model.UpdateWebFunctionEndpointResponse;
 import software.amazon.awssdk.services.lambdaweb.model.ValidationException;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.NoSuchBucketException;
 
 import java.util.Map;
 
@@ -58,19 +59,24 @@ class LambdaWebTest {
         s3.putObject(r -> r.bucket(bucket).key("app.zip"), RequestBody.fromString("zip"));
     }
 
+    /** Only "already gone" is tolerated; any other failure to clean up fails the run. */
     @AfterAll
     static void cleanup() {
         if (lambdaWeb != null) {
             try {
                 lambdaWeb.deleteWebFunction(r -> r.functionName(FUNCTION_NAME));
-            } catch (Exception ignored) {}
+            } catch (ResourceNotFoundException expected) {
+                // The last test deletes the function itself.
+            }
             lambdaWeb.close();
         }
         if (s3 != null) {
             try {
                 s3.deleteObject(r -> r.bucket(bucket).key("app.zip"));
                 s3.deleteBucket(r -> r.bucket(bucket));
-            } catch (Exception ignored) {}
+            } catch (NoSuchBucketException expected) {
+                // Setup did not get as far as creating the bucket.
+            }
             s3.close();
         }
     }
