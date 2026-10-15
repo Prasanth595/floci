@@ -139,7 +139,8 @@ class ContainerLifecycleManagerNetworkTest {
         IllegalStateException e = assertThrows(IllegalStateException.class,
                 () -> manager().createAndStart(spec("floci-nte", Map.of(8080, 18080), List.of())));
 
-        assertTrue(e.getMessage().contains("floci-nte"), e.getMessage());
+        assertTrue(e.getMessage().contains("Docker network floci-nte"), e.getMessage());
+        assertTrue(e.getMessage().contains("network floci-nte not found"), e.getMessage());
         verify(removeCmd).exec();
     }
 
