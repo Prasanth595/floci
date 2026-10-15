@@ -179,21 +179,19 @@ final class AutoPauseController {
                     cancelTimer();
                     return new ControllerLease();
                 }
+                if (state == State.PAUSING) {
+                    pauseCanceled = true;
+                }
                 if (!waitForResume) {
                     if (state == State.PAUSED && !resumeRequested) {
                         startTimer(this::resumeInBackground, Duration.ZERO);
                         resumeRequested = true;
-                    } else if (state == State.PAUSING) {
-                        pauseCanceled = true;
                     }
                     throw new RdsBackendGate.ResumingException();
                 }
                 if (state == State.PAUSED) {
                     resume();
                 } else {
-                    if (state == State.PAUSING) {
-                        pauseCanceled = true;
-                    }
                     settled.await();
                 }
             }
