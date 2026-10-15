@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -27,6 +29,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -105,7 +108,7 @@ public class LambdaWebService implements Resettable {
     static final Pattern REGION = Pattern.compile("([a-z]{2,}-){2,}[0-9]");
     static final Pattern TAG_KEY = Pattern.compile("[a-zA-Z0-9 _\\.:/=+\\-@]+");
     static final Pattern TAG_VALUE = Pattern.compile("[a-zA-Z0-9 _\\.:/=+\\-@]*");
-    static final Pattern NEXT_TOKEN = Pattern.compile("[a-f0-9-]{36}");
+    private static final String TOKEN_MARKER = "lambda-web|";
     static final Pattern POLICY_REVISION_ID = Pattern.compile("[0-9a-f-]{36}");
     private static final Pattern FILTER_NAME = Pattern.compile("[a-zA-Z0-9]+");
     private static final Pattern FILTER_VALUE = Pattern.compile("[a-zA-Z0-9_-]+");
@@ -128,8 +131,6 @@ public class LambdaWebService implements Resettable {
     /** Keyed {@code region/functionName}. The backend adds the caller's account to every key. */
     private StorageBackend<String, WebFunction> functions;
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
-    /** The key of the item each minted page token ended on. */
-    private final ConcurrentHashMap<String, PageAnchor> pageAnchors = new ConcurrentHashMap<>();
 
     @Inject
     public LambdaWebService(RegionResolver regionResolver, StorageFactory storageFactory, EmulatorConfig config,
@@ -155,10 +156,6 @@ public class LambdaWebService implements Resettable {
     @Override
     public void clear() {
         functions.clear();
-        pageAnchors.clear();
-    }
-
-    public record Page<T>(List<T> items, String nextToken) {
     }
 
     /** An endpoint before and after an update. The update response shows both. */
@@ -234,18 +231,17 @@ public class LambdaWebService implements Resettable {
         }
     }
 
-    public Page<WebFunction> listFunctions(String region, JsonNode request) {
+    public PaginatedResult<WebFunction> listFunctions(String region, JsonNode request) {
         ListRequest list = parseListRequest(request);
-        List<WebFunction> byName = in(region).stream()
+        List<WebFunction> snapshots = in(region).stream()
                 .map(fn -> {
                     synchronized (lockFor(region, fn.functionName)) {
                         return copy(fn, WebFunction.class);
                     }
                 })
-                .sorted(Comparator.comparing(f -> f.functionName))
                 .toList();
-        return page(list.matchesState("Active") ? byName : List.of(), list,
-                scope("ListWebFunctions", region, null, list), f -> f.functionName, true);
+        return page(list.matchesState("Active") ? snapshots : List.of(), list,
+                scope("ListWebFunctions", region, null, list), f -> f.functionName);
     }
 
     public void deleteFunction(String region, String functionNameOrArn) {
@@ -294,19 +290,24 @@ public class LambdaWebService implements Resettable {
         }
     }
 
-    public Page<WebFunctionRevision> listRevisions(String region, String functionNameOrArn, JsonNode request) {
+    public PaginatedResult<WebFunctionRevision> listRevisions(String region, String functionNameOrArn,
+                                                              JsonNode request) {
         ListRequest list = parseListRequest(request);
         String functionName = resolveFunctionName(region, functionNameOrArn, "ListWebFunctionRevisions");
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
-            List<WebFunctionRevision> newestFirst = fn.revisions.values().stream()
-                    .sorted(Comparator.comparing((WebFunctionRevision r) -> r.createdAt).reversed())
+            List<WebFunctionRevision> snapshots = fn.revisions.values().stream()
                     .map(r -> copy(r, WebFunctionRevision.class))
                     .toList();
-            return page(list.matchesState("Active") ? newestFirst : List.of(), list,
-                    scope("ListWebFunctionRevisions", region, functionName, list),
-                    r -> LambdaWebResponses.timestamp(r.createdAt) + " " + r.revisionId, false);
+            return page(list.matchesState("Active") ? snapshots : List.of(), list,
+                    scope("ListWebFunctionRevisions", region, functionName, list), LambdaWebService::newestFirst);
         }
+    }
+
+    /** A cursor that sorts revisions newest first. */
+    private static String newestFirst(WebFunctionRevision revision) {
+        long micros = ChronoUnit.MICROS.between(Instant.EPOCH, revision.createdAt);
+        return String.format(Locale.ROOT, "%019d", Long.MAX_VALUE - micros) + " " + revision.revisionId;
     }
 
     public void deleteRevision(String region, String functionNameOrArn, String revisionIdOrArn) {
@@ -530,17 +531,17 @@ public class LambdaWebService implements Resettable {
         }
     }
 
-    public Page<WebFunctionEndpoint> listEndpoints(String region, String functionNameOrArn, JsonNode request) {
+    public PaginatedResult<WebFunctionEndpoint> listEndpoints(String region, String functionNameOrArn,
+                                                              JsonNode request) {
         ListRequest list = parseListRequest(request);
         String functionName = resolveFunctionName(region, functionNameOrArn, "ListWebFunctionEndpoints");
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
-            List<WebFunctionEndpoint> byName = fn.endpoints.values().stream()
-                    .sorted(Comparator.comparing(e -> e.endpointName))
+            List<WebFunctionEndpoint> snapshots = fn.endpoints.values().stream()
                     .map(e -> copy(e, WebFunctionEndpoint.class))
                     .toList();
-            return page(list.matchesState("Active") ? byName : List.of(), list,
-                    scope("ListWebFunctionEndpoints", region, functionName, list), e -> e.endpointName, true);
+            return page(list.matchesState("Active") ? snapshots : List.of(), list,
+                    scope("ListWebFunctionEndpoints", region, functionName, list), e -> e.endpointName);
         }
     }
 
@@ -1242,7 +1243,7 @@ public class LambdaWebService implements Resettable {
         String nextToken = LambdaWebJson.text(request, "nextToken");
         JsonNode filters = LambdaWebJson.list(request, "filters");
         LambdaWebValidation validation = new LambdaWebValidation();
-        validation.range("maxResults", maxResults, 1, 50).pattern("nextToken", nextToken, NEXT_TOKEN);
+        validation.range("maxResults", maxResults, 1, 50);
         List<String> badNames = new ArrayList<>();
         List<String> states = null;
         if (filters != null) {
@@ -1282,51 +1283,36 @@ public class LambdaWebService implements Resettable {
         return new ListRequest(states, maxResults == null ? DEFAULT_PAGE_SIZE : maxResults, nextToken);
     }
 
-    /** The request a page token belongs to and the sort key of the item its page ended on. */
-    private record PageAnchor(String scope, String sortKey) {
-    }
-
-    private static String scope(String operation, String region, String functionName, ListRequest list) {
-        return operation + "|" + region + "|" + functionName + "|" + list.states() + "|" + list.maxResults();
+    private String scope(String operation, String region, String functionName, ListRequest list) {
+        return TOKEN_MARKER + operation + "|" + region + "|" + regionResolver.getAccountId() + "|" + functionName
+                + "|" + list.states() + "|" + list.maxResults();
     }
 
     /**
-     * Pages a listing sorted by {@code sortKey}. A token continues the request it was issued for, after
-     * the item its page ended on; when that item is gone the next page starts at the first item past
-     * it in sort order, as on AWS.
+     * Pages a listing in {@code cursorOf} order. The token carries the request it was issued for and the
+     * cursor of the item its page ended on, so the next page starts past that item even when it is gone,
+     * as on AWS.
      */
-    private <T> Page<T> page(List<T> items, ListRequest list, String scope, Function<T, String> sortKey,
-                             boolean ascending) {
-        int start = 0;
-        if (list.nextToken() != null) {
-            PageAnchor anchor = pageAnchors.get(list.nextToken());
-            if (anchor == null) {
-                throw new AwsException("ValidationException",
-                        "The nextToken " + list.nextToken() + " is invalid or has expired.", 400);
-            }
-            if (!anchor.scope().equals(scope)) {
-                throw new AwsException("ValidationException", "The nextToken " + list.nextToken()
-                        + " does not match the request. Subsequent pagination requests must use the same"
-                        + " parameters as the initial request.", 400);
-            }
-            start = items.size();
-            for (int i = 0; i < items.size(); i++) {
-                int order = sortKey.apply(items.get(i)).compareTo(anchor.sortKey());
-                if (ascending ? order > 0 : order < 0) {
-                    start = i;
-                    break;
-                }
-            }
+    private static <T> PaginatedResult<T> page(List<T> items, ListRequest list, String scope,
+                                               Function<T, String> cursorOf) {
+        return Pagination.paginate(items, cursorOf, list.maxResults(), list.nextToken(), scope,
+                LambdaWebService::tokenError);
+    }
+
+    private static AwsException tokenError(String token) {
+        String decoded;
+        try {
+            decoded = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException expected) {
+            // Not base64, so not a token Floci issued.
+            decoded = "";
         }
-        int end = Math.min(items.size(), start + list.maxResults());
-        List<T> pageItems = items.subList(start, end);
-        String nextToken = null;
-        if (end < items.size()) {
-            String key = sortKey.apply(items.get(end - 1));
-            nextToken = UUID.nameUUIDFromBytes((scope + "|" + key).getBytes(StandardCharsets.UTF_8)).toString();
-            pageAnchors.put(nextToken, new PageAnchor(scope, key));
+        if (decoded.startsWith(TOKEN_MARKER)) {
+            return new AwsException("ValidationException", "The nextToken " + token
+                    + " does not match the request. Subsequent pagination requests must use the same"
+                    + " parameters as the initial request.", 400);
         }
-        return new Page<>(pageItems, nextToken);
+        return new AwsException("ValidationException", "The nextToken " + token + " is invalid or has expired.", 400);
     }
 
     // ---------------------------------------------------------------- storage

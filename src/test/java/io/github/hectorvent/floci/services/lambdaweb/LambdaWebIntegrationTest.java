@@ -520,8 +520,7 @@ class LambdaWebIntegrationTest {
         given().contentType("application/json").body("{\"nextToken\": \"not-a-token\"}")
                 .when().post(BASE + "/web-functions")
                 .then().statusCode(400)
-                .body("message", equalTo("1 validation error detected: Value 'not-a-token' at 'nextToken' failed to"
-                        + " satisfy constraint: Member must satisfy regular expression pattern: [a-f0-9-]{36}"));
+                .body("message", equalTo("The nextToken not-a-token is invalid or has expired."));
 
         given().contentType("application/json").body("{\"functionName\": \"-bad\"}")
                 .when().put(BASE + "/web-functions")

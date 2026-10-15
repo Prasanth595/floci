@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambdaweb;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebResponses.View;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
@@ -62,7 +63,7 @@ public class LambdaWebController {
     @Path("/web-functions")
     public Response listWebFunctions(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
-        LambdaWebService.Page<WebFunction> page = service.listFunctions(region, parse(body));
+        PaginatedResult<WebFunction> page = service.listFunctions(region, parse(body));
         return Response.ok(LambdaWebResponses.list("functions",
                 page.items().stream().map(LambdaWebResponses::function).toList(), page.nextToken())).build();
     }
@@ -96,7 +97,7 @@ public class LambdaWebController {
     public Response listWebFunctionRevisions(@Context HttpHeaders headers,
                                              @PathParam("functionName") String functionName, String body) {
         String region = regionResolver.resolveRegion(headers);
-        LambdaWebService.Page<WebFunctionRevision> page = service.listRevisions(region, functionName, parse(body));
+        PaginatedResult<WebFunctionRevision> page = service.listRevisions(region, functionName, parse(body));
         return Response.ok(LambdaWebResponses.list("revisions",
                 page.items().stream().map(r -> LambdaWebResponses.revisionSummary(r, View.STORED)).toList(),
                 page.nextToken())).build();
@@ -136,7 +137,7 @@ public class LambdaWebController {
     public Response listWebFunctionEndpoints(@Context HttpHeaders headers,
                                              @PathParam("functionName") String functionName, String body) {
         String region = regionResolver.resolveRegion(headers);
-        LambdaWebService.Page<WebFunctionEndpoint> page = service.listEndpoints(region, functionName, parse(body));
+        PaginatedResult<WebFunctionEndpoint> page = service.listEndpoints(region, functionName, parse(body));
         return Response.ok(LambdaWebResponses.list("endpoints",
                 page.items().stream().map(e -> LambdaWebResponses.endpointSummary(e, View.STORED)).toList(),
                 page.nextToken())).build();

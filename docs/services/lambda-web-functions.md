@@ -39,6 +39,7 @@ The `Lambda Web` service model (apiVersion 2025-03-07, `aws lambda-web` in the A
 - **Execution role and network connector** ARNs are checked for shape only. The assume-role check AWS makes is not done yet.
 - **Resource policies** are checked the way AWS checks them before storing: the document grammar, a `lambda:` action, a `Resource` that names the function, a valid principal, and no public `Allow` without a trusted condition. The policy is not evaluated on requests yet.
 - **ARNs** given as identifiers must name the request's region and the caller's account, as on AWS. A revision or endpoint ARN resolves by its id or name only.
+- **Page tokens** are base64 cursors that carry the request and the position of the page, not the UUIDs AWS issues. A token reused with other parameters gets the AWS "does not match the request" error, and any other token the "invalid or has expired" error.
 - **Domain names** take the form `<id>.001.lambda-web.<region>.<floci host>` and `<id>.lambda-web.global.<floci host>`, with the host and port of `floci.base-url`. A `PerRegion` endpoint gets one domain per region in `regionalEndpoints`.
 - **Not implemented yet:** invoking a function through its endpoint domain, execution environments, `IamAuth` on requests, the automatic deletion of revisions past 50, and the `AWS::Lambda::WebFunction*` CloudFormation types. The endpoint domain does not answer requests yet.
 

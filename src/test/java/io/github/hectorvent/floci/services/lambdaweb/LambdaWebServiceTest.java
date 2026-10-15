@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
@@ -275,19 +276,18 @@ class LambdaWebServiceTest {
     }
 
     @Test
-    void listsPageByNameWithUuidTokens() {
+    void listsPageByNameWithCursorTokens() {
         LambdaWebService service = service();
         for (String name : List.of("charlie", "alpha", "bravo")) {
             service.createFunction(REGION, createRequest(name));
         }
         ObjectNode request = mapper.createObjectNode().put("maxResults", 2);
-        LambdaWebService.Page<WebFunction> first = service.listFunctions(REGION, request);
+        PaginatedResult<WebFunction> first = service.listFunctions(REGION, request);
         assertEquals(List.of("alpha", "bravo"), first.items().stream().map(f -> f.functionName).toList());
         assertNotNull(first.nextToken());
-        assertTrue(first.nextToken().matches("[a-f0-9-]{36}"), first.nextToken());
 
         request.put("nextToken", first.nextToken());
-        LambdaWebService.Page<WebFunction> second = service.listFunctions(REGION, request);
+        PaginatedResult<WebFunction> second = service.listFunctions(REGION, request);
         assertEquals(List.of("charlie"), second.items().stream().map(f -> f.functionName).toList());
         assertNull(second.nextToken());
 
@@ -320,7 +320,7 @@ class LambdaWebServiceTest {
         assertEquals(mismatch, message(() -> service.listFunctions(REGION, otherSize)));
 
         ObjectNode revisions = mapper.createObjectNode().put("maxResults", 1);
-        LambdaWebService.Page<WebFunctionRevision> newest = service.listRevisions(REGION, "alpha", revisions);
+        PaginatedResult<WebFunctionRevision> newest = service.listRevisions(REGION, "alpha", revisions);
         assertEquals(60, newest.items().get(0).serviceConfig.timeoutSeconds);
         revisions.put("nextToken", newest.nextToken());
         assertEquals(30, service.listRevisions(REGION, "alpha", revisions).items().get(0).serviceConfig.timeoutSeconds);
