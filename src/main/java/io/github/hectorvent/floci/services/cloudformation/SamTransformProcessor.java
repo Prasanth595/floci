@@ -1405,13 +1405,7 @@ class SamTransformProcessor {
     private static String destinationType(JsonNode type, JsonNode template, Map<String, String> parameterValues) {
         String value = type.isTextual() ? type.asText() : null;
         if (type.isObject() && type.size() == 1 && type.path("Ref").isTextual()) {
-            String parameter = type.path("Ref").asText();
-            JsonNode defaultValue = template.path("Parameters").path(parameter).path("Default");
-            if (parameterValues.containsKey(parameter)) {
-                value = parameterValues.get(parameter);
-            } else if (defaultValue.isTextual()) {
-                value = defaultValue.asText();
-            }
+            value = parameterValue(type.path("Ref").asText(), template, parameterValues);
         }
         return value != null && EVENT_INVOKE_DESTINATION_TYPES.contains(value) ? value : null;
     }
