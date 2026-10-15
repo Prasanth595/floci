@@ -1387,7 +1387,8 @@ public class S3Service implements Resettable, ResourceProvider {
         if (decision == ResourcePolicyDecision.EXPLICIT_DENY) {
             throw accessDeniedException(bucketName, key);
         }
-        if (decision == ResourcePolicyDecision.ALLOW || decision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER) {
+        if (decision == ResourcePolicyDecision.ALLOW || decision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER
+                || decision == ResourcePolicyDecision.ALLOW_ACCOUNT) {
             return;
         }
         if (sameAccountAsOwner) {
@@ -3880,8 +3881,7 @@ public class S3Service implements Resettable, ResourceProvider {
         return withMultipartOperationLock(bucket, uploadId, () -> {
             MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
             if (partNumber < 1 || partNumber > 10000) {
-                throw new AwsException("InvalidArgument",
-                        "Part number must be between 1 and 10000.", 400);
+                throw PartRange.invalidPartNumber(Integer.toString(partNumber));
             }
             validateSseCustomerAccess(upload, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
 
@@ -3935,8 +3935,7 @@ public class S3Service implements Resettable, ResourceProvider {
         ChecksumAlgorithm declared = withMultipartOperationLock(bucket, uploadId, () -> {
             MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
             if (partNumber < 1 || partNumber > 10000) {
-                throw new AwsException("InvalidArgument",
-                        "Part number must be between 1 and 10000.", 400);
+                throw PartRange.invalidPartNumber(Integer.toString(partNumber));
             }
             validateSseCustomerAccess(upload, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
             return upload.getChecksumAlgorithm();
@@ -4197,6 +4196,13 @@ public class S3Service implements Resettable, ResourceProvider {
     public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
                                             Map<Integer, String> partETags, Map<Integer, S3Checksum> partChecksums,
                                             String checksumType, S3Checksum expectedChecksum) {
+        return completeMultipartUpload(bucket, key, uploadId, partNumbers, partETags, partChecksums,
+                checksumType, expectedChecksum, null);
+    }
+
+    public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
+                                            Map<Integer, String> partETags, Map<Integer, S3Checksum> partChecksums,
+                                            String checksumType, S3Checksum expectedChecksum, Long expectedObjectSize) {
         S3Object completed = withMultipartOperationLock(bucket, uploadId, () -> {
             MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
 
@@ -4227,8 +4233,13 @@ public class S3Service implements Resettable, ResourceProvider {
             }
 
             validateCompleteChecksumType(algorithm, storedChecksumType, ChecksumType.fromWireValue(checksumType));
+            long objectSize = parts.stream().mapToLong(Part::getSize).sum();
+            if (expectedObjectSize != null && expectedObjectSize != objectSize) {
+                throw new AwsException("InvalidRequest", "The provided 'x-amz-mp-object-size' header value "
+                        + expectedObjectSize + " does not match what was computed: " + objectSize, 400);
+            }
             if (inMemory) {
-                requireFitsInMemory("Multipart upload " + uploadId, parts.stream().mapToLong(Part::getSize).sum());
+                requireFitsInMemory("Multipart upload " + uploadId, objectSize);
             }
 
             // Concatenate parts in order
