@@ -794,40 +794,44 @@ password in cleartext, MySQL sends a scramble, so the proxy would have to drive 
 ## TLS / SSL
 
 The RDS auth proxy terminates TLS itself (the backend container stays plaintext). It presents
-a non-CA server certificate followed by the self-signed CA that signed it, so strict TLS
+a non-CA server certificate followed by Floci's shared root CA, so strict TLS
 clients can validate an end-entity certificate rather than being asked to accept a CA as a server.
 The server certificate's Subject Alternative Names cover every advertised DB instance, cluster,
 or RDS Proxy host: the Docker bridge IP, `host.docker.internal`, `localhost`, or whatever
 `rds.endpointHost` resolves to.
 
-The CA is persisted at `{storage.persistent-path}/tls/rds-ca.crt`, with its owner-only private
-key in `rds-ca.key`. The server certificate is issued in memory on startup and when a new host
+The shared CA is the same one used by ACM, IoT, and EKS. It is persisted at
+`{storage.persistent-path}/tls/floci-root-ca.crt`, with its owner-only private key in
+`floci-root-ca.key`. The server certificate is issued in memory on startup and when a new host
 appears, and renewed before expiry during TLS use; its SAN list is recorded in `rds-ca.metadata.json`.
 Renewal preserves the CA and SANs. If the CA itself expires, the proxy refuses new TLS use
 rather than silently changing client trust; restart to regenerate the unusable CA and trust its replacement.
-The CA certificate and key do not
-change during SAN growth, restarts, or migration from older Floci versions, so existing client
-trust stores keep working. Missing or corrupt SAN metadata is rebuilt without replacing a valid
+The shared CA certificate and key do not change during SAN growth or restarts. Missing or
+corrupt SAN metadata is rebuilt without replacing a valid
 CA. An invalid or unusable CA/key pair is replaced with a warning; only then must clients trust
 the replacement CA again.
 
-Floci logs the certificate path (and the `PGSSLROOTCERT` hint) the first time it generates or
-loads it:
+When upgrading from a version that used a separate RDS CA, update clients once to trust
+`floci-root-ca.crt` instead of `rds-ca.crt`. The shared certificate is also available from
+`GET /_floci/ca.pem`. Existing `rds-ca.crt` and `rds-ca.key` files are ignored, even if expired
+or corrupt, and are not overwritten or deleted. The existing `rds-ca.metadata.json` SAN list
+is still loaded. Clients that already trust Floci's shared root need no trust-store update.
+
+The proxy logs the shared certificate path when it first issues a server certificate:
 
 ```
-RDS proxy TLS: CA cert at ./data/tls/rds-ca.crt
-RDS proxy TLS: for sslmode=verify-full set PGSSLROOTCERT=./data/tls/rds-ca.crt
+RDS proxy TLS: for sslmode=verify-full set PGSSLROOTCERT=./data/tls/floci-root-ca.crt
 ```
 
 Because the SAN matches the address you actually connect to, `verify-full` (the same level
-Aurora enforces in AWS) works locally too — no need to fall back to `sslmode=disable` just to
+Aurora enforces in AWS) works locally too, without falling back to `sslmode=disable` just to
 exercise the same connection-string settings you use in production:
 
 ```bash
 # PostgreSQL
-PGSSLROOTCERT=./data/tls/rds-ca.crt psql "host=localhost port=7001 user=admin sslmode=verify-full"
+PGSSLROOTCERT=./data/tls/floci-root-ca.crt psql "host=localhost port=7001 user=admin sslmode=verify-full"
 
 # MySQL / MariaDB
 mysql -h 127.0.0.1 -P 7002 -u root -psecret123 \
-  --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/rds-ca.crt
+  --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/floci-root-ca.crt
 ```

@@ -1,6 +1,6 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
@@ -47,8 +47,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class PostgresProtocolHandlerTest {
 
@@ -458,13 +456,12 @@ class PostgresProtocolHandlerTest {
              Socket proxyClient = clientServer.accept()) {
 
             RdsProxyTlsCertificates tlsCertificates = testTlsCertificates();
-            Path caCertFile = tempDir.resolve("tls").resolve("rds-ca.crt");
+            Path caCertFile = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls")).certificatePath();
             if (legacyCa) {
-                Files.createDirectories(caCertFile.getParent());
                 CertificateGenerator.GeneratedCertificate legacy = new CertificateGenerator()
                         .generateSelfSignedCertificate("localhost", List.of("localhost", "172.17.0.5"),
                                 KeyAlgorithm.RSA_2048);
-                Files.writeString(caCertFile, legacy.certificatePem());
+                Files.writeString(caCertFile.resolveSibling("rds-ca.crt"), legacy.certificatePem());
                 Files.writeString(caCertFile.resolveSibling("rds-ca.key"), legacy.privateKeyPem());
                 Files.writeString(caCertFile.resolveSibling("rds-ca.metadata.json"),
                         "{\"hostnames\":[\"localhost\",\"172.17.0.5\"]}");
@@ -1907,11 +1904,8 @@ class PostgresProtocolHandlerTest {
     }
 
     private RdsProxyTlsCertificates testTlsCertificates() {
-        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
-        when(storage.persistentPath()).thenReturn(tempDir.toString());
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        when(config.storage()).thenReturn(storage);
-        return new RdsProxyTlsCertificates(config, new CertificateGenerator());
+        return new RdsProxyTlsCertificates(FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls")),
+                new CertificateGenerator());
     }
 
     /**
