@@ -128,8 +128,7 @@ class SamTransformProcessorTest {
 
         JsonNode resources = processor.expandSamTemplate(template).path("Resources");
 
-        // SAM's id: the SHA-1 of {"ZipFile": ...} as sorted compact JSON, the value Python's
-        // json.dumps(separators=(",", ":"), sort_keys=True) and hashlib.sha1 give.
+        // SAM's id: the first ten hex digits of the SHA-1 of {"ZipFile": ...} as sorted compact JSON.
         String versionId = "MyFuncVersion102360dfc3";
         assertTrue(resources.has(versionId), resources.toString());
         assertEquals("AWS::Lambda::Version", resources.path(versionId).path("Type").asText());
@@ -149,7 +148,7 @@ class SamTransformProcessorTest {
                 aliasProps.path("FunctionVersion").path("Fn::GetAtt"));
     }
 
-    /** The ids are the ones samtranslator gives for the same input, as recomputed in Python. */
+    /** The ids are the ones SAM gives the same function. */
     @Test
     void expandSamTemplate_autoPublishAliasVersionIdFollowsSamsHashInput() throws Exception {
         String template = """
@@ -215,11 +214,11 @@ class SamTransformProcessorTest {
     }
 
     /**
-     * Python's {@code json.dumps} escapes everything outside printable ASCII, DEL included, in
-     * lowercase hex, and a character beyond the Basic Multilingual Plane as its surrogate pair.
+     * SAM hashes the code with everything outside printable ASCII, DEL included, escaped in lowercase
+     * hex, and a character beyond the Basic Multilingual Plane as its surrogate pair.
      */
     @Test
-    void expandSamTemplate_autoPublishAliasVersionIdEscapesTheCodeAsPythonDoes() throws Exception {
+    void expandSamTemplate_autoPublishAliasVersionIdEscapesTheCodeAsSamDoes() throws Exception {
         String template = """
             {
               "Transform": "AWS::Serverless-2016-10-31",
@@ -269,9 +268,8 @@ class SamTransformProcessorTest {
     }
 
     /**
-     * A given {@code AutoPublishCodeSha256} is the hash: samtranslator's {@code LogicalIdGenerator}
-     * returns its first ten characters and hashes nothing else, so the code alone no longer names
-     * the version.
+     * A given {@code AutoPublishCodeSha256} names the version: SAM takes its first ten characters
+     * and hashes nothing else, so the code alone no longer names the version.
      */
     @Test
     void expandSamTemplate_autoPublishCodeSha256TakesTheHashesPlace() throws Exception {

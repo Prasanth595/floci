@@ -348,7 +348,7 @@ class SamTransformIntegrationTest {
             .formParam("Action", "DescribeChangeSet").formParam("StackName", stackName)
             .formParam("ChangeSetName", "second")
         .when().post("/").then().statusCode(200).extract().asString();
-        // The ids samtranslator gives the two InlineCode values.
+        // The ids SAM gives the two InlineCode values.
         List<String> changes = XmlParser.extractGroups(changeSet, "ResourceChange").stream()
             .map(change -> change.get("Action") + " " + change.get("LogicalResourceId"))
             .toList();

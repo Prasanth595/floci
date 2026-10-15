@@ -41,7 +41,7 @@ class SamTransformProcessor {
     private static final Pattern S3_DEFINITION_URI = Pattern.compile(
             "^s3://(?<bucket>[^/?]+)/(?<key>.+?)(?:\\?versionId=(?<version>.+))?$");
 
-    /** A {@code ${Name}} reference in an {@code Fn::Sub} string, as SAM's translator matches one. */
+    /** A {@code ${Name}} reference in an {@code Fn::Sub} string, as SAM matches one. */
     private static final Pattern SUB_REFERENCE = Pattern.compile("\\$\\{([A-Za-z0-9.]+|AWS::[A-Z][A-Za-z]*)}");
 
     /** What SAM accepts as a logical id. */
@@ -1049,10 +1049,10 @@ class SamTransformProcessor {
     }
 
     /**
-     * The checks samtranslator makes on every function's version properties before it transforms
-     * them: the types it declares for each, and that {@code VersionDeletionPolicy} comes with an
-     * {@code AutoPublishAlias}. Like SAM's property validation, it takes any one-key object for an
-     * intrinsic function where the property allows one.
+     * The checks SAM makes on every function's version properties before it transforms them: the
+     * type each must have, and that {@code VersionDeletionPolicy} comes with an
+     * {@code AutoPublishAlias}. Like SAM, it takes any one-key object for an intrinsic function where
+     * the property allows one.
      */
     private void validateVersionProperties(String functionLogicalId, JsonNode properties) {
         JsonNode codeSha256 = properties.path("AutoPublishCodeSha256");
@@ -1138,7 +1138,7 @@ class SamTransformProcessor {
                     .with(JsonWriteFeature.ESCAPE_NON_ASCII)
                     .without(JsonWriteFeature.WRITE_HEX_UPPER_CASE)
                     .writeValueAsString(hashed)
-                    // ESCAPE_NON_ASCII leaves DEL as it is; Python escapes it too.
+                    // ESCAPE_NON_ASCII leaves DEL as it is; SAM's hash input escapes it too.
                     .replace("\u007f", "\\u007f");
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Cannot serialize the version hash input of " + functionLogicalId, e);
