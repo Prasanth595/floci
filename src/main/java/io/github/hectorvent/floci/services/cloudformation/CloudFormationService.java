@@ -377,6 +377,22 @@ public class CloudFormationService implements ResourceProvider {
                                       Map<String, String> tags, String region, String accountId,
                                       boolean attachToReviewInProgressStack, boolean fromPreviousTemplate) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
+        boolean isCreateType = "CREATE".equalsIgnoreCase(changeSetType);
+        // An update names its stack by name or stack ID; the map is keyed by name. One that names no
+        // live stack is keyed as given, so it lands in the missing-stack branch below.
+        Stack live = isCreateType ? null : resolveStack(stackName, region, accountId);
+
+        // Ahead of the transform and the preflight below, which both read the parameter values. A
+        // request the claim below refuses for its stack alone (an update of a stack that is missing
+        // or cannot be updated, a create over a name in use) gets that refusal instead: there is no
+        // deployed value for its UsePreviousValue to keep.
+        Stack named = isCreateType ? stacks.get(stackKey(accountId, stackName, region)) : live;
+        boolean refusedForItsStack = isCreateType
+                ? named != null && !(attachToReviewInProgressStack && "REVIEW_IN_PROGRESS".equals(named.getStatus()))
+                : named == null || "DELETE_COMPLETE".equals(named.getStatus()) || refusesUpdate(named.getStatus());
+        if (!refusedForItsStack) {
+            requireParameterValues(resolvedTemplate, parameters);
+        }
 
         // Real CloudFormation runs a declared macro (here, only AWS::Serverless-2016-10-31)
         // before it ever evaluates the template's own resources or conditions. On real AWS,
@@ -422,10 +438,6 @@ public class CloudFormationService implements ResourceProvider {
         // was already released, losing an accepted change set or corrupting the map's links. Only
         // persistStack() stays outside: it is storage I/O, and compute()'s contract is that the
         // remapping function does short, non-blocking work.
-        boolean isCreateType = "CREATE".equalsIgnoreCase(changeSetType);
-        // An update names its stack by name or stack ID; the map is keyed by name. One that names no
-        // live stack is keyed as given, so it lands in the missing-stack branch below.
-        Stack live = isCreateType ? null : resolveStack(stackName, region, accountId);
         String canonicalStackName = live == null ? stackName : live.getStackName();
         ChangeSet[] created = new ChangeSet[1];
         Stack stack = stacks.compute(stackKey(accountId, canonicalStackName, region), (k, existing) -> {
@@ -635,9 +647,10 @@ public class CloudFormationService implements ResourceProvider {
                     changedParams.add(k);
                 }
             });
-            // A parameter that was deployed but is omitted from this update with no template
-            // Default is dropped entirely by resolveDefaultParameters (matching what
-            // ExecuteChangeSet does); flag its disappearance too, not just a value change.
+            // A parameter that was deployed but that the new template no longer declares, and the
+            // update does not pass, is absent from the new values, as it is when ExecuteChangeSet
+            // runs; flag its disappearance too, not just a value change. One the template still
+            // declares has a value or a Default: createChangeSet refuses the update otherwise.
             oldResolvedParams.keySet().forEach(k -> {
                 if (!newResolvedParams.containsKey(k)) {
                     changedParams.add(k);
@@ -2959,6 +2972,55 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
+     * Refuses a template that declares a parameter the request gives no value and the template no
+     * {@code Default}, as CloudFormation refuses CreateStack, UpdateStack and CreateChangeSet,
+     * naming every such parameter in the order the template declares them. An empty value is a
+     * value. {@code UsePreviousValue} is one too: the request handler has already replaced it with
+     * the deployed value, or left the parameter without one when nothing was deployed. A template
+     * that does not parse is left for the paths that report that, and so is what an
+     * {@code AWS::Include} supplies, which only execution merges: a parameter whose definition uses
+     * one, or every parameter when the section itself is one.
+     */
+    void requireParameterValues(String templateBody, Map<String, String> params) {
+        JsonNode template;
+        try {
+            template = parseTemplate(templateBody);
+        } catch (Exception e) {
+            return;
+        }
+        JsonNode declared = template.path("Parameters");
+        if (AwsIncludeProcessor.AWS_INCLUDE.equals(declared.path("Fn::Transform").path("Name").asText(""))) {
+            return;
+        }
+        Map<String, String> given = resolveDefaultParameters(template, params);
+        List<String> missing = new ArrayList<>();
+        declared.properties().forEach(parameter -> {
+            String name = parameter.getKey();
+            if (!"Fn::Transform".equals(name) && !awsIncludeProcessor.containsAwsInclude(parameter.getValue())
+                    && !given.containsKey(name)) {
+                missing.add(name);
+            }
+        });
+        if (!missing.isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "Parameters: [" + String.join(", ", missing) + "] must have values", 400);
+        }
+    }
+
+    /**
+     * The values a template deploys with: {@code params} over each parameter's {@code Default}, or
+     * {@code params} alone when the template does not parse. UpdateStackSet resolves
+     * {@code UsePreviousValue} against these, since a stack set keeps only the values it was given.
+     */
+    Map<String, String> parametersWithDefaults(String templateBody, Map<String, String> params) {
+        try {
+            return resolveDefaultParameters(parseTemplate(templateBody), params);
+        } catch (Exception e) {
+            return params != null ? params : Map.of();
+        }
+    }
+
+    /**
      * Fails a create/update before any stack state is mutated when a resource that will be created
      * depends on a resource excluded by a false condition, or when resources depend on each other
      * in a cycle. Real CloudFormation rejects such a template synchronously ("Template format
@@ -3253,6 +3315,34 @@ public class CloudFormationService implements ResourceProvider {
         String childTemplate = fetchTemplateFromS3(templateUrl);
         String childStackName = parentStack.getStackName() + "-" + logicalId;
 
+        // Resolved as a property value: Parameters may be an Fn::If choosing between whole maps,
+        // and a value that is AWS::NoValue passes nothing, so the child's Default applies. A list,
+        // such as an Fn::GetAZs resolves to, is passed joined with commas, and a null as an empty
+        // string, as before.
+        Map<String, String> childParams = new LinkedHashMap<>();
+        JsonNode parameters = props == null ? null : engine.resolveNodeOmittingNoValue(props.get("Parameters"));
+        if (parameters != null && parameters.isObject()) {
+            parameters.fields().forEachRemaining(e -> {
+                JsonNode value = e.getValue();
+                if (value.isArray()) {
+                    List<String> items = new ArrayList<>();
+                    value.forEach(item -> items.add(item.asText()));
+                    childParams.put(e.getKey(), String.join(",", items));
+                } else {
+                    childParams.put(e.getKey(), value.isNull() ? "" : value.asText());
+                }
+            });
+        }
+        // CloudFormation creates or updates the child with these values, so the call fails as a
+        // CreateStack or UpdateStack would, before the child is created or changed.
+        try {
+            requireParameterValues(childTemplate, childParams);
+        } catch (AwsException e) {
+            resource.setStatus("CREATE_FAILED");
+            resource.setStatusReason(e.getMessage());
+            return resource;
+        }
+
         Stack childStack = null;
         boolean childCreate = isCreate || previousResource == null
                 || previousResource.getPhysicalId() == null;
@@ -3264,12 +3354,6 @@ public class CloudFormationService implements ResourceProvider {
             childStack = newStack(childStackName, region, accountId);
             childStack.setStatus("CREATE_IN_PROGRESS");
             stacks.put(stackKey(accountId, childStackName, region), childStack);
-        }
-
-        Map<String, String> childParams = new LinkedHashMap<>();
-        if (props != null && props.has("Parameters") && props.get("Parameters").isObject()) {
-            props.get("Parameters").fields().forEachRemaining(e ->
-                    childParams.put(e.getKey(), engine.resolve(e.getValue())));
         }
 
         executeTemplate(childStack, childTemplate, childParams, null, childCreate, region, accountId);
