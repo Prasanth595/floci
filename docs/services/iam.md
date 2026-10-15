@@ -1200,6 +1200,8 @@ specific log-stream ARN, so policies can allow or deny one stream within a group
 account and region. Both stream operations check the documented group and stream name constraints
 before changing storage, preventing delimiter aliases from targeting another stream. Other Logs
 actions retain their existing wildcard resource evaluation.
+These checks also apply to deletion: legacy streams with names containing `:` or `*` cannot be
+deleted through `DeleteLogStream`. Existing stored names are not automatically migrated.
 
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
 from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets

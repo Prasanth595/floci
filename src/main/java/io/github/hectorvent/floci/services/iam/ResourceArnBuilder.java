@@ -99,7 +99,7 @@ public class ResourceArnBuilder {
 
     /** Uses the serving operation, not an independently parsed target header. */
     public List<String> buildLogStreamResources(String action, ContainerRequestContext ctx,
-                                                 String region, String accountId) {
+                                                 String region, String accountId, String partition) {
         if (!("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action))) {
             return List.of("*");
         }
@@ -110,7 +110,7 @@ public class ResourceArnBuilder {
         // Match the handler's coercion and raw names, including whitespace and numeric values.
         String group = body.path("logGroupName").asText();
         String stream = body.path("logStreamName").asText();
-        return List.of(AwsArnUtils.Arn.of("logs", region, accountId,
+        return List.of(new AwsArnUtils.Arn(partition, "logs", region, accountId,
                 "log-group:" + group + ":log-stream:" + stream).toString());
     }
 

@@ -417,7 +417,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
         List<String> resources = resolveResourceArns(credentialScope,
                 "logs".equals(credentialScope)
-                        ? arnBuilder.buildLogStreamResources(action, ctx, region, accountId)
+                        ? arnBuilder.buildLogStreamResources(action, ctx, region, accountId, requestPartition())
                         : arnBuilder.buildResources(credentialScope, ctx, region, accountId));
 
         Optional<PresignedScope> presignedScope = iamService.presignedScope(akid);

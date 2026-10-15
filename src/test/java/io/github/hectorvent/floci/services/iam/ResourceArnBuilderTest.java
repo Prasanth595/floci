@@ -655,7 +655,7 @@ class ResourceArnBuilderTest {
                 when(ctx.getHeaderString("X-Amz-Target")).thenReturn("Logs_20140328.DeleteLogGroup");
                 assertEquals(List.of("arn:" + AwsRegions.partitionFor(region)
                                 + ":logs:" + region + ":123456789012:log-group: /group :log-stream:42"),
-                        builder.buildLogStreamResources(action, ctx, region, "123456789012"));
+                        builder.buildLogStreamResources(action, ctx, region, "123456789012", AwsRegions.partitionFor(region)));
             }
         }
     }
@@ -665,7 +665,7 @@ class ResourceArnBuilderTest {
         for (String action : List.of("logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy",
                 "logs:TagResource", "logs:UntagResource", "logs:ListTagsForResource", "logs:PutLogEvents")) {
             setJsonBody("{\"logGroupName\":\"group\",\"logStreamName\":\"stream\"}");
-            assertEquals(List.of("*"), builder.buildLogStreamResources(action, ctx, "us-east-1", ACCOUNT));
+            assertEquals(List.of("*"), builder.buildLogStreamResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
         }
     }
 
