@@ -77,6 +77,33 @@ class CloudFormationParameterValuesIntegrationTest {
         describeStacks(stackName).then().statusCode(400);
     }
 
+    /**
+     * The values are checked before the template's dependency checks, which evaluate conditions
+     * that read them, so a template with both a cycle and a missing value gets the parameter error.
+     */
+    @Test
+    void aMissingValueIsReportedBeforeADependencyCycle() {
+        String stackName = "cfn-param-cycle-" + Long.toString(System.nanoTime(), 36);
+
+        request("CreateStack", stackName)
+            .formParam("TemplateBody", """
+                    {
+                      "Parameters": {"Env": {"Type": "String"}},
+                      "Resources": {
+                        "A": {"Type": "AWS::SQS::Queue", "DependsOn": "B"},
+                        "B": {"Type": "AWS::SQS::Queue", "DependsOn": "A"}
+                      }
+                    }
+                    """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Message", equalTo("Parameters: [Env] must have values"));
+
+        describeStacks(stackName).then().statusCode(400);
+    }
+
     /** An empty value is a value, and a Default stands in for an omitted one. */
     @Test
     void anEmptyValueAndADefaultAreValues() {
