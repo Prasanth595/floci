@@ -397,7 +397,8 @@ public class CloudFormationService implements ResourceProvider {
         // The preflight evaluates AWS::StackName and AWS::StackId as the execution will: an update
         // or a create attaching to a placeholder against that stack, any other create against the
         // id it is given below, allocated now. A create over a name in use is checked as that new
-        // stack, never as the stack holding the name.
+        // stack, never as the stack holding the name; an update of a missing stack, refused below,
+        // with the name it gave and an empty id.
         boolean attaches = isCreateType && named != null && !refusedForItsStack;
         String createdStackId = isCreateType && !attaches ? newStackId(stackName, region, accountId) : null;
         Stack identity = isCreateType ? (attaches ? named : null) : live;

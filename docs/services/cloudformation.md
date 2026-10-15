@@ -395,9 +395,10 @@ before provisioning:
   `Parameters: [Env] must have values`, naming each such parameter, before anything changes. An
   empty value counts as a value. An update does not carry values over: set `UsePreviousValue` to
   keep the deployed one. `UsePreviousValue` on a parameter that has no deployed value passes none.
-  A request for a stack that does not exist, cannot be updated, or already exists gets that error
-  rather than this one. The check runs before the template's dependency checks (a cycle, an
-  unresolved dependency, a malformed condition), which read the values. The same check
+  The check runs before the template's dependency checks (a cycle, an unresolved dependency, a
+  malformed condition), which read the values. A request for a stack that does not exist, cannot
+  be updated, or already exists gets that error rather than this one, unless the template fails
+  its dependency checks, which come first. The same check
   refuses `CreateStackSet` and `UpdateStackSet`, and fails a nested stack's resource whose
   `Parameters` leave a child parameter without a value. A parameter that an `AWS::Include` defines
   is not checked, nor is any parameter in a section that carries an `AWS::Include` of its own.
@@ -470,9 +471,8 @@ The operands of `Fn::Equals` are resolved as resource property values are, so `R
 or a pseudo parameter (`AWS::StackName` and `AWS::StackId` included) and `Fn::FindInMap`, the
 functions CloudFormation supports there, work inside a condition. The dependency check a create runs
 before the stack exists sees the `AWS::StackId` the stack is then given. An operand Floci cannot
-resolve compares as an
-empty string. `AWS::NotificationARNs` is the empty list everywhere, as Floci keeps no notification
-ARNs. `Fn::ImportValue` is not allowed in a condition, as in CloudFormation: `CreateStack`,
+resolve compares as an empty string. `AWS::NotificationARNs` is the empty list everywhere, as
+Floci keeps no notification ARNs. `Fn::ImportValue` is not allowed in a condition, as in CloudFormation: `CreateStack`,
 `UpdateStack` and `CreateChangeSet` refuse such a template, with the message `Template error: Cannot
 use Fn::ImportValue in Conditions.` A SAM template's change set fails with that reason instead, and
 so does the stack when CreateStack or UpdateStack executes it; an `AWS::Include` template fails when
