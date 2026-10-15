@@ -9801,7 +9801,7 @@ public class RdsService implements Resettable, ResourceProvider {
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 
-    private static final Set<String> DATA_API_ENGINES = Set.of("aurora-postgresql", "aurora-mysql", "aurora");
+    private static final Set<String> DATA_API_ENGINES = Set.of("aurora-postgresql", "aurora-mysql");
 
     /**
      * The Data API is offered for Aurora PostgreSQL and Aurora MySQL only, so turning it on for any
@@ -9809,7 +9809,6 @@ public class RdsService implements Resettable, ResourceProvider {
      */
     public static void requireDataApiEngine(String engine) {
         String name = engine == null ? "postgres" : engine.toLowerCase(Locale.ROOT);
-        // "aurora" is Aurora MySQL's older engine name.
         if (!DATA_API_ENGINES.contains(name)) {
             throw new AwsException("InvalidParameterCombination", "The Data API (HTTP endpoint) is available for "
                     + "Aurora PostgreSQL and Aurora MySQL DB clusters only, not for engine " + name + ".", 400);

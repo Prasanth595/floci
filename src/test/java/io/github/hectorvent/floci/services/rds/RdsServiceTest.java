@@ -3244,8 +3244,7 @@ class RdsServiceTest {
     void theDataApiTakesOnlyTheAuroraEngines() {
         RdsService.requireDataApiEngine("aurora-postgresql");
         RdsService.requireDataApiEngine("AURORA-MYSQL");
-        RdsService.requireDataApiEngine("aurora");
-        for (String engine : new String[] {"aurora-serverless", "aurora-postgresql-limitless", "postgres", null}) {
+        for (String engine : new String[] {"aurora", "aurora-serverless", "aurora-postgresql-limitless", "postgres", null}) {
             AwsException refused = assertThrows(AwsException.class, () -> RdsService.requireDataApiEngine(engine));
             assertEquals("InvalidParameterCombination", refused.getErrorCode(), String.valueOf(engine));
         }
