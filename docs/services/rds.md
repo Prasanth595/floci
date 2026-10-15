@@ -793,13 +793,20 @@ password in cleartext, MySQL sends a scramble, so the proxy would have to drive 
 
 ## TLS / SSL
 
-The RDS auth proxy terminates TLS itself (the backend container stays plaintext) using a
-self-signed CA whose Subject Alternative Names cover every advertised host Floci has handed
-out for a DB instance, cluster, or RDS Proxy — the Docker bridge IP, `host.docker.internal`,
-`localhost`, or whatever `rds.endpointHost` resolves to. The CA is persisted at
-`{storage.persistent-path}/tls/rds-ca.crt` and grows its SAN list as new hosts appear, so the
-same root survives restarts and works for every local database, not just the one that
-generated it.
+The RDS auth proxy terminates TLS itself (the backend container stays plaintext). It presents
+a non-CA server certificate followed by the self-signed CA that signed it, so strict TLS
+clients can validate an end-entity certificate rather than being asked to accept a CA as a server.
+The server certificate's Subject Alternative Names cover every advertised DB instance, cluster,
+or RDS Proxy host: the Docker bridge IP, `host.docker.internal`, `localhost`, or whatever
+`rds.endpointHost` resolves to.
+
+The CA is persisted at `{storage.persistent-path}/tls/rds-ca.crt`, with its owner-only private
+key in `rds-ca.key`. The server certificate is issued in memory on startup and when a new host
+appears; its SAN list is recorded in `rds-ca.metadata.json`. The CA certificate and key do not
+change during SAN growth, restarts, or migration from older Floci versions, so existing client
+trust stores keep working. Missing or corrupt SAN metadata is rebuilt without replacing a valid
+CA. An invalid or unusable CA/key pair is replaced with a warning; only then must clients trust
+the replacement CA again.
 
 Floci logs the certificate path (and the `PGSSLROOTCERT` hint) the first time it generates or
 loads it:

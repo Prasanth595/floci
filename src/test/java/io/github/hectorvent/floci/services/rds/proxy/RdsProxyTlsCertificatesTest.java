@@ -3,8 +3,12 @@ package io.github.hectorvent.floci.services.rds.proxy;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.net.ssl.SSLContext;
 import java.nio.file.Files;
@@ -13,10 +17,12 @@ import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.cert.X509Certificate;
+import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -121,6 +127,71 @@ class RdsProxyTlsCertificatesTest {
                 Files.readString(tempDir.resolve("tls").resolve("rds-ca.crt")));
 
         assertEquals(certificate.getIssuerX500Principal(), certificate.getSubjectX500Principal());
+        assertTrue(certificate.getBasicConstraints() >= 0);
+    }
+
+    @Test
+    void migratingLegacyCaAndGrowingSansNeverChangesTheTrustedCertificate() throws Exception {
+        Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
+        CertificateGenerator.GeneratedCertificate legacy = new CertificateGenerator()
+                .generateSelfSignedCertificate("localhost", List.of("localhost", "172.17.0.5"), KeyAlgorithm.RSA_2048);
+        Path certFile = tlsDir.resolve("rds-ca.crt");
+        Path keyFile = tlsDir.resolve("rds-ca.key");
+        Files.writeString(certFile, legacy.certificatePem());
+        Files.writeString(keyFile, legacy.privateKeyPem());
+        Files.writeString(tlsDir.resolve("rds-ca.metadata.json"), "{\"hostnames\":[\"localhost\",\"172.17.0.5\"]}");
+        boolean posix = Files.getFileStore(tempDir).supportsFileAttributeView(PosixFileAttributeView.class);
+        if (posix) {
+            Files.setPosixFilePermissions(keyFile, PosixFilePermissions.fromString("rw-r--r--"));
+        }
+
+        RdsProxyTlsCertificates migrated = newCertificates();
+        migrated.ensureHost("172.17.0.5");
+        migrated.ensureHost("host.docker.internal");
+        newCertificates().ensureHost("host.docker.internal");
+
+        assertEquals(legacy.certificatePem(), Files.readString(certFile));
+        assertEquals(legacy.privateKeyPem(), Files.readString(keyFile));
+        if (posix) {
+            assertEquals(PosixFilePermissions.fromString("rw-------"), Files.getPosixFilePermissions(keyFile));
+        }
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"{", "null", "{\"hostnames\":[null]}", "{\"hostnames\":[\" \"]}", "{\"hostnames\":[]}"})
+    void recoveringMetadataDoesNotReplaceAValidTrustAnchor(String metadata) throws Exception {
+        newCertificates().sslContext();
+        Path tlsDir = tempDir.resolve("tls");
+        Path certFile = tlsDir.resolve("rds-ca.crt");
+        String trustedCertificate = Files.readString(certFile);
+        if (metadata != null) {
+            Files.writeString(tlsDir.resolve("rds-ca.metadata.json"), metadata);
+        } else {
+            Files.delete(tlsDir.resolve("rds-ca.metadata.json"));
+        }
+
+        newCertificates().sslContext();
+
+        assertEquals(trustedCertificate, Files.readString(certFile));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void replacesAnUnusableCaKeyWithAMatchingTrustAnchor(boolean malformedKey) throws Exception {
+        newCertificates().sslContext();
+        Path certFile = tempDir.resolve("tls/rds-ca.crt");
+        Path keyFile = tempDir.resolve("tls/rds-ca.key");
+        String previousCa = Files.readString(certFile);
+        String replacementKey = malformedKey ? "not a private key"
+                : new CertificateGenerator().generateCaCertificate("Unrelated CA").privateKeyPem();
+        Files.writeString(keyFile, replacementKey);
+
+        newCertificates().sslContext();
+
+        assertNotEquals(previousCa, Files.readString(certFile));
+        X509Certificate ca = Pem.parseCertificate(Files.readString(certFile));
+        assertTrue(Pem.isPair(Pem.parsePrivateKey(Files.readString(keyFile)), ca.getPublicKey()));
     }
 
     private RdsProxyTlsCertificates newCertificates() {
