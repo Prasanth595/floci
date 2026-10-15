@@ -88,10 +88,15 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         // and only reconcile the bucket's configuration. A replacing update derives a different
         // name and still creates, hence reusesPriorEntity rather than isUpdate.
         Unwind unwind = new Unwind();
+        r.getAttributes().remove(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR);
         try {
             // Built before anything is created, so a configuration that fails validation creates nothing.
             NotificationConfiguration notifications = notificationConfiguration(props, ctx);
             String ownershipControlsXml = ownershipControlsXml(props, ctx);
+            if (ctx.reusesPriorEntity(bucketName)) {
+                r.getAttributes().put(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR,
+                        s3Service.snapshotBucketConfiguration(bucketName));
+            }
             if (!ctx.reusesPriorEntity(bucketName)) {
                 // In us-east-1 CreateBucket also answers for a bucket the account already owns,
                 // which this resource must never delete.
@@ -278,19 +283,14 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         private NotificationConfiguration replacedNotifications;
     }
 
-    /**
-     * Undoes what a failed provision changed. On a failed update the engine restores the previous
-     * resource record and reports it rolled back unless the provisioner records why it could not
-     * be, so the bucket itself has to be put back: one this attempt created is deleted, and a
-     * notification configuration it replaced is put back. The other properties have no restore;
-     * the notification configuration goes ahead of them, so a destination S3 rejects leaves them
-     * untouched.
-     */
+    /** Restores an in-place bucket update or removes a newly created bucket after a failed provision. */
     private void unwind(StackResource r, String bucketName, Unwind unwind, ProvisionContext ctx,
                         RuntimeException failure) {
         try {
             if (unwind.created) {
                 s3Service.deleteBucket(bucketName);
+            } else if (r.getAttributes().containsKey(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR)) {
+                rollbackUpdate(r);
             } else if (unwind.replacedNotifications != null) {
                 // Valid when it was put; its destinations are not checked again on the way back.
                 s3Service.putBucketNotificationConfiguration(bucketName, unwind.replacedNotifications, true);
@@ -303,6 +303,32 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
                         "Could not restore bucket " + bucketName + ": " + e.getMessage());
             }
         }
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        if (!BUCKET.equals(resource.getResourceType())) {
+            return false;
+        }
+        String snapshot = resource.getAttributes().get(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR);
+        if (snapshot == null) {
+            return false;
+        }
+        s3Service.restoreBucketConfiguration(resource.getPhysicalId(), snapshot);
+        resource.getAttributes().remove(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR);
+        return true;
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return resource.getAttributes().containsKey(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR)
+                ? new UpdateCleanupResult(true, true, null, 0, null)
+                : UpdateCleanupResult.notApplicable();
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR);
     }
 
     private static boolean sameConfiguration(NotificationConfiguration desired, NotificationConfiguration current) {

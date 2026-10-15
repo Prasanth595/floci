@@ -87,6 +87,7 @@ public final class CfnRollback {
      * {@code rollbackUpdate}.
      */
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
+    public static final String S3_BUCKET_UPDATE_SNAPSHOT_ATTR = "__FlociS3BucketUpdateSnapshot";
 
     /**
      * Holds the description, event pattern and retention an EventBridge archive carried before an
