@@ -157,6 +157,10 @@ class LambdaWebCfnProvisionerTest {
         WebFunction fn = function(FN_ARN);
         fn.tags.put("env", "prod");
         when(service.getFunction(REGION, "app")).thenReturn(fn);
+        WebFunction retagged = function(FN_ARN);
+        retagged.tags.put("team", "web");
+        retagged.updatedAt = fn.updatedAt.plusSeconds(5);
+        when(service.replaceTags(REGION, "app", Map.of("team", "web"))).thenReturn(retagged);
         StackResource prior = resource(LambdaWebCfnProvisioner.FUNCTION);
         prior.setPhysicalId(FN_ARN);
         ObjectNode props = mapper.createObjectNode().put("FunctionName", "app");
@@ -168,7 +172,13 @@ class LambdaWebCfnProvisionerTest {
         verify(service).replaceTags(REGION, "app", Map.of("team", "web"));
         verify(service, never()).createFunctionShell(anyString(), anyString(), any());
         assertEquals(FN_ARN, r.getPhysicalId());
+        assertEquals(LambdaWebService.formatTimestamp(retagged.updatedAt), r.getAttributes().get("UpdatedAt"));
         assertFalse(provisioner.hasReplacementUpdate(r));
+        // A failed stack update puts the prior tags back.
+        assertTrue(r.getAttributes().containsKey(CfnRollback.LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR));
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(service).replaceTags(REGION, FN_ARN, Map.of("env", "prod"));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR));
     }
 
     @Test
@@ -185,6 +195,8 @@ class LambdaWebCfnProvisionerTest {
 
         verify(service, never()).replaceTags(anyString(), anyString(), any());
         assertEquals(FN_ARN, r.getPhysicalId());
+        assertFalse(r.getAttributes().containsKey(CfnRollback.LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR));
+        assertFalse(provisioner.rollbackUpdate(r), "nothing changed in place, so there is nothing to put back");
     }
 
     @Test
@@ -338,6 +350,8 @@ class LambdaWebCfnProvisionerTest {
     @Test
     void endpointWithTheSameIdentityIsUpdatedInPlace() {
         WebFunctionEndpoint existing = endpoint("prod", "HomeRegion", List.of("us-east-1"));
+        existing.authType = "ApplicationManaged";
+        existing.autoDeploymentMode = "LatestRevision";
         when(service.getFunction(REGION, "app")).thenReturn(function(FN_ARN));
         when(service.getEndpoint(REGION, FN_ARN, existing.endpointArn)).thenReturn(existing);
         WebFunctionEndpoint updated = endpoint("prod", "HomeRegion", List.of("us-east-1"));
@@ -361,10 +375,22 @@ class LambdaWebCfnProvisionerTest {
         Set<String> expected = new HashSet<>(ENDPOINT_ATTRIBUTES);
         expected.add("UpdateStatus");
         expected.add("UpdateStatusReason");
+        expected.add(CfnRollback.LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR);
         assertEquals(expected, r.getAttributes().keySet());
         assertEquals("Successful", r.getAttributes().get("UpdateStatus"));
         assertEquals("The endpoint is updated.", r.getAttributes().get("UpdateStatusReason"));
         assertFalse(provisioner.hasReplacementUpdate(r));
+        // A failed stack update puts the prior configuration back.
+        assertTrue(provisioner.rollbackUpdate(r));
+        ArgumentCaptor<JsonNode> restored = ArgumentCaptor.forClass(JsonNode.class);
+        verify(service).updateEndpoint(eq(REGION), eq(FN_ARN), eq("prod"), restored.capture());
+        assertEquals("ApplicationManaged", restored.getValue().path("authType").asText());
+        assertEquals("LatestRevision", restored.getValue().path("autoDeploymentMode").asText());
+        assertFalse(restored.getValue().has("revisionWeights"));
+        assertEquals("", restored.getValue().path("description").asText());
+        assertTrue(restored.getValue().path("scalingConfig").isEmpty());
+        assertTrue(restored.getValue().path("throttleConfig").isEmpty());
+        assertFalse(r.getAttributes().containsKey(CfnRollback.LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR));
     }
 
     @Test

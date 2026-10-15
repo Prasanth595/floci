@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -94,12 +96,37 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
+    /** An in-place change is undone from the snapshot taken before it; the snapshot stays until that succeeds. */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        return ReplacementCleanup.rollback(resource, this::delete);
+        if (ReplacementCleanup.rollback(resource, this::delete)) {
+            return true;
+        }
+        String raw = resource.getAttributes().get(CfnRollback.LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return false;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            LOG.errorv("Could not parse the Lambda Web update snapshot of {0}: {1}", resource.getLogicalId(), e.getMessage());
+            return false;
+        }
+        String region = snapshot.path("region").asText();
+        String functionArn = snapshot.path("functionArn").asText();
+        if ("endpoint".equals(snapshot.path("type").asText())) {
+            service.updateEndpoint(region, functionArn, snapshot.path("endpointName").asText(), snapshot.get("patch"));
+        } else {
+            service.replaceTags(region, functionArn,
+                    MAPPER.convertValue(snapshot.get("tags"), new TypeReference<Map<String, String>>() {}));
+        }
+        resource.getAttributes().remove(CfnRollback.LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR);
+        return true;
     }
 
     private void provisionFunction(StackResource r, JsonNode props, ProvisionContext ctx) {
@@ -109,7 +136,8 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
         WebFunction fn = ctx.isUpdate() ? find(() -> service.getFunction(ctx.region(), name)) : null;
         if (fn != null && ctx.reusesPriorEntity(fn.functionArn)) {
             if (!tags.equals(fn.tags)) {
-                service.replaceTags(ctx.region(), name, tags);
+                r.getAttributes().put(CfnRollback.LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR, tagSnapshot(ctx.region(), fn).toString());
+                fn = service.replaceTags(ctx.region(), name, tags);
             }
         } else {
             fn = service.createFunctionShell(ctx.region(), name, tags);
@@ -161,6 +189,8 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
             WebFunctionEndpoint existing = find(() -> service.getEndpoint(ctx.region(), functionArnOf(prior), prior));
             if (fn != null && existing != null && existing.functionArn.equals(fn.functionArn)) {
                 if (sameIdentity(existing, resolved, ctx.region())) {
+                    r.getAttributes().put(CfnRollback.LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR,
+                            endpointSnapshot(ctx.region(), existing).toString());
                     endpoint = service.updateEndpoint(ctx.region(), functionName, existing.endpointName,
                             endpointPatch(resolved, ctx)).after();
                 } else if (existing.endpointName.equals(resolved.path("EndpointName").asText())) {
@@ -202,6 +232,39 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
             patch.put("description", "");
         }
         return patch;
+    }
+
+    private static ObjectNode tagSnapshot(String region, WebFunction fn) {
+        ObjectNode snapshot = MAPPER.createObjectNode().put("type", "function").put("region", region)
+                .put("functionArn", fn.functionArn);
+        ObjectNode tags = snapshot.putObject("tags");
+        fn.tags.forEach(tags::put);
+        return snapshot;
+    }
+
+    /** The endpoint's mutable configuration in the shape {@code UpdateWebFunctionEndpoint} takes. */
+    private static ObjectNode endpointSnapshot(String region, WebFunctionEndpoint endpoint) {
+        ObjectNode snapshot = MAPPER.createObjectNode().put("type", "endpoint").put("region", region)
+                .put("functionArn", endpoint.functionArn).put("endpointName", endpoint.endpointName);
+        ObjectNode patch = snapshot.putObject("patch");
+        patch.put("authType", endpoint.authType);
+        patch.put("description", endpoint.description == null ? "" : endpoint.description);
+        patch.put("autoDeploymentMode", endpoint.autoDeploymentMode);
+        if (!"LatestRevision".equals(endpoint.autoDeploymentMode)) {
+            ArrayNode weights = patch.putArray("revisionWeights");
+            for (WebFunctionEndpoint.RevisionWeight weight : endpoint.revisionWeights) {
+                weights.addObject().put("revisionId", weight.revisionId).put("weight", weight.weight);
+            }
+        }
+        ObjectNode scaling = patch.putObject("scalingConfig");
+        if (endpoint.scalingConfig != null && endpoint.scalingConfig.maxEnvironments != null) {
+            scaling.put("maxEnvironments", endpoint.scalingConfig.maxEnvironments);
+        }
+        ObjectNode throttle = patch.putObject("throttleConfig");
+        if (endpoint.throttleConfig != null && endpoint.throttleConfig.rateLimit != null) {
+            throttle.put("rateLimit", endpoint.throttleConfig.rateLimit);
+        }
+        return snapshot;
     }
 
     private static boolean reusablePrior(ProvisionContext ctx, Map<String, String> attributesBefore) {
