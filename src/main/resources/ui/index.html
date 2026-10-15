@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Floci: local AWS emulator</title>
+  <title>floci-aws: local AWS emulator</title>
   <script>
     // One file, two views: the dashboard, and the "starting Floci UI" wait page served at /_floci/ui.
     document.documentElement.dataset.view =
@@ -112,6 +112,7 @@
       font-family: var(--mono); font-size: 12px; color: var(--text);
     }
     .build:empty { display: none; }
+    .emulator { font-family: var(--mono); font-size: 12.5px; color: var(--text-muted); }
     .top-end { margin-left: auto; display: flex; align-items: center; gap: 20px; }
     .btn {
       display: inline-flex; align-items: center; gap: 8px; padding: 9px 16px;
@@ -325,10 +326,12 @@
       </g>
     </svg>
   </a>
+  <!-- Which Floci emulator serves this page; the other emulators reuse the page with their own name. -->
+  <span class="emulator" id="emulator">floci-aws</span>
   <span class="status offline" id="status" role="status">
       <span class="dot"></span><span id="status-label">Connecting…</span>
     </span>
-  <span class="build" id="build" title="Floci version"></span>
+  <span class="build" id="build" title="floci-aws version"></span>
   <div class="top-end">
     <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme" title="Switch theme">
       <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
@@ -662,6 +665,7 @@
     // ── Theme (follows the OS until the user picks one) ──
     var THEME_KEY = "floci.theme";
     var themeButton = $("theme-toggle");
+    var themeChosen = false;   // a click this page view, which wins over the OS even when storage is blocked
     function storedTheme() {
       try { var t = localStorage.getItem(THEME_KEY); return t === "light" || t === "dark" ? t : null; }
       catch (e) { return null; /* storage blocked: the choice lasts for this page view */ }
@@ -675,12 +679,13 @@
     applyTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
     themeButton.addEventListener("click", function () {
       var next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+      themeChosen = true;
       applyTheme(next);
       try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* storage blocked: lasts for this page view */ }
     });
     if (window.matchMedia) {
       var osLight = matchMedia("(prefers-color-scheme: light)");
-      var onOsChange = function (event) { if (!storedTheme()) { applyTheme(event.matches ? "light" : "dark"); } };
+      var onOsChange = function (event) { if (!themeChosen && !storedTheme()) { applyTheme(event.matches ? "light" : "dark"); } };
       if (osLight.addEventListener) { osLight.addEventListener("change", onOsChange); } else if (osLight.addListener) { osLight.addListener(onOsChange); }
     }
 
