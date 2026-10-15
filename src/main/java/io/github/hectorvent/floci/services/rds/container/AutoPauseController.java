@@ -81,6 +81,7 @@ final class AutoPauseController {
     // was cancelled or belongs to an earlier state, and does nothing.
     private Future<?> timer;
     private long timerToken;
+    private boolean resumeRequested;
     private boolean pauseCanceled;
     private boolean closed;
     private Instant lastSignal = Instant.EPOCH;
@@ -163,6 +164,10 @@ final class AutoPauseController {
      * @throws IllegalStateException when Docker cannot resume the container, which stays paused
      */
     RdsBackendGate.Lease acquire() throws InterruptedException {
+        return acquire(true);
+    }
+
+    RdsBackendGate.Lease acquire(boolean waitForResume) throws InterruptedException {
         lock.lock();
         try {
             while (true) {
@@ -173,6 +178,15 @@ final class AutoPauseController {
                     leases++;
                     cancelTimer();
                     return new ControllerLease();
+                }
+                if (!waitForResume) {
+                    if (state == State.PAUSED && !resumeRequested) {
+                        startTimer(this::resumeInBackground, Duration.ZERO);
+                        resumeRequested = true;
+                    } else if (state == State.PAUSING) {
+                        pauseCanceled = true;
+                    }
+                    throw new RdsBackendGate.ResumingException();
                 }
                 if (state == State.PAUSED) {
                     resume();
@@ -312,8 +326,8 @@ final class AutoPauseController {
             if (thawFailure != null) {
                 LOG.warnv(thawFailure, "Could not undo the auto-pause of RDS container {0}", containerId);
                 state = State.PAUSED;
-                armPausedReport();
                 settled.signalAll();
+                armPausedReport();
                 return;
             }
         }
@@ -334,15 +348,21 @@ final class AutoPauseController {
         RuntimeException failure = withoutLock(() -> freezer.unpause(containerId));
         if (failure != null) {
             state = State.PAUSED;
-            armPausedReport();
             settled.signalAll();
+            armPausedReport();
             throw new IllegalStateException(
                     "Could not resume auto-paused RDS container " + containerId, failure);
         }
         if (closed || resumeDelay.isZero()) {
             finishResume();
         } else {
-            startTimer(this::resumeDelayElapsed, resumeDelay);
+            try {
+                startTimer(this::resumeDelayElapsed, resumeDelay);
+            } catch (IllegalStateException e) {
+                // Docker has thawed the backend; a stopped timer must not strand its waiters.
+                finishResume();
+                throw e;
+            }
         }
     }
 
@@ -411,6 +431,7 @@ final class AutoPauseController {
     }
 
     private void cancelTimer() {
+        resumeRequested = false;
         if (timer != null) {
             timer.cancel(false);
             timer = null;
