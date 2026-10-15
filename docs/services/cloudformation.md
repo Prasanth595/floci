@@ -465,6 +465,17 @@ Template `Conditions` are evaluated before provisioning. A resource whose `Condi
 `Ref` / `Fn::GetAtt` are not required to resolve. This matches CloudFormation and is required for the
 condition-heavy templates CDK and LZA emit.
 
+The operands of `Fn::Equals` are resolved as resource property values are, so `Ref` to a parameter
+or a pseudo parameter (`AWS::StackName` and `AWS::StackId` included) and `Fn::FindInMap`, the
+functions CloudFormation supports there, work inside a condition. The dependency check a create runs
+before the stack exists sees an empty `AWS::StackId`. An operand Floci cannot resolve compares as an
+empty string. `AWS::NotificationARNs` is the empty list everywhere, as Floci keeps no notification
+ARNs. `Fn::ImportValue` is not allowed in a condition, as in CloudFormation: `CreateStack`,
+`UpdateStack` and `CreateChangeSet` refuse such a template, with the message `Template error: Cannot
+use Fn::ImportValue in Conditions.` A SAM template's change set fails with that reason instead, and
+so does the stack when CreateStack or UpdateStack executes it; an `AWS::Include` template fails when
+it is executed.
+
 ## Custom Resources and the CDK Provider Framework
 
 `AWS::CloudFormation::CustomResource` and `Custom::*` resources are backed by their `ServiceToken`

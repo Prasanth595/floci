@@ -408,7 +408,7 @@ public class CloudFormationService implements ResourceProvider {
         // template declaring the SAM transform, whether or not that transform succeeded, so
         // gating this call on samTransformFailureReason == null duplicates that check for no
         // effect.
-        validateResourceDependencies(resolvedTemplate, parameters, region, accountId);
+        validateResourceDependencies(resolvedTemplate, parameters, stackName, region, accountId);
 
         // A CREATE change set against a name that already has a stack of any status - including
         // ROLLBACK_COMPLETE - is a real conflict: AWS requires an explicit DeleteStack before a
@@ -667,7 +667,7 @@ public class CloudFormationService implements ResourceProvider {
                     ? resolveConditions(oldTemplate, oldResolvedParams, stack, region, regionResolver.getAccountId())
                     : Map.of();
             Map<String, Boolean> newConditions = resolveConditions(
-                    newTemplate, newResolvedParams, null, region, regionResolver.getAccountId());
+                    newTemplate, newResolvedParams, stack, region, regionResolver.getAccountId());
             Set<String> changedConditions = new HashSet<>();
             newConditions.forEach((name, val) -> {
                 if (!Objects.equals(val, oldConditions.get(name))) {
@@ -2930,28 +2930,57 @@ public class CloudFormationService implements ResourceProvider {
 
     private Map<String, Boolean> resolveConditions(JsonNode template, Map<String, String> params,
                                                    Stack stack, String region, String accountId) {
+        return resolveConditions(template, params, stack.getStackName(), stack.getStackId(), region, accountId);
+    }
+
+    /**
+     * Evaluates the template's {@code Conditions} through the template engine, so an operand of
+     * {@code Fn::Equals} can be any intrinsic the engine resolves, {@code Fn::FindInMap} and the
+     * pseudo parameters included. {@code AWS::StackName} and {@code AWS::StackId} resolve to the
+     * name and id given, so every evaluation of one stack's template passes the stack's own; only
+     * a create's preflight runs before the stack id exists, and passes an empty one.
+     */
+    private Map<String, Boolean> resolveConditions(JsonNode template, Map<String, String> params,
+                                                   String stackName, String stackId, String region,
+                                                   String accountId) {
         Map<String, Boolean> conditions = new HashMap<>();
         JsonNode condNode = template.path("Conditions");
         if (!condNode.isObject()) {
             return conditions;
         }
+        Map<String, JsonNode> mappings = new HashMap<>();
+        template.path("Mappings").fields().forEachRemaining(e -> mappings.put(e.getKey(), e.getValue()));
+        // Every declared parameter has a value or a Default once a template is deployed, but a stack
+        // stored by an older Floci may lack one. It compares as "", as it did when that stack was
+        // deployed, rather than as its own name, which is how the engine answers a Ref it cannot resolve.
+        Map<String, String> conditionParams = new HashMap<>(params);
+        template.path("Parameters").fieldNames().forEachRemaining(name -> conditionParams.putIfAbsent(name, ""));
+        // A template being deployed with an import in a condition is refused up front
+        // (requireStringConditionReferences); one here is a stored template's, which reads it as "".
+        CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
+                accountId, region, stackName, stackId, conditionParams, Map.of(), Map.of(),
+                conditions, mappings, objectMapper, name -> "");
         // Two-pass: collect all names first, then evaluate (handles forward references)
         condNode.fields().forEachRemaining(e -> conditions.put(e.getKey(), false));
         condNode.fields().forEachRemaining(e ->
-                conditions.put(e.getKey(), evaluateCondition(e.getValue(), params, conditions, region, accountId)));
+                conditions.put(e.getKey(), evaluateCondition(e.getValue(), conditions, engine)));
         return conditions;
     }
 
     private static final String NON_STRING_CONDITION_REFERENCE =
             "Template error: every Condition object must have a single String value.";
+    private static final String IMPORT_VALUE_IN_CONDITION =
+            "Template error: Cannot use Fn::ImportValue in Conditions.";
 
     /**
      * Rejects a template whose conditions name another one with anything but a string, as
      * CloudFormation does before evaluating any of them: {@code Fn::And}, {@code Fn::Or} and
      * {@code Fn::Not} stop early, so evaluation alone would read such an operand as false or never
      * reach it. SAM's translator emits this shape when a conditional function's event invoke
-     * destination is itself conditional. Checked on the template being deployed only, so a stored
-     * template is never a reason an update cannot proceed.
+     * destination is itself conditional. Also rejects {@code Fn::ImportValue} anywhere in a
+     * condition, which CloudFormation does not allow there. Checked on the template being deployed
+     * only, so a stored template read as the old side of a diff, a rollback or a delete ordering is
+     * never a reason an update cannot proceed.
      */
     private static void requireStringConditionReferencesIn(JsonNode template) {
         template.path("Conditions").forEach(CloudFormationService::requireStringConditionReferences);
@@ -2967,6 +2996,9 @@ public class CloudFormationService implements ResourceProvider {
         }
         if (expression.has("Condition") && !expression.get("Condition").isTextual()) {
             throw new AwsException("ValidationError", NON_STRING_CONDITION_REFERENCE, 400);
+        }
+        if (expression.has("Fn::ImportValue")) {
+            throw new AwsException("ValidationError", IMPORT_VALUE_IN_CONDITION, 400);
         }
         expression.forEach(CloudFormationService::requireStringConditionReferences);
     }
@@ -3033,7 +3065,7 @@ public class CloudFormationService implements ResourceProvider {
      * graph the execution path resolves correctly.
      */
     private void validateResourceDependencies(String templateBody, Map<String, String> params,
-                                               String region, String accountId) {
+                                               String stackName, String region, String accountId) {
         JsonNode template;
         try {
             template = parseTemplate(templateBody);
@@ -3052,15 +3084,20 @@ public class CloudFormationService implements ResourceProvider {
 
         requireStringConditionReferencesIn(template);
         Map<String, String> resolvedParams = resolveDefaultParameters(template, params);
-        Map<String, Boolean> conditions =
-                resolveConditions(template, resolvedParams, null, region, accountId);
+        // Execution evaluates AWS::StackName and AWS::StackId against the stack, so the preflight
+        // does too: the live stack an update targets, or the name a create is about to take. The
+        // stack lives in the account the change set is created in, a StackSet's target included.
+        Stack live = resolveStack(stackName, region, accountId);
+        Map<String, Boolean> conditions = live != null && !"DELETE_COMPLETE".equals(live.getStatus())
+                ? resolveConditions(template, resolvedParams, live, region, accountId)
+                : resolveConditions(template, resolvedParams, stackName, "", region, accountId);
 
         // Throws the ValidationError for either case; the order itself is computed again on execution.
         topologicalSort(resources, conditions);
     }
 
-    private boolean evaluateCondition(JsonNode expr, Map<String, String> params,
-                                      Map<String, Boolean> conditions, String region, String accountId) {
+    private boolean evaluateCondition(JsonNode expr, Map<String, Boolean> conditions,
+                                      CloudFormationTemplateEngine engine) {
         if (expr == null || expr.isNull()) {
             return false;
         }
@@ -3074,20 +3111,18 @@ public class CloudFormationService implements ResourceProvider {
             if (expr.has("Fn::Equals")) {
                 JsonNode args = expr.get("Fn::Equals");
                 if (args.isArray() && args.size() == 2) {
-                    String left = resolveConditionValue(args.get(0), params, region, accountId);
-                    String right = resolveConditionValue(args.get(1), params, region, accountId);
-                    return left.equals(right);
+                    return conditionOperand(args.get(0), engine).equals(conditionOperand(args.get(1), engine));
                 }
             }
             if (expr.has("Fn::Not")) {
                 JsonNode args = expr.get("Fn::Not");
                 if (args.isArray() && !args.isEmpty()) {
-                    return !evaluateCondition(args.get(0), params, conditions, region, accountId);
+                    return !evaluateCondition(args.get(0), conditions, engine);
                 }
             }
             if (expr.has("Fn::And")) {
                 for (JsonNode item : expr.get("Fn::And")) {
-                    if (!evaluateCondition(item, params, conditions, region, accountId)) {
+                    if (!evaluateCondition(item, conditions, engine)) {
                         return false;
                     }
                 }
@@ -3095,7 +3130,7 @@ public class CloudFormationService implements ResourceProvider {
             }
             if (expr.has("Fn::Or")) {
                 for (JsonNode item : expr.get("Fn::Or")) {
-                    if (evaluateCondition(item, params, conditions, region, accountId)) {
+                    if (evaluateCondition(item, conditions, engine)) {
                         return true;
                     }
                 }
@@ -3105,21 +3140,22 @@ public class CloudFormationService implements ResourceProvider {
         return false;
     }
 
-    private String resolveConditionValue(JsonNode node, Map<String, String> params,
-                                         String region, String accountId) {
-        if (node.isTextual()) {
-            return node.textValue();
+    /**
+     * An {@code Fn::Equals} operand as the template engine resolves it. One the engine cannot
+     * resolve, such as an {@code Fn::Sub} whose template is not a string, compares as an empty
+     * string, as every function did before conditions went through the engine, so a template that
+     * evaluated then, stored or new, still evaluates and gets its dependency checks.
+     */
+    private static String conditionOperand(JsonNode operand, CloudFormationTemplateEngine engine) {
+        try {
+            return engine.resolve(operand);
+        } catch (AwsException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            LOG.debugv("Condition operand {0} did not resolve and compares as an empty string: {1}",
+                    operand, e.getMessage());
+            return "";
         }
-        if (node.isObject() && node.has("Ref")) {
-            String name = node.get("Ref").asText();
-            return switch (name) {
-                case "AWS::AccountId" -> accountId;
-                case "AWS::Region" -> region;
-                case "AWS::NoValue" -> "";
-                default -> params.getOrDefault(name, "");
-            };
-        }
-        return node.asText();
     }
 
     private JsonNode parseTemplate(String templateBody) throws Exception {
