@@ -123,7 +123,8 @@ create_function() {
     assert_failure
     assert_output --partial "ResourceNotFoundException"
 
-    run aws_cmd lambda-web create-web-function --function-name "-bad" \
+    # The = form keeps the CLI from reading a name that starts with a dash as an option.
+    run aws_cmd lambda-web create-web-function --function-name=-bad \
         --revision-config "{\"buildConfig\":$(build_config),\"serviceConfig\":{\"executionRoleArn\":\"$ROLE_ARN\"}}" \
         --endpoint-config '{"endpointName":"dev","endpointType":"HomeRegion","authType":"ApplicationManaged"}'
     assert_failure
