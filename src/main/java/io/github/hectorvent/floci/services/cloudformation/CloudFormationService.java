@@ -3033,7 +3033,8 @@ public class CloudFormationService implements ResourceProvider {
         JsonNode template;
         try {
             template = parseTemplate(templateBody);
-        } catch (Exception e) {
+        } catch (Exception ignored) {
+            // No Parameters section to check; the preflight and the execution report the parse error.
             return;
         }
         JsonNode declared = template.path("Parameters");
@@ -3063,7 +3064,8 @@ public class CloudFormationService implements ResourceProvider {
     Map<String, String> parametersWithDefaults(String templateBody, Map<String, String> params) {
         try {
             return resolveDefaultParameters(parseTemplate(templateBody), params);
-        } catch (Exception e) {
+        } catch (Exception ignored) {
+            // No Defaults to add from a template that does not parse; the given values stand.
             return params != null ? params : Map.of();
         }
     }
