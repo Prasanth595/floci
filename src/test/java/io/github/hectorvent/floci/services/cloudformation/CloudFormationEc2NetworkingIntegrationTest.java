@@ -212,7 +212,11 @@ class CloudFormationEc2NetworkingIntegrationTest {
         // association that name it; the gateway and route tables stay. The replacement gateway gets a
         // new EIP: CloudFormation creates it before deleting the old one, and on AWS a gateway given
         // an Elastic IP the displaced gateway still holds is created failed. The old EIP stays in
-        // the template and is free once the displaced gateway is gone.
+        // the template for a second reason: Floci's update cleanup deletes removed resources before
+        // the old copies of replaced ones (AWS deletes in reverse dependency order), so dropping the
+        // EIP while replacing its gateway would try to release it while the old gateway still holds
+        // it. Keeping NatEip sidesteps that; the cleanup order is a separate issue. The old EIP is
+        // free once the displaced gateway is gone. oldEip is NatEip: out is NatEipB's outputs below.
         cloudFormation("UpdateStack", template(vpcId, "10.40.2.0/24").replace("NatEip", "NatEipB")
                 .replace("\"NatEipB\": {\"Type\"",
                         "\"NatEip\": {\"Type\": \"AWS::EC2::EIP\", \"Properties\": {\"Domain\": \"vpc\"}},\n"
