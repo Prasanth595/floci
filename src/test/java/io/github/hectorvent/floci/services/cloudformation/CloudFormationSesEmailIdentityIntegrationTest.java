@@ -570,7 +570,8 @@ class CloudFormationSesEmailIdentityIntegrationTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void anotherFailedUpdateRetriesTheLastSuccessfulIdentitySnapshot(boolean replacing) throws Exception {
+    void continuedRollbackRestoresTheLastSuccessfulIdentitySnapshotBeforeAnotherUpdate(boolean replacing)
+            throws Exception {
         String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
         stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
         cfn("CreateStack", template(identityName, false)).then().statusCode(200);
@@ -594,6 +595,8 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             assertEquals(false, sesIdentity(identityName).jsonPath().getBoolean("FeedbackForwardingStatus"));
             assertEquals("new", sesIdentity(identityName).jsonPath()
                     .getString("Tags.find { it.Key == 'purpose' }.Value"));
+            cfn("ContinueUpdateRollback", null).then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_COMPLETE");
             String nextIdentity = replacing ? "replacement-" + identityName : identityName;
             ObjectNode secondAttempt = (ObjectNode) MAPPER.readTree(template(nextIdentity, false));
             secondAttempt.withObject("/Resources/Identity/Properties").set("Tags",
@@ -646,6 +649,8 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         try {
             cfn("UpdateStack", failed.toString()).then().statusCode(200);
             awaitStatus("UPDATE_ROLLBACK_FAILED");
+            continueUpdateRollbackSkipping("Identity").then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_COMPLETE");
             doThrow(new AwsException("ServiceUnavailableException", "replacement unavailable", 503))
                     .when(sesService).createEmailIdentity(eq(replacement), isNull(), any(), eq("us-east-1"));
 
@@ -672,7 +677,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
     }
 
     @Test
-    void outputsOnlyUpdateKeepsFailedIdentityRollbackRetryable() throws Exception {
+    void failedIdentityRollbackRejectsUpdateAndRemainsRetryable() throws Exception {
         String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
         String otherAccount = "000000000002";
         stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
@@ -702,14 +707,15 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             awaitStatus("UPDATE_ROLLBACK_FAILED");
             ObjectNode outputsOnly = (ObjectNode) MAPPER.readTree(template(identityName, true));
             outputsOnly.withObject("/Outputs").set("Marker", MAPPER.valueToTree(Map.of("Value", "cleanup")));
-            cfn("UpdateStack", outputsOnly.toString()).then().statusCode(200);
+            cfn("UpdateStack", outputsOnly.toString()).then().statusCode(400);
+            cfn("ContinueUpdateRollback", null).then().statusCode(200);
             String failedAgain = awaitStatus("UPDATE_ROLLBACK_FAILED");
             assertEquals(null, XmlParser.extractPairs(failedAgain,
                     "Outputs", "OutputKey", "OutputValue").get("Marker"));
             assertEquals(false, sesIdentity(identityName).jsonPath().getBoolean("FeedbackForwardingStatus"));
             assertEquals("new", sesIdentity(identityName).jsonPath()
                     .getString("Tags.find { it.Key == 'purpose' }.Value"));
-            verify(identityService, times(3)).save(
+            verify(identityService, times(2)).save(
                     argThat(identity -> isOriginalSnapshot(identity, identityName, originalTokens)),
                     eq("us-east-1"));
 
@@ -736,7 +742,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
     }
 
     @Test
-    void outputsOnlyUpdateRecoversPendingIdentityRollbackBeforeCommit() throws Exception {
+    void outputsOnlyUpdateCommitsAfterContinuedIdentityRollback() throws Exception {
         String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
         stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
         createIdentityStack(identityName);
@@ -755,6 +761,8 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         try {
             cfn("UpdateStack", failed.toString()).then().statusCode(200);
             awaitStatus("UPDATE_ROLLBACK_FAILED");
+            cfn("ContinueUpdateRollback", null).then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_COMPLETE");
 
             ObjectNode outputsOnly = (ObjectNode) MAPPER.readTree(template(identityName, true));
             outputsOnly.withObject("/Outputs").set("Marker", MAPPER.valueToTree(Map.of("Value", "recovered")));
@@ -773,7 +781,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
     }
 
     @Test
-    void recoveredIdentityStaysCompleteWhenLaterResourceFails() throws Exception {
+    void continuedIdentityRollbackRemainsCompleteWhenLaterResourceFails() throws Exception {
         String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
         stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
         createIdentityStack(identityName);
@@ -792,6 +800,8 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         try {
             cfn("UpdateStack", firstFailure.toString()).then().statusCode(200);
             awaitStatus("UPDATE_ROLLBACK_FAILED");
+            cfn("ContinueUpdateRollback", null).then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_COMPLETE");
 
             ObjectNode secondFailure = (ObjectNode) MAPPER.readTree(template(identityName, true));
             secondFailure.withObject("/Resources").set("AnotherBadSecret", MAPPER.valueToTree(Map.of(
@@ -803,7 +813,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             String rolledBack = awaitStatus("UPDATE_ROLLBACK_COMPLETE");
             assertEquals(null, XmlParser.extractPairs(rolledBack,
                     "Outputs", "OutputKey", "OutputValue").get("Marker"));
-            assertEquals("UPDATE_COMPLETE", XmlParser.extractPairs(
+            assertEquals("CREATE_COMPLETE", XmlParser.extractPairs(
                     cfn("DescribeStackResources", null).then().statusCode(200).extract().asString(),
                     "StackResources", "LogicalResourceId", "ResourceStatus").get("Identity"));
             Response restored = sesIdentity(identityName);
@@ -1073,6 +1083,15 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             request.formParam("TemplateBody", template);
         }
         return request.post("/");
+    }
+
+    private Response continueUpdateRollbackSkipping(String logicalId) {
+        return given().contentType("application/x-www-form-urlencoded")
+                .header("Authorization", stackAuth)
+                .formParam("Action", "ContinueUpdateRollback")
+                .formParam("StackName", stack)
+                .formParam("ResourcesToSkip.member.1", logicalId)
+                .post("/");
     }
 
     private Response sesIdentity(String identity) {

@@ -69,6 +69,24 @@ class AutoScalingServiceTest {
     }
 
     @Test
+    void zoneOnlyGroupAcceptsRealZonesOutsideTheLocalSubnetCatalog() {
+        service.ec2Service = mock(Ec2Service.class);
+        service.createLaunchConfiguration(REGION, "zone-lc", null, "ami-test", "t3.nano",
+                null, List.of(), null, null, null);
+        service.createAutoScalingGroup(REGION, "zone-only", "zone-lc", null, null, null, null,
+                0, 0, 0, 300, List.of("us-east-1d"), List.of(), List.of(), List.of(),
+                "EC2", 0, List.of(), Map.of(), Map.of(), AsgOptionalFields.none());
+        assertEquals(List.of("us-east-1d"), service.describeAutoScalingGroups(
+                REGION, List.of("zone-only")).getFirst().getAvailabilityZones());
+        service.updateAutoScalingGroup(REGION, "zone-only", null, null, null, null, null,
+                null, 10, null, null, List.of("us-east-1d", "us-east-1f"), null,
+                null, null, null, AsgOptionalFields.none());
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("zone-only")).getFirst();
+        assertEquals(List.of("us-east-1d", "us-east-1f"), group.getAvailabilityZones());
+        assertEquals(10, group.getMaxSize());
+    }
+
+    @Test
     void startInstanceRefreshStoresCompletedRefreshAndAppliesDesiredLaunchTemplate() {
         InstanceRefresh request = new InstanceRefresh();
         request.setStrategy("Rolling");
@@ -524,6 +542,7 @@ class AutoScalingServiceTest {
 
         group.getInstances().clear();
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-replacement", "InService", "lt-original", "2");
+        refresh.getReplacements().getFirst().setReplacementInstanceId("i-replacement");
         service.completeInstanceRefreshIfSettled(REGION, "test-asg");
 
         InstanceRefresh completed = service.describeInstanceRefreshes(
@@ -551,6 +570,7 @@ class AutoScalingServiceTest {
 
         group.getInstances().clear();
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-replacement", "InService", "lt-original", "2");
+        refresh.getReplacements().getFirst().setReplacementInstanceId("i-replacement");
         service.completeInstanceRefreshIfSettled(REGION, "test-asg");
 
         InstanceRefresh completed = service.describeInstanceRefreshes(
@@ -604,6 +624,7 @@ class AutoScalingServiceTest {
         group.getInstances().clear();
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-replacement", "InService", "lt-updated", "2");
 
+        refresh.getReplacements().getFirst().setReplacementInstanceId("i-replacement");
         service.completeInstanceRefreshIfSettled(REGION, "test-asg");
 
         InstanceRefresh completed = service.describeInstanceRefreshes(

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.CloudFormationException;
 import software.amazon.awssdk.services.cloudformation.model.Output;
+import software.amazon.awssdk.services.cloudformation.model.Stack;
 import software.amazon.awssdk.services.route53.Route53Client;
 import software.amazon.awssdk.services.route53.model.Change;
 import software.amazon.awssdk.services.route53.model.ChangeAction;
@@ -199,15 +200,20 @@ class CloudFormationSesEmailIdentityTest {
     }
 
     private void awaitStatus(String expected) throws InterruptedException {
-        String actual = null;
-        for (int attempt = 0; attempt < 150; attempt++) {
-            actual = cfn.describeStacks(r -> r.stackName(stackId)).stacks().get(0).stackStatusAsString();
+        TestFixtures.await(() -> {
+            Stack stack = cfn.describeStacks(r -> r.stackName(stackId)).stacks().get(0);
+            String actual = stack.stackStatusAsString();
             if (expected.equals(actual)) {
-                return;
+                return true;
             }
-            Thread.sleep(200L);
-        }
-        assertThat(actual).isEqualTo(expected);
+            if (actual.endsWith("_FAILED") || (!"DELETE_COMPLETE".equals(expected)
+                    && actual.contains("ROLLBACK") && !actual.endsWith("_IN_PROGRESS"))) {
+                throw new AssertionError(stackName + " reached " + actual + " instead of " + expected + ": "
+                        + stack.stackStatusReason());
+            }
+            return false;
+        }, stackName, expected, TestFixtures.isRealAws() ? 600_000_000_000L : 60_000_000_000L,
+                TestFixtures.isRealAws() ? 2_000 : 100);
     }
 
     private GetEmailIdentityResponse identity(String name) {
