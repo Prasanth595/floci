@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -49,25 +50,39 @@ public class ResourceArnBuilder {
     /** Reads the CBOR bodies the RPC v2 and {@code x-amz-cbor-1.1} paths carry. */
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
 
+    /**
+     * Stands in for the random suffix of a secret that {@code CreateSecret} has not made yet. Each
+     * {@code ?} matches the one character a {@code secret:<name>-??????} policy expects there.
+     */
+    private static final String UNASSIGNED_SECRET_SUFFIX = "-??????";
+
     private final ObjectMapper objectMapper;
     /**
      * Looked up lazily through a provider: this builder is constructed by the enforcement filter,
      * which IamService itself does not depend on, and a direct injection would close that loop.
      */
     private final Instance<IamService> iamService;
+    /** Looked up lazily for the same reason, to resolve a secret named by its name. */
+    private final Instance<SecretsManagerService> secretsManagerService;
 
     @Inject
-    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService) {
+    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
+                              Instance<SecretsManagerService> secretsManagerService) {
         this.objectMapper = objectMapper;
         this.iamService = iamService;
+        this.secretsManagerService = secretsManagerService;
+    }
+
+    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService) {
+        this(objectMapper, iamService, null);
     }
 
     public ResourceArnBuilder() {
-        this(new ObjectMapper(), null);
+        this(new ObjectMapper(), null, null);
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper) {
-        this(objectMapper, null);
+        this(objectMapper, null, null);
     }
 
     public String build(String credentialScope, ContainerRequestContext ctx,
@@ -936,6 +951,11 @@ public class ResourceArnBuilder {
     }
 
     // ── Secrets Manager ──────────────────────────────────────────────────────────
+    /**
+     * A secret named by its name is authorized against its full ARN, random suffix included, so a
+     * {@code secret:<name>-??????} policy matches it as it does on AWS. {@code CreateSecret} names
+     * the secret in {@code Name}, and the suffix is not assigned until the secret is created.
+     */
     private String buildSecretsManagerArn(ContainerRequestContext ctx, String region, String accountId) {
         JsonNode json = readJsonBody(ctx);
         if (json != null && json.isObject()) {
@@ -945,11 +965,29 @@ public class ResourceArnBuilder {
                     if (AwsArnUtils.isArnFor(secretId, "secretsmanager")) {
                         return secretId;
                     }
-                    return AwsArnUtils.Arn.of("secretsmanager", region, accountId, "secret:" + secretId).toString();
+                    return storedSecretArn(secretId, region, accountId)
+                            .orElseGet(() -> secretArn(secretId, region, accountId));
+                }
+            }
+            if (json.hasNonNull("Name")) {
+                String name = json.get("Name").asText().trim();
+                if (!name.isEmpty()) {
+                    return secretArn(name + UNASSIGNED_SECRET_SUFFIX, region, accountId);
                 }
             }
         }
-        return AwsArnUtils.Arn.of("secretsmanager", region, accountId, "secret:*").toString();
+        return secretArn("*", region, accountId);
+    }
+
+    private Optional<String> storedSecretArn(String name, String region, String accountId) {
+        if (secretsManagerService == null) {
+            return Optional.empty();
+        }
+        return secretsManagerService.get().findArnByName(accountId, name, region);
+    }
+
+    private static String secretArn(String name, String region, String accountId) {
+        return AwsArnUtils.Arn.of("secretsmanager", region, accountId, "secret:" + name).toString();
     }
 
     // ── SSM ──────────────────────────────────────────────────────────────────────

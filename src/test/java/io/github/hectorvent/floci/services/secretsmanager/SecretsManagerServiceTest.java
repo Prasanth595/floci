@@ -529,6 +529,28 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void findArnByNameReturnsTheStoredArnWithItsSuffix() {
+        Secret created = service.createSecret("app/core", "value", null, null, null, null, REGION);
+
+        assertEquals(created.getArn(), service.findArnByName("000000000000", "app/core", REGION).orElseThrow());
+        assertTrue(service.findArnByName("000000000000", "app/missing", REGION).isEmpty());
+    }
+
+    @Test
+    void findArnByNameReadsOnlyTheNamedAccount() {
+        AccountAwareStorageBackend<Secret> accountAware =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        SecretsManagerService svc = new SecretsManagerService(accountAware, 30);
+        Secret otherAccount = new Secret();
+        otherAccount.setName("app/core");
+        otherAccount.setArn("arn:aws:secretsmanager:" + REGION + ":111122223333:secret:app/core-AbCdEf");
+        accountAware.putForAccount("111122223333", REGION + "::app/core", otherAccount);
+
+        assertEquals(otherAccount.getArn(), svc.findArnByName("111122223333", "app/core", REGION).orElseThrow());
+        assertTrue(svc.findArnByName("000000000000", "app/core", REGION).isEmpty());
+    }
+
+    @Test
     void ordinarySecretNamedLikeAnRdsSecretStillNeedsALambdaArn() {
         // Ownership is a property of the secret, not of its name: anyone may create a secret
         // called rds!something, and that must not grant it service-managed rotation.

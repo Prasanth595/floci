@@ -37,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -414,6 +415,19 @@ public class SecretsManagerService implements ResourceProvider {
     public Secret describeSecret(String secretId, String region) {
         Secret secret = resolveSecret(secretId, region);
         return secret;
+    }
+
+    /**
+     * The full ARN of the secret with this name in the given account and region, or empty when
+     * there is none. IAM enforcement reads it before the request runs: AWS authorizes a request
+     * that names a secret by its name against the secret's ARN, random suffix included.
+     */
+    public Optional<String> findArnByName(String accountId, String name, String region) {
+        String key = regionKey(region, name);
+        Optional<Secret> secret = store instanceof AccountAwareStorageBackend<Secret> aware
+                ? aware.getForAccount(accountId, key)
+                : store.get(key);
+        return secret.map(Secret::getArn);
     }
 
     /**

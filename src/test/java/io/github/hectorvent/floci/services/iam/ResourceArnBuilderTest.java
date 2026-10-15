@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
@@ -106,6 +107,14 @@ class ResourceArnBuilderTest {
         Instance<IamService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(service);
         return new ResourceArnBuilder(new ObjectMapper(), instance);
+    }
+
+    /** A builder reading {@code secrets}, for a secret named by its name. */
+    private static ResourceArnBuilder backedBy(SecretsManagerService secrets) {
+        @SuppressWarnings("unchecked")
+        Instance<SecretsManagerService> instance = mock(Instance.class);
+        when(instance.get()).thenReturn(secrets);
+        return new ResourceArnBuilder(new ObjectMapper(), null, instance);
     }
 
     private static IamService storeHolding(String userName, String path, String arn) {
@@ -878,6 +887,36 @@ class ResourceArnBuilderTest {
         setJsonBody("{\"SecretId\":\"app/prod/database\"}");
         String arn = builder.build("secretsmanager", ctx, "us-east-1", "000000000000");
         assertEquals("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/prod/database", arn);
+    }
+
+    @Test
+    void secretsManagerResolvesASecretNamedByItsNameToItsStoredArn() {
+        String storedArn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:app/core-AbC123";
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        when(secrets.findArnByName("111122223333", "app/core", "us-east-1")).thenReturn(Optional.of(storedArn));
+        setJsonBody("{\"SecretId\":\"app/core\"}");
+
+        String arn = backedBy(secrets).build("secretsmanager", ctx, "us-east-1", "111122223333");
+
+        assertEquals(storedArn, arn);
+    }
+
+    @Test
+    void secretsManagerKeepsTheNameOfASecretThatIsNotStored() {
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        when(secrets.findArnByName(ACCOUNT, "app/missing", "us-east-1")).thenReturn(Optional.empty());
+        setJsonBody("{\"SecretId\":\"app/missing\"}");
+
+        String arn = backedBy(secrets).build("secretsmanager", ctx, "us-east-1", ACCOUNT);
+
+        assertEquals("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/missing", arn);
+    }
+
+    @Test
+    void secretsManagerCreateSecretBuildsArnFromNameWithAnUnassignedSuffix() {
+        setJsonBody("{\"Name\":\"app/core\",\"SecretString\":\"x\"}");
+        String arn = builder.build("secretsmanager", ctx, "us-east-1", ACCOUNT);
+        assertEquals("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/core-??????", arn);
     }
 
     // ── SSM ──────────────────────────────────────────────────────────────────────
