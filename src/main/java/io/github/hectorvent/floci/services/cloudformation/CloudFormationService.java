@@ -3034,7 +3034,7 @@ public class CloudFormationService implements ResourceProvider {
         try {
             template = parseTemplate(templateBody);
         } catch (Exception ignored) {
-            // No Parameters section to check; the preflight and the execution report the parse error.
+            // No Parameters section to check; executing the change set reports the parse error.
             return;
         }
         JsonNode declared = template.path("Parameters");
