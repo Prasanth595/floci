@@ -1114,6 +1114,43 @@ a Query `Action` field on it does not change the action it is checked as, and it
 still percent-encoded, as the router matches it, so an encoded `/` inside a parameter cannot make
 the route's rule miss.
 
+An S3 object operation is checked as the action the S3 documentation gives it:
+- **Multipart uploads:**
+  - `CreateMultipartUpload`, `UploadPart` and `CompleteMultipartUpload` are checked as
+    `s3:PutObject`.
+  - `AbortMultipartUpload` is checked as `s3:AbortMultipartUpload`.
+  - `ListParts` is checked as `s3:ListMultipartUploadParts`.
+- **Restore and select:** `RestoreObject` is checked as `s3:RestoreObject`, and
+  `SelectObjectContent` as `s3:GetObject`, or `s3:GetObjectVersion` when it names a version.
+- **Object lock:** object retention and legal hold use their own actions: `s3:GetObjectRetention`,
+  `s3:PutObjectRetention`, `s3:GetObjectLegalHold` and `s3:PutObjectLegalHold`.
+- **Annotations:** object annotations use the `s3:*ObjectAnnotation` actions, and
+  `s3:ListObjectAnnotations` when no annotation name is given.
+- **Versions:** a `versionId` selects the version action AWS checks.
+  - Reading or heading a version needs `s3:GetObjectVersion`; `s3:GetObject` is not needed.
+  - Deleting a version needs `s3:DeleteObjectVersion`, so a deny on it stops permanent deletes
+    while a plain delete still adds a delete marker.
+  - A version's ACL and annotations use `s3:GetObjectVersionAcl`, `s3:PutObjectVersionAcl` and the
+    `s3:*ObjectVersionAnnotation(s)` actions.
+  - Tagging a version is still checked as the `s3:*ObjectTagging` actions: the tagging operations
+    act on the current version whatever `versionId` names.
+  - S3's own access check under `floci.services.s3.enforce-auth`, which evaluates bucket policies
+    and ACLs, checks reading, selecting from or deleting a version as `s3:GetObjectVersion` or
+    `s3:DeleteObjectVersion`, but a version's ACL and annotation requests as the base actions, and
+    offers no `s3:versionid`.
+  - Deleting a version with an `If-Match` ETag also needs `s3:GetObject`, as a plain conditional
+    delete does: the S3 user guide says the condition is evaluated against the current version.
+- **Bucket configurations:**
+  - Analytics, inventory and Intelligent-Tiering configurations use
+    `s3:Get/PutAnalyticsConfiguration`, `s3:Get/PutInventoryConfiguration` and
+    `s3:Get/PutIntelligentTieringConfiguration`.
+  - Removing a configuration needs its Put action.
+  - `DeleteBucketTagging` is checked as `s3:PutBucketTagging`, since AWS has no
+    `s3:DeleteBucketTagging` action.
+
+A request naming several of these sub-resources is checked as the one S3 runs. `GET ?acl&tagging`
+returns the tags, so it needs `s3:GetObjectTagging`.
+
 A request that names its operation, in a Query `Action`, an `X-Amz-Target` header or a Smithy RPC v2
 path (`/service/<service>/operation/<operation>`), is authorized as the action AWS checks for that
 operation, which is usually the operation's own name. An RPC v2 call is checked as the service and
@@ -1378,14 +1415,15 @@ floci populates:
   `s3:PutBucketTagging` (the `<Tagging>` body).
 - `aws:ResourceTag/<key>`: the target resource's current tags, for `ec2:CreateTags`,
   `ec2:DeleteTags`, `ec2:TerminateInstances` and `ec2:DescribeInstances` (the first
-  `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucketTagging`
-  and `s3:DeleteBucket` (the bucket). A request naming several EC2 resources is evaluated
+  `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucket` and the
+  `s3:PutBucketTagging` that `DeleteBucketTagging` is checked as (the bucket). A request naming several EC2 resources is evaluated
   once per resource and denied when any of them fails the condition, as on AWS.
   `logs:CreateLogStream` and `logs:DeleteLogStream` use the owning log group's tags.
 - `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
   `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
-  `s3:DeleteObjectTagging` and `s3:PutObjectTagging`. A `versionId` in the request selects the
-  version whose tags are read. **`s3:DeleteObject` and `s3:PutObject` do not receive this key**, as measured on AWS.
+  `s3:DeleteObjectTagging`, `s3:PutObjectTagging` and the annotation actions, and for their
+  version actions (`s3:GetObjectVersion`, `s3:GetObjectVersionAcl` and so on). A `versionId` in the request
+  selects the version whose tags are read. **`s3:DeleteObject` and `s3:PutObject` do not receive this key**, as measured on AWS.
   An allow conditioned on it denies the delete of a correctly tagged object, and a create cannot
   be gated on tags an object does not have yet.
 - `s3:RequestObjectTag/<key>`: a tag the request asks to attach. `s3:PutObject` reads these
@@ -1400,9 +1438,12 @@ floci populates:
   `ForAllValues:StringEquals` can limit all requested keys without a `Null` guard; an
   omitted or empty tag set still follows the absent-key rules above. Existing object tags
   do not contribute to this requested set. See the [AWS object-tag policy guidance](https://docs.aws.amazon.com/AmazonS3/latest/userguide/tagging-and-policies.html).
+- `s3:versionid`: the `versionId` of the request, for the version actions it selects.
 - A `PutObject` carrying `If-Match` is authorized as `s3:GetObject` as well, and that second
-  check is made without the object's tags in the context, as measured on AWS. `If-None-Match`
-  needs no such permission.
+  check is made without the object's tags in the context, as measured on AWS. `CopyObject` and
+  `CompleteMultipartUpload`, the other operations the S3 user guide lists for `If-Match`, get the
+  same check; `CreateMultipartUpload` and `UploadPart` ignore the header. `If-None-Match` needs no
+  such permission.
 - `aws:PrincipalArn`: the caller's ARN, resolved from the signing access key. It is the
   IAM-user ARN for a user access key, and `arn:aws:iam::<account>:root` for the bare account-id
   key (floci's account-root principal), matching the ARN shape AWS itself reports for the account
