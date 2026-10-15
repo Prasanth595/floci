@@ -82,12 +82,44 @@ class CloudFormationLambdaWebIntegrationTest {
                 .then().statusCode(200)
                 .body("serviceConfig.timeoutSeconds", equalTo(45));
 
+        // A failure after the next replacement rolls the endpoint back to this revision and deletes the replacement.
+        cloudFormation(stackName, "UpdateStack", template(functionName, 60, BAD_REVISION));
+        await().untilAsserted(() -> describeStacks(stackName, "UPDATE_ROLLBACK_COMPLETE"));
+        given().when().get("/2025-03-07/web-functions/" + functionName + "/endpoints/prod")
+                .then().statusCode(200)
+                .body("revisionWeights[0].revisionId", equalTo(newRevisionId));
+        await().untilAsserted(() -> given().contentType("application/json").body("{}")
+                .when().post("/2025-03-07/web-functions/" + functionName + "/list-revisions")
+                .then().statusCode(200)
+                .body("revisions", hasSize(1))
+                .body("revisions[0].revisionId", equalTo(newRevisionId)));
+
         cloudFormation(stackName, "DeleteStack", null);
         await().untilAsserted(() -> given().when().get("/2025-03-07/web-functions/" + functionName)
                 .then().statusCode(404));
     }
 
+    /** A revision whose code object does not exist, created after the endpoint, so the update fails there. */
+    private static final String BAD_REVISION = """
+            "Bad": {
+              "Type": "AWS::Lambda::WebFunctionRevision",
+              "DependsOn": ["Ep"],
+              "Properties": {
+                "FunctionName": {"Ref": "Fn"},
+                "BuildConfig": {
+                  "CodeConfig": {"S3Object": {"Bucket": "%s", "Key": "missing.zip"}},
+                  "RuntimeConfig": {"Runtime": "nodejs24.x"}
+                },
+                "ServiceConfig": {"ExecutionRoleArn": "arn:aws:iam::000000000000:role/cfn-web"}
+              }
+            },
+            """.formatted(BUCKET);
+
     private static String template(String functionName, int timeoutSeconds) {
+        return template(functionName, timeoutSeconds, "");
+    }
+
+    private static String template(String functionName, int timeoutSeconds, String extraResources) {
         return """
                 {
                   "Resources": {
@@ -110,7 +142,7 @@ class CloudFormationLambdaWebIntegrationTest {
                         }
                       }
                     },
-                    "Ep": {
+                    %s"Ep": {
                       "Type": "AWS::Lambda::WebFunctionEndpoint",
                       "Properties": {
                         "FunctionName": {"Ref": "Fn"},
@@ -135,7 +167,7 @@ class CloudFormationLambdaWebIntegrationTest {
                     "EpState": {"Value": {"Fn::GetAtt": ["Ep", "State"]}}
                   }
                 }
-                """.formatted(functionName, BUCKET, timeoutSeconds);
+                """.formatted(functionName, BUCKET, timeoutSeconds, extraResources);
     }
 
     private static void cloudFormation(String stackName, String action, String templateBody) {
