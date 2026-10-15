@@ -98,7 +98,7 @@ class Route53ResolverReplayFallbackTest {
         AwsException broken = assertThrows(AwsException.class,
                 () -> service.listResolverEndpointIpAddresses(id));
         assertEquals("InternalServiceErrorException", broken.jsonType());
-        assertEquals(500, broken.getHttpStatus());
+        assertEquals(400, broken.getHttpStatus());
     }
 
     @Test

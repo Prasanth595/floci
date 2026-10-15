@@ -254,7 +254,7 @@ public class Route53ResolverService {
                 .map(node -> node.get("IpAddressRequests"))
                 .filter(JsonNode::isArray)
                 .orElseThrow(() -> new AwsException("InternalServiceErrorException",
-                        "No IP addresses recorded for resolver endpoint: " + id, 500));
+                        "No IP addresses recorded for resolver endpoint: " + id, 400));
         List<ObjectNode> addresses = new ArrayList<>();
         for (int i = 0; i < recorded.size(); i++) {
             JsonNode request = recorded.get(i);
