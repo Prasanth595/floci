@@ -259,6 +259,24 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void aMalformedEnableHttpEndpointFailsInsteadOfTurningTheEndpointOff() {
+        DbCluster enabled = mock(DbCluster.class);
+        when(enabled.getDbClusterIdentifier()).thenReturn("dataapi");
+        when(enabled.isHttpEndpointEnabled()).thenReturn(true);
+        when(rdsService.getDbCluster("dataapi")).thenReturn(enabled);
+        when(rdsService.modifyDbCluster(eq("dataapi"), any(), any(), any(), any(), any(), any())).thenReturn(enabled);
+
+        StackResource r = provisionExisting("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"dataapi","Engine":"aurora-postgresql","EnableHttpEndpoint":"yes"}
+                """, "us-east-1", "dataapi", Map.of("DBClusterIdentifier", "dataapi"));
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("EnableHttpEndpoint must be true or false"), r.getStatusReason());
+        verify(rdsService, never()).setHttpEndpoint(any(), any(), anyBoolean());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void dbClusterEnableHttpEndpointOnANonAuroraEngineFailsBeforeCreating() {
         StackResource r = provision("Cluster", "AWS::RDS::DBCluster", """
                 {"DBClusterIdentifier":"dataapi","Engine":"postgres","EnableHttpEndpoint":true}

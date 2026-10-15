@@ -3241,6 +3241,17 @@ class RdsServiceTest {
     }
 
     @Test
+    void theDataApiTakesOnlyTheAuroraEngines() {
+        RdsService.requireDataApiEngine("aurora-postgresql");
+        RdsService.requireDataApiEngine("AURORA-MYSQL");
+        RdsService.requireDataApiEngine("aurora");
+        for (String engine : new String[] {"aurora-serverless", "aurora-postgresql-limitless", "postgres", null}) {
+            AwsException refused = assertThrows(AwsException.class, () -> RdsService.requireDataApiEngine(engine));
+            assertEquals("InvalidParameterCombination", refused.getErrorCode(), String.valueOf(engine));
+        }
+    }
+
+    @Test
     void engineVersionsSortNumericallyForUpgradeTargets() {
         RdsEngineCatalog.EngineVersion pg163 = RdsEngineCatalog.VERSIONS.stream()
                 .filter(v -> v.engine().equals("postgres") && v.version().equals("16.3")).findFirst().orElseThrow();
