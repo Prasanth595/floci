@@ -21,6 +21,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -143,6 +144,33 @@ class AutoPauseControllerTest {
         }
         assertEquals(State.RUNNING, controller.state());
         assertFalse(freezer.paused);
+    }
+
+    @Test
+    void leaseReleaseStillSucceedsAfterTheTimerStops() throws Exception {
+        AutoPauseController controller = controller(Duration.ZERO);
+        controller.configure(300, listener);
+        RdsBackendGate.Lease lease = controller.acquire();
+        scheduler.reject = true;
+
+        assertDoesNotThrow(lease::close);
+        assertEquals(0, controller.leaseCount());
+        assertEquals(State.RUNNING, controller.state());
+    }
+
+    @Test
+    void pausedReportingIsBestEffortButResumeSchedulingMustSucceed() throws Exception {
+        AutoPauseController controller = controller(Duration.ZERO);
+        controller.configure(300, listener);
+        scheduler.reject = true;
+
+        assertTrue(assertDoesNotThrow(controller::pauseIfIdle));
+        assertEquals(State.PAUSED, controller.state());
+        assertThrows(IllegalStateException.class, () -> controller.acquire(false));
+        scheduler.reject = false;
+        assertThrows(RdsBackendGate.ResumingException.class, () -> controller.acquire(false));
+        scheduler.advance(Duration.ZERO);
+        assertEquals(State.RUNNING, controller.state());
     }
 
     @Test

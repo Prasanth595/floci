@@ -403,12 +403,12 @@ final class AutoPauseController {
         if (closed || state != State.RUNNING || leases > 0 || secondsUntilAutoPause == null) {
             return;
         }
-        startTimer(this::idleTimerFired, Duration.ofSeconds(secondsUntilAutoPause));
+        startBestEffortTimer(this::idleTimerFired, Duration.ofSeconds(secondsUntilAutoPause));
     }
 
     private void armPausedReport() {
         if (!closed) {
-            startTimer(this::pausedReportDue, PAUSED_REPORT_INTERVAL);
+            startBestEffortTimer(this::pausedReportDue, PAUSED_REPORT_INTERVAL);
         }
     }
 
@@ -421,6 +421,15 @@ final class AutoPauseController {
             }
         } finally {
             unlockAndDispatch();
+        }
+    }
+
+    private void startBestEffortTimer(LongConsumer task, Duration delay) {
+        try {
+            startTimer(task, delay);
+        } catch (IllegalStateException e) {
+            // Shutdown must not turn a completed request's lease release into a failure.
+            LOG.debugv(e, "Could not schedule best-effort RDS timer for {0}", containerId);
         }
     }
 
