@@ -465,6 +465,54 @@ class Ec2ServiceTest {
                 .noneMatch(subnet -> subnetId.equals(subnet.getSubnetId())));
     }
 
+    /**
+     * A failed NAT gateway was never created and holds no interface, so it does not pin its subnet.
+     * The gateway fails because its Elastic IP is already held by a gateway in the default VPC.
+     */
+    @Test
+    void deleteSubnetIgnoresAFailedNatGateway() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String defaultSubnetId = service.describeSubnets(region, List.of(), Map.of()).getFirst().getSubnetId();
+        String allocationId = service.allocateAddress(region).getAllocationId();
+        service.createNatGateway(region, defaultSubnetId, allocationId, null, null);
+        String vpcId = service.createVpc(region, "10.85.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(region, vpcId, "10.85.1.0/24", "us-east-1a").getSubnetId();
+        NatGateway failed = service.createNatGateway(region, subnetId, allocationId, null, null);
+        assertEquals("failed", failed.getState());
+
+        service.deleteSubnet(region, subnetId);
+        assertTrue(service.describeSubnets(region, List.of(), Map.of()).stream()
+                .noneMatch(subnet -> subnetId.equals(subnet.getSubnetId())));
+    }
+
+    /** DeleteVpc checks the same subnet residents, so a failed NAT gateway does not pin the VPC either. */
+    @Test
+    void deleteVpcIgnoresAFailedNatGatewayInOneOfItsSubnets() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String defaultSubnetId = service.describeSubnets(region, List.of(), Map.of()).getFirst().getSubnetId();
+        String allocationId = service.allocateAddress(region).getAllocationId();
+        service.createNatGateway(region, defaultSubnetId, allocationId, null, null);
+        String vpcId = service.createVpc(region, "10.86.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(region, vpcId, "10.86.1.0/24", "us-east-1a").getSubnetId();
+        NatGateway failed = service.createNatGateway(region, subnetId, allocationId, null, null);
+        assertEquals("failed", failed.getState());
+
+        // DeleteVpc refuses while any subnet remains, so the resident check runs in DeleteSubnet;
+        // after that the failed gateway must not keep the VPC either.
+        service.deleteSubnet(region, subnetId);
+        service.deleteVpc(region, vpcId);
+        assertTrue(service.describeVpcs(region, List.of(), Map.of()).stream()
+                .noneMatch(vpc -> vpcId.equals(vpc.getVpcId())));
+    }
+
     @Test
     void deleteSubnetFailsUntilItsStandaloneNetworkInterfaceIsDeleted() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),

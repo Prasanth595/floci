@@ -4790,7 +4790,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * it the VPC: an instance, a NAT gateway, a standalone network interface, or an interface or
      * Gateway Load Balancer endpoint. A {@code shutting-down} instance still holds its interface and
      * a {@code deleting} NAT gateway still holds its address, so only {@code terminated} and
-     * {@code deleted} release the subnet; a standalone interface is removed from the store on
+     * {@code deleted} release the subnet. A {@code failed} NAT gateway was never created and holds
+     * no interface, so it does not count either; a standalone interface is removed from the store on
      * delete, so its presence alone counts. AWS answers {@code DependencyViolation} until then.
      */
     private void requireNoSubnetResidents(String region, Set<String> subnetIds, String message) {
@@ -4804,7 +4805,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                         || !"terminated".equals(instance.getState().getName())))
                 || natGateways.scan(k -> k.startsWith(regionPrefix)).stream()
                         .anyMatch(natGateway -> subnetIds.contains(natGateway.getSubnetId())
-                                && !"deleted".equals(natGateway.getState()))
+                                && !"deleted".equals(natGateway.getState())
+                                && !"failed".equals(natGateway.getState()))
                 || networkInterfaces.scan(k -> k.startsWith(regionPrefix)).stream()
                         .anyMatch(ni -> subnetIds.contains(ni.getSubnetId()))
                 || vpcEndpoints.scan(k -> k.startsWith(regionPrefix)).stream()
