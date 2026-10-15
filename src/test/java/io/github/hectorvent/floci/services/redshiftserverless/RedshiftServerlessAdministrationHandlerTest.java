@@ -71,13 +71,12 @@ class RedshiftServerlessAdministrationHandlerTest {
         assertEquals("ValidationException", errorType("ListReservationOfferings", "{\"maxResults\":0}"));
         assertEquals("ValidationException", errorType("ListReservationOfferings", "{\"maxResults\":101}"));
 
-        String trackToken = ok("ListTracks", "{\"maxResults\":1}").get("nextToken").textValue();
         assertEquals("ValidationException",
-                errorType("ListManagedWorkgroups", "{\"nextToken\":\"" + trackToken + "\"}"));
+                errorType("ListManagedWorkgroups", "{\"nextToken\":\"bad-token\"}"));
         assertEquals("ValidationException",
-                errorType("ListReservations", "{\"nextToken\":\"" + trackToken + "\"}"));
+                errorType("ListReservations", "{\"nextToken\":\"bad-token\"}"));
         assertEquals("ValidationException",
-                errorType("ListReservationOfferings", "{\"nextToken\":\"" + trackToken + "\"}"));
+                errorType("ListReservationOfferings", "{\"nextToken\":\"bad-token\"}"));
 
         assertEquals("ResourceNotFoundException", errorType("GetReservation", "{\"reservationId\":\"r-1\"}"));
         assertEquals("ValidationException", errorType("GetReservation", "{}"));

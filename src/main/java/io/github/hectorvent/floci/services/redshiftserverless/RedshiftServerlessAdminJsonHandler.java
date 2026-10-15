@@ -4,8 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsErrorResponse;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -31,18 +29,6 @@ public class RedshiftServerlessAdminJsonHandler {
     @Inject
     public RedshiftServerlessAdminJsonHandler(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
-    }
-
-    /** Services {@code action}, or answers {@code UnknownOperationException} when it is not one of ours. */
-    public Response handle(String action, JsonNode request, String region) {
-        Supplier<Response> op = operation(action, request, region);
-        if (op == null) {
-            return Response.status(400)
-                    .entity(new AwsErrorResponse("UnknownOperationException",
-                            "Operation " + action + " is not supported."))
-                    .build();
-        }
-        return op.get();
     }
 
     Supplier<Response> operation(String action, JsonNode request, String region) {
@@ -92,15 +78,9 @@ public class RedshiftServerlessAdminJsonHandler {
     }
 
     private Response listTracks(JsonNode request) {
-        Integer maxResults = ServerlessSupport.maxResults(request);
-        if (maxResults != null && (maxResults < 1 || maxResults > 100)) {
-            throw new AwsException("ValidationException", "maxResults must be between 1 and 100", 400);
-        }
-        int limit = maxResults != null ? maxResults : 100;
-        String nextToken = ServerlessSupport.text(request, "nextToken");
         PaginatedResult<String> page = Pagination.paginate(TRACK_NAMES, name -> name,
-                limit, nextToken, "ListTracks",
-                token -> new AwsException("ValidationException", "Invalid nextToken.", 400));
+                ServerlessSupport.maxResults(request), ServerlessSupport.text(request, "nextToken"),
+                100, 100, "ValidationException");
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("tracks");
         page.items().forEach(name -> items.add(trackNode(name)));
@@ -122,14 +102,8 @@ public class RedshiftServerlessAdminJsonHandler {
      * Glue zero-ETL managed workgroups, publishes no reservation offerings and sells no reservations.
      */
     private Response listWithoutItems(JsonNode request, String listName) {
-        Integer maxResults = ServerlessSupport.maxResults(request);
-        if (maxResults != null && (maxResults < 1 || maxResults > 100)) {
-            throw new AwsException("ValidationException", "maxResults must be between 1 and 100", 400);
-        }
-        String nextToken = ServerlessSupport.text(request, "nextToken");
-        if (nextToken != null && !nextToken.isEmpty()) {
-            throw new AwsException("ValidationException", "Invalid nextToken.", 400);
-        }
+        Pagination.paginate(List.<String>of(), name -> name, ServerlessSupport.maxResults(request),
+                ServerlessSupport.text(request, "nextToken"), 100, 100, "ValidationException");
         ObjectNode response = objectMapper.createObjectNode();
         response.putArray(listName);
         return Response.ok(response).build();
