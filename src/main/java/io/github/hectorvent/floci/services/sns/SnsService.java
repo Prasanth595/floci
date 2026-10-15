@@ -2090,8 +2090,8 @@ public class SnsService implements Resettable, ResourceProvider {
 
     /**
      * {@code anything-but} of exactly one nested positive operator. A present value matches only
-     * when that operator does not. An empty object, an unknown key, or more than one key fails
-     * closed. Does not recurse into {@code anything-but} or {@code exists}.
+     * when that operator does not. An empty object, an unknown key, more than one key, or a
+     * malformed operand fails closed. Does not recurse into {@code anything-but} or {@code exists}.
      *
      * @param attributeValue when true, {@code stringValue} is the attribute and {@code numeric}
      *                       parses it; otherwise {@code numeric} matches only a JSON number
@@ -2105,9 +2105,12 @@ public class SnsService implements Resettable, ResourceProvider {
         JsonNode operand = operator.get(name);
         if ("prefix".equals(name) || "suffix".equals(name) || "equals-ignore-case".equals(name)
                 || "wildcard".equals(name) || "cidr".equals(name)) {
+            if (operand == null || !operand.isTextual()) {
+                return false;
+            }
             return !matchesStringOperator(name, operand, stringValue);
         }
-        if (!"numeric".equals(name)) {
+        if (!"numeric".equals(name) || !isWellFormedNumericCondition(operand)) {
             return false;
         }
         boolean matched;
@@ -2123,6 +2126,24 @@ public class SnsService implements Resettable, ResourceProvider {
             matched = false;
         }
         return !matched;
+    }
+
+    /** Comparator/number pairs only. Any other numeric operand is malformed and must not be negated. */
+    private static boolean isWellFormedNumericCondition(JsonNode conditions) {
+        if (conditions == null || !conditions.isArray() || conditions.size() % 2 != 0) {
+            return false;
+        }
+        for (int i = 0; i < conditions.size(); i += 2) {
+            JsonNode op = conditions.get(i);
+            if (!op.isTextual() || !conditions.get(i + 1).isNumber()
+                    || !switch (op.asText()) {
+                        case "=", ">", ">=", "<", "<=" -> true;
+                        default -> false;
+                    }) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

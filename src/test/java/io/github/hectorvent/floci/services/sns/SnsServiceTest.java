@@ -820,6 +820,26 @@ class SnsServiceTest {
         assertTrue(snsService.matchesFilterPolicy(numberVsPrefix, body("{\"n\":100}"), null));
     }
 
+    /** Non-textual and malformed numeric nested operands fail closed in both filter scopes. */
+    @Test
+    void filterPolicy_nestedAnythingBut_malformedOperandDoesNotMatch() {
+        assertMalformedNestedClosed("{\"f\":[{\"anything-but\":{\"suffix\":1}}]}",
+                "f", "x1", "{\"f\":\"x1\"}");
+        assertMalformedNestedClosed("{\"n\":[{\"anything-but\":{\"numeric\":[\"=\",100,\"<\"]}}]}",
+                "n", "50", "{\"n\":50}");
+        assertMalformedNestedClosed("{\"n\":[{\"anything-but\":{\"numeric\":1}}]}",
+                "n", "1", "{\"n\":1}");
+        assertMalformedNestedClosed("{\"n\":[{\"anything-but\":{\"numeric\":[\"=\",\"100\"]}}]}",
+                "n", "50", "{\"n\":50}");
+    }
+
+    private void assertMalformedNestedClosed(String policy, String key, String attribute, String json) {
+        assertFalse(snsService.matchesFilterPolicy(
+                subscriptionWithPolicy(policy, "MessageBody"), body(json), null));
+        assertFalse(snsService.matchesFilterPolicy(
+                subscriptionWithPolicy(policy, null), null, attr(key, attribute, "String")));
+    }
+
     /** A glob is anchored and literal; a CIDR compares addresses under the prefix and ignores names. */
     @Test
     void filterPolicy_messageBody_wildcardAndCidrEdges() {
