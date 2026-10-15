@@ -1,16 +1,28 @@
 package io.github.hectorvent.floci.services.redshiftserverless;
 
+import io.github.hectorvent.floci.services.redshift.TempCredential;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -22,6 +34,8 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.when;
 
@@ -32,6 +46,12 @@ class RedshiftServerlessIntegrationTest {
     private static final String TARGET_PREFIX = "RedshiftServerless.";
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260904/us-east-1/redshift-serverless/aws4_request";
+
+    @TestHTTPResource
+    URI endpoint;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -52,6 +72,44 @@ class RedshiftServerlessIntegrationTest {
         when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
                 any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
                 .thenReturn(new RedshiftServerlessRuntime.Backend("127.0.0.1", 55432));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void queryCredentialsKeepTheRegisteredDatabaseIdentity(boolean blankHeader) {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String user = "query-user-" + suffix;
+        String namespace = "query-ns-" + suffix;
+        String workgroup = "query-wg-" + suffix;
+        String region = "eu-west-1";
+        String root = EnforcementFixtures.auth("000000000000", "redshift-serverless")
+                .replace("us-east-1", region);
+        String caller = EnforcementFixtures.createUser(cleanup, endpoint.getPort(),
+                EnforcementFixtures.auth("000000000000", "iam"), user).accessKeyId();
+        when(runtime.issueCredential(anyString(), anyString(), anyString(), anyString(), anyInt()))
+                .thenAnswer(invocation -> new TempCredential(invocation.getArgument(3), "temporary-password",
+                        Instant.now().plusSeconds(900), List.of()));
+        given().header("Authorization", root).header("X-Amz-Target", TARGET_PREFIX + "CreateNamespace")
+                .contentType(CONTENT_TYPE).body(Map.of("namespaceName", namespace, "adminUsername", "admin"))
+                .when().post("/").then().statusCode(200);
+        cleanup.register(() -> given().header("Authorization", root)
+                .header("X-Amz-Target", TARGET_PREFIX + "DeleteNamespace").contentType(CONTENT_TYPE)
+                .body(Map.of("namespaceName", namespace)).when().post("/").then().statusCode(200));
+        given().header("Authorization", root).header("X-Amz-Target", TARGET_PREFIX + "CreateWorkgroup")
+                .contentType(CONTENT_TYPE).body(Map.of("workgroupName", workgroup, "namespaceName", namespace))
+                .when().post("/").then().statusCode(200);
+        cleanup.register(() -> given().header("Authorization", root)
+                .header("X-Amz-Target", TARGET_PREFIX + "DeleteWorkgroup").contentType(CONTENT_TYPE)
+                .body(Map.of("workgroupName", workgroup)).when().post("/").then().statusCode(200));
+        RequestSpecification request = given().contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", TARGET_PREFIX + "GetCredentials")
+                .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+                .queryParam("X-Amz-Credential", caller + "/20261015/" + region + "/redshift-serverless/aws4_request")
+                .queryParam("X-Amz-Signature", "abc").body(Map.of("workgroupName", workgroup));
+        if (blankHeader) {
+            request.header("Authorization", "");
+        }
+        request.when().post("/").then().statusCode(200).body("dbUser", equalTo("IAM:" + user));
     }
 
     @Test
