@@ -234,6 +234,31 @@ class Route53ResolverIntegrationTest {
     }
 
     @Test
+    void listResolverEndpointIpAddresses_repeatedEntriesGetDistinctStableIds() {
+        // Two addresses in one subnet, both left for AWS to pick, is a valid request: the
+        // model's IpAddressesRequest is a plain list with no uniqueness constraint. Each is a
+        // separate address, so each needs its own IpId.
+        String endpointId = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Name\":\"ep-dup-ips\",\"Direction\":\"INBOUND\",\"CreatorRequestId\":\"list-ips-dup\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],"
+                + "\"IpAddresses\":[{\"SubnetId\":\"subnet-aaa\"},{\"SubnetId\":\"subnet-aaa\"}]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("ResolverEndpoint.Id");
+
+        String first = listIpAddresses(endpointId);
+        java.util.List<String> ids = io.restassured.path.json.JsonPath.from(first).getList("IpAddresses.IpId");
+        assertEquals(2, ids.size());
+        assertEquals(2, new java.util.HashSet<>(ids).size(), "repeated entries share an IpId: " + ids);
+        assertEquals(first, listIpAddresses(endpointId));
+    }
+
+    @Test
     void listResolverEndpointIpAddresses_unknownEndpoint_returnsResourceNotFound() {
         given()
             .contentType(CONTENT_TYPE)

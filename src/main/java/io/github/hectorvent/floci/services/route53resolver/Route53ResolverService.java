@@ -233,19 +233,27 @@ public class Route53ResolverService {
 
     /**
      * The endpoint's addresses as AWS {@code IpAddressResponse} entries, built from the
-     * {@code IpAddresses} recorded at create time. {@code IpId} is derived from the endpoint
-     * and the entry, so it is stable across calls. An address the request left for AWS to
-     * pick has no {@code Ip}: Floci does not allocate from the subnet.
+     * {@code IpAddresses} recorded at create time. {@code IpId} is derived from the endpoint,
+     * the entry and its position in the recorded list, so it is stable across calls. An
+     * address the request left for AWS to pick has no {@code Ip}: Floci does not allocate
+     * from the subnet.
      */
     public List<ObjectNode> listResolverEndpointIpAddresses(String id) {
         ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+        // A missing record would otherwise read as an empty list beside a nonzero
+        // IpAddressCount; fail loudly with the modeled InternalServiceErrorException instead.
         JsonNode recorded = endpointIpRequestStore.get(id)
-                .map(node -> node.path("IpAddressRequests"))
-                .orElse(objectMapper.createArrayNode());
+                .map(node -> node.get("IpAddressRequests"))
+                .filter(JsonNode::isArray)
+                .orElseThrow(() -> new AwsException("InternalServiceErrorException",
+                        "No IP addresses recorded for resolver endpoint: " + id, 500));
         List<ObjectNode> addresses = new ArrayList<>();
-        for (JsonNode request : recorded) {
+        for (int i = 0; i < recorded.size(); i++) {
+            JsonNode request = recorded.get(i);
             ObjectNode address = objectMapper.createObjectNode();
-            address.put("IpId", "rni-" + deterministicHex(id + "|" + canonicalKey(request), 17));
+            // The index keeps repeated entries (two addresses in one subnet, both left for AWS
+            // to pick) distinct; the stored list is normalised once at create, so it is stable.
+            address.put("IpId", "rni-" + deterministicHex(id + "|" + i + "|" + canonicalKey(request), 17));
             copyIfPresent(request, address, "SubnetId", "Ip", "Ipv6");
             address.put("Status", "ATTACHED");
             address.put("StatusMessage", "This IP address is operational.");
