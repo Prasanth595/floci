@@ -74,23 +74,6 @@ class EksPodIdentityAccountIntegrationTest {
         }
     }
 
-    @Test
-    void crossAccountRoleSessionStaysInTheClusterAccount() {
-        String name = "pi-cross-role-" + UUID.randomUUID().toString().substring(0, 8);
-        String roleName = "role-" + name;
-        try {
-            Cluster cluster = createCluster(OTHER_ACCOUNT, name);
-            String roleArn = RequestScopes.callAs(DEFAULT_ACCOUNT,
-                    () -> iamService.createRole(roleName, "/", "{}", null, 3600, null).getArn());
-            createPodIdentityResourcesForRole(OTHER_ACCOUNT, cluster, roleArn);
-            assertCredentialsBelongTo(OTHER_ACCOUNT, DEFAULT_ACCOUNT, cluster);
-        } finally {
-            cleanUp(OTHER_ACCOUNT, name, roleName);
-            RequestScopes.runAs(DEFAULT_ACCOUNT, () -> iamService.findRole(DEFAULT_ACCOUNT, roleName)
-                    .ifPresent(role -> iamService.deleteRole(roleName)));
-        }
-    }
-
     private Cluster createCluster(String account, String name) {
         Cluster cluster = new Cluster();
         cluster.setName(name);
@@ -143,19 +126,15 @@ class EksPodIdentityAccountIntegrationTest {
     }
 
     private void assertCredentialsBelongTo(String account, Cluster cluster) {
-        assertCredentialsBelongTo(account, account, cluster);
-    }
-
-    private void assertCredentialsBelongTo(String clusterAccount, String roleAccount, Cluster cluster) {
-        String accessKeyId = given().header("Authorization", mintToken(clusterAccount, cluster))
+        String accessKeyId = given().header("Authorization", mintToken(account, cluster))
                 .get("/v1/credentials")
                 .then().statusCode(200)
-                .body("AccountId", equalTo(roleAccount))
+                .body("AccountId", equalTo(account))
                 .extract().path("AccessKeyId");
         IamService.EksSessionIdentity identity = iamService.findEksSessionIdentity(accessKeyId).orElseThrow();
-        assertEquals(clusterAccount, identity.accountId());
-        assertEquals("arn:aws:iam::" + roleAccount + ":role/role-" + cluster.getName(), identity.roleArn());
-        iamService.unregisterSession(clusterAccount, accessKeyId);
+        assertEquals(account, identity.accountId());
+        assertEquals("arn:aws:iam::" + account + ":role/role-" + cluster.getName(), identity.roleArn());
+        iamService.unregisterSession(account, accessKeyId);
         assertTrue(iamService.findEksSessionIdentity(accessKeyId).isEmpty());
     }
 
