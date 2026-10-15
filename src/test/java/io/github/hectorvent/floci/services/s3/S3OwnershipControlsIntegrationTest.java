@@ -68,6 +68,72 @@ class S3OwnershipControlsIntegrationTest {
 
     @Test
     @Order(5)
+    void enforcedOwnershipRejectsAclWritesAndDisallowedUploadAcls() {
+        given()
+            .body("object body")
+        .when()
+            .put("/" + BUCKET + "/owned-object")
+        .then()
+            .statusCode(200);
+
+        given()
+            .body(OWNERSHIP_CONTROLS_XML.replace("BucketOwnerPreferred", "BucketOwnerEnforced"))
+        .when()
+            .put("/" + BUCKET + "?ownershipControls")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("x-amz-acl", "public-read")
+        .when()
+            .put("/" + BUCKET + "?acl")
+        .then()
+            .statusCode(400)
+            .body(containsString("AccessControlListNotSupported"));
+
+        given()
+            .header("x-amz-acl", "public-read")
+        .when()
+            .put("/" + BUCKET + "/owned-object?acl")
+        .then()
+            .statusCode(400)
+            .body(containsString("AccessControlListNotSupported"));
+
+        given()
+            .header("x-amz-acl", "public-read")
+            .body("new object")
+        .when()
+            .put("/" + BUCKET + "/rejected-object")
+        .then()
+            .statusCode(400)
+            .body(containsString("AccessControlListNotSupported"));
+
+        given()
+            .header("x-amz-acl", "public-read")
+        .when()
+            .post("/" + BUCKET + "/rejected-multipart?uploads")
+        .then()
+            .statusCode(400)
+            .body(containsString("AccessControlListNotSupported"));
+
+        given()
+            .body("new object")
+        .when()
+            .put("/" + BUCKET + "/no-acl-object")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("x-amz-acl", "bucket-owner-full-control")
+            .body("new object")
+        .when()
+            .put("/" + BUCKET + "/accepted-object")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(6)
     void deleteOwnershipControlsReturns204() {
         given()
         .when()
@@ -77,7 +143,7 @@ class S3OwnershipControlsIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void getOwnershipControlsAfterDeleteReturns404() {
         given()
         .when()
