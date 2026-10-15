@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
@@ -21,8 +22,8 @@ import io.vertx.core.net.PemTrustOptions;
 import io.vertx.core.net.SocketAddress;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -30,7 +31,6 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.Signature;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -67,25 +67,18 @@ class TlsHttp2HostRoutingIntegrationTest {
     @Inject
     CloudFrontService cloudFrontService;
 
-    /** What the test created, removed newest first: every class on this profile shares one application. */
-    private final List<Runnable> cleanup = new ArrayList<>();
-
-    @AfterEach
-    void removeWhatTheTestCreated() {
-        for (int i = cleanup.size() - 1; i >= 0; i--) {
-            cleanup.get(i).run();
-        }
-    }
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @Test
     void cloudFrontServesACannedSignedUrlOnEachLocalDeliveryHost() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
         String bucket = "cf-h2-" + suffix;
         s3Service.createBucket(bucket, REGION);
-        cleanup.add(() -> s3Service.deleteBucket(bucket));
+        cleanup.register(() -> s3Service.deleteBucket(bucket));
         s3Service.putObject(bucket, "private/report.txt", ("H2-" + suffix).getBytes(StandardCharsets.UTF_8),
                 "text/plain", Map.of());
-        cleanup.add(() -> s3Service.deleteObject(bucket, "private/report.txt"));
+        cleanup.register(() -> s3Service.deleteObject(bucket, "private/report.txt"));
 
         KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
         generator.initialize(2048);
@@ -98,14 +91,14 @@ class TlsHttp2HostRoutingIntegrationTest {
                 + "\n-----END PUBLIC KEY-----");
         publicKey = cloudFrontService.createPublicKey(publicKey);
         String publicKeyId = publicKey.getId();
-        cleanup.add(() -> cloudFrontService.deletePublicKey(publicKeyId,
+        cleanup.register(() -> cloudFrontService.deletePublicKey(publicKeyId,
                 cloudFrontService.getPublicKey(publicKeyId).getEtag()));
         KeyGroup keyGroup = new KeyGroup();
         keyGroup.setName("kg-" + suffix);
         keyGroup.setItems(List.of(publicKey.getId()));
         keyGroup = cloudFrontService.createKeyGroup(keyGroup);
         String keyGroupId = keyGroup.getId();
-        cleanup.add(() -> cloudFrontService.deleteKeyGroup(keyGroupId,
+        cleanup.register(() -> cloudFrontService.deleteKeyGroup(keyGroupId,
                 cloudFrontService.getKeyGroup(keyGroupId).getEtag()));
 
         Origin origin = new Origin();
@@ -125,7 +118,7 @@ class TlsHttp2HostRoutingIntegrationTest {
         distribution = cloudFrontService.createDistribution(distribution, Map.of());
         String distributionId = distribution.getId();
         // The test owns the distribution, so it skips the disable-then-delete round trip.
-        cleanup.add(() -> cloudFrontService.removeDistribution(distributionId));
+        cleanup.register(() -> cloudFrontService.removeDistribution(distributionId));
 
         // A browser sends the host in lower case, and a canned policy signs the port too.
         String id = distribution.getId().toLowerCase(Locale.ROOT);
@@ -151,7 +144,7 @@ class TlsHttp2HostRoutingIntegrationTest {
                 .body("{\"name\":\"h2-host-routing\"}")
                 .when().post("/restapis")
                 .then().statusCode(201).extract().path("id");
-        cleanup.add(() -> given().when().delete("/restapis/" + apiId).then().statusCode(202));
+        cleanup.register(() -> given().when().delete("/restapis/" + apiId).then().statusCode(202));
         String rootId = given().when().get("/restapis/" + apiId + "/resources")
                 .then().statusCode(200).extract().path("item[0].id");
         String resourceId = given().contentType(ContentType.JSON)
@@ -179,11 +172,11 @@ class TlsHttp2HostRoutingIntegrationTest {
         given().contentType(ContentType.JSON)
                 .body("{\"domainName\":\"" + API_DOMAIN + "\"}")
                 .when().post("/domainnames").then().statusCode(201);
-        cleanup.add(() -> given().when().delete("/domainnames/" + API_DOMAIN).then().statusCode(202));
+        cleanup.register(() -> given().when().delete("/domainnames/" + API_DOMAIN).then().statusCode(202));
         given().contentType(ContentType.JSON)
                 .body("{\"basePath\":\"v1\",\"restApiId\":\"" + apiId + "\",\"stage\":\"dev\"}")
                 .when().post("/domainnames/" + API_DOMAIN + "/basepathmappings").then().statusCode(201);
-        cleanup.add(() -> given().when().delete("/domainnames/" + API_DOMAIN + "/basepathmappings/v1")
+        cleanup.register(() -> given().when().delete("/domainnames/" + API_DOMAIN + "/basepathmappings/v1")
                 .then().statusCode(202));
 
         Http2Response response = getOverHttp2(API_DOMAIN, "/v1/ping");

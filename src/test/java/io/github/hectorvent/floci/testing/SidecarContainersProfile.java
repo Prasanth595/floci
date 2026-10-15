@@ -32,9 +32,10 @@ import java.util.Map;
  * process ids mean nothing here. A normal shutdown stops the sidecars; those of a run that was
  * killed are removed by the next run on the same host key, in {@link #removeAbandonedSidecars()}.
  *
- * <p>Also sets the HTTP port and {@code floci.base-url} together. The AppSync resolver callback URL
- * is built from the base URL's port, which in production is the port Floci listens on. Under
- * {@code @QuarkusTest} the application listens on the test port instead, so without this the
+ * <p>Also sets the HTTP port, {@code floci.port} and {@code floci.base-url} together. The AppSync
+ * resolver callback URL a launched container uses is built from {@code quarkus.http.port}, which in
+ * production is the port Floci listens on. Under {@code @QuarkusTest} the application listens on
+ * the test port instead, so without this the
  * sidecar would call back to 4566 and every resolver-backed field would fail with a connection
  * error, and floci-duck would reach for Floci's S3 on the wrong port. The port is a free one
  * chosen once when the class loads, rather than a fixed number, so two runs on the same machine do
@@ -64,6 +65,8 @@ public class SidecarContainersProfile implements QuarkusTestProfile {
         return Map.of(
                 "floci.docker.resource-namespace", NAMESPACE,
                 "quarkus.http.test-port", String.valueOf(TEST_PORT),
+                "quarkus.http.port", String.valueOf(TEST_PORT),
+                "floci.port", String.valueOf(TEST_PORT),
                 "floci.base-url", "http://localhost:" + TEST_PORT,
                 "floci.services.cur.emit-mode", "off",
                 "floci.services.bcm-data-exports.emit-mode", "off");

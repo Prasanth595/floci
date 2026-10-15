@@ -908,8 +908,8 @@ public class IamPolicyEvaluator {
             return false;
         }
         return matchesAction(stmt, action)
-                && matchesResource(stmt, resource)
-                && matchesConditions(stmt.getConditions(), ctx);
+                && matchesResource(stmt, resource, ctx)
+                && matchesConditions(stmt.getConditions(), ctx, policyVariables(stmt));
     }
 
     private boolean conditionDirectlyMatchesPrincipalArn(Map<String, Map<String, List<String>>> conditions, String principalArn) {
@@ -944,8 +944,8 @@ public class IamPolicyEvaluator {
         PrincipalMatch match = principalMatch(stmt, principal);
         if (match == PrincipalMatch.NONE
                 || !matchesAction(stmt, action)
-                || !matchesResource(stmt, resource)
-                || !matchesConditions(stmt.getConditions(), ctx)) {
+                || !matchesResource(stmt, resource, ctx)
+                || !matchesConditions(stmt.getConditions(), ctx, policyVariables(stmt))) {
             return PrincipalMatch.NONE;
         }
         return match;
@@ -1121,8 +1121,13 @@ public class IamPolicyEvaluator {
     private boolean matchesStatement(PolicyStatement stmt, String action, String resource,
                                       Map<String, List<String>> ctx) {
         return matchesAction(stmt, action)
-                && matchesResource(stmt, resource)
-                && matchesConditions(stmt.getConditions(), ctx);
+                && matchesResource(stmt, resource, ctx)
+                && matchesConditions(stmt.getConditions(), ctx, policyVariables(stmt));
+    }
+
+    /** Whether this statement's document declares the version that gives {@code ${...}} meaning. */
+    private static boolean policyVariables(PolicyStatement stmt) {
+        return PolicyVariableResolver.enabledFor(stmt.getVersion());
     }
 
     /** Action: matches if any Action pattern matches; NotAction: matches if NO pattern matches. */
@@ -1137,12 +1142,37 @@ public class IamPolicyEvaluator {
     }
 
     /** Resource: matches if any Resource pattern matches; NotResource: matches if NO pattern matches. */
-    private boolean matchesResource(PolicyStatement stmt, String resource) {
+    private boolean matchesResource(PolicyStatement stmt, String resource,
+                                     Map<String, List<String>> ctx) {
         if (stmt.getResources() != null) {
-            return matchesAny(stmt.getResources(), resource);
+            return matchesAnyResource(stmt.getResources(), resource, ctx, policyVariables(stmt));
         }
         if (stmt.getNotResources() != null) {
-            return !matchesAny(stmt.getNotResources(), resource);
+            return !matchesAnyResource(stmt.getNotResources(), resource, ctx, policyVariables(stmt));
+        }
+        return false;
+    }
+
+    /**
+     * Glob over the Resource or NotResource patterns, with each pattern's policy variables
+     * resolved first. A pattern holding a variable with no value matches nothing, which the user
+     * guide states for both elements: "the resource that includes a policy variable with no value
+     * will not match any resource". In NotResource that reads the other way round, since a
+     * pattern matching no resource excludes none, so the statement covers every resource.
+     */
+    private boolean matchesAnyResource(List<String> patterns, String resource,
+                                        Map<String, List<String>> ctx, boolean policyVariables) {
+        if (!policyVariables) {
+            return matchesAny(patterns, resource);
+        }
+        if (resource == null) {
+            return false;
+        }
+        for (String pattern : patterns) {
+            String resolved = PolicyVariableResolver.resolveResourcePattern(pattern, ctx).orElse(null);
+            if (resolved != null && globMatchesHelper(resolved, resource, true)) {
+                return true;
+            }
         }
         return false;
     }
@@ -1177,10 +1207,13 @@ public class IamPolicyEvaluator {
      * same operator semantics as every other policy this class reads. For policies this class
      * does not match statements for itself: trust policies carry no {@code Resource} element, so
      * {@link AssumeRolePolicyEvaluator} matches their principal and action and asks here for the
-     * condition.
+     * condition. {@code policyVersion} is that document's own {@code Version} element, since a
+     * {@code ${...}} is only a policy variable under the version that introduced them.
      */
-    boolean conditionMatches(JsonNode condition, Map<String, List<String>> conditionCtx) {
-        return matchesConditions(parseConditions(condition), normalizeConditionContext(conditionCtx));
+    boolean conditionMatches(JsonNode condition, Map<String, List<String>> conditionCtx,
+                             String policyVersion) {
+        return matchesConditions(parseConditions(condition), normalizeConditionContext(conditionCtx),
+                PolicyVariableResolver.enabledFor(policyVersion));
     }
 
     /**
@@ -1188,12 +1221,12 @@ public class IamPolicyEvaluator {
      * Returns true if ALL blocks pass (or there are no conditions).
      */
     private boolean matchesConditions(Map<String, Map<String, List<String>>> conditions,
-                                       Map<String, List<String>> ctx) {
+                                       Map<String, List<String>> ctx, boolean policyVariables) {
         if (conditions == null || conditions.isEmpty()) {
             return true;
         }
         for (Map.Entry<String, Map<String, List<String>>> entry : conditions.entrySet()) {
-            if (!evaluateConditionBlock(entry.getKey(), entry.getValue(), ctx)) {
+            if (!evaluateConditionBlock(entry.getKey(), entry.getValue(), ctx, policyVariables)) {
                 return false;
             }
         }
@@ -1213,6 +1246,15 @@ public class IamPolicyEvaluator {
             "NumericGreaterThan", "NumericGreaterThanEquals", "DateEquals", "DateNotEquals",
             "DateLessThan", "DateLessThanEquals", "DateGreaterThan", "DateGreaterThanEquals",
             "IpAddress", "NotIpAddress");
+
+    /**
+     * The operators a policy variable may be used with: "Conditions support variables when you
+     * use string operators or ARN operators", and not Numeric, Date, Boolean, Binary, IP Address
+     * or Null. With one of those, a {@code ${...}} is the text it is written as.
+     */
+    private static final Set<String> VARIABLE_CONDITION_OPERATORS = Set.of(
+            "StringEquals", "StringNotEquals", "StringEqualsIgnoreCase", "StringNotEqualsIgnoreCase",
+            "StringLike", "StringNotLike", "ArnEquals", "ArnNotEquals", "ArnLike", "ArnNotLike");
 
     private record ParsedOperator(SetQuantifier quantifier, String baseOp, boolean ifExists) {}
 
@@ -1259,21 +1301,40 @@ public class IamPolicyEvaluator {
      * multi-valued negated condition and the deny-list idiom for keys such as
      * {@code dynamodb:Attributes} ({@code ForAllValues:StringNotEquals}).
      */
-    private boolean matchesCondValues(String baseOp, String ctxValue, List<String> condValues) {
+    private boolean matchesCondValues(String baseOp, String ctxValue, List<String> condValues,
+                                       Map<String, List<String>> ctx, boolean policyVariables) {
         if (isNegatedOperator(baseOp)) {
             for (String condValue : condValues) {
-                if (!evaluateSingleCondition(baseOp, ctxValue, condValue)) {
+                if (!matchesCondValue(baseOp, ctxValue, condValue, ctx, policyVariables)) {
                     return false;
                 }
             }
             return true;
         }
         for (String condValue : condValues) {
-            if (evaluateSingleCondition(baseOp, ctxValue, condValue)) {
+            if (matchesCondValue(baseOp, ctxValue, condValue, ctx, policyVariables)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * One policy value against one request value, with the policy value's variables resolved
+     * first. A value holding a variable with nothing to resolve to is effectively null: there is
+     * "no equal or like value", so a positive operator does not match, while an inverted one does,
+     * the request value being neither equal to nor like a null.
+     */
+    private boolean matchesCondValue(String baseOp, String ctxValue, String condValue,
+                                      Map<String, List<String>> ctx, boolean policyVariables) {
+        String resolved = condValue;
+        if (policyVariables) {
+            resolved = PolicyVariableResolver.resolveValue(condValue, ctx).orElse(null);
+            if (resolved == null) {
+                return isNegatedOperator(baseOp);
+            }
+        }
+        return evaluateSingleCondition(baseOp, ctxValue, resolved, policyVariables);
     }
 
     private static boolean isNegatedOperator(String baseOp) {
@@ -1287,13 +1348,15 @@ public class IamPolicyEvaluator {
 
     private boolean evaluateConditionBlock(String operator,
                                             Map<String, List<String>> keyValueMap,
-                                            Map<String, List<String>> ctx) {
+                                            Map<String, List<String>> ctx,
+                                            boolean policyVariables) {
         if (!isSupportedConditionOperator(operator)) {
             return false;
         }
         ParsedOperator parsed = parseOperator(operator);
         String baseOp = parsed.baseOp();
         boolean ifExists = parsed.ifExists();
+        boolean substitute = policyVariables && VARIABLE_CONDITION_OPERATORS.contains(baseOp);
 
         for (Map.Entry<String, List<String>> entry : keyValueMap.entrySet()) {
             String condKey = entry.getKey().toLowerCase(java.util.Locale.ROOT);
@@ -1341,14 +1404,14 @@ public class IamPolicyEvaluator {
                 // matches vacuously, which is why real policies pair ForAllValues with a
                 // Null:{key:"false"} guard.
                 case FOR_ALL_VALUES -> ctxValues.stream()
-                        .allMatch(ctxValue -> matchesCondValues(baseOp, ctxValue, condValues));
+                        .allMatch(ctxValue -> matchesCondValues(baseOp, ctxValue, condValues, ctx, substitute));
                 // At least one request value must match. An empty set never matches.
                 case FOR_ANY_VALUE -> ctxValues.stream()
-                        .anyMatch(ctxValue -> matchesCondValues(baseOp, ctxValue, condValues));
+                        .anyMatch(ctxValue -> matchesCondValues(baseOp, ctxValue, condValues, ctx, substitute));
                 // A bare operator against a multi-valued key is a policy authoring error in
                 // AWS; mirror that by comparing only the first value.
                 case NONE -> !ctxValues.isEmpty()
-                        && matchesCondValues(baseOp, ctxValues.getFirst(), condValues);
+                        && matchesCondValues(baseOp, ctxValues.getFirst(), condValues, ctx, substitute);
             };
             if (!keyMatch) {
                 return false;
@@ -1358,16 +1421,25 @@ public class IamPolicyEvaluator {
     }
 
 
-    private boolean evaluateSingleCondition(String operator, String ctxValue, String condValue) {
+    /**
+     * One comparison. {@code escapes} says the policy value came back from substitution, which is
+     * the only way a {@link PolicyVariableResolver#ESCAPE} marker can be in it: the glob operators
+     * then read the marker themselves, while the operators comparing whole strings collapse it
+     * first. Without substitution no marker is honoured, so one written into a document is the
+     * character it is and cannot narrow the comparison.
+     */
+    private boolean evaluateSingleCondition(String operator, String ctxValue, String condValue,
+                                             boolean escapes) {
+        String plain = escapes ? PolicyVariableResolver.literal(condValue) : condValue;
         return switch (operator) {
-            case "StringEquals"              -> ctxValue.equals(condValue);
-            case "StringNotEquals"           -> !ctxValue.equals(condValue);
-            case "StringEqualsIgnoreCase"    -> ctxValue.equalsIgnoreCase(condValue);
-            case "StringNotEqualsIgnoreCase" -> !ctxValue.equalsIgnoreCase(condValue);
-            case "StringLike"                -> caseSensitiveGlobMatches(condValue, ctxValue);
-            case "StringNotLike"             -> !caseSensitiveGlobMatches(condValue, ctxValue);
-            case "ArnEquals", "ArnLike"      -> matchesArnCondition(condValue, ctxValue);
-            case "ArnNotEquals", "ArnNotLike"-> !matchesArnCondition(condValue, ctxValue);
+            case "StringEquals"              -> ctxValue.equals(plain);
+            case "StringNotEquals"           -> !ctxValue.equals(plain);
+            case "StringEqualsIgnoreCase"    -> ctxValue.equalsIgnoreCase(plain);
+            case "StringNotEqualsIgnoreCase" -> !ctxValue.equalsIgnoreCase(plain);
+            case "StringLike"                -> globMatches(condValue, ctxValue, true, escapes);
+            case "StringNotLike"             -> !globMatches(condValue, ctxValue, true, escapes);
+            case "ArnEquals", "ArnLike"      -> matchesArnCondition(condValue, ctxValue, escapes);
+            case "ArnNotEquals", "ArnNotLike"-> !matchesArnCondition(condValue, ctxValue, escapes);
             case "Bool"                      -> Boolean.parseBoolean(condValue) == Boolean.parseBoolean(ctxValue);
             case "NumericEquals"             -> compareNumeric(ctxValue, condValue, order -> order == 0);
             case "NumericNotEquals"          -> compareNumeric(ctxValue, condValue, order -> order != 0);
@@ -1453,17 +1525,35 @@ public class IamPolicyEvaluator {
      * Case-insensitive glob matching supporting {@code *} (any sequence) and {@code ?} (any char).
      */
     public static boolean globMatches(String pattern, String value) {
-        if (pattern == null || value == null) {
-            return false;
-        }
-        return globMatchesHelper(pattern.toLowerCase(), value.toLowerCase());
+        return globMatches(pattern, value, false, false);
     }
 
     public static boolean caseSensitiveGlobMatches(String pattern, String value) {
-        return pattern != null && value != null && globMatchesHelper(pattern, value);
+        return globMatches(pattern, value, true, false);
+    }
+
+    /**
+     * One glob, with {@code caseSensitive} choosing how the characters compare and
+     * {@code escapes} saying whether a {@link PolicyVariableResolver#ESCAPE} marker in the pattern
+     * protects the character behind it. Only a pattern that came back from substitution carries a
+     * marker, so every other caller leaves escapes off and a marker written into a policy is just
+     * a character.
+     */
+    private static boolean globMatches(String pattern, String value, boolean caseSensitive,
+                                        boolean escapes) {
+        if (pattern == null || value == null) {
+            return false;
+        }
+        return caseSensitive
+                ? globMatchesHelper(pattern, value, escapes)
+                : globMatchesHelper(pattern.toLowerCase(), value.toLowerCase(), escapes);
     }
 
     public static boolean matchesArnCondition(String pattern, String value) {
+        return matchesArnCondition(pattern, value, false);
+    }
+
+    private static boolean matchesArnCondition(String pattern, String value, boolean escapes) {
         if (pattern == null || value == null) {
             return false;
         }
@@ -1474,21 +1564,43 @@ public class IamPolicyEvaluator {
             return false;
         }
         for (int i = 0; i < patternComponents.length; i++) {
-            if (!caseSensitiveGlobMatches(patternComponents[i], valueComponents[i])) {
+            if (!globMatches(patternComponents[i], valueComponents[i], true, escapes)) {
                 return false;
             }
         }
         return true;
     }
 
+    /**
+     * Matches {@code pattern} against {@code value}, where {@code *} is any sequence and
+     * {@code ?} any single character. A character behind {@link PolicyVariableResolver#ESCAPE}
+     * matches only itself, which is how {@code ${*}} and {@code ${?}} keep standing for an
+     * asterisk and a question mark once they are substituted.
+     */
     private static boolean globMatchesHelper(String pattern, String value) {
+        return globMatchesHelper(pattern, value, false);
+    }
+
+    private static boolean globMatchesHelper(String pattern, String value, boolean escapes) {
         int patternIndex = 0;
         int valueIndex = 0;
         int starIndex = -1;
         int starValueIndex = -1;
 
         while (valueIndex < value.length()) {
-            if (patternIndex < pattern.length() && pattern.charAt(patternIndex) == '*') {
+            if (escapes && patternIndex + 1 < pattern.length()
+                    && pattern.charAt(patternIndex) == PolicyVariableResolver.ESCAPE) {
+                if (pattern.charAt(patternIndex + 1) == value.charAt(valueIndex)) {
+                    patternIndex += 2;
+                    valueIndex++;
+                    continue;
+                }
+                if (starIndex < 0) {
+                    return false;
+                }
+                patternIndex = starIndex + 1;
+                valueIndex = ++starValueIndex;
+            } else if (patternIndex < pattern.length() && pattern.charAt(patternIndex) == '*') {
                 starIndex = patternIndex++;
                 starValueIndex = valueIndex;
             } else if (patternIndex < pattern.length()
@@ -1569,18 +1681,19 @@ public class IamPolicyEvaluator {
     private List<PolicyStatement> parseStatements(String document) throws Exception {
         JsonNode root = objectMapper.readTree(document);
         JsonNode stmtNode = root.path("Statement");
+        String version = root.path("Version").asText(null);
         List<PolicyStatement> result = new ArrayList<>();
         if (stmtNode.isArray()) {
             for (JsonNode s : stmtNode) {
-                result.add(parseStatement(s));
+                result.add(parseStatement(s, version));
             }
         } else if (stmtNode.isObject()) {
-            result.add(parseStatement(stmtNode));
+            result.add(parseStatement(stmtNode, version));
         }
         return result;
     }
 
-    private PolicyStatement parseStatement(JsonNode stmt) {
+    private PolicyStatement parseStatement(JsonNode stmt, String version) {
         String effect = stmt.path("Effect").asText("Allow");
         Map<String, List<String>> principals = parsePrincipals(stmt.get("Principal"));
         Map<String, List<String>> notPrincipals = parsePrincipals(stmt.get("NotPrincipal"));
@@ -1599,7 +1712,8 @@ public class IamPolicyEvaluator {
                 notActions.isEmpty()  ? null : notActions,
                 resources.isEmpty()   ? null : resources,
                 notResources.isEmpty()? null : notResources,
-                conditions);
+                conditions,
+                version);
     }
 
     private Map<String, List<String>> parsePrincipals(JsonNode node) {

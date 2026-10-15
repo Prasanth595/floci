@@ -555,6 +555,41 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     /**
+     * The follow-up hectorvent asked for on #5644: a version published with no {@code readme}
+     * field at all (unlike {@link #getPackageVersionReadmeReturnsWhatTheRealPublishEnvelopeSent},
+     * whose fixture carries npm's own literal placeholder text, a real string) must still read back
+     * as an empty string, not 404 — the same empty-readme answer pypi's upload path already gives
+     * when twine sends no {@code description} field. Before the fix, {@code checkRepublish} only
+     * added a version to {@code readmeByVersion} when its {@code readme} field was non-null, so a
+     * version published without one was never recorded at all, and {@code GetPackageVersionReadme}
+     * answered {@code ResourceNotFoundException} for a version that genuinely exists on Verdaccio.
+     */
+    @Test
+    @Order(16)
+    void publishingWithNoReadmeFieldStillRecordsAnEmptyReadmeRatherThanNothing() {
+        String packageName = "no-readme-field-pkg";
+        byte[] tarball = "no readme field throwaway tarball".getBytes(StandardCharsets.UTF_8);
+        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
+                + "\",\"version\":\"1.0.0\",\"dist\":{\"tarball\":"
+                + "\"http://ignored/" + packageName + "-1.0.0.tgz\""
+                + "}}},\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{\"content_type\":"
+                + "\"application/octet-stream\",\"data\":\""
+                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/readme?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package="
+                        + packageName + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("readme", equalTo(""))
+                .body("package", equalTo(packageName))
+                .body("version", equalTo("1.0.0"));
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code VerdaccioSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container, not the repository-record

@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -111,11 +112,15 @@ public class CognitoService implements ResourceProvider {
     private static final List<String> DELIVERY_MEDIUMS = List.of("SMS", "EMAIL");
     // JVM-local stripes bound lock memory without retaining one lock for every user key.
     private static final int USER_LOCK_STRIPES = 512;
+    // A Cognito email attribute is one address, not an SES display-name or recipient list.
+    private static final Pattern EMAIL_ATTRIBUTE_PATTERN =
+            Pattern.compile("[^\\s\\p{Cntrl}@<>,;]+@[^\\s\\p{Cntrl}@<>,;]+");
+    private static final int EMAIL_ATTRIBUTE_MAX_LENGTH = 2048;
     /**
-     * The commercial CloudFront suffix for the test constructors; CDI wires
-     * {@code floci.services.cloudfront.domain-suffix}.
+     * No configured CloudFront suffix, for the test constructors: the suffix then follows the
+     * request's partition. CDI wires {@code floci.services.cloudfront.domain-suffix}.
      */
-    private static final String DEFAULT_CLOUDFRONT_DOMAIN_SUFFIX = "cloudfront.net"; // partition-literal: test-shaped constructor default
+    private static final String UNCONFIGURED_CLOUDFRONT_DOMAIN_SUFFIX = null;
 
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -219,7 +224,7 @@ public class CognitoService implements ResourceProvider {
                 storageFactory.create("cognito", "cognito-revoked-tokens.json",
                         new TypeReference<Map<String, RevokedTokenInfo>>() {}),
                 trimTrailingSlash(emulatorConfig.effectiveBaseUrl()),
-                emulatorConfig.services().cloudfront().domainSuffix(),
+                emulatorConfig.services().cloudfront().domainSuffix().orElse(null),
                 regionResolver,
                 lambdaService,
                 acmService,
@@ -242,7 +247,7 @@ public class CognitoService implements ResourceProvider {
                    LambdaService lambdaService,
                    AcmService acmService) {
         this(poolStore, clientStore, resourceServerStore, userStore, groupStore, revokedTokenStore, baseUrl,
-                DEFAULT_CLOUDFRONT_DOMAIN_SUFFIX, regionResolver, lambdaService, acmService);
+                UNCONFIGURED_CLOUDFRONT_DOMAIN_SUFFIX, regionResolver, lambdaService, acmService);
     }
 
     CognitoService(StorageBackend<String, UserPool> poolStore,
@@ -259,7 +264,7 @@ public class CognitoService implements ResourceProvider {
             CognitoMessageDispatcher messageDispatcher,
             TlsCertificateManager certificateManager) {
         this(poolStore, clientStore, resourceServerStore, domainStore, identityProviderStore, userStore,
-                groupStore, revokedTokenStore, baseUrl, DEFAULT_CLOUDFRONT_DOMAIN_SUFFIX, regionResolver,
+                groupStore, revokedTokenStore, baseUrl, UNCONFIGURED_CLOUDFRONT_DOMAIN_SUFFIX, regionResolver,
                 lambdaService, acmService, verificationCodeService, messageDispatcher, certificateManager);
     }
 
@@ -1934,8 +1939,10 @@ public class CognitoService implements ResourceProvider {
         return AwsArnUtils.Arn.global(partition, "cloudfront", userPoolDomain.getAwsAccountId(), "distribution/" + id).toString();
     }
 
+    /** A distribution name on the configured CloudFront suffix, or the request partition's when none is. */
     private String generateCloudFrontDomain() {
-        return UUID.randomUUID().toString().replace("-", "").substring(0, 14) + "." + cloudFrontDomainSuffix;
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 14) + "."
+                + CloudFrontEdgeDomain.domainSuffix(cloudFrontDomainSuffix, regionResolver.getPartition());
     }
 
     private String generateDomainVersion() {
@@ -2325,6 +2332,8 @@ public class CognitoService implements ResourceProvider {
             resolvedAttributes.put("sub", canonicalUsername);
         }
 
+        validateEmailAttribute(resolvedAttributes, false);
+
         CognitoUser user = new CognitoUser();
         user.setUsername(canonicalUsername);
         user.setUserPoolId(pool.getId());
@@ -2625,10 +2634,11 @@ public class CognitoService implements ResourceProvider {
             String userPoolId, String username, Map<String, String> attributes) {
         CognitoUser user = adminGetUser(userPoolId, username);
         UserPool pool = describeUserPool(userPoolId);
+        validateEmailAttribute(attributes, true);
         if (usesAliasUsernames(pool)) {
             for (String aliasAttribute : pool.getUsernameAttributes()) {
                 String newValue = attributes.get(aliasAttribute);
-                if (newValue == null || newValue.equals(user.getAttributes().get(aliasAttribute))) {
+                if (blankToNull(newValue) == null || newValue.equals(user.getAttributes().get(aliasAttribute))) {
                     continue;
                 }
                 CognitoUser other = findUserByAlias(userPoolId, aliasAttribute, newValue);
@@ -2640,7 +2650,16 @@ public class CognitoService implements ResourceProvider {
         }
         attributes.keySet().forEach(attributeName ->
                 clearPendingAttributeVerification(userPoolId, user, attributeName));
-        user.getAttributes().putAll(attributes);
+        for (Map.Entry<String, String> attribute : attributes.entrySet()) {
+            String attributeName = attribute.getKey();
+            String value = attribute.getValue();
+            if (blankToNull(value) == null) {
+                user.getAttributes().remove(attributeName);
+                user.getAttributes().remove(attributeName + "_verified");
+            } else {
+                user.getAttributes().put(attributeName, value);
+            }
+        }
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(userPoolId, user.getUsername()), user);
     }
@@ -3258,6 +3277,8 @@ public class CognitoService implements ResourceProvider {
         } else if (userStore.get(userKey(userPoolId, username)).isPresent()) {
             throw new AwsException("UsernameExistsException", "User already exists", 400);
         }
+
+        validateEmailAttribute(resolvedAttributes, false);
 
         String key = userKey(userPoolId, canonicalUsername);
 
@@ -4040,6 +4061,7 @@ public class CognitoService implements ResourceProvider {
             String poolId, String username, Map<String, String> attributes) {
         UserPool pool = describeUserPool(poolId);
         CognitoUser currentUser = adminGetUser(poolId, username);
+        validateEmailAttribute(attributes, true);
 
         // Validate every entry (alias availability) before mutating the user or issuing any
         // verification code. Otherwise a later entry failing leaves an earlier entry's code
@@ -4108,6 +4130,36 @@ public class CognitoService implements ResourceProvider {
         updatedUser.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(poolId, updatedUser.getUsername()), updatedUser);
         return deliveryDetails;
+    }
+
+    private static void validateEmailAttribute(Map<String, String> attributes, boolean allowDeletion) {
+        if (attributes == null || !attributes.containsKey("email")) {
+            return;
+        }
+        String email = attributes.get("email");
+        if (allowDeletion && email != null && email.isBlank()) {
+            return;
+        }
+        // Use Cognito's 2048-character attribute limit, not SES's envelope-address limit.
+        if (email == null || email.length() > EMAIL_ATTRIBUTE_MAX_LENGTH
+                || !EMAIL_ATTRIBUTE_PATTERN.matcher(email).matches() || !hasEmailSeparator(email)) {
+            throw new AwsException("InvalidParameterException", "Invalid email address format.", 400);
+        }
+    }
+
+    private static boolean hasEmailSeparator(String email) {
+        boolean quoted = false;
+        for (int i = 0; i < email.length(); i++) {
+            char character = email.charAt(i);
+            if (character == '\\') {
+                i++;
+            } else if (character == '"') {
+                quoted = !quoted;
+            } else if (character == '@' && !quoted) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void deleteUserAttributes(String accessToken, List<String> attributeNames) {

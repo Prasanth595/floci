@@ -435,7 +435,13 @@ public class CodeArtifactNpmDataPlane {
      * field, see {@link NpmPublishEnvelopeScanner.Version} for why this, not Verdaccio's own
      * packument response, is the only place it is ever available), and the caller only ever
      * records it on that same successful-forward path: a confirmed republish writes nothing new,
-     * so there is nothing to capture a readme change for either.
+     * so there is nothing to capture a readme change for either. Every version in the envelope
+     * gets an entry here, even one whose {@code readme} field came back {@code null} (missing, or
+     * of a shape {@link NpmPublishEnvelopeScanner} ignores): {@link
+     * CodeArtifactService#recordPublishedPackageVersionReadme} already turns a {@code null} readme
+     * into {@code ""}, the same empty-string answer pypi's own upload path already records when
+     * twine sends no {@code description} field, so a published version without a readme is never
+     * mistaken for one that was never published at all.
      */
     private record RepublishCheck(boolean confirmed, long totalAttachmentBytes, PackageIdentity identity,
             Map<String, String> readmeByVersion) {}
@@ -454,11 +460,7 @@ public class CodeArtifactNpmDataPlane {
                 .mapToLong(NpmPublishEnvelopeScanner.Attachment::size)
                 .sum();
         Map<String, String> readmeByVersion = new HashMap<>();
-        envelope.versions().forEach((version, v) -> {
-            if (v.readme() != null) {
-                readmeByVersion.put(version, v.readme());
-            }
-        });
+        envelope.versions().forEach((version, v) -> readmeByVersion.put(version, v.readme()));
         Optional<JsonNode> storedDocument;
         try {
             storedDocument = verdaccioClient.fetchPackageDocument(backendBaseUrl, identity.namespace(),

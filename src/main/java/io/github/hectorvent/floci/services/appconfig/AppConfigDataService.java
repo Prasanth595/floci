@@ -225,7 +225,7 @@ public class AppConfigDataService {
                 String name = parameter[0].trim();
                 String value = parameter[1].trim();
                 if (name.equalsIgnoreCase("type")) {
-                    featureFlags = "AWS.AppConfig.FeatureFlags".equalsIgnoreCase(value);
+                    featureFlags = "AWS.AppConfig.FeatureFlags".equalsIgnoreCase(parameterValue(value));
                 } else if (name.equalsIgnoreCase("q")) {
                     acceptable = !value.matches("0(\\.0+)?");
                 }
@@ -235,6 +235,33 @@ public class AppConfigDataService {
             }
         }
         return false;
+    }
+
+    /**
+     * A media-type parameter value as RFC 9110 section 5.6.6 defines it: a token as is, or a quoted-string without its
+     * DQUOTEs and with each quoted-pair read as the character after its backslash (section 5.6.4). {@code null} for a
+     * quoted-string with no closing DQUOTE or with anything after it.
+     */
+    private static String parameterValue(String value) {
+        if (!value.startsWith("\"")) {
+            return value;
+        }
+        StringBuilder unquoted = new StringBuilder();
+        boolean escaped = false;
+        for (int i = 1; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (escaped) {
+                unquoted.append(c);
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                return i == value.length() - 1 ? unquoted.toString() : null;
+            } else {
+                unquoted.append(c);
+            }
+        }
+        return null;
     }
 
     static byte[] transformFeatureFlags(byte[] content, ObjectMapper objectMapper) {
