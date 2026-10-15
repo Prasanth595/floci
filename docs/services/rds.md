@@ -811,11 +811,11 @@ corrupt SAN metadata is rebuilt without replacing a valid
 CA. An invalid or unusable CA/key pair is replaced with a warning; only then must clients trust
 the replacement CA again.
 
-When upgrading from a version that used a separate RDS CA, update clients once to trust
-`floci-root-ca.crt` instead of `rds-ca.crt`. The shared certificate is also available from
-`GET /_floci/ca.pem`. Existing `rds-ca.crt` and `rds-ca.key` files are ignored, even if expired
-or corrupt, and are not overwritten or deleted. The existing `rds-ca.metadata.json` SAN list
-is still loaded. Clients that already trust Floci's shared root need no trust-store update.
+The proxy also writes the shared root certificate to `tls/rds-ca.crt`, preserving existing
+`PGSSLROOTCERT` and MySQL `--ssl-ca` paths. This compatibility copy is refreshed when the proxy
+initializes, even if the old RDS certificate is expired or corrupt. The unused `rds-ca.key`
+is removed; the shared CA key and existing `rds-ca.metadata.json` SAN list are retained.
+The shared certificate is also available from `GET /_floci/ca.pem`.
 
 The proxy logs the shared certificate path when it first issues a server certificate:
 

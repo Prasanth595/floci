@@ -15,6 +15,7 @@ import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.SecureRandom;
@@ -34,7 +35,8 @@ import java.util.Set;
  * The server certificate's SANs cover every advertised Postgres/MySQL host.
  *
  * <p>The shared CA persists at {@code {persistent-path}/tls/floci-root-ca.{crt,key}}. The
- * {@code rds-ca.metadata.json} file alongside it records the current SAN list. A client trusts the shared CA once
+ * {@code rds-ca.crt} compatibility copy preserves existing client paths, and
+ * {@code rds-ca.metadata.json} records the current SAN list. A client trusts the shared CA once
  * (e.g. {@code sslmode=verify-full sslrootcert=<path>}) to keep working across every local
  * database and every restart, including when advertised hosts change.
  */
@@ -123,8 +125,32 @@ public class RdsProxyTlsCertificates {
                             metadataFile);
                 }
             }
+            refreshLegacyCaFiles();
             regenerate(sans);
             logTrustHint(certificateAuthority.certificatePath());
+        }
+    }
+
+    private void refreshLegacyCaFiles() {
+        Path temporary = null;
+        try {
+            Path tlsDir = tlsDir();
+            temporary = Files.createTempFile(tlsDir, "rds-ca-", ".tmp");
+            Files.writeString(temporary, certificateAuthority.caPem());
+            // Replace the path itself, never a legacy symlink's target or a shared inode.
+            Files.move(temporary, tlsDir.resolve("rds-ca.crt"),
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            Files.deleteIfExists(tlsDir.resolve("rds-ca.key"));
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to refresh RDS proxy TLS CA compatibility files", e);
+        } finally {
+            if (temporary != null) {
+                try {
+                    Files.deleteIfExists(temporary);
+                } catch (IOException e) {
+                    LOG.warnv(e, "RDS proxy TLS: could not remove temporary CA file {0}", temporary);
+                }
+            }
         }
     }
 

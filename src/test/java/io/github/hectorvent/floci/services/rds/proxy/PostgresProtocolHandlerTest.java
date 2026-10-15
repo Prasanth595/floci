@@ -456,7 +456,7 @@ class PostgresProtocolHandlerTest {
              Socket proxyClient = clientServer.accept()) {
 
             RdsProxyTlsCertificates tlsCertificates = testTlsCertificates();
-            Path caCertFile = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls")).certificatePath();
+            Path caCertFile = tempDir.resolve("tls/rds-ca.crt");
             if (legacyCa) {
                 CertificateGenerator.GeneratedCertificate legacy = new CertificateGenerator()
                         .generateSelfSignedCertificate("localhost", List.of("localhost", "172.17.0.5"),

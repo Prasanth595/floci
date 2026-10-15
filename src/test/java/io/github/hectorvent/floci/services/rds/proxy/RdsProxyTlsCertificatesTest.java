@@ -21,6 +21,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -44,8 +45,44 @@ class RdsProxyTlsCertificatesTest {
         newCertificates().sslContext();
 
         assertEquals(sharedCa.caPem(), Files.readString(sharedCa.certificatePath()));
-        assertFalse(Files.exists(tempDir.resolve("tls/rds-ca.crt")));
+        assertEquals(sharedCa.caPem(), Files.readString(tempDir.resolve("tls/rds-ca.crt")));
         assertFalse(Files.exists(tempDir.resolve("tls/rds-ca.key")));
+    }
+
+    @Test
+    void legacyPathsCannotOverwriteOrDeleteTheSharedPrivateKeyThroughSymlinks() throws Exception {
+        FlociCertificateAuthority sharedCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls"));
+        Path tlsDir = sharedCa.certificatePath().getParent();
+        Path sharedKeyFile = tlsDir.resolve(FlociCertificateAuthority.CA_KEY_NAME);
+        String sharedKey = Files.readString(sharedKeyFile);
+        Path legacyCertificate = Files.createSymbolicLink(tlsDir.resolve("rds-ca.crt"), sharedKeyFile);
+        Path legacyKey = Files.createSymbolicLink(tlsDir.resolve("rds-ca.key"), sharedKeyFile);
+
+        newCertificates().sslContext();
+
+        assertFalse(Files.isSymbolicLink(legacyCertificate));
+        assertEquals(sharedCa.caPem(), Files.readString(legacyCertificate));
+        assertFalse(Files.isSymbolicLink(legacyKey));
+        assertEquals(sharedKey, Files.readString(sharedKeyFile));
+        assertEquals(sharedCa.caPem(), Files.readString(sharedCa.certificatePath()));
+    }
+
+    @Test
+    void aFailedLegacyCertificateWriteDoesNotPublishAnInitializedContext() throws Exception {
+        FlociCertificateAuthority sharedCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls"));
+        Path legacyCertificate = Files.createDirectory(tempDir.resolve("tls/rds-ca.crt"));
+        Path obstruction = Files.writeString(legacyCertificate.resolve("keep"), "not a certificate");
+        RdsProxyTlsCertificates certs = newCertificates();
+
+        assertThrows(IllegalStateException.class, certs::sslContext);
+        Files.delete(obstruction);
+        Files.delete(legacyCertificate);
+        assertDoesNotThrow(certs::sslContext);
+
+        assertEquals(sharedCa.caPem(), Files.readString(legacyCertificate));
+        try (Stream<Path> files = Files.list(legacyCertificate.getParent())) {
+            assertFalse(files.anyMatch(path -> path.getFileName().toString().endsWith(".tmp")));
+        }
     }
 
     @Test
@@ -143,7 +180,7 @@ class RdsProxyTlsCertificatesTest {
     }
 
     @Test
-    void ignoresAnExpiredLegacyCaAndRetainsItsSansWithoutChangingEitherCa() throws Exception {
+    void replacesAnExpiredLegacyCertificateAndRetainsItsSansWithoutChangingTheSharedCa() throws Exception {
         FlociCertificateAuthority sharedCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls"));
         Path tlsDir = sharedCa.certificatePath().getParent();
         CertificateGenerator.GeneratedCertificate legacy = new CertificateGenerator()
@@ -163,8 +200,8 @@ class RdsProxyTlsCertificatesTest {
         newCertificates().ensureHost("host.docker.internal");
 
         assertEquals(sharedCa.caPem(), Files.readString(sharedCa.certificatePath()));
-        assertEquals(legacy.certificatePem(), Files.readString(certFile));
-        assertEquals(legacy.privateKeyPem(), Files.readString(keyFile));
+        assertEquals(sharedCa.caPem(), Files.readString(certFile));
+        assertFalse(Files.exists(keyFile));
     }
 
     @ParameterizedTest
@@ -188,7 +225,7 @@ class RdsProxyTlsCertificatesTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void ignoresAnUnusableLegacyCaKeyWithoutReplacingTheSharedTrustAnchor(boolean malformedKey) throws Exception {
+    void removesAnUnusableLegacyCaKeyWithoutReplacingTheSharedTrustAnchor(boolean malformedKey) throws Exception {
         FlociCertificateAuthority sharedCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls"));
         CertificateGenerator.GeneratedCertificate legacy = new CertificateGenerator().generateCaCertificate("Legacy RDS CA");
         Path certFile = tempDir.resolve("tls/rds-ca.crt");
@@ -201,8 +238,8 @@ class RdsProxyTlsCertificatesTest {
         newCertificates().sslContext();
 
         assertEquals(sharedCa.caPem(), Files.readString(sharedCa.certificatePath()));
-        assertEquals(legacy.certificatePem(), Files.readString(certFile));
-        assertEquals(replacementKey, Files.readString(keyFile));
+        assertEquals(sharedCa.caPem(), Files.readString(certFile));
+        assertFalse(Files.exists(keyFile));
     }
 
     @Test
