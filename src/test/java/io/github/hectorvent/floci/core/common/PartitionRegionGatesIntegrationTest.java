@@ -181,6 +181,57 @@ class PartitionRegionGatesIntegrationTest {
             .body("FunctionUrl", containsString(".lambda-url.us-east-1."));
     }
 
+    private static Response cognito(String region, String action, String body) {
+        return given()
+            .header("Authorization", PartitionMatrix.sigV4Auth(region, "cognito-idp"))
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService." + action)
+            .contentType(JSON_1_1)
+            .body(body)
+        .when().post("/");
+    }
+
+    /**
+     * GovCloud and the European Sovereign Cloud have user pools but no custom domains for them, so a
+     * CustomDomainConfig is refused there for what it asks, before its certificate is looked at; a
+     * prefix domain is not affected.
+     */
+    @Test
+    void userPoolCustomDomainsAreRejectedInGovCloudAndEusc() {
+        for (String region : List.of("us-gov-west-1", "eusc-de-east-1")) {
+            assertCustomDomainsRejected(region);
+        }
+    }
+
+    private void assertCustomDomainsRejected(String region) {
+        String partition = AwsRegions.partitionFor(region);
+        String certificateArn = "arn:" + partition + ":acm:" + region + ":000000000000:certificate/custom";
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String poolId = cognito(region, "CreateUserPool", "{\"PoolName\":\"domain-gate-" + suffix + "\"}")
+            .then().statusCode(200)
+            .extract().jsonPath().getString("UserPool.Id");
+        cleanup.register(() -> cognito(region, "DeleteUserPool", "{\"UserPoolId\":\"" + poolId + "\"}"));
+
+        cognito(region, "CreateUserPoolDomain", "{\"UserPoolId\":\"" + poolId + "\","
+                + "\"Domain\":\"auth-" + suffix + ".example.com\",\"CustomDomainConfig\":{\"CertificateArn\":"
+                + "\"" + certificateArn + "\"}}")
+            .then().statusCode(400)
+                .body("__type", containsString("InvalidParameterException"))
+                .body("message", containsString("not available in partition " + partition));
+
+        String prefix = "gate-" + suffix;
+        cognito(region, "CreateUserPoolDomain",
+                "{\"UserPoolId\":\"" + poolId + "\",\"Domain\":\"" + prefix + "\"}")
+            .then().statusCode(200);
+        cleanup.register(() -> cognito(region, "DeleteUserPoolDomain",
+                "{\"UserPoolId\":\"" + poolId + "\",\"Domain\":\"" + prefix + "\"}"));
+
+        cognito(region, "UpdateUserPoolDomain", "{\"UserPoolId\":\"" + poolId + "\","
+                + "\"Domain\":\"" + prefix + "\",\"CustomDomainConfig\":{\"CertificateArn\":"
+                + "\"" + certificateArn + "\"}}")
+            .then().statusCode(400)
+                .body("message", containsString("not available in partition " + partition));
+    }
+
     @Test
     void cloudFrontScopeLivesInThePartitionsImplicitGlobalRegion() {
         String name = "cn-" + Long.toString(System.nanoTime(), 36);

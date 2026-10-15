@@ -122,10 +122,12 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
     /**
      * A replacement is undone through the cleanup record: the displaced entity was never touched.
      * A reused entity that an update changed in place (tags, a subnet's MapPublicIpOnLaunch, a
-     * route's target) is put back from the snapshot taken before the change. Without either, the
-     * update changed nothing about the entity. A provision that fails mid-way restores its own
-     * snapshot before the failure propagates (see {@link #guarded}), so the previous metadata the
-     * engine restores for that resource matches the entity again.
+     * route's target) is put back from the snapshot taken before the change; the snapshot is
+     * removed only after the restore succeeds, so a restore that throws keeps it for a
+     * ContinueUpdateRollback retry. Without either, the update changed nothing about the entity.
+     * A provision that fails mid-way restores its own snapshot before the failure propagates (see
+     * {@link #guarded}), so the previous metadata the engine restores for that resource matches
+     * the entity again.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
@@ -133,10 +135,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             resource.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
             return true;
         }
-        String snapshot = resource.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
-        if (snapshot != null) {
-            restoreInPlace(resource, snapshot);
-        }
+        undoInPlace(resource);
         return true;
     }
 
@@ -151,10 +150,14 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         String entityId = prior.path("entityId").asText();
         if (prior.has("tags")) {
             Map<String, String> priorTags = new LinkedHashMap<>();
-            prior.get("tags").fields().forEachRemaining(f -> priorTags.put(f.getKey(), f.getValue().asText()));
+            prior.get("tags").fields().forEachRemaining(f -> {
+                if (!Ec2Service.isAwsTagKey(f.getKey())) {
+                    priorTags.put(f.getKey(), f.getValue().asText());
+                }
+            });
             List<Tag> added = new ArrayList<>();
             prior.path("appliedKeys").forEach(key -> {
-                if (!priorTags.containsKey(key.asText())) {
+                if (!Ec2Service.isAwsTagKey(key.asText()) && !priorTags.containsKey(key.asText())) {
                     added.add(new Tag(key.asText(), null));
                 }
             });
@@ -176,7 +179,8 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             String prefixList = text(target, "destinationPrefixListId");
             String egressOnly = text(target, "egressOnlyInternetGatewayId");
             if (egressOnly != null) {
-                ec2Service.deleteRoute(region, routeTableId, cidr, ipv6, prefixList);
+                CfnDeletes.safeDelete("route", routeTableId, () -> ec2Service.deleteRoute(region, routeTableId, cidr,
+                        ipv6, prefixList), "InvalidRoute.NotFound");
                 ec2Service.createRoute(region, routeTableId, cidr, ipv6, prefixList, null, null, egressOnly, null);
             } else {
                 ec2Service.replaceRoute(region, routeTableId, cidr, ipv6, prefixList,
@@ -279,7 +283,9 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> desired = ctx.resolveTags(props, "Tags");
         Map<String, String> currentTags = new LinkedHashMap<>();
         for (Tag tag : current == null ? List.<Tag>of() : current) {
-            currentTags.put(tag.getKey(), tag.getValue());
+            if (!Ec2Service.isAwsTagKey(tag.getKey())) {
+                currentTags.put(tag.getKey(), tag.getValue());
+            }
         }
         List<String> stale = ProvisionContext.staleTagKeys(currentTags, desired);
         if (reused && ctx.isUpdate() && (!stale.isEmpty() || !desired.equals(currentTags))) {
@@ -567,6 +573,11 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
                 && connectivityType.equalsIgnoreCase(existing.getConnectivityType() == null ? "public" : existing.getConnectivityType());
         NatGateway nat = reuse ? existing
                 : ec2Service.createNatGateway(ctx.region(), subnetId, allocationId, connectivityType, tagList(props, ctx));
+        if ("failed".equals(nat.getState())) {
+            // The resource fails and its failed gateway is not left behind.
+            ec2Service.deleteNatGateway(ctx.region(), nat.getNatGatewayId());
+            throw new AwsException(nat.getFailureCode(), nat.getFailureMessage(), 400);
+        }
         if (reuse) {
             CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> applyTags(r, true, nat.getNatGatewayId(), existing.getTags(), props, ctx));
         }

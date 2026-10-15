@@ -20,6 +20,7 @@ import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Ports;
+import com.github.dockerjava.api.model.Volume;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -43,6 +44,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -72,6 +74,9 @@ public class ContainerLifecycleManager {
     // per uid) this reads as a disk-space problem and sends operators looking in the wrong place.
     private static final Pattern KEYRING_QUOTA_PATTERN =
             Pattern.compile("join keyctl.*disk quota exceeded", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+
+    /** Matches 3-4 octal digits (e.g. "0755", "755", "2775"), matching CreationInfo.Permissions. */
+    public static final Pattern PERMISSIONS_PATTERN = Pattern.compile("^[0-7]{3,4}$");
 
     private static final long NANO_CPUS_PER_CPU = 1_000_000_000L;
     private static final String CONTAINER_NETWORK_MODE_PREFIX = "container:";
@@ -580,18 +585,33 @@ public class ContainerLifecycleManager {
      * and do nothing, the volume analogue of start treating an HTTP 304 as success.
      */
     public void ensureVolume(String volumeName) {
-        createVolumeIfAbsent(volumeName);
+        createVolumeIfAbsent(volumeName, ContainerStorageHelper.defaultLabels(config));
+    }
+
+    /**
+     * {@link #ensureVolume} for a volume an operator named, created when absent without any
+     * Floci label, the umbrella and extra ones alike. The operator named the volume, so its
+     * lifecycle is theirs: nothing that sweeps Floci-labelled volumes may collect it, neither
+     * a floci-scoped {@code docker volume prune} nor a testcontainers module reaping a run's
+     * labelled child resources through labels injected into {@code floci.docker.extra-labels}.
+     */
+    public void ensureUnmanagedVolume(String volumeName) {
+        if (volumeExists(volumeName)) {
+            return;
+        }
+        dockerClient.createVolumeCmd()
+                .withName(volumeName)
+                // An explicit empty map, never mergedLabels: the operator-named volume
+                // carries no Floci label, so no label-based sweep collects it.
+                .withLabels(Map.of())
+                .exec();
+        LOG.debugv("Created unmanaged volume {0}", volumeName);
     }
 
     /** Creates a volume with resource ownership labels for recoverable cleanup. */
     public void ensureVolume(String volumeName, Map<String, String> labels) {
         createVolumeIfAbsent(volumeName, labels);
     }
-
-    private boolean createVolumeIfAbsent(String volumeName) {
-        return createVolumeIfAbsent(volumeName, Map.of());
-    }
-
     /** Creates the named volume when it is missing; returns whether it was created. */
     private boolean createVolumeIfAbsent(String volumeName, Map<String, String> labels) {
         if (volumeExists(volumeName)) {
@@ -640,9 +660,29 @@ public class ContainerLifecycleManager {
      */
     public void ensureSharedVolume(String volumeName, OptionalInt ownerUid, OptionalInt ownerGid,
                                    Optional<String> rootPermissions, String initImage) {
+        ensureSharedVolumeRoot(volumeName,
+                ownerUid.isPresent() ? OptionalLong.of(ownerUid.getAsInt()) : OptionalLong.empty(),
+                ownerGid.isPresent() ? OptionalLong.of(ownerGid.getAsInt()) : OptionalLong.empty(),
+                rootPermissions, initImage);
+    }
+
+    /** True when {@code permissions} is 3 to 4 octal digits (e.g. "0755", "755", "2775"). */
+    public static boolean isValidPermissions(String permissions) {
+        return permissions != null && PERMISSIONS_PATTERN.matcher(permissions).matches();
+    }
+
+    /** Initialises an access point's root without narrowing AWS's unsigned 32-bit POSIX ids. */
+    public void ensureSharedVolume(String volumeName, long ownerUid, long ownerGid,
+                                   String rootPermissions, String initImage) {
+        ensureSharedVolumeRoot(volumeName, OptionalLong.of(ownerUid), OptionalLong.of(ownerGid),
+                Optional.of(rootPermissions), initImage);
+    }
+
+    private void ensureSharedVolumeRoot(String volumeName, OptionalLong ownerUid, OptionalLong ownerGid,
+                                        Optional<String> rootPermissions, String initImage) {
         // A volume created now is root:root 0755 again, so a memo left by a volume of the same name
         // that was removed since (e.g. DeleteApplication, docker volume rm) is stale.
-        if (createVolumeIfAbsent(volumeName)) {
+        if (createVolumeIfAbsent(volumeName, ContainerStorageHelper.defaultLabels(config))) {
             initializedSharedVolumes.remove(volumeName);
         }
         if (rootPermissions.isEmpty() && ownerUid.isEmpty() && ownerGid.isEmpty()) {
@@ -658,7 +698,7 @@ public class ContainerLifecycleManager {
         // Validate before splicing into the helper's `sh -c`, matching CreationInfo.Permissions
         // (^[0-7]{3,4}$), so a typo can't produce a mangled script that soft-fails.
         rootPermissions.ifPresent(p -> {
-            if (!p.matches("^[0-7]{3,4}$")) {
+            if (!isValidPermissions(p)) {
                 throw new IllegalArgumentException(
                         "floci.storage.efs root-permissions must be 3-4 octal digits (e.g. \"0777\","
                                 + " or \"2775\" for setgid): " + p);
@@ -678,7 +718,7 @@ public class ContainerLifecycleManager {
         });
     }
 
-    private void initSharedVolumeRoot(String volumeName, OptionalInt ownerUid, OptionalInt ownerGid,
+    private void initSharedVolumeRoot(String volumeName, OptionalLong ownerUid, OptionalLong ownerGid,
                                       Optional<String> rootPermissions, String initImage) {
         String mount = "/floci-shared-volume";
         StringBuilder script = new StringBuilder();
@@ -686,7 +726,7 @@ public class ContainerLifecycleManager {
         // always has both operands (no trailing colon). setgid is expressed via a 4-digit octal
         // rootPermissions (e.g. "2775"), matching CreationInfo.Permissions.
         if (ownerUid.isPresent() && ownerGid.isPresent()) {
-            script.append("chown ").append(ownerUid.getAsInt()).append(':').append(ownerGid.getAsInt())
+            script.append("chown ").append(ownerUid.getAsLong()).append(':').append(ownerGid.getAsLong())
                     .append(' ').append(mount).append(" && ");
         }
         rootPermissions.ifPresent(p -> script.append("chmod ").append(p).append(' ').append(mount).append(" && "));
@@ -697,11 +737,37 @@ public class ContainerLifecycleManager {
 
         HostConfig hostConfig = HostConfig.newHostConfig().withMounts(List.of(
                 new Mount().withType(MountType.VOLUME).withSource(volumeName).withTarget(mount)));
-        CreateContainerResponse created = dockerClient.createContainerCmd(image)
+        CreateContainerCmd command = dockerClient.createContainerCmd(image)
                 .withHostConfig(hostConfig)
-                .withCmd("sh", "-c", script.toString())
-                .withLabels(ContainerStorageHelper.defaultLabels(config))
-                .exec();
+                .withCmd("sh", "-c", script.toString());
+        runStorageInitHelper(command, "shared volume " + volumeName);
+        LOG.infov("Initialised shared volume {0} root (cmd: {1})", volumeName, script);
+    }
+
+    /**
+     * Makes a bind directory writable by the owner of the image's data directory. The
+     * helper runs on the Docker daemon's host, using the workload image so custom image
+     * ownership is respected. Only the mount root is changed; existing files are untouched.
+     * Unlike shared-volume initialisation, failure propagates and every launch checks the root.
+     */
+    public void ensureBindDirectory(String hostPath, String image, String imageDataPath) {
+        imageCacheService.ensureImageExists(image);
+        String mount = "/floci-bind-directory";
+        String script = "ownership=$(stat -c '%u:%g' \"$1\") && "
+                + "chown \"$ownership\" \"$2\" && chmod u+rwx \"$2\"";
+        HostConfig hostConfig = HostConfig.newHostConfig()
+                .withBinds(new Bind(hostPath, new Volume(mount)));
+        CreateContainerCmd command = dockerClient.createContainerCmd(image)
+                .withHostConfig(hostConfig)
+                .withUser("0")
+                .withEntrypoint("sh")
+                .withCmd("-c", script, "floci-bind-init", imageDataPath, mount);
+        runStorageInitHelper(command, "bind directory " + hostPath);
+        LOG.infov("Initialised bind directory {0} using ownership from {1}:{2}", hostPath, image, imageDataPath);
+    }
+
+    private void runStorageInitHelper(CreateContainerCmd command, String description) {
+        CreateContainerResponse created = command.withLabels(ContainerStorageHelper.defaultLabels(config)).exec();
         String helperId = created.getId();
         try {
             startContainer(helperId);
@@ -709,17 +775,14 @@ public class ContainerLifecycleManager {
                     .exec(new WaitContainerResultCallback())
                     .awaitStatusCode(60, TimeUnit.SECONDS);
             if (status == null || status != 0) {
-                // Throw so the caller leaves the volume unmemoised and retries on the next launch,
-                // rather than leaving it root:root 0755 with no further attempt.
-                throw new IllegalStateException("shared-volume init for " + volumeName
-                        + " exited with status " + status + " (cmd: " + script + ")");
+                throw new IllegalStateException("Storage init for " + description + " exited with status " + status);
             }
-            LOG.infov("Initialised shared volume {0} root (cmd: {1})", volumeName, script);
         } finally {
             try {
                 dockerClient.removeContainerCmd(helperId).withForce(true).exec();
-            } catch (Exception ignore) {
-                // best-effort cleanup of the one-off helper
+            } catch (Exception e) {
+                LOG.warnv("Failed to remove storage init helper {0} for {1}: {2}",
+                        helperId, description, e.getMessage());
             }
         }
     }
@@ -1005,6 +1068,18 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Like {@link #resolveEndpoint(String, int)}, but prefers the container's address on
+     * {@code preferredNetwork}, as {@link #createAndStart} does with the spec's network. A
+     * container that publishes ports is created on the default bridge and connected to its
+     * service network after start, so without a preference the bridge address, which Floci
+     * usually cannot reach, can be returned instead.
+     */
+    public EndpointInfo resolveEndpoint(String containerId, int containerPort, String preferredNetwork) {
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        return resolveEndpoint(inspect, containerPort, preferredNetwork);
+    }
+
+    /**
      * Resolves the container's IP on its Docker network, independent of whether Floci runs
      * natively or in a container. Used for addresses that sibling containers (not Floci itself)
      * must dial — e.g. ElastiCache cluster-bus peering between Valkey nodes.
@@ -1145,6 +1220,9 @@ public class ContainerLifecycleManager {
         }
         if (spec.readonlyRootfs()) {
             hostConfig.withReadonlyRootfs(true);
+        }
+        if (spec.init()) {
+            hostConfig.withInit(true);
         }
 
         // Port bindings — services decide whether to request them based on their

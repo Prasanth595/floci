@@ -222,7 +222,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 |--------|-------------|
 | CreateVpc | Creates a VPC with the requested CIDR block. `InstanceTenancy` accepts `default` or `dedicated`; `host` is rejected with `InvalidParameterValue`, as on AWS. |
 | DescribeVpcs | Lists or returns stored VPCs. |
-| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, or an attached internet gateway. Instances, NAT gateways and other subnet-resident resources are not checked. |
+| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway, a transit gateway attachment, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Lists common AWS interface endpoint services and S3 (gateway and interface) in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
@@ -247,7 +247,7 @@ gateway lifecycles.
 |--------|-------------|
 | CreateSubnet | Creates a subnet in a VPC. |
 | DescribeSubnets | Lists or returns stored subnets. |
-| DeleteSubnet | Deletes a subnet from the local EC2 store. |
+| DeleteSubnet | Deletes a subnet from the local EC2 store. Fails with `DependencyViolation` while the subnet still has a transit gateway attachment or anything holding a network interface in it: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifySubnetAttribute | Updates supported subnet attributes. |
 
 ### Security Groups
@@ -300,6 +300,14 @@ that publish those images.
 | DeleteTags | Removes tags from supported EC2 resources. |
 | DescribeTags | Lists tags stored for EC2 resources. |
 
+Public tag mutations reject keys beginning with `aws:` regardless of ASCII case.
+An empty `DeleteTags` tag list removes user tags and preserves AWS-managed tags.
+CloudFormation tag updates and rollbacks likewise leave AWS-managed tags intact.
+Instance and security-group templates validate desired tags before changing resource properties
+or deleting old tags. Volume and Spot request creation also reject reserved keys before allocation.
+Nested launch-template tags follow AWS's case-sensitive check: `aws:` is rejected with
+`InvalidTagKey.Malformed`, while `AWS:` and mixed-case prefixes can be stored in template versions.
+
 ### Internet Gateways
 
 | Action | Description |
@@ -321,7 +329,7 @@ that publish those images.
 | DisassociateRouteTable | Removes a route table association. |
 | CreateRoute | Adds a route to a route table. Accepts `InstanceId`, `NetworkInterfaceId`, and `VpcPeeringConnectionId` as targets (alongside `GatewayId`/`NatGatewayId`/`EgressOnlyInternetGatewayId`) and reports them back on `DescribeRouteTables`. |
 | ReplaceRoute | Replaces the target of an existing route, accepting `InstanceId`, `NetworkInterfaceId`, and `VpcPeeringConnectionId`. |
-| DeleteRoute | Removes a route from a route table. |
+| DeleteRoute | Removes a route from a route table. Refuses the route to the VPC CIDR that `CreateRouteTable` seeds with `InvalidParameterValue`, and reports a destination with no route as `InvalidRoute.NotFound`. |
 
 ### VPC Peering Connections
 
@@ -669,6 +677,18 @@ These members of `RequestLaunchTemplateData` are stored and read back unchanged 
 Within `NetworkInterfaces`, `ConnectionTrackingSpecification` is stored and read back with all
 three of its timeout members.
 
+At launch, `RunInstances` and `CreateFleet` apply the template's `BlockDeviceMappings` under the
+request's, field by field: a request entry for a `DeviceName` the template maps changes only the
+members it sets, and the rest keep the template's values; devices only one side maps apply as
+given. An Auto Scaling group launching from a template gets the template's mappings the same
+way. The root volume's type comes from the mapping for the AMI's root device, else from the
+AMI's own root mapping, else `gp3`, and `CreateImage` records that type on the new AMI's root
+mapping. A mapping with `NoDevice` set removes its device whatever else it names, so it sets no
+type and its `VolumeType` is not checked. A mapping naming a `VolumeType` outside the service model's enum fails with
+`InvalidParameterValue`, as `ModifyVolume` does. Template versions are not checked when they are
+stored, so a template naming an unknown `VolumeType` is accepted by `CreateLaunchTemplate` and
+fails at launch.
+
 Both blocks are validated by `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` before
 anything is stored. An `InstanceRequirements` block must carry `VCpuCount` and `MemoryMiB`, each
 with its `Min`, which the service model declares required; a request missing either fails with
@@ -951,6 +971,11 @@ Synthesised addresses come from the subnet's own CIDR block, skipping the first 
 and the last one as AWS reserves them, and skipping every address a persisted instance, network
 interface or NAT gateway in the subnet still holds, so a restart does not hand one out twice. A
 subnet with no free address left fails the request with `InsufficientFreeAddressesInSubnet`.
+
+`CreateSubnet` derives `AvailableIpAddressCount` from the IPv4 CIDR, excluding the
+five AWS-reserved addresses. `DescribeSubnets` subtracts addresses currently held
+by instances, network interfaces, NAT gateways and interface endpoints. ASG
+scale-out uses this count when selecting among subnets in the same zone.
 
 ## Requirements
 

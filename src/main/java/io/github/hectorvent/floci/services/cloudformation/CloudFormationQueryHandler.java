@@ -51,6 +51,7 @@ public class CloudFormationQueryHandler {
             case "CreateStack" -> createStack(params, region);
             case "UpdateStack" -> updateStack(params, region);
             case "DeleteStack" -> deleteStack(params, region);
+            case "ContinueUpdateRollback" -> continueUpdateRollback(params, region);
             case "UpdateTerminationProtection" -> updateTerminationProtection(params, region);
             case "CreateChangeSet" -> createChangeSet(params, region);
             case "DescribeChangeSet" -> describeChangeSet(params, region);
@@ -187,6 +188,28 @@ public class CloudFormationQueryHandler {
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
+    }
+
+    // ── ContinueUpdateRollback ───────────────────────────────────────────────
+
+    private Response continueUpdateRollback(MultivaluedMap<String, String> params, String region) {
+        String stackName = params.getFirst("StackName");
+        List<String> resourcesToSkip = extractList(params, "ResourcesToSkip.member.");
+        boolean forceRollback = Boolean.parseBoolean(params.getFirst("ForceRollback"));
+        // RoleARN and ClientRequestToken are accepted and have no effect: Floci assumes no role
+        // for stack operations and does not deduplicate retried requests.
+        try {
+            cfnService.continueUpdateRollback(stackName, resourcesToSkip, forceRollback, region);
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+        String xml = new XmlBuilder()
+                .start("ContinueUpdateRollbackResponse", CF_NS)
+                .raw("<ContinueUpdateRollbackResult/>")
+                .raw(AwsQueryResponse.responseMetadata())
+                .end("ContinueUpdateRollbackResponse")
+                .build();
+        return Response.ok(xml).type("text/xml").build();
     }
 
     // ── UpdateTerminationProtection ─────────────────────────────────────────────
@@ -450,6 +473,7 @@ public class CloudFormationQueryHandler {
                     .elem("PhysicalResourceId", res.getPhysicalId())
                     .elem("ResourceType", res.getResourceType())
                     .elem("ResourceStatus", res.getStatus())
+                    .elem("ResourceStatusReason", res.getStatusReason())
                     .elem("LastUpdatedTimestamp", ISO.format(res.getTimestamp()))
                     .end("StackResourceDetail")
                     .end("DescribeStackResourceResult")
@@ -692,13 +716,14 @@ public class CloudFormationQueryHandler {
 
     /**
      * @param previousParameters the stack's currently deployed parameters, consulted when a member
-     *                           sets {@code UsePreviousValue=true} instead of a {@code ParameterValue}
+     *                           sets {@code UsePreviousValue=true} instead of a {@code ParameterValue}.
+     *                           A member naming one that has no deployed value is left out: there is
+     *                           no value to keep, so the template's Default applies, or none.
      */
     private Map<String, String> extractParameters(
             MultivaluedMap<String, String> params, Map<String, String> previousParameters) {
         Map<String, String> result = new HashMap<>();
-        int i = 1;
-        while (true) {
+        for (int i = 1; ; i++) {
             String key = params.getFirst("Parameters.member." + i + ".ParameterKey");
             if (key == null) {
                 break;
@@ -706,11 +731,13 @@ public class CloudFormationQueryHandler {
             String value;
             if (Boolean.parseBoolean(params.getFirst("Parameters.member." + i + ".UsePreviousValue"))) {
                 value = previousParameters.get(key);
+                if (value == null) {
+                    continue;
+                }
             } else {
                 value = params.getFirst("Parameters.member." + i + ".ParameterValue");
             }
             result.put(key, value != null ? value : "");
-            i++;
         }
         return result;
     }
@@ -878,7 +905,9 @@ public class CloudFormationQueryHandler {
     private Response updateStackSet(MultivaluedMap<String, String> params) {
         try {
             String stackSetName = params.getFirst("StackSetName");
-            Map<String, String> previousParameters = stackSetService.describeStackSet(stackSetName).getParameters();
+            StackSet current = stackSetService.describeStackSet(stackSetName);
+            Map<String, String> previousParameters =
+                    cfnService.parametersWithDefaults(current.getTemplateBody(), current.getParameters());
             StackSetOperation op = stackSetService.updateStackSet(
                     stackSetName,
                     cfnService.resolveTemplateBody(params.getFirst("TemplateBody"), params.getFirst("TemplateURL")),

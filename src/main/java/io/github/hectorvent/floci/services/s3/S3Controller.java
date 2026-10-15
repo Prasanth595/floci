@@ -418,8 +418,7 @@ public class S3Controller {
                             httpHeaders.getHeaderString("If-Match"),
                             httpHeaders.getHeaderString("If-None-Match"),
                             uriInfo.getQueryParameters().getFirst("uploadId"),
-                            uriInfo.getQueryParameters().getFirst("partNumber") != null
-                                    ? Integer.parseInt(uriInfo.getQueryParameters().getFirst("partNumber")) : null,
+                            uriInfo.getQueryParameters().getFirst("partNumber"),
                             uriInfo,
                             httpHeaders,
                             body != null ? new ByteArrayInputStream(body) : null);
@@ -801,7 +800,7 @@ public class S3Controller {
                               @HeaderParam("If-Match") String ifMatch,
                               @HeaderParam("If-None-Match") String ifNoneMatch,
                               @QueryParam("uploadId") String uploadId,
-                              @QueryParam("partNumber") Integer partNumber,
+                              @QueryParam("partNumber") String partNumber,
                               @Context UriInfo uriInfo,
                               @Context HttpHeaders httpHeaders,
                               InputStream body) {
@@ -847,12 +846,13 @@ public class S3Controller {
 
             if (uploadId != null && partNumber != null) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
+                int parsedPartNumber = PartRange.parseUploadPartNumber(partNumber);
                 if (copySource != null && !copySource.isEmpty()) {
                     return handleUploadPartCopy(
-                            copySource, bucket, key, uploadId, partNumber, httpHeaders, authorization);
+                            copySource, bucket, key, uploadId, parsedPartNumber, httpHeaders, authorization);
                 }
                 requireDeclaredSizeWithin(httpHeaders, contentEncoding, contentSha256, S3Service.MAX_PART_SIZE);
-                Part part = s3Service.storePart(bucket, key, uploadId, partNumber,
+                Part part = s3Service.storePart(bucket, key, uploadId, parsedPartNumber,
                         decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
                         uploadChecksums(httpHeaders, uriInfo),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
@@ -1645,7 +1645,7 @@ public class S3Controller {
                 S3Checksum expectedChecksum = extractChecksum(httpHeaders, uriInfo);
                 S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers,
                         completedPartETags(completedParts), completedPartChecksums(completedParts), checksumType,
-                        expectedChecksum);
+                        expectedChecksum, multipartObjectSize(httpHeaders, uriInfo));
                 String baseUrl = uriInfo.getBaseUri().toString();
                 if (baseUrl.endsWith("/")) {
                     baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
@@ -2296,6 +2296,35 @@ public class S3Controller {
         if (size > maxSize) {
             throw S3Service.entityTooLarge(size, maxSize);
         }
+    }
+
+    private static Long multipartObjectSize(HttpHeaders httpHeaders, UriInfo uriInfo) {
+        String name = "x-amz-mp-object-size";
+        String value = httpHeaders != null ? httpHeaders.getHeaderString(name) : null;
+        if (value == null && uriInfo != null && uriInfo.getQueryParameters() != null) {
+            for (Map.Entry<String, List<String>> entry : uriInfo.getQueryParameters().entrySet()) {
+                if (entry.getKey().equalsIgnoreCase(name) && !entry.getValue().isEmpty()) {
+                    value = entry.getValue().getFirst();
+                    break;
+                }
+            }
+        }
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        long size;
+        try {
+            size = Long.parseLong(normalized);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidRequest", "Value for x-amz-mp-object-size header is invalid: '"
+                    + normalized + "'", 400);
+        }
+        if (size < 0) {
+            throw new AwsException("InvalidRequest", "Value for x-amz-mp-object-size header is less than zero: '"
+                    + normalized + "'", 400);
+        }
+        return size;
     }
 
     private static String trailerHeader(HttpHeaders httpHeaders, UriInfo uriInfo) {
@@ -3525,12 +3554,13 @@ public class S3Controller {
         }
         // S3 InvalidArgument responses carry ArgumentName and ArgumentValue so the SDK can
         // surface which input was rejected, and EntityTooSmall and EntityTooLarge the proposed and
-        // allowed sizes. They travel through AwsException.extendedData.
+        // allowed sizes. Multipart size errors also identify the rejected part.
+        // They travel through AwsException.extendedData.
         if (e.getExtendedData() != null) {
-            for (String sizeField : List.of("ProposedSize", "MinSizeAllowed", "MaxSizeAllowed")) {
-                Object size = e.getExtendedData().get(sizeField);
-                if (size != null) {
-                    xmlBuilder.elem(sizeField, size.toString());
+            for (String field : List.of("ProposedSize", "MinSizeAllowed", "MaxSizeAllowed", "PartNumber", "ETag")) {
+                Object value = e.getExtendedData().get(field);
+                if (value != null) {
+                    xmlBuilder.elem(field, value.toString());
                 }
             }
             Object resource = e.getExtendedData().get("Resource");

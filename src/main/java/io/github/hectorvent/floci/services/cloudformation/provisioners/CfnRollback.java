@@ -197,10 +197,26 @@ public final class CfnRollback {
     public static final String REPLACEMENT_CLEANUP_ATTR = "__FlociReplacementCleanup";
 
     /**
+     * Holds the tags, stream setting and time-to-live setting a DynamoDB table carried before an
+     * in-place update changed them, with the account and region that address it, so a failed
+     * stack update can put all three back. Written by {@code DynamoDbCfnProvisioner} before its
+     * first mutating call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR = "__FlociDynamoDbTableUpdateSnapshot";
+
+    /**
      * Holds the attributes and tags a queue carried before an in-place update changed them,
      * so a failed stack update can restore them.
      */
     public static final String SQS_UPDATE_SNAPSHOT_ATTR = "__FlociSqsUpdateSnapshot";
+
+    /**
+     * Holds the value, settings and managed tags an SSM parameter carried before an in-place
+     * update changed them, with the resource's attributes from before, so a failed stack update
+     * can put them back. Written by {@code SsmCfnProvisioner} before its put and spent by its
+     * {@code rollbackUpdate}; a rename leaves its rollback to {@link #REPLACEMENT_CLEANUP_ATTR}.
+     */
+    public static final String SSM_PARAMETER_UPDATE_SNAPSHOT_ATTR = "__FlociSsmParameterUpdateSnapshot";
 
     /**
      * Holds the settings a Cognito user pool or user pool client had before an in-place update

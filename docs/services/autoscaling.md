@@ -40,6 +40,28 @@ and zero capacity. Both groups had identical configuration except for name, ARN
 and creation time. The SDK regression is
 `compatibility-tests/sdk-test-python/tests/test_autoscaling_subnet_whitespace.py`.
 
+Scale-out follows the [AWS placement rules](https://docs.aws.amazon.com/autoscaling/ec2/userguide/auto-scaling-benefits.html):
+choose the zone with the fewest active instances, then its subnet with the most
+free IPv4 addresses. Declared subnets and actual EC2 placement take precedence
+over stale group zone metadata. Exhausted IPv4 subnets are skipped when another
+subnet has capacity. If all are full, EC2 reports the selected subnet's allocation
+error. IPv6-only subnets do not require free IPv4 addresses. Retrying another zone
+after a launch error and rebalancing without a capacity increase are not implemented.
+
+AWS launch errors appear as failed scaling activities after preserving partial
+launches. Repeated identical failures reuse the recorded activity, following the
+scale-in behavior, and do not complete an instance refresh. Unexpected runtime
+failures in ordinary scale-out, and save and cleanup failures, still propagate.
+Refresh launch failures retain the original replacement attempt and appear as
+failed scaling activities while other replacements can continue. Refresh and
+ordinary launches share the same launch settings, including template block-device
+mappings; accepted refresh launches keep their recorded source identity.
+
+For groups configured only with Availability Zones, Floci preserves its unpinned
+EC2 launch behavior and counts each member under the requested zone. This permits
+real zones outside the local subnet catalog, such as `us-east-1d`; the underlying
+EC2 instance can use a default subnet in a different zone.
+
 ### Instance Management
 
 | Operation | Notes |
@@ -51,6 +73,27 @@ and creation time. The SDK regression is
 | `TerminateInstanceInAutoScalingGroup` | Terminates a specific instance; optionally decrements desired capacity |
 | `SuspendProcesses` | Records suspended scaling processes (empty list suspends all); reported back by `DescribeAutoScalingGroups` |
 | `ResumeProcesses` | Clears suspended processes (empty list resumes all) |
+
+### Instance Refresh Recovery
+
+New instance refreshes retain the selected instances and their replacement progress
+across persistent, hybrid, and WAL storage reloads. Suspending `InstanceRefresh`,
+`Launch`, or `Terminate` pauses refresh replacements; resuming those processes lets
+the refresh continue. A failed replacement launch remains part of the refresh, so
+ordinary desired-capacity reconciliation does not bypass the pause. Explicit
+`TerminateInstanceInAutoScalingGroup` requests still run, and independent capacity
+increases can proceed while only `InstanceRefresh` is suspended. Paused original
+instances keep their target-group registrations until replacement resumes.
+Explicitly detached instances leave refresh ownership and are not adopted again
+when the refresh resumes. Recovery of an accepted EC2 launch keeps the source
+identity recorded for that attempt even if the group configuration has changed.
+Older attempts without a recorded source use the available EC2 instance metadata
+without assigning the current launch template to the recovered instance.
+
+This does not implement rolling health-percentage limits, checkpoints, rollback,
+or cancellation. Refreshes saved by older versions without replacement ownership
+retain the previous reconciliation behavior. Storage reload coverage does not
+imply an atomic transaction spanning Auto Scaling and EC2 after a process crash.
 
 ### Load Balancer Attachment
 
@@ -138,8 +181,9 @@ adjustments. Suspension and resumption wait for any desired-capacity adjustment 
 in progress for that group, so a completed suspension cannot be bypassed by an earlier
 reconciliation check.
 
-Suspension does not yet pause instance-refresh selection or replacement cleanup.
-Explicitly requested termination and stale-instance cleanup continue independently.
+New owned refresh replacements also pause for `InstanceRefresh`, `Launch`, or
+`Terminate`, as described above. Explicitly requested termination and stale-instance
+cleanup continue independently.
 Other suspended process names are stored and returned but do not pause their
 associated activities.
 
@@ -155,6 +199,11 @@ pass the shared EC2 decoder's base64 and 16 KiB raw-data checks. The decoder als
 gzip and expansion beyond 10 MiB; this is Floci's execution safety limit, not an AWS API limit.
 Invalid marked data in an older saved configuration is contained as a launch failure so reconciliation
 can still save the group and check refresh progress.
+
+Direct and mixed launch templates retain the selected version's original user-data
+encoding for instance attributes and metadata, including compressed and binary
+payloads. Execution still uses decoded text. Older templates that store only
+execution text retain that text through a UTF-8 fallback.
 
 Auto Scaling groups preserve either a launch configuration, a top-level launch template, or a `MixedInstancesPolicy`. These launch sources are mutually exclusive in create/update requests. When a mixed instances policy is supplied, Floci stores and returns:
 

@@ -1477,6 +1477,20 @@ public interface EmulatorConfig {
 
         @WithDefault("9399")
         int kafkaHostPortMax();
+
+        /**
+         * Only applies when Floci runs in a container. Each broker then has a second Kafka
+         * listener, published to a host port from the kafka-host-port range so clients on the
+         * Docker host can reach it, and advertised as {@code <this hostname>:<port>}
+         * ({@code localhost} when unset).
+         *
+         * <p>When set, GetBootstrapBrokers returns both listeners,
+         * {@code <container-name>:9092,<this hostname>:<port>}, so clients on the Docker host
+         * and in sibling containers can each discover the broker. When unset or blank, it
+         * returns the broker's Docker-network address, which sibling containers use.
+         * Env: FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME
+         */
+        Optional<String> bootstrapHostname();
     }
 
     interface AmazonMqServiceConfig {
@@ -1698,6 +1712,9 @@ public interface EmulatorConfig {
 
         @WithDefault("180")
         long transactionTtlSeconds();
+
+        @WithDefault("false")
+        boolean databaseResumingExceptionEnabled();
     }
 
     interface RedshiftDataServiceConfig {
@@ -1887,9 +1904,11 @@ public interface EmulatorConfig {
 
         /**
          * How often the buffer flusher checks for streams whose buffering
-         * interval (BufferingHints.IntervalInSeconds) has elapsed.
+         * interval (BufferingHints.IntervalInSeconds) has elapsed. AWS delivers once
+         * the first buffer condition is met, so a buffer is delivered at most this
+         * long after its interval ends.
          */
-        @WithDefault("10")
+        @WithDefault("1")
         long tickIntervalSeconds();
 
         /**
@@ -1918,6 +1937,18 @@ public interface EmulatorConfig {
     interface CognitoServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Rejects an app client whose token validity is outside AWS's limits: access and ID tokens
+         * between 5 minutes and 1 day, refresh tokens between 60 minutes and 3,650 days. Env:
+         * {@code FLOCI_SERVICES_COGNITO_ENFORCE_TOKEN_VALIDITY_LIMITS}
+         *
+         * <p>On by default, because a client that Floci accepts and AWS refuses only fails when it is
+         * deployed. Turn it off to keep tokens shorter than AWS allows, such as a one-minute access
+         * token for a test of what happens when it expires.
+         */
+        @WithDefault("true")
+        boolean enforceTokenValidityLimits();
     }
 
     interface StepFunctionsServiceConfig {
@@ -2101,6 +2132,29 @@ public interface EmulatorConfig {
 
         @WithDefault("${floci.storage.persistent-path}/opensearch")
         String dataPath();
+
+        /**
+         * Optional data volume for the domain containers Floci spawns, replacing the
+         * per-domain volume Floci derives by default. An absolute path is bind-mounted as
+         * {@code <path>/<account-id>/<region>/<domain-name>}, nested under a {@code <namespace>} subdirectory
+         * when a resource namespace is configured; any other value is a Docker volume
+         * name and each domain gets its own {@code <name>-<namespace>-<account-id>-<region>-<domain-name>}
+         * volume, without the namespace segment when none is configured. No two domains
+         * and no two namespaced deployments sharing a Docker daemon ever share a data
+         * directory. Storage named here is never removed on domain delete,
+         * regardless of storage mode and prune policy: the operator named it, so its
+         * lifecycle is theirs. A volume Floci creates when absent carries no Floci
+         * label, so neither a floci-scoped volume prune nor a sweep of Floci-labelled
+         * child resources, a testcontainers module reaping a run's labelled children,
+         * removes it. When Floci itself runs in a container, an absolute path
+         * resolves on the Docker daemon's host. Paths starting with / retain Linux path syntax
+         * even when Floci runs on Windows. A temporary root container using the selected
+         * image creates and prepares bind-directory ownership and owner write access there;
+         * existing files are untouched, and preparation failure aborts domain startup.
+         *
+         * Env var: FLOCI_SERVICES_OPENSEARCH_DATA_VOLUME
+         */
+        Optional<String> dataVolume();
 
         @WithDefault("false")
         boolean keepRunningOnShutdown();
@@ -2369,8 +2423,11 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        @WithDefault("cloudfront.net") // partition-literal: configurable; the China CDN suffix has no published source
-        String domainSuffix();
+        /**
+         * Suffix of generated distribution domain names, in every partition when set. Unset, the
+         * suffix follows the request's partition ({@code CloudFrontEdgeDomain#domainSuffix}).
+         */
+        Optional<String> domainSuffix();
 
         /**
          * Exact custom-origin hostnames allowed to resolve to private or otherwise non-routable
@@ -2550,7 +2607,7 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        @WithDefault("floci/floci-ui:latest")
+        @WithDefault("floci/floci-ui:0.7.0")
         String image();
 
         @WithDefault("floci-ui")
