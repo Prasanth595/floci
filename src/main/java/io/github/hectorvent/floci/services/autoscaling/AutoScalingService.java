@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.autoscaling;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
@@ -16,12 +18,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
-import java.security.GeneralSecurityException;
-import java.security.MessageDigest;
-import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.*;
 import java.util.Base64;
@@ -562,99 +559,41 @@ public class AutoScalingService {
 
     // AWS: values inside one filter are ORed, separate filters are ANDed; only these four
     // filter names exist. Ordered by (group, key); NextToken is the last pair returned, so tags
-    // added or removed between pages neither skip nor repeat an entry.
-    public TagPage describeTags(String region, List<Map.Entry<String, List<String>>> filters,
-                                Integer maxRecords, String nextToken) {
+    // added or removed between pages neither skip nor repeat an entry. Values match exactly
+    // (the Filter model says they are case-sensitive).
+    public PaginatedResult<TagDescription> describeTags(String region, List<Map.Entry<String, List<String>>> filters,
+                                                         Integer maxRecords, String nextToken) {
         for (Map.Entry<String, List<String>> filter : filters) {
             if (!Set.of("auto-scaling-group", "key", "value", "propagate-at-launch").contains(filter.getKey())) {
                 throw new AwsException("ValidationError", "Filter name '" + filter.getKey() + "' is not valid.", 400);
             }
         }
-        String[] after = parseTagCursor(region, nextToken);
         int limit = maxRecords != null ? Math.min(Math.max(maxRecords, 1), 100) : 50;
         List<TagDescription> matches = groups.values().stream()
                 .filter(Objects::nonNull) // group deleted between key snapshot and value read
                 .filter(g -> region.equals(g.getRegion()))
-                .sorted(Comparator.comparing(AutoScalingGroup::getAutoScalingGroupName))
-                .flatMap(g -> new TreeMap<>(g.getTags()).entrySet().stream()
+                .flatMap(g -> g.getTags().entrySet().stream()
                         .map(t -> new TagDescription(g.getAutoScalingGroupName(), t.getKey(), t.getValue(),
                                 g.getTagPropagateAtLaunch().getOrDefault(t.getKey(), false))))
                 .filter(t -> matchesFilter(filters, "auto-scaling-group", t.resourceId())
                         && matchesFilter(filters, "key", t.key())
                         && matchesFilter(filters, "value", t.value())
                         && matchesFilter(filters, "propagate-at-launch", String.valueOf(t.propagateAtLaunch())))
-                .filter(t -> after == null || t.resourceId().compareTo(after[0]) > 0
-                        || (t.resourceId().equals(after[0]) && t.key().compareTo(after[1]) > 0))
                 .collect(Collectors.toList());
-        if (matches.size() <= limit) {
-            return new TagPage(matches, null);
-        }
-        TagDescription last = matches.get(limit - 1);
-        Base64.Encoder b64 = Base64.getUrlEncoder().withoutPadding();
-        byte[] cursor = (last.resourceId() + "\0" + last.key()).getBytes(StandardCharsets.UTF_8);
-        String token = b64.encodeToString(cursor) + "." + b64.encodeToString(signTagCursor(region, cursor));
-        return new TagPage(matches.subList(0, limit), token);
-    }
-
-    // Signed so a forged or edited token is refused as AWS refuses one, and bound to the account
-    // and region that issued it. The key is per bean instance, not static: a static initializer can
-    // run at native-image build time and bake one key into every process. A token does not outlive
-    // a restart; a genuine token past the end (groups deleted since) still resumes.
-    private final byte[] tagCursorKey = newTagCursorKey();
-
-    // nextBytes, not generateSeed: generateSeed reads the entropy source and can block at startup.
-    private static byte[] newTagCursorKey() {
-        byte[] key = new byte[32];
-        new SecureRandom().nextBytes(key);
-        return key;
-    }
-
-    private byte[] signTagCursor(String region, byte[] cursor) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(tagCursorKey, "HmacSHA256"));
-            mac.update(regionResolver.getAccountId().getBytes(StandardCharsets.UTF_8));
-            mac.update((byte) 0);
-            mac.update(region.getBytes(StandardCharsets.UTF_8));
-            mac.update((byte) 0);
-            return mac.doFinal(cursor);
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("HmacSHA256 is not available", e);
-        }
-    }
-
-    private String[] parseTagCursor(String region, String nextToken) {
-        if (nextToken == null || nextToken.isBlank()) {
-            return null;
-        }
-        try {
-            String[] parts = nextToken.split("\\.", -1);
-            if (parts.length == 2) {
-                byte[] cursor = Base64.getUrlDecoder().decode(parts[0]);
-                byte[] mac = Base64.getUrlDecoder().decode(parts[1]);
-                String[] fields = new String(cursor, StandardCharsets.UTF_8).split("\0", 2);
-                if (fields.length == 2 && MessageDigest.isEqual(mac, signTagCursor(region, cursor))) {
-                    return fields;
-                }
-            }
-        } catch (IllegalArgumentException ignored) {
-            // falls through to InvalidNextToken
-        }
-        throw new AwsException("InvalidNextToken", "The NextToken value is not valid.", 400);
+        // "\0" sorts below every other character, so the cursor orders as the (group, key) pair.
+        return Pagination.paginate(matches,
+                t -> t.resourceId() + "\0" + t.key(), limit, nextToken, "autoscaling-tags",
+                token -> new AwsException("InvalidNextToken", "The NextToken value is not valid.", 400));
     }
 
     // Every filter of this name must match (a repeated name is a second filter, ANDed).
     private static boolean matchesFilter(List<Map.Entry<String, List<String>>> filters, String name, String actual) {
-        boolean caseInsensitive = name.equals("propagate-at-launch");
         return filters.stream()
                 .filter(f -> f.getKey().equals(name) && !f.getValue().isEmpty())
-                .allMatch(f -> f.getValue().stream()
-                        .anyMatch(v -> caseInsensitive ? v.equalsIgnoreCase(actual) : v.equals(actual)));
+                .allMatch(f -> f.getValue().contains(actual));
     }
 
     public record TagDescription(String resourceId, String key, String value, boolean propagateAtLaunch) {}
-
-    public record TagPage(List<TagDescription> tags, String nextToken) {}
 
     private AutoScalingGroup requireTaggableGroup(String region, String resourceId, String resourceType) {
         if (!"auto-scaling-group".equals(resourceType)) {

@@ -167,35 +167,32 @@ class AutoScalingDescribeTagsIntegrationTest {
                 .body(containsString("ValidationError"));
     }
 
+    // Like every other member list in this handler, filters are read up to the first missing index.
     @Test
-    void sparseFilterIndicesAreAValidationErrorNotAnUnfilteredRead() {
-        describe()
-                .formParam("Filters.member.2.Name", "key")
-                .formParam("Filters.member.2.Values.member.1", "AsgId")
+    void filtersAreReadUpToTheFirstMissingIndex() {
+        XmlPath xml = describe()
+                .formParam("Filters.member.1.Name", "auto-scaling-group")
+                .formParam("Filters.member.1.Values.member.1", GROUP_B)
+                .formParam("Filters.member.3.Name", "key")
+                .formParam("Filters.member.3.Values.member.1", "no-such-key")
             .when().post("/")
-            .then().statusCode(400)
-                .body(containsString("ValidationError"));
-        describe()
-                .formParam("Filters.member.1.Name", "key")
-                .formParam("Filters.member.1.Values.member.2", "AsgId")
-            .when().post("/")
-            .then().statusCode(400)
-                .body(containsString("ValidationError"));
+            .then().statusCode(200).extract().xmlPath();
+
+        assertEquals(List.of("AsgId"), xml.getList(ROOT + ".Key"));
     }
 
+    // Filter values are case-sensitive (AWS Filter model), propagate-at-launch included.
     @Test
-    void oversizedFilterIndexIsAValidationErrorNotAServerError() {
-        describe()
-                .formParam("Filters.member.99999999999.Name", "key")
+    void propagateAtLaunchFilterIsCaseSensitive() {
+        XmlPath xml = describe()
+                .formParam("Filters.member.1.Name", "auto-scaling-group")
+                .formParam("Filters.member.1.Values.member.1", GROUP_A)
+                .formParam("Filters.member.2.Name", "propagate-at-launch")
+                .formParam("Filters.member.2.Values.member.1", "True")
             .when().post("/")
-            .then().statusCode(400)
-                .body(containsString("ValidationError"));
-        describe()
-                .formParam("Filters.member.1.Name", "key")
-                .formParam("Filters.member.1.Values.member.99999999999", "AsgId")
-            .when().post("/")
-            .then().statusCode(400)
-                .body(containsString("ValidationError"));
+            .then().statusCode(200).extract().xmlPath();
+
+        assertEquals(List.of(), xml.getList(ROOT + ".Key"));
     }
 
     // A tag deleted from an already-returned page must not shift the next page past an unread tag.
@@ -265,37 +262,12 @@ class AutoScalingDescribeTagsIntegrationTest {
                 .body(containsString("InvalidNextToken"));
     }
 
-    // A token that decodes to a plausible (group, key) but was never issued, or an issued one
-    // whose cursor was edited, is refused as AWS refuses a token it did not mint.
+    // A token that decodes to a plausible (group, key) but lacks this list's namespace was not
+    // minted here.
     @Test
-    void forgedOrEditedNextTokenIsInvalidNextToken() {
-        Base64.Encoder b64 = Base64.getUrlEncoder().withoutPadding();
-        assertInvalidNextToken(b64.encodeToString(
+    void tokenWithoutTheNamespaceIsInvalidNextToken() {
+        assertInvalidNextToken(Base64.getUrlEncoder().encodeToString(
                 (GROUP_A + "\0AsgId").getBytes(StandardCharsets.UTF_8)));
-        String genuine = describe().formParam("MaxRecords", "1")
-            .when().post("/")
-            .then().statusCode(200).extract().xmlPath()
-                .getString("DescribeTagsResponse.DescribeTagsResult.NextToken");
-        assertInvalidNextToken(b64.encodeToString("zzzz\0zzzz".getBytes(StandardCharsets.UTF_8))
-                + genuine.substring(genuine.indexOf('.')));
-    }
-
-    // A token is bound to the account that issued it: replayed under another account it must not
-    // resume a listing there.
-    @Test
-    void nextTokenFromAnotherAccountIsInvalidNextToken() {
-        String token = describe().formParam("MaxRecords", "1")
-            .when().post("/")
-            .then().statusCode(200).extract().xmlPath()
-                .getString("DescribeTagsResponse.DescribeTagsResult.NextToken");
-        assertNotNull(token);
-        given().formParam("Action", "DescribeTags")
-                .header("Authorization",
-                        "AWS4-HMAC-SHA256 Credential=333333333333/20260501/us-east-1/autoscaling/aws4_request")
-                .formParam("NextToken", token)
-            .when().post("/")
-            .then().statusCode(400)
-                .body(containsString("InvalidNextToken"));
     }
 
     private static void assertInvalidNextToken(String token) {

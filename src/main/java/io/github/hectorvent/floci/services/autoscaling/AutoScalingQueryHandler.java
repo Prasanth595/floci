@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.autoscaling;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.autoscaling.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -11,7 +12,6 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
-import java.math.BigInteger;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -495,16 +495,11 @@ public class AutoScalingQueryHandler {
 
     private Response handleDescribeTags(MultivaluedMap<String, String> p, String region) {
         List<Map.Entry<String, List<String>>> filters = new ArrayList<>();
-        int filterCount = 0;
         for (int i = 1; ; i++) {
             String name = p.getFirst("Filters.member." + i + ".Name");
             if (name == null) { break; }
-            filterCount = i;
-            List<String> values = memberList(p, "Filters.member." + i + ".Values");
-            rejectIndexGap(p, "Filters.member." + i + ".Values.member.", values.size());
-            filters.add(Map.entry(name, values));
+            filters.add(Map.entry(name, memberList(p, "Filters.member." + i + ".Values")));
         }
-        rejectIndexGap(p, "Filters.member.", filterCount);
         String maxRecords = p.getFirst("MaxRecords");
         Integer limit = null;
         if (maxRecords != null && !maxRecords.isBlank()) {
@@ -514,13 +509,13 @@ public class AutoScalingQueryHandler {
                 throw new AwsException("ValidationError", "MaxRecords '" + maxRecords + "' is not a valid integer.", 400);
             }
         }
-        AutoScalingService.TagPage page = service.describeTags(region, filters,
+        PaginatedResult<AutoScalingService.TagDescription> page = service.describeTags(region, filters,
                 limit, p.getFirst("NextToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTagsResponse", NS)
                   .start("DescribeTagsResult")
                     .start("Tags");
-        for (AutoScalingService.TagDescription tag : page.tags()) {
+        for (AutoScalingService.TagDescription tag : page.items()) {
             xml.start("member")
                .elem("ResourceId", tag.resourceId())
                .elem("ResourceType", "auto-scaling-group")
@@ -1455,21 +1450,6 @@ public class AutoScalingQueryHandler {
             result.add(val);
         }
         return result;
-    }
-
-    /** A member list is read until its first missing index; any parameter past that gap would be silently dropped. */
-    private static void rejectIndexGap(MultivaluedMap<String, String> p, String prefix, int contiguous) {
-        for (String key : p.keySet()) {
-            if (!key.startsWith(prefix)) { continue; }
-            String rest = key.substring(prefix.length());
-            int dot = rest.indexOf('.');
-            String index = dot < 0 ? rest : rest.substring(0, dot);
-            if (!index.isEmpty() && index.chars().allMatch(Character::isDigit)
-                    && new BigInteger(index).compareTo(BigInteger.valueOf(contiguous)) > 0) {
-                throw new AwsException("ValidationError",
-                        "Parameter " + key + " follows a missing member index.", 400);
-            }
-        }
     }
 
     private List<String> commaList(String value) {

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
@@ -494,9 +495,9 @@ class AutoScalingServiceTest {
         withVanished.put(REGION + "::vanished", null);
         field.set(service, withVanished);
 
-        AutoScalingService.TagPage page = service.describeTags(REGION, List.of(), null, null);
+        PaginatedResult<AutoScalingService.TagDescription> page = service.describeTags(REGION, List.of(), null, null);
 
-        assertEquals(List.of("k"), page.tags().stream().map(AutoScalingService.TagDescription::key).toList());
+        assertEquals(List.of("k"), page.items().stream().map(AutoScalingService.TagDescription::key).toList());
     }
 
     @Test
