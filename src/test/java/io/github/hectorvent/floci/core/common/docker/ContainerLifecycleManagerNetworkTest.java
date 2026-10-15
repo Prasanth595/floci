@@ -10,6 +10,7 @@ import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.NetworkSettings;
@@ -126,6 +127,33 @@ class ContainerLifecycleManagerNetworkTest {
         assertThrows(IllegalStateException.class, () -> manager().create(specWithLinkLocalIp(Map.of())));
 
         verify(dockerClient).removeContainerCmd("container-id");
+    }
+
+    @Test
+    void createAndStartFailsAndRemovesThePublishingContainerWhenItsNetworkDoesNotExist() {
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
+        RemoveContainerCmd removeCmd = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(removeCmd);
+        doThrow(new NotFoundException("network floci-nte not found")).when(connectCmd).exec();
+
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> manager().createAndStart(spec("floci-nte", Map.of(8080, 18080), List.of())));
+
+        assertTrue(e.getMessage().contains("floci-nte"), e.getMessage());
+        verify(removeCmd).exec();
+    }
+
+    @Test
+    void createAndStartKeepsThePublishingContainerWhenJoiningAnExistingNetworkFails() {
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
+        doThrow(new RuntimeException("endpoint already exists")).when(connectCmd).exec();
+        NetworkSettings networks = mock(NetworkSettings.class);
+        InspectContainerResponse inspect = inspectOf("container-id");
+        when(inspect.getNetworkSettings()).thenReturn(networks);
+
+        manager().createAndStart(spec("floci-net", Map.of(8080, 18080), List.of()));
+
+        verify(dockerClient, never()).removeContainerCmd(any(String.class));
     }
 
     @Test

@@ -388,6 +388,12 @@ public class ContainerLifecycleManager {
                         .withNetworkId(spec.networkMode())
                         .exec();
                 LOG.debugv("Connected container {0} to network {1}", containerId, spec.networkMode());
+            } catch (NotFoundException e) {
+                // A container that joins its network at creation fails there when the network does
+                // not exist. One that publishes ports joins only now, so fail it the same way instead
+                // of leaving it on the default bridge, out of reach of the network it was meant for.
+                throw new IllegalStateException("Docker network " + spec.networkMode()
+                        + " does not exist; container " + containerId + " cannot join it", e);
             } catch (Exception e) {
                 LOG.warnv("Could not connect container {0} to network {1}: {2}",
                         containerId, spec.networkMode(), e.getMessage());
