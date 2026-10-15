@@ -98,6 +98,36 @@ class RedshiftServerlessAdministrationHandlerTest {
         assertEquals("ValidationException", errorType("PutResourcePolicy",
                 "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/x\",\"policy\":"
                         + mapper.valueToTree(policy) + "}"));
+        assertEquals("resourceArn does not identify a snapshot in this account and Region.",
+                errorMessage("PutResourcePolicy",
+                        "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/x\",\"policy\":"
+                                + mapper.valueToTree(policy) + "}"));
+        assertEquals("ValidationException", errorType("PutResourcePolicy",
+                "{\"policy\":" + mapper.valueToTree(policy) + "}"));
+        assertEquals("ValidationException", errorType("PutResourcePolicy",
+                "{\"resourceArn\":\"" + snapshotArn + "\"}"));
+        assertEquals("ValidationException", errorType("GetResourcePolicy",
+                "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/x\"}"));
+        assertEquals("resourceArn does not identify a snapshot in this account and Region.",
+                errorMessage("GetResourcePolicy",
+                        "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/x\"}"));
+        assertEquals("ValidationException", errorType("DeleteResourcePolicy",
+                "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/x\"}"));
+        assertEquals("resourceArn does not identify a snapshot in this account and Region.",
+                errorMessage("DeleteResourcePolicy",
+                        "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/x\"}"));
+        assertEquals("ValidationException", errorType("GetResourcePolicy",
+                "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID + ":workgroup/x\"}"));
+        assertEquals("resourceArn does not identify a snapshot in this account and Region.",
+                errorMessage("GetResourcePolicy",
+                        "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID + ":workgroup/x\"}"));
+        assertEquals("ValidationException", errorType("DeleteResourcePolicy",
+                "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID + ":workgroup/x\"}"));
+        assertEquals("resourceArn does not identify a snapshot in this account and Region.",
+                errorMessage("DeleteResourcePolicy",
+                        "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID + ":workgroup/x\"}"));
+        assertEquals("ValidationException", errorType("GetResourcePolicy", "{}"));
+        assertEquals("ValidationException", errorType("DeleteResourcePolicy", "{}"));
 
         assertEquals(0, ok("DeleteResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}").size());
         assertEquals("ResourceNotFoundException",
@@ -214,6 +244,12 @@ class RedshiftServerlessAdministrationHandlerTest {
         Response response = invoke(action, json);
         assertEquals(400, response.getStatus(), action + " should be rejected: " + response.getEntity());
         return mapper.valueToTree(response.getEntity()).path("__type").asText(null);
+    }
+
+    private String errorMessage(String action, String json) {
+        Response response = invoke(action, json);
+        assertEquals(400, response.getStatus(), action + " should be rejected: " + response.getEntity());
+        return mapper.valueToTree(response.getEntity()).path("message").asText(null);
     }
 
     private Response invoke(String action, String json) {

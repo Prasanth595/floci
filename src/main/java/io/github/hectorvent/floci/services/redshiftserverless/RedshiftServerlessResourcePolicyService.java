@@ -69,6 +69,7 @@ public class RedshiftServerlessResourcePolicyService implements Resettable {
     }
 
     private ResourcePolicy require(String resourceArn, String region) {
+        serverless.snapshotNameFromArn(resourceArn, region, "resourceArn");
         ResourcePolicy stored = policies.get(storageKey(region, resourceArn)).orElse(null);
         if (stored != null && !isOnSameSnapshot(stored, region)) {
             policies.delete(storageKey(region, resourceArn));
@@ -91,7 +92,7 @@ public class RedshiftServerlessResourcePolicyService implements Resettable {
     }
 
     private Optional<RedshiftServerlessSnapshot> findSnapshot(String resourceArn, String region) {
-        return serverless.findSnapshot(serverless.snapshotNameFromArn(resourceArn, region), region);
+        return serverless.findSnapshot(serverless.snapshotNameFromArn(resourceArn, region, "resourceArn"), region);
     }
 
     private void requireJsonObject(String policy) {
