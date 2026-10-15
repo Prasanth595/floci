@@ -361,14 +361,16 @@ numeric `Version` attribute. CloudFormation resolves the version before creating
 alias. As in SAM, the version's logical id is `<Function>Version` followed by ten hex digits of a
 SHA-1 over the function's code, with its template parameter references resolved (pseudo
 parameters such as `${AWS::Region}` stay as written), its `Environment` and `MemorySize` as
-written, and its `SnapStart` when `ApplyOn` is anything but `None`. An update that changes any of
-them, or a parameter the code uses, publishes a new version and moves the alias to it. A parameter
-used only in `Environment` or `MemorySize` does not, and neither does a property outside the hash,
-such as `Timeout`. `AutoPublishAliasAllProperties` hashes every property floci gives the function,
-and its `SnapStart`, instead, and a string `AutoPublishCodeSha256`
-replaces the hash with its first ten characters. A new id publishes only when the function's code
-or configuration changed since its last version, so a new `AutoPublishCodeSha256` alone, or a
-`Tags` edit under `AutoPublishAliasAllProperties`, leaves the alias where it is. On AWS a new
+written, and its `SnapStart` when `ApplyOn` is anything but `None`. An update that changes the
+code, `Environment` or `MemorySize`, or a parameter the code uses, publishes a new version and
+moves the alias to it. A parameter used only in `Environment` or `MemorySize` does not, and neither
+does a property outside the hash, such as `Timeout`. Under `AutoPublishAliasAllProperties` the hash
+covers every property floci gives the function, plus its `SnapStart`. A string
+`AutoPublishCodeSha256` replaces the hash with its first ten characters. A new id publishes only
+when the function's code or configuration changed since its last version. floci does not give the
+function `SnapStart`, so turning it on changes the id but publishes nothing, and neither does a new
+`AutoPublishCodeSha256` alone or a `Tags` edit under `AutoPublishAliasAllProperties`: the alias
+stays where it is. On AWS a new
 `AutoPublishCodeSha256` alone also publishes, because SAM appends it to the function's
 `Description`; floci's transform sets no `Description` on the function.
 

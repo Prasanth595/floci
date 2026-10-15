@@ -1087,7 +1087,7 @@ class SamTransformProcessor {
      * hex digits of the SHA-1 of the function's {@code Code}, with references to template parameters
      * resolved, merged with its {@code Environment}, its {@code MemorySize} and a {@code SnapStart}
      * that applies, or of all its properties under {@code AutoPublishAliasAllProperties}, as sorted
-     * compact JSON with every character outside printable ASCII escaped in lowercase hex. A string
+     * compact JSON with characters outside printable ASCII escaped, in lowercase hex. A string
      * {@code AutoPublishCodeSha256} names the version itself, by its first ten characters. A change
      * to the hashed input is a new logical id: the update publishes a new version and the alias moves
      * to it. Unchanged, the id and the version it published stay, since the version provisioner never
@@ -1126,8 +1126,10 @@ class SamTransformProcessor {
             if (functionProperties.has("MemorySize")) {
                 hashed.set("MemorySize", functionProperties.get("MemorySize").deepCopy());
             }
-            // Turning SnapStart on publishes a version, so that version gets its snapshot.
-            if (snapStart.isObject() && !"None".equals(snapStart.path("ApplyOn").asText("None"))) {
+            // SAM hashes a SnapStart that applies, so the id matches the one SAM gives. A missing
+            // ApplyOn means None; a null one does not.
+            JsonNode applyOn = snapStart.path("ApplyOn");
+            if (snapStart.isObject() && !applyOn.isMissingNode() && !"None".equals(applyOn.asText(null))) {
                 hashed.set("SnapStart", snapStart.deepCopy());
             }
         }
@@ -1138,7 +1140,7 @@ class SamTransformProcessor {
                     .with(JsonWriteFeature.ESCAPE_NON_ASCII)
                     .without(JsonWriteFeature.WRITE_HEX_UPPER_CASE)
                     .writeValueAsString(hashed)
-                    // ESCAPE_NON_ASCII leaves DEL as it is; SAM's hash input escapes it too.
+                    // ESCAPE_NON_ASCII leaves DEL as it is; SAM's hash input escapes DEL as well.
                     .replace("\u007f", "\\u007f");
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Cannot serialize the version hash input of " + functionLogicalId, e);

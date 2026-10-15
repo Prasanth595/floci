@@ -181,7 +181,7 @@ class SamTransformProcessorTest {
 
     /**
      * SAM also hashes a function's SnapStart when its ApplyOn is anything but "None", so turning
-     * SnapStart on publishes a new version; absent, empty or "None" leaves the id unchanged. With
+     * SnapStart on names a new version; absent, empty or "None" leaves the id unchanged. With
      * AutoPublishAliasAllProperties it is hashed like every other property.
      */
     @Test
@@ -205,6 +205,9 @@ class SamTransformProcessorTest {
         assertEquals("MyFuncVersiona8f283d3fa", publishedVersionId(template.formatted(snapStart)));
         assertEquals("MyFuncVersion2154246fbb",
                 publishedVersionId(template.formatted(", \"MemorySize\": 256" + snapStart)));
+        assertEquals("MyFuncVersion3c4b5efba5",
+                publishedVersionId(template.formatted(", \"SnapStart\": {\"ApplyOn\": null}")),
+                "a null ApplyOn is not None, so SAM hashes it");
         for (String off : List.of("", ", \"SnapStart\": {\"ApplyOn\": \"None\"}", ", \"SnapStart\": {}")) {
             assertEquals("MyFuncVersion102360dfc3", publishedVersionId(template.formatted(off)), off);
         }
