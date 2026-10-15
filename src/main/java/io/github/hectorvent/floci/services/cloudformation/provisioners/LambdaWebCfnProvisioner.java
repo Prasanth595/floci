@@ -12,27 +12,19 @@ import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionRevision;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
- * CloudFormation provisioning for Lambda Web Functions: {@code AWS::Lambda::WebFunction},
- * {@code AWS::Lambda::WebFunctionRevision} and {@code AWS::Lambda::WebFunctionEndpoint}.
- *
- * <p>Each type is identified by its ARN, the registry schemas' primaryIdentifier, so {@code Ref}
- * returns it. A function's only createOnly property is its name, so an update that keeps it
- * reconciles the tags in place. Every property of a revision is createOnly: an update whose
- * configuration differs mints a new revision and the displaced one is deleted once the update
- * commits, through {@link ReplacementCleanup}, while an update that changed nothing keeps the
- * revision. An endpoint keeps its identity while its name, type, regions and function stay the
- * same and is updated through the service's UpdateWebFunctionEndpoint otherwise.</p>
- *
- * <p>Template properties are PascalCase and the service reads camelCase, so the properties are
- * lowered as they are passed through; the keys of {@code EnvironmentVariables} are the user's own
- * and stay as written.</p>
+ * CloudFormation provisioning for {@code AWS::Lambda::WebFunction}, {@code WebFunctionRevision} and
+ * {@code WebFunctionEndpoint}. Each physical id is the resource's ARN, the schemas' primaryIdentifier.
+ * Every property of a revision is createOnly. A function's createOnly property is its name, an
+ * endpoint's are its function, name, type and regions.
  */
 @ApplicationScoped
 public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
@@ -40,6 +32,7 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
     static final String FUNCTION = "AWS::Lambda::WebFunction";
     static final String REVISION = "AWS::Lambda::WebFunctionRevision";
     static final String ENDPOINT = "AWS::Lambda::WebFunctionEndpoint";
+    private static final Logger LOG = Logger.getLogger(LambdaWebCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Set<String> ENDPOINT_CREATE_ONLY = Set.of("FunctionName", "EndpointName", "EndpointType", "Regions");
 
@@ -65,11 +58,7 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    /**
-     * Every physical id is an ARN that names its function, so the function is read back out of it.
-     * A revision or endpoint whose function is already gone counts as deleted; a revision an endpoint
-     * still routes to keeps its ConflictException, so the stack reports the failure.
-     */
+    /** A revision an endpoint still routes to keeps its ConflictException, so the stack reports it. */
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         switch (resourceType) {
@@ -112,14 +101,13 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
         String name = require(props, "FunctionName", r, ctx);
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
-        boolean reused = ctx.isUpdate() && ctx.priorPhysicalId() != null
-                && name.equals(nameOf(ctx.priorPhysicalId())) && exists(() -> service.getFunction(ctx.region(), name));
-        WebFunction fn;
-        if (reused) {
-            service.replaceTags(ctx.region(), name, tags);
-            fn = service.getFunction(ctx.region(), name);
+        WebFunction fn = ctx.isUpdate() ? find(() -> service.getFunction(ctx.region(), name)) : null;
+        if (fn != null && ctx.reusesPriorEntity(fn.functionArn)) {
+            if (!tags.equals(fn.tags)) {
+                service.replaceTags(ctx.region(), name, tags);
+            }
         } else {
-            fn = service.createFunctionShell(ctx.region(), ctx.accountId(), name, tags);
+            fn = service.createFunctionShell(ctx.region(), name, tags);
         }
         r.setPhysicalId(fn.functionArn);
         ReplacementCleanup.record(r, ctx, attributesBefore);
@@ -132,17 +120,16 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
 
     private void provisionRevision(StackResource r, JsonNode props, ProvisionContext ctx) {
         String functionName = require(props, "FunctionName", r, ctx);
-        JsonNode request = toCamelCase(ctx.engine().resolveNode(props), Set.of("FunctionName"));
+        JsonNode request = toCamelCase(ctx.engine().resolveNodeOmittingNoValue(props), Set.of("FunctionName"));
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         WebFunctionRevision revision = null;
-        if (ctx.isUpdate() && ctx.priorPhysicalId() != null) {
-            try {
-                WebFunctionRevision existing = service.getRevision(ctx.region(), functionName, ctx.priorPhysicalId());
-                if (service.revisionMatches(existing, request)) {
-                    revision = existing;
-                }
-            } catch (AwsException e) {
-                // The prior revision is gone or belongs to another function now: a new one is minted below.
+        if (reusablePrior(ctx, attributesBefore)) {
+            WebFunction fn = find(() -> service.getFunction(ctx.region(), functionName));
+            String prior = ctx.priorPhysicalId();
+            WebFunctionRevision existing = find(() -> service.getRevision(ctx.region(), functionArnOf(prior), prior));
+            if (fn != null && existing != null && existing.functionArn.equals(fn.functionArn)
+                    && service.revisionMatches(existing, request)) {
+                revision = existing;
             }
         }
         if (revision == null) {
@@ -160,26 +147,24 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
 
     private void provisionEndpoint(StackResource r, JsonNode props, ProvisionContext ctx) {
         String functionName = require(props, "FunctionName", r, ctx);
-        JsonNode resolved = ctx.engine().resolveNode(props);
+        JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(props);
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         WebFunctionEndpoint endpoint = null;
-        if (ctx.isUpdate() && ctx.priorPhysicalId() != null) {
-            WebFunctionEndpoint existing = existingEndpoint(ctx, functionName);
-            if (existing != null && sameIdentity(existing, resolved, ctx.region())) {
-                ObjectNode patch = (ObjectNode) toCamelCase(resolved, ENDPOINT_CREATE_ONLY);
-                // A property the template dropped is cleared, as the registry handler does.
-                if (!patch.has("scalingConfig")) {
-                    patch.putObject("scalingConfig");
+        if (reusablePrior(ctx, attributesBefore)) {
+            WebFunction fn = find(() -> service.getFunction(ctx.region(), functionName));
+            String prior = ctx.priorPhysicalId();
+            WebFunctionEndpoint existing = find(() -> service.getEndpoint(ctx.region(), functionArnOf(prior), prior));
+            if (fn != null && existing != null && existing.functionArn.equals(fn.functionArn)) {
+                if (sameIdentity(existing, resolved, ctx.region())) {
+                    endpoint = service.updateEndpoint(ctx.region(), functionName, existing.endpointName,
+                            endpointPatch(resolved, ctx)).after();
+                } else if (existing.endpointName.equals(resolved.path("EndpointName").asText())) {
+                    throw CfnExceptions.customNamedReplacement(existing.endpointName);
                 }
-                if (!patch.has("throttleConfig")) {
-                    patch.putObject("throttleConfig");
-                }
-                endpoint = service.updateEndpoint(ctx.region(), functionName, existing.endpointName, patch).after();
             }
         }
         if (endpoint == null) {
-            endpoint = service.createEndpoint(ctx.region(), ctx.accountId(), functionName,
-                    toCamelCase(resolved, Set.of("FunctionName")));
+            endpoint = service.createEndpoint(ctx.region(), functionName, toCamelCase(resolved, Set.of("FunctionName")));
         }
         r.setPhysicalId(endpoint.endpointArn);
         ReplacementCleanup.record(r, ctx, attributesBefore);
@@ -191,20 +176,33 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
         if (endpoint.updateStatus != null) {
             r.getAttributes().put("UpdateStatus", endpoint.updateStatus);
             r.getAttributes().put("UpdateStatusReason", "The endpoint is updated.");
+        } else {
+            r.getAttributes().remove("UpdateStatus");
+            r.getAttributes().remove("UpdateStatusReason");
         }
         r.getAttributes().put("CreatedAt", LambdaWebService.formatTimestamp(endpoint.createdAt));
         r.getAttributes().put("UpdatedAt", LambdaWebService.formatTimestamp(endpoint.updatedAt));
     }
 
-    private WebFunctionEndpoint existingEndpoint(ProvisionContext ctx, String functionName) {
-        try {
-            return service.getEndpoint(ctx.region(), functionName, ctx.priorPhysicalId());
-        } catch (AwsException e) {
-            return null;
+    /** The in-place update. A property the previous template declared and this one dropped is cleared. */
+    private static ObjectNode endpointPatch(JsonNode resolved, ProvisionContext ctx) {
+        ObjectNode patch = (ObjectNode) toCamelCase(resolved, ENDPOINT_CREATE_ONLY);
+        if (!patch.has("scalingConfig") && ctx.previouslyDeclared("ScalingConfig")) {
+            patch.putObject("scalingConfig");
         }
+        if (!patch.has("throttleConfig") && ctx.previouslyDeclared("ThrottleConfig")) {
+            patch.putObject("throttleConfig");
+        }
+        if (!patch.has("description") && ctx.previouslyDeclared("Description")) {
+            patch.put("description", "");
+        }
+        return patch;
     }
 
-    /** The createOnly properties of an endpoint: name, type and the region set, home region included. */
+    private static boolean reusablePrior(ProvisionContext ctx, Map<String, String> attributesBefore) {
+        return ctx.isUpdate() && !CfnResourceDispatcher.isStub(ctx.priorPhysicalId(), attributesBefore);
+    }
+
     private static boolean sameIdentity(WebFunctionEndpoint existing, JsonNode props, String homeRegion) {
         if (!existing.endpointName.equals(props.path("EndpointName").asText())
                 || !existing.endpointType.equals(props.path("EndpointType").asText())) {
@@ -216,12 +214,15 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
         return regions.equals(new LinkedHashSet<>(existing.regions));
     }
 
-    private static boolean exists(Runnable lookup) {
+    private static <T> T find(Supplier<T> lookup) {
         try {
-            lookup.run();
-            return true;
+            return lookup.get();
         } catch (AwsException e) {
-            return false;
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("No prior web function entity to reuse: {0}", e.getMessage());
+            return null;
         }
     }
 
@@ -233,20 +234,15 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
         return value;
     }
 
-    /** The function ARN a revision or endpoint ARN belongs to. */
-    private static String functionArnOf(String physicalId) {
-        int child = physicalId.indexOf("/revision/");
+    private static String functionArnOf(String childArn) {
+        int child = childArn.indexOf("/revision/");
         if (child < 0) {
-            child = physicalId.indexOf("/endpoint/");
+            child = childArn.indexOf("/endpoint/");
         }
-        return child < 0 ? physicalId : physicalId.substring(0, child);
+        return child < 0 ? childArn : childArn.substring(0, child);
     }
 
-    private static String nameOf(String functionArn) {
-        return functionArn.substring(functionArn.lastIndexOf('/') + 1);
-    }
-
-    /** Lowers the first letter of every key except those under EnvironmentVariables, dropping {@code skip}. */
+    /** The keys of {@code EnvironmentVariables} are the user's own and stay as written. */
     private static JsonNode toCamelCase(JsonNode node, Set<String> skip) {
         if (node == null || !node.isObject()) {
             return MAPPER.createObjectNode();
