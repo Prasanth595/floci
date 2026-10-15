@@ -34,6 +34,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -470,6 +471,45 @@ class EcsContainerManagerVolumesTest {
                         accessPointDefinition("fsap-test"), List.of(), "us-east-1"));
         assertEquals("ClientException", failure.getErrorCode());
         verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void accessPointPosixUserWithNullSecondaryGidSkipsNull() {
+        EmulatorConfig cfg = efsFallbackConfig();
+        AccessPointDescription ap = new AccessPointDescription();
+        ap.setFileSystemId("fs-test");
+        PosixUser user = new PosixUser();
+        user.setUid(10001L);
+        user.setGid(10002L);
+        user.setSecondaryGids(Arrays.asList(20001L, null, 20002L));
+        ap.setPosixUser(user);
+        when(efsService.describeAccessPoints("eu-west-1", null, "fsap-test")).thenReturn(List.of(ap));
+        managerWithEfs(cfg).startTask(task("000000000000", "eu-west-1"),
+                accessPointDefinition("fsap-test"), List.of(), "eu-west-1");
+        verify(builder).withGroupAdd("10002");
+        verify(builder).withGroupAdd("20001");
+        verify(builder).withGroupAdd("20002");
+        verify(builder, never()).withGroupAdd("null");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"invalid", "888", "07777", ""})
+    void accessPointWithInvalidCreationInfoPermissionsRejectsLaunch(String permissions) {
+        AccessPointDescription ap = new AccessPointDescription();
+        ap.setFileSystemId("fs-test");
+        CreationInfo creation = new CreationInfo();
+        creation.setOwnerUid(1000L);
+        creation.setOwnerGid(1000L);
+        creation.setPermissions(permissions);
+        RootDirectory root = new RootDirectory();
+        root.setCreationInfo(creation);
+        ap.setRootDirectory(root);
+        when(efsService.describeAccessPoints("us-east-1", null, "fsap-test")).thenReturn(List.of(ap));
+        AwsException failure = assertThrows(AwsException.class,
+                () -> managerWithEfs(efsFallbackConfig()).startTask(task("000000000000", "us-east-1"),
+                        accessPointDefinition("fsap-test"), List.of(), "us-east-1"));
+        assertEquals("ClientException", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("permissions"));
     }
 
     private EmulatorConfig efsFallbackConfig() {

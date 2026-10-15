@@ -2326,6 +2326,11 @@ public class EcsContainerManager {
                 throw new AwsException("ClientException",
                         "EFS access point " + efs.accessPointId() + " has incomplete CreationInfo", 400);
             }
+            if (!creation.getPermissions().matches("^[0-7]{3,4}$")) {
+                throw new AwsException("ClientException",
+                        "EFS access point " + efs.accessPointId() + " has invalid CreationInfo permissions: "
+                                + creation.getPermissions(), 400);
+            }
             lifecycleManager.ensureSharedVolume(efsVolumeName, creation.getOwnerUid(), creation.getOwnerGid(),
                     creation.getPermissions(), efsCfg.initImage());
         } else {
@@ -2342,7 +2347,9 @@ public class EcsContainerManager {
             specBuilder.withGroupAdd(String.valueOf(posixUser.getGid()));
             if (posixUser.getSecondaryGids() != null) {
                 for (Long gid : posixUser.getSecondaryGids()) {
-                    specBuilder.withGroupAdd(String.valueOf(gid));
+                    if (gid != null) {
+                        specBuilder.withGroupAdd(String.valueOf(gid));
+                    }
                 }
             }
             return;
