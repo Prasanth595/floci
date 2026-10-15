@@ -5,6 +5,9 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashSet;
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
@@ -245,9 +248,9 @@ class Route53ResolverIntegrationTest {
             .extract().path("ResolverEndpoint.Id");
 
         String first = listIpAddresses(endpointId);
-        java.util.List<String> ids = io.restassured.path.json.JsonPath.from(first).getList("IpAddresses.IpId");
+        List<String> ids = io.restassured.path.json.JsonPath.from(first).getList("IpAddresses.IpId");
         assertEquals(2, ids.size());
-        assertEquals(2, new java.util.HashSet<>(ids).size(), "repeated entries share an IpId: " + ids);
+        assertEquals(2, new HashSet<>(ids).size(), "repeated entries share an IpId: " + ids);
         assertEquals(first, listIpAddresses(endpointId));
     }
 
