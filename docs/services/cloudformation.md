@@ -395,10 +395,11 @@ before provisioning:
   `Parameters: [Env] must have values`, naming each such parameter, before anything changes. An
   empty value counts as a value. An update does not carry values over: set `UsePreviousValue` to
   keep the deployed one. `UsePreviousValue` on a parameter that has no deployed value passes none.
-  The check runs before the template's dependency checks (a cycle, an unresolved dependency, a
-  malformed condition), which read the values. A request for a stack that does not exist, cannot
-  be updated, or already exists gets that error rather than this one, unless the template fails
-  its dependency checks, which come first. The same check
+  The values are checked before the template's dependency checks (a cycle, an unresolved
+  dependency, a malformed condition), which read them, so a template with a cycle and a missing
+  value gets this error. A request for a stack that does not exist, cannot be updated, or already
+  exists gets that stack error instead of this one; a dependency error still comes before the
+  stack error. The same check
   refuses `CreateStackSet` and `UpdateStackSet`, and fails a nested stack's resource whose
   `Parameters` leave a child parameter without a value. A parameter that an `AWS::Include` defines
   is not checked, nor is any parameter in a section that carries an `AWS::Include` of its own.
