@@ -9,7 +9,6 @@ import io.vertx.core.http.HttpClientRequest;
 import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.RequestOptions;
-import io.vertx.core.net.SocketAddress;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -163,14 +162,13 @@ class ElbV2PreserveHostHeaderIntegrationTest {
     private void assertStreamsRequestAndResponse(String loadBalancerArn) throws Exception {
         HttpClientRequest request = vertx.createHttpClient()
                 .request(new RequestOptions()
-                        .setServer(SocketAddress.inetSocketAddress(LISTENER_PORT, "127.0.0.1"))
                         .setHost(loadBalancerDnsName(loadBalancerArn))
                         .setPort(LISTENER_PORT)
                         .setMethod(io.vertx.core.http.HttpMethod.POST)
                         .setURI("/stream"))
                 .toCompletionStage()
                 .toCompletableFuture()
-                .get(5, TimeUnit.SECONDS);
+                .get(2, TimeUnit.SECONDS);
         CompletableFuture<Buffer> bodyFuture = new CompletableFuture<>();
         CompletableFuture<HttpClientResponse> responseFuture = request.response()
                 .onSuccess(response -> response.bodyHandler(bodyFuture::complete))
