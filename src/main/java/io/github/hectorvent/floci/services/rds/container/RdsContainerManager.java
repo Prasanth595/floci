@@ -898,17 +898,27 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
      * read that does not finish in time fails rather than returning part of the log.
      */
     public List<String> readLog(String containerId) {
+        return readLog(containerId, Duration.ofSeconds(10));
+    }
+
+    List<String> readLog(String containerId, Duration timeout) {
         ByteArrayOutputStream raw = new ByteArrayOutputStream();
-        try {
+        ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<>() {
+            @Override
+            public void onNext(Frame frame) {
+                synchronized (raw) {
+                    raw.writeBytes(frame.getPayload());
+                }
+            }
+        };
+        try (callback) {
             boolean completed = lifecycleManager.getDockerClient().logContainerCmd(containerId)
                     .withStdOut(true).withStdErr(true).withTimestamps(true).withTail(MAX_LOG_LINES)
-                    .exec(new ResultCallback.Adapter<Frame>() {
-                        @Override
-                        public void onNext(Frame frame) {
-                            raw.writeBytes(frame.getPayload());
-                        }
-                    }).awaitCompletion(Duration.ofSeconds(10).toMillis(), TimeUnit.MILLISECONDS);
+                    .exec(callback)
+                    .awaitCompletion(timeout.toMillis(), TimeUnit.MILLISECONDS);
             if (!completed) {
+                // Closing the callback (try-with-resources) stops the stream, so nothing writes into
+                // the buffer after this read gives up.
                 throw new IllegalStateException("Timed out reading the log of container " + containerId);
             }
         } catch (InterruptedException e) {
@@ -916,8 +926,13 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
             throw new IllegalStateException("Interrupted while reading the log of container " + containerId, e);
         } catch (NotFoundException e) {
             return null;
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not close the log stream of container " + containerId, e);
         }
-        String text = raw.toString(StandardCharsets.UTF_8);
+        String text;
+        synchronized (raw) {
+            text = raw.toString(StandardCharsets.UTF_8);
+        }
         if (text.isEmpty()) {
             return List.of();
         }

@@ -241,6 +241,43 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void aLogReadThatTimesOutFailsAndClosesTheStream() throws Exception {
+        EmulatorConfig config = config(tempDir.resolve("host-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        com.github.dockerjava.api.command.LogContainerCmd logCmd =
+                mock(com.github.dockerjava.api.command.LogContainerCmd.class);
+        when(dockerClient.logContainerCmd("slow")).thenReturn(logCmd);
+        when(logCmd.withStdOut(true)).thenReturn(logCmd);
+        when(logCmd.withStdErr(true)).thenReturn(logCmd);
+        when(logCmd.withTimestamps(true)).thenReturn(logCmd);
+        when(logCmd.withTail(RdsContainerManager.MAX_LOG_LINES)).thenReturn(logCmd);
+        java.io.Closeable stream = mock(java.io.Closeable.class);
+        // Docker starts the stream and sends one frame, then never completes.
+        when(logCmd.exec(any())).thenAnswer(invocation -> {
+            com.github.dockerjava.api.async.ResultCallback.Adapter<com.github.dockerjava.api.model.Frame> callback =
+                    invocation.getArgument(0);
+            callback.onStart(stream);
+            callback.onNext(new com.github.dockerjava.api.model.Frame(
+                    com.github.dockerjava.api.model.StreamType.STDOUT,
+                    "2026-10-15T10:00:00Z partial\n".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            return callback;
+        });
+
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, mock(ContainerLogStreamer.class), mock(ContainerDetector.class), config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+
+        IllegalStateException timedOut = assertThrows(IllegalStateException.class,
+                () -> manager.readLog("slow", java.time.Duration.ofMillis(50)));
+        assertTrue(timedOut.getMessage().contains("Timed out"), timedOut.getMessage());
+        verify(stream).close();
+    }
+
+    @Test
     void mysqlNonRootMasterStartInstallsGrantInitScriptBeforeStart() throws Exception {
         EmulatorConfig config = config(tempDir.resolve("host-root"));
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
