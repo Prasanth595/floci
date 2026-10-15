@@ -270,6 +270,21 @@ handling; a hand-rolled signer must include it.
 > signed, known caller is let through. `principalOrgId` and `cognitoIdentity` are always null -
 > Organizations membership and identity-pool federation are not modelled.
 
+### Request Model Validation
+
+Imported OpenAPI and Swagger request models can reference sibling models, including recursive
+references. Body validation resolves these schemas within the same API while preserving inline
+definitions. API Gateway model URLs (`https://apigateway.amazonaws.com/restapis/{api}/models/{name}`)
+also resolve from that deployment's snapshot in every partition, including China.
+Other schema URLs are not fetched.
+
+Rejected bodies return `Invalid request body` by default. Custom gateway responses can access
+the schema validation detail through `$context.error.validationErrorString`.
+
+Each deployment snapshots its model schemas. Updating or deleting a model does not change
+validation for an existing deployment; deploy again to apply those changes. Deployments saved
+before model snapshots were introduced retain their previous behavior until redeployed.
+
 ### Gateway Responses
 
 A REST API's gateway responses customise what the gateway itself answers when it, rather than

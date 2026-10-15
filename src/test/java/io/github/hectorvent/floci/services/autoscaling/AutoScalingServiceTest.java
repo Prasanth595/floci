@@ -546,6 +546,7 @@ class AutoScalingServiceTest {
 
         group.getInstances().clear();
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-replacement", "InService", "lt-original", "2");
+        refresh.getReplacements().getFirst().setReplacementInstanceId("i-replacement");
         service.completeInstanceRefreshIfSettled(REGION, "test-asg");
 
         InstanceRefresh completed = service.describeInstanceRefreshes(
@@ -573,6 +574,7 @@ class AutoScalingServiceTest {
 
         group.getInstances().clear();
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-replacement", "InService", "lt-original", "2");
+        refresh.getReplacements().getFirst().setReplacementInstanceId("i-replacement");
         service.completeInstanceRefreshIfSettled(REGION, "test-asg");
 
         InstanceRefresh completed = service.describeInstanceRefreshes(
@@ -626,6 +628,7 @@ class AutoScalingServiceTest {
         group.getInstances().clear();
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-replacement", "InService", "lt-updated", "2");
 
+        refresh.getReplacements().getFirst().setReplacementInstanceId("i-replacement");
         service.completeInstanceRefreshIfSettled(REGION, "test-asg");
 
         InstanceRefresh completed = service.describeInstanceRefreshes(

@@ -219,6 +219,7 @@ floci:
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
+      database-resuming-exception-enabled: false
     redshift-data:
       enabled: true
       result-ttl-hours: 24
@@ -262,6 +263,7 @@ floci:
       enabled: true
     cognito:
       enabled: true
+      enforce-token-validity-limits: true
     stepfunctions:
       enabled: true
       allow-plaintext-http: true

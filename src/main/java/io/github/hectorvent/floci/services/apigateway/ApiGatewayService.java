@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -86,6 +87,12 @@ public class ApiGatewayService implements ResourceProvider {
     /** The only partition where API Gateway offers edge-optimized APIs and custom domain names. */
     private static final Set<String> EDGE_OPTIMIZED_PARTITIONS = Set.of("aws");
 
+    /**
+     * The regional hosted zone a custom domain reports in a region with no published one. Only
+     * the two GovCloud regions have a sourced zone ({@link AwsRegionFacts#apiGatewayRegionalHostedZoneId}).
+     */
+    private static final String UNSOURCED_REGIONAL_HOSTED_ZONE_ID = "Z2FDTNDATAQYL2"; // partition-literal: placeholder kept where no per-region source exists
+
     private static final ObjectMapper JSON = new ObjectMapper();
 
     /** Documented default page size for GetUsage. */
@@ -102,6 +109,7 @@ public class ApiGatewayService implements ResourceProvider {
     private final StorageBackend<String, RestApi> apiStore;
     private final StorageBackend<String, ApiGatewayResource> resourceStore;
     private final StorageBackend<String, Deployment> deploymentStore;
+    private final StorageBackend<String, Map<String, String>> deploymentModelStore;
     private final StorageBackend<String, Stage> stageStore;
     private final StorageBackend<String, Authorizer> authorizerStore;
     private final StorageBackend<String, ApiKey> apiKeyStore;
@@ -176,6 +184,9 @@ public class ApiGatewayService implements ResourceProvider {
                 new TypeReference<>() {
                 });
         this.deploymentStore = storageFactory.create("apigateway", "apigateway-deployments.json",
+                new TypeReference<>() {
+                });
+        this.deploymentModelStore = storageFactory.create("apigateway", "apigateway-deployment-models.json",
                 new TypeReference<>() {
                 });
         this.stageStore = storageFactory.create("apigateway", "apigateway-stages.json",
@@ -408,6 +419,7 @@ public class ApiGatewayService implements ResourceProvider {
         String prefix = region + "::" + apiId + "::";
         resourceStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(resourceStore::delete);
         deploymentStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(deploymentStore::delete);
+        deploymentModelStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(deploymentModelStore::delete);
         stageStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(stageStore::delete);
         modelStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(modelStore::delete);
         requestValidatorStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(requestValidatorStore::delete);
@@ -780,15 +792,18 @@ public class ApiGatewayService implements ResourceProvider {
         getRestApi(region, apiId);
         String description = (String) request.getOrDefault("description", "");
         String snapshot;
+        Map<String, String> schemas;
         try {
             snapshot = JSON.writeValueAsString(new DeploymentExportSnapshot(getRestApi(region, apiId),
                     getResources(region, apiId), getModels(region, apiId), getAuthorizers(region, apiId),
                     getRequestValidators(region, apiId), getGatewayResponses(region, apiId).stream()
                             .filter(response -> !response.isDefaultResponse()).toList()));
+            schemas = modelSchemas(JSON.readValue(snapshot, DeploymentExportSnapshot.class).models());
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Cannot capture REST API deployment", e);
         }
         Deployment deployment = new Deployment(shortId(10), description, System.currentTimeMillis() / 1000L, snapshot);
+        deploymentModelStore.put(deploymentKey(region, apiId, deployment.id()), schemas);
         deploymentStore.put(deploymentKey(region, apiId, deployment.id()), deployment);
         LOG.infov("Created deployment {0} for API {1}", deployment.id(), apiId);
 
@@ -843,6 +858,32 @@ public class ApiGatewayService implements ResourceProvider {
     public void deleteDeployment(String region, String apiId, String deploymentId) {
         getDeployment(region, apiId, deploymentId);
         deploymentStore.delete(deploymentKey(region, apiId, deploymentId));
+        deploymentModelStore.delete(deploymentKey(region, apiId, deploymentId));
+    }
+
+    Map<String, String> getDeploymentModelSchemas(String region, String apiId, String deploymentId) {
+        if (deploymentId != null) {
+            Optional<Map<String, String>> schemas = deploymentModelStore.get(deploymentKey(region, apiId, deploymentId));
+            if (schemas.isPresent()) {
+                return schemas.get();
+            }
+        }
+        // Deployments persisted before model snapshots were introduced retain their existing behavior.
+        return currentModelSchemas(region, apiId);
+    }
+
+    private Map<String, String> currentModelSchemas(String region, String apiId) {
+        return modelSchemas(getModels(region, apiId));
+    }
+
+    private Map<String, String> modelSchemas(List<Model> models) {
+        Map<String, String> schemas = new HashMap<>();
+        for (Model model : models) {
+            if (model.getSchema() != null) {
+                schemas.put(model.getName(), model.getSchema());
+            }
+        }
+        return Map.copyOf(schemas);
     }
 
     public Deployment updateDeployment(String region, String apiId, String deploymentId, List<Map<String, String>> patchOperations) {
@@ -2115,7 +2156,8 @@ public class ApiGatewayService implements ResourceProvider {
         domain.setRegionalCertificateName((String) request.get("regionalCertificateName"));
         domain.setRegionalCertificateArn((String) request.get("regionalCertificateArn"));
         domain.setRegionalDomainName(domainName + ".regional.local");
-        domain.setRegionalHostedZoneId("Z2FDTNDATAQYL2"); // partition-literal: no published per-region source for the regional zone
+        domain.setRegionalHostedZoneId(AwsRegionFacts.apiGatewayRegionalHostedZoneId(region)
+                .orElse(UNSOURCED_REGIONAL_HOSTED_ZONE_ID));
         applyEndpointType(domain, endpointType, region);
         domain.setSecurityPolicy((String) request.getOrDefault("securityPolicy", "TLS_1_2"));
         // Nothing is provisioned behind the domain, so it is usable as soon as it exists.
@@ -2168,7 +2210,8 @@ public class ApiGatewayService implements ResourceProvider {
             domain.setDistributionDomainName(null);
             domain.setDistributionHostedZoneId(null);
         } else if (domain.getDistributionDomainName() == null) {
-            CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(region, config.services().cloudfront().domainSuffix());
+            CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(regionResolver.partitionForRegion(region),
+                    config.services().cloudfront().domainSuffix().orElse(null));
             domain.setDistributionDomainName(edge.domainName());
             domain.setDistributionHostedZoneId(edge.hostedZoneId());
         }

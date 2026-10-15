@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -646,6 +647,28 @@ class ResourceArnBuilderTest {
         }).when(ctx).setEntityStream(any(InputStream.class));
     }
 
+    @Test
+    void logStreamTargetsUseTheServingActionAndRequestPartition() {
+        for (String action : List.of("logs:CreateLogStream", "logs:DeleteLogStream")) {
+            for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1")) {
+                setJsonBody("{\"logGroupName\":\" /group \",\"logStreamName\":42}");
+                when(ctx.getHeaderString("X-Amz-Target")).thenReturn("Logs_20140328.DeleteLogGroup");
+                assertEquals(List.of("arn:" + AwsRegions.partitionFor(region)
+                                + ":logs:" + region + ":123456789012:log-group: /group :log-stream:42"),
+                        builder.buildLogStreamResources(action, ctx, region, "123456789012", AwsRegions.partitionFor(region)));
+            }
+        }
+    }
+
+    @Test
+    void excludedLogsActionsKeepWildcardResources() {
+        for (String action : List.of("logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy",
+                "logs:TagResource", "logs:UntagResource", "logs:ListTagsForResource", "logs:PutLogEvents")) {
+            setJsonBody("{\"logGroupName\":\"group\",\"logStreamName\":\"stream\"}");
+            assertEquals(List.of("*"), builder.buildLogStreamResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+        }
+    }
+
     // ── DynamoDB ─────────────────────────────────────────────────────────────────
 
     @Test
@@ -976,6 +999,43 @@ class ResourceArnBuilderTest {
         queryParams.putSingle("Qualifier", "1");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function:1",
                 builder.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void lambdaWebRoutesResolveTheFunctionRevisionOrEndpointTheyActOn() {
+        String fn = "arn:aws:lambda:us-east-1:000000000000:web-function/app";
+        when(uriInfo.getPath()).thenReturn("/2025-03-07/web-functions/app");
+        assertEquals(fn, builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/2025-03-07/web-functions/app/revisions");
+        assertEquals(fn, builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/2025-03-07/web-functions/app/list-endpoints");
+        assertEquals(fn, builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/2025-03-07/web-functions/app/revisions/rev-abcde");
+        assertEquals(fn + "/revision/rev-abcde", builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/2025-03-07/web-functions/app/endpoints/prod");
+        assertEquals(fn + "/endpoint/prod", builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        // A function named by its ARN keeps the account and region it names.
+        when(uriInfo.getPath()).thenReturn(
+                "/2025-03-07/web-functions/arn:aws:lambda:us-east-1:111122223333:web-function/app/endpoints/prod");
+        assertEquals("arn:aws:lambda:us-east-1:111122223333:web-function/app/endpoint/prod",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        // A revision or endpoint named by its ARN resolves to its id under the path's function.
+        when(uriInfo.getPath()).thenReturn("/2025-03-07/web-functions/app/revisions/"
+                + "arn:aws:lambda:us-east-1:000000000000:web-function/app/revision/rev-abcde");
+        assertEquals(fn + "/revision/rev-abcde", builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/2025-03-07/web-functions/app/endpoints/"
+                + "arn:aws:lambda:us-east-1:000000000000:web-function/app/endpoint/prod");
+        assertEquals(fn + "/endpoint/prod", builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        // The tag and policy routes carry the function ARN in the path.
+        when(uriInfo.getPath()).thenReturn("/2025-03-07/tags/" + fn);
+        assertEquals(fn, builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/2025-03-07/resource-policy/" + fn);
+        assertEquals(fn, builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        // Listing functions, the account settings and creating a function name no resource.
+        when(uriInfo.getPath()).thenReturn("/2025-03-07/web-functions");
+        assertEquals("*", builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/2025-03-07/web-account-settings");
+        assertEquals("*", builder.build("lambda", ctx, "us-east-1", "000000000000"));
     }
 
     @Test
