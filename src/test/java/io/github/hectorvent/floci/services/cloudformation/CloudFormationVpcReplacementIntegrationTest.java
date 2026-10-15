@@ -101,7 +101,7 @@ class CloudFormationVpcReplacementIntegrationTest {
         assertFalse(ec2("DescribeSubnets").contains(before.get("SubnetId")), "the displaced subnet must be gone");
 
         cloudFormation(stack, "DeleteStack", null);
-        CfnStackWaits.awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack, CFN_AUTH);
         assertFalse(ec2("DescribeVpcs").contains(after.get("VpcId")), "stack delete must remove the VPC");
         assertFalse(ec2("DescribeSubnets").contains(after.get("SubnetId")), "stack delete must remove the subnet");
     }
@@ -123,7 +123,7 @@ class CloudFormationVpcReplacementIntegrationTest {
         assertEquals("true", dnsHostnames(vpcId), "the VPC's prior EnableDnsHostnames must be back");
 
         cloudFormation(stack, "DeleteStack", null);
-        CfnStackWaits.awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack, CFN_AUTH);
         assertFalse(ec2("DescribeVpcs").contains(vpcId), "stack delete must remove the VPC");
     }
 

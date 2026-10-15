@@ -398,6 +398,48 @@ class Ec2VpcCfnProvisionerTest {
     }
 
     @Test
+    void aTagResolutionFailureHappensBeforeTheVpcIsCreated() {
+        // A missing Fn::ImportValue fails resolution; the VPC must not exist by then, or it would
+        // sit outside the rollback guard and leak.
+        when(engine.resolveNode(argThat(node -> node != null && node.isArray())))
+                .thenThrow(new AwsException("ValidationError", "No export named Shared-Tag found", 400));
+
+        AwsException e = assertThrows(AwsException.class, () -> provision(null, """
+                {"CidrBlock": "10.0.0.0/16", "Tags": [{"Key": "k", "Value": {"Fn::ImportValue": "Shared-Tag"}}]}"""));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        verify(ec2, never()).createVpc(anyString(), anyString(), anyBoolean(), anyBoolean(), anyString());
+        verify(ec2, never()).deleteVpc(any(), any());
+    }
+
+    @Test
+    void reservedAwsTagsAreNeverSnapshottedNorWrittenBack() {
+        Vpc existing = vpc("vpc-existing", "10.0.0.0/16");
+        existing.setEnableDnsSupport(true);
+        when(ec2.describeVpcs(REGION, List.of("vpc-existing"), Map.of())).thenReturn(List.of(existing));
+        when(ec2.describeTags(REGION, Map.of("resource-id", List.of("vpc-existing")))).thenReturn(List.of(
+                Map.of("key", "aws:cloudformation:stack-name", "value", "my-stack"),
+                Map.of("key", "Name", "value", "old")));
+
+        StackResource r = provision("vpc-existing", """
+                {"CidrBlock": "10.0.0.0/16", "Tags": [{"Key": "Name", "Value": "new"}]}""");
+
+        String snapshot = r.getAttributes().get(Ec2VpcCfnProvisioner.IN_PLACE_PRIOR_ATTR);
+        assertTrue(snapshot.contains("\"Name\":\"old\""), snapshot);
+        assertFalse(snapshot.contains("aws:cloudformation"), snapshot);
+        verify(ec2, never()).deleteTags(any(), any(), any());
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(ec2).createTags(eq(REGION), eq(List.of("vpc-existing")), argThat(tags("Name=new")));
+        verify(ec2).createTags(eq(REGION), eq(List.of("vpc-existing")), argThat(tags("Name=old")));
+        verify(ec2, never()).createTags(eq(REGION), any(), argThat(actual -> actual != null
+                && actual.stream().anyMatch(t -> t.getKey().startsWith("aws:"))));
+        verify(ec2, never()).deleteTags(eq(REGION), any(), argThat(actual -> actual != null
+                && actual.stream().anyMatch(t -> t.getKey().startsWith("aws:"))));
+    }
+
+    @Test
     void deleteToleratesOnlyAVpcThatIsAlreadyGone() {
         doThrow(new AwsException("InvalidVpcID.NotFound", "does not exist", 400)).when(ec2).deleteVpc(REGION, "vpc-gone");
         assertDoesNotThrow(() -> provisioner.delete("AWS::EC2::VPC", "vpc-gone", REGION));

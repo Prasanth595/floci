@@ -76,19 +76,19 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
         String cidr = ctx.resolveOptional(props, "CidrBlock");
         String tenancy = ctx.resolveOptional(props, "InstanceTenancy");
         String desiredTenancy = tenancy == null || tenancy.isBlank() ? DEFAULT_TENANCY : tenancy;
+        // AWS defaults for a non-default VPC: DnsSupport on, DnsHostnames off. A template that
+        // omits the property (or resolves it to AWS::NoValue, which the engine renders blank) gets
+        // the default, as CloudFormation applies it on every update too. Every property resolves
+        // before the VPC exists, so a resolution failure cannot leave a VPC outside the guard.
+        boolean dnsSupport = Boolean.parseBoolean(ctx.resolveOrDefault(props, "EnableDnsSupport", "true"));
+        boolean dnsHostnames = Boolean.parseBoolean(ctx.resolveOrDefault(props, "EnableDnsHostnames", "false"));
+        Map<String, String> desiredTags = ctx.resolveTags(props, "Tags");
         Vpc reconciled = existingVpcToReconcile(ctx.isUpdate() ? ctx.priorPhysicalId() : null, cidr, desiredTenancy, region);
         boolean reused = reconciled != null;
         Vpc vpc = reused ? reconciled : ec2Service.createVpc(region, cidr, false, false, desiredTenancy);
         String vpcId = vpc.getVpcId();
         r.setPhysicalId(vpcId);
         r.getAttributes().put("VpcId", vpcId);
-
-        // AWS defaults for a non-default VPC: DnsSupport on, DnsHostnames off. A template that
-        // omits the property (or resolves it to AWS::NoValue, which the engine renders blank) gets
-        // the default, as CloudFormation applies it on every update too.
-        boolean dnsSupport = Boolean.parseBoolean(ctx.resolveOrDefault(props, "EnableDnsSupport", "true"));
-        boolean dnsHostnames = Boolean.parseBoolean(ctx.resolveOrDefault(props, "EnableDnsHostnames", "false"));
-        Map<String, String> desiredTags = ctx.resolveTags(props, "Tags");
 
         CfnRollback.guarded(r, ctx, !reused, () -> ec2Service.deleteVpc(region, vpcId), () -> undoInPlace(r), () -> {
             if (reused) {
