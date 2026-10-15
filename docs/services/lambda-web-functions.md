@@ -35,12 +35,12 @@ The `Lambda Web` service model (apiVersion 2025-03-07, `aws lambda-web` in the A
 ## Emulation Behavior
 
 - **Instant convergence:** a revision and an endpoint are stored `Active` and an endpoint update is stored `Successful`. The create and update responses still report the transitional state AWS reports (`Pending`, `updateStatus: InProgress`, and the per-region block as it was before the update), so a waiter sees one poll.
-- **Code comes from S3 only.** The object named in `buildConfig.codeConfig.s3Object` must exist in Floci's S3, as on AWS. AWS also requires bucket versioning and a bucket policy for the Lambda service principal. Floci checks neither, and the revision does not pin a `versionId` the request did not give.
-- **Execution role and network connector** ARNs are checked for shape only. AWS also checks that it can assume the role.
-- **Resource policies** are checked the way AWS checks them before storing: the document grammar, a `lambda:` action, a `Resource` that names the function, a valid principal, and no public `Allow` without a trusted condition. The policy is not evaluated on requests.
+- **Code comes from S3 only.** The object named in `buildConfig.codeConfig.s3Object` must exist in Floci's S3, as on AWS. AWS also requires bucket versioning and a bucket policy for the Lambda service principal. Floci does not check them yet, and the revision does not pin a `versionId` the request did not give yet.
+- **Execution role and network connector** ARNs are checked for shape only. The assume-role check AWS makes is not done yet.
+- **Resource policies** are checked the way AWS checks them before storing: the document grammar, a `lambda:` action, a `Resource` that names the function, a valid principal, and no public `Allow` without a trusted condition. The policy is not evaluated on requests yet.
 - **ARNs** given as identifiers must name the request's region and the caller's account, as on AWS. A revision or endpoint ARN resolves by its id or name only.
 - **Domain names** take the form `<id>.001.lambda-web.<region>.<floci host>` and `<id>.lambda-web.global.<floci host>`, with the host and port of `floci.base-url`. A `PerRegion` endpoint gets one domain per region in `regionalEndpoints`.
-- **Not emulated:** invoking a function through its endpoint domain, execution environments, revision auto-cleanup past 50 revisions, and `IamAuth`. The endpoint domain does not answer requests yet.
+- **Not implemented yet:** invoking a function through its endpoint domain, execution environments, `IamAuth` on requests, and the automatic deletion of revisions past 50. The endpoint domain does not answer requests yet.
 
 ### `aws lambda-web deploy`
 
@@ -50,8 +50,8 @@ The CLI's `deploy` command works against Floci with `AWS_ENDPOINT_URL` set:
 AWS_ENDPOINT_URL=http://localhost:4566 aws lambda-web deploy --name my-app --hello-world --create
 ```
 
-The command passes `--endpoint-url` only to the Lambda Web client. Its STS, S3 and IAM calls use the default endpoints, so the environment variable is what routes them to Floci. The `endpointUrl` it prints is the Floci domain name behind `https://`, which Floci does not serve.
+The command passes `--endpoint-url` only to the Lambda Web client. Its STS, S3 and IAM calls use the default endpoints, so the environment variable is what routes them to Floci. The `endpointUrl` it prints is the Floci domain name behind `https://`, which Floci does not serve yet.
 
 ## CloudFormation
 
-`AWS::Lambda::WebFunction`, `AWS::Lambda::WebFunctionRevision` and `AWS::Lambda::WebFunctionEndpoint` provision through the resource registry. `Ref` of each is its ARN. Every property of a revision is createOnly, so a changed revision mints a new one and the displaced revision is deleted once the update commits. An endpoint keeps its identity while its function, name, type and regions stay the same. A changed type or region list under the same name is refused the way CloudFormation refuses to replace a custom-named resource. `Fn::GetAtt` on `RegionalEndpoints` is not supported.
+`AWS::Lambda::WebFunction`, `AWS::Lambda::WebFunctionRevision` and `AWS::Lambda::WebFunctionEndpoint` provision through the resource registry. `Ref` of each is its ARN. Every property of a revision is createOnly, so a changed revision mints a new one and the displaced revision is deleted once the update commits. An endpoint keeps its identity while its function, name, type and regions stay the same. A changed type or region list under the same name is refused the way CloudFormation refuses to replace a custom-named resource. `Fn::GetAtt` on `RegionalEndpoints` is not supported yet.
