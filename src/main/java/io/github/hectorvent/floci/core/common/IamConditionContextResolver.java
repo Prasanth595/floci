@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbConditionKeys;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbTableNames;
@@ -70,6 +71,7 @@ public class IamConditionContextResolver {
     private final Instance<DynamoDbFacade> dynamoDbFacade;
     private final Instance<Ec2Service> ec2Service;
     private final Instance<S3Service> s3Service;
+    private final Instance<CloudWatchLogsService> logsService;
     private final RequestContext requestContext;
     private final EmulatorConfig config;
 
@@ -77,11 +79,13 @@ public class IamConditionContextResolver {
     public IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
                                        Instance<Ec2Service> ec2Service,
                                        Instance<S3Service> s3Service,
+                                       Instance<CloudWatchLogsService> logsService,
                                        RequestContext requestContext,
                                        EmulatorConfig config) {
         this.dynamoDbFacade = dynamoDbFacade;
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
+        this.logsService = logsService;
         this.requestContext = requestContext;
         this.config = config;
     }
@@ -93,8 +97,38 @@ public class IamConditionContextResolver {
             case "ec2" -> ec2ConditionContext(action, ctx);
             case "dynamodb" -> dynamoDbConditionContext(action, ctx);
             case "iam" -> iamConditionContext(action, ctx);
+            case "logs" -> logStreamConditionContext(action, ctx);
             default -> null;
         };
+    }
+
+    /** Stream access uses the owning log group's tags, in the handler's account and region. */
+    private Map<String, List<String>> logStreamConditionContext(String action, ContainerRequestContext ctx) {
+        if (!("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action))) {
+            return null;
+        }
+        JsonNode body = bufferedJsonBody(ctx);
+        if (body == null || !logsService.isResolvable()) {
+            return null;
+        }
+        String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
+        Map<String, String> tags;
+        try {
+            tags = logsService.get().listTagsLogGroup(body.path("logGroupName").asText(), region);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            // Leave the handler to report a missing group; unexpected lookup errors must not hide a deny.
+            return null;
+        }
+        if (tags == null || tags.isEmpty()) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        tags.forEach((key, value) -> conditions.put(RESOURCE_TAG_PREFIX + key,
+                List.of(value == null ? "" : value)));
+        return conditions;
     }
 
     private static Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {

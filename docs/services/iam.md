@@ -1194,6 +1194,13 @@ These identities always bypass enforcement (backward-compatible defaults):
 | No `Authorization` header | **Rejected** for a JSON, CBOR or Query management call, unless AWS serves the operation without credentials. Allowed for a REST request such as a health check (see [Unsigned requests](#unsigned-requests)) |
 | Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
 
+**CloudWatch Logs streams.** `logs:CreateLogStream` and `logs:DeleteLogStream` evaluate the
+specific log-stream ARN, so policies can allow or deny one stream within a group. Their
+`aws:ResourceTag/<key>` conditions read the owning log group's current tags in the request's
+account and region. Both stream operations check the documented group and stream name constraints
+before changing storage, preventing delimiter aliases from targeting another stream. Other Logs
+actions retain their existing wildcard resource evaluation.
+
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
 from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets
 Manager, SSM, KMS and IAM. Within IAM the resource type each action is evaluated against is the one
@@ -1314,6 +1321,7 @@ floci populates:
   `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucketTagging`
   and `s3:DeleteBucket` (the bucket). A request naming several EC2 resources is evaluated
   once per resource and denied when any of them fails the condition, as on AWS.
+  `logs:CreateLogStream` and `logs:DeleteLogStream` use the owning log group's tags.
 - `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
   `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
   `s3:DeleteObjectTagging` and `s3:PutObjectTagging`. A `versionId` in the request selects the
