@@ -243,23 +243,18 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         String path = "#/OwnershipControls";
         requireObject(controls, path);
         JsonNode rules = declaredArray(controls, "Rules", path);
-        if (rules == null || rules.isEmpty()) {
-            throw new AwsException("InvalidRequest", "OwnershipControls requires at least one rule", 400);
-        }
         XmlBuilder xml = new XmlBuilder().start("OwnershipControls", AwsNamespaces.S3);
-        for (int index = 0; index < rules.size(); index++) {
+        for (int index = 0; rules != null && index < rules.size(); index++) {
             String rulePath = path + "/Rules/" + index;
             JsonNode rule = requireObject(rules.get(index), rulePath);
             String ownership = required(rule, "ObjectOwnership", rulePath);
-            if (!Set.of("BucketOwnerPreferred", "ObjectWriter", "BucketOwnerEnforced").contains(ownership)) {
-                throw new AwsException("InvalidRequest",
-                        "Invalid ObjectOwnership at " + rulePath + ": " + ownership, 400);
-            }
             xml.start("Rule");
             xml.elem("ObjectOwnership", ownership);
             xml.end("Rule");
         }
-        return xml.end("OwnershipControls").build();
+        String document = xml.end("OwnershipControls").build();
+        S3Service.validateOwnershipControls(document);
+        return document;
     }
 
     private void applyBucketOwnershipControls(String bucketName, String ownershipControlsXml,

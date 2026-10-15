@@ -5049,8 +5049,33 @@ public class S3Service implements Resettable, ResourceProvider {
     public void putBucketOwnershipControls(String bucketName, String ownershipControlsXml) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        validateOwnershipControls(ownershipControlsXml);
         bucket.setOwnershipControlsConfiguration(ownershipControlsXml);
         bucketStore.put(bucketName, bucket);
+    }
+
+    /** Validates the same ownership document for direct S3 calls and CloudFormation templates. */
+    public static void validateOwnershipControls(String xml) {
+        if (!"OwnershipControls".equals(XmlParser.rootElementName(xml))) {
+            throw new AwsException("MalformedXML", "Invalid OwnershipControls document", 400);
+        }
+        XmlParser.XmlElement controls = XmlParser.extractElementTree(xml, "OwnershipControls");
+        long ruleCount = controls.count("Rule");
+        if (ruleCount != 1) {
+            throw new AwsException("InvalidRequest", ruleCount == 0
+                    ? "OwnershipControls requires at least one rule"
+                    : "OwnershipControls requires exactly one rule", 400);
+        }
+        XmlParser.XmlElement rule = controls.child("Rule");
+        XmlParser.XmlElement ownership = rule.child("ObjectOwnership");
+        if (rule.count("ObjectOwnership") != 1 || ownership == null) {
+            throw new AwsException("MalformedXML", "OwnershipControls rule requires ObjectOwnership", 400);
+        }
+        if (!Set.of("BucketOwnerPreferred", "ObjectWriter", "BucketOwnerEnforced")
+                .contains(ownership.text())) {
+            throw new AwsException("InvalidRequest",
+                    "Invalid ObjectOwnership at #/OwnershipControls/Rules/0: " + ownership.text(), 400);
+        }
     }
 
     public void deleteBucketOwnershipControls(String bucketName) {

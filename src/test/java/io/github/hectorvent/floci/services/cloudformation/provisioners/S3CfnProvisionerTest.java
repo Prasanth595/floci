@@ -99,6 +99,19 @@ class S3CfnProvisionerTest {
     }
 
     @Test
+    void multipleOwnershipRulesFailBeforeCreatingTheBucket() {
+        AwsException error = assertThrows(AwsException.class, () -> provisionBucket("""
+                {"BucketName":"my-bucket","OwnershipControls":{"Rules":[
+                  {"ObjectOwnership":"ObjectWriter"},
+                  {"ObjectOwnership":"BucketOwnerEnforced"}]}}
+                """));
+
+        assertEquals("OwnershipControls requires exactly one rule", error.getMessage());
+        verify(s3, never()).createBucket(anyString(), anyString());
+        verify(s3, never()).putBucketOwnershipControls(anyString(), anyString());
+    }
+
+    @Test
     void refIsTheBucketNameAndGetAttExposesTheDocumentedAttributes() {
         StackResource r = provisionBucket("""
                 {"BucketName": "my-bucket"}

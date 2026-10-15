@@ -68,6 +68,34 @@ class S3OwnershipControlsIntegrationTest {
 
     @Test
     @Order(5)
+    void invalidDirectOwnershipControlsDoNotOverwriteTheStoredMode() {
+        given()
+            .body(OWNERSHIP_CONTROLS_XML.replace("BucketOwnerPreferred", "NotAnOwnershipMode"))
+        .when()
+            .put("/" + BUCKET + "?ownershipControls")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidRequest"));
+
+        given()
+            .body(OWNERSHIP_CONTROLS_XML.replace("</OwnershipControls>",
+                    "<Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>"))
+        .when()
+            .put("/" + BUCKET + "?ownershipControls")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidRequest"));
+
+        given()
+        .when()
+            .get("/" + BUCKET + "?ownershipControls")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ObjectOwnership>BucketOwnerPreferred</ObjectOwnership>"));
+    }
+
+    @Test
+    @Order(6)
     void deleteOwnershipControlsReturns204() {
         given()
         .when()
@@ -77,7 +105,7 @@ class S3OwnershipControlsIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void getOwnershipControlsAfterDeleteReturns404() {
         given()
         .when()
