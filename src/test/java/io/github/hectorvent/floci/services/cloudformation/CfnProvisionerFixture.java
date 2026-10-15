@@ -64,10 +64,12 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCapaci
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EksCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ElastiCacheCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.ElastiCacheServerlessCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ElbV2CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsArchiveCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.FirehoseCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.GuardDutyMalwareProtectionPlanCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamAccessKeyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamInstanceProfileCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamManagedPolicyCfnProvisioner;
@@ -95,6 +97,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftC
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftServerlessCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Route53CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleGroupCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretTargetAttachmentCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretsManagerCfnProvisioner;
@@ -123,10 +126,12 @@ import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheMemcachedService;
+import io.github.hectorvent.floci.services.elasticache.ElastiCacheServerlessService;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.guardduty.GuardDutyService;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iot.IotAuthorizerService;
 import io.github.hectorvent.floci.services.iot.IotDomainConfigurationService;
@@ -236,9 +241,11 @@ final class CfnProvisionerFixture {
         private BackupService backupService;
         private ElastiCacheService elastiCacheService;
         private ElastiCacheMemcachedService elastiCacheMemcachedService;
+        private ElastiCacheServerlessService elastiCacheServerlessService;
         private RedshiftService redshiftService;
         private RedshiftServerlessService redshiftServerlessService;
         private CloudMapService cloudMapService;
+        private GuardDutyService guardDutyService;
         private BedrockAgentCoreControlService bedrockAgentCoreControlService;
         private BedrockAgentCoreMemoryService bedrockAgentCoreMemoryService;
         private CloudFormationResourceRegistry resourceRegistry;
@@ -457,12 +464,16 @@ final class CfnProvisionerFixture {
             }
             if (schedulerService != null) {
                 discovered.add(new SchedulerScheduleGroupCfnProvisioner(schedulerService));
+                discovered.add(new SchedulerScheduleCfnProvisioner(schedulerService));
             }
             if (transferService != null) {
                 discovered.add(new TransferCfnProvisioner(transferService));
             }
             if (elastiCacheService != null && elastiCacheMemcachedService != null) {
                 discovered.add(new ElastiCacheCfnProvisioner(elastiCacheService, elastiCacheMemcachedService));
+            }
+            if (elastiCacheServerlessService != null) {
+                discovered.add(new ElastiCacheServerlessCfnProvisioner(elastiCacheServerlessService));
             }
             if (redshiftService != null) {
                 discovered.add(new RedshiftClusterCfnProvisioner(redshiftService));
@@ -472,6 +483,9 @@ final class CfnProvisionerFixture {
             }
             if (cloudMapService != null) {
                 discovered.add(new CloudMapCfnProvisioner(cloudMapService));
+            }
+            if (guardDutyService != null) {
+                discovered.add(new GuardDutyMalwareProtectionPlanCfnProvisioner(guardDutyService));
             }
             if (bedrockAgentCoreControlService != null && bedrockAgentCoreMemoryService != null) {
                 discovered.add(new BedrockAgentCoreCfnProvisioner(bedrockAgentCoreControlService,
@@ -746,6 +760,11 @@ final class CfnProvisionerFixture {
             return this;
         }
 
+        public Builder elastiCacheServerless(ElastiCacheServerlessService s) {
+            this.elastiCacheServerlessService = s;
+            return this;
+        }
+
         public Builder redshiftService(RedshiftService s) {
             this.redshiftService = s;
             return this;
@@ -762,6 +781,11 @@ final class CfnProvisionerFixture {
 
         public Builder cloudMap(CloudMapService v) {
             this.cloudMapService = v;
+            return this;
+        }
+
+        public Builder guardDuty(GuardDutyService v) {
+            this.guardDutyService = v;
             return this;
         }
 

@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
+import io.github.hectorvent.floci.services.rds.model.DbRoleAssociation;
 import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.EventSubscription;
@@ -48,7 +49,11 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.function.BiFunction;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Query-protocol handler for all RDS actions (form-encoded POST, XML response).
@@ -96,6 +101,12 @@ public class RdsQueryHandler {
                 case "PromoteReadReplica" -> handlePromoteReadReplica(params, region);
                 case "SwitchoverReadReplica" -> handleSwitchoverReadReplica(params, region);
                 case "PromoteReadReplicaDBCluster" -> handlePromoteReadReplicaDbCluster(params, region);
+                case "DescribeDBEngineVersions" -> handleDescribeDbEngineVersions(params);
+                case "DescribeEngineDefaultParameters" -> handleDescribeEngineDefaultParameters(params,
+                        "DescribeEngineDefaultParameters");
+                case "DescribeEngineDefaultClusterParameters" -> handleDescribeEngineDefaultParameters(params,
+                        "DescribeEngineDefaultClusterParameters");
+                case "DescribeValidDBInstanceModifications" -> handleDescribeValidDbInstanceModifications(params, region);
                 case "DescribeOrderableDBInstanceOptions" -> handleDescribeOrderableDbInstanceOptions(params);
                 case "DescribeEvents" -> handleDescribeEvents(params, region);
                 case "CreateEventSubscription" -> handleCreateEventSubscription(params, region);
@@ -106,6 +117,10 @@ public class RdsQueryHandler {
                 case "DescribeDBClusterEndpoints" -> handleDescribeDbClusterEndpoints(params, region);
                 case "ModifyDBClusterEndpoint" -> handleModifyDbClusterEndpoint(params, region);
                 case "DeleteDBClusterEndpoint" -> handleDeleteDbClusterEndpoint(params, region);
+                case "AddRoleToDBCluster" -> handleAddRoleToDbCluster(params, region);
+                case "RemoveRoleFromDBCluster" -> handleRemoveRoleFromDbCluster(params, region);
+                case "AddRoleToDBInstance" -> handleAddRoleToDbInstance(params, region);
+                case "RemoveRoleFromDBInstance" -> handleRemoveRoleFromDbInstance(params, region);
                 case "AddSourceIdentifierToSubscription" ->
                         handleAddSourceIdentifierToSubscription(params, region);
                 case "RemoveSourceIdentifierFromSubscription" ->
@@ -358,6 +373,57 @@ public class RdsQueryHandler {
                 params.getFirst("SubscriptionName"));
         return Response.ok(AwsQueryResponse.envelope("DeleteEventSubscription", AwsNamespaces.RDS,
                 new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
+    }
+
+    private Response handleAddRoleToDbCluster(MultivaluedMap<String, String> params, String region) {
+        service.addRoleToDbCluster(region, params.getFirst("DBClusterIdentifier"),
+                params.getFirst("RoleArn"), params.getFirst("FeatureName"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("AddRoleToDBCluster", AwsNamespaces.RDS)).build();
+    }
+
+    private Response handleRemoveRoleFromDbCluster(MultivaluedMap<String, String> params, String region) {
+        service.removeRoleFromDbCluster(region, params.getFirst("DBClusterIdentifier"),
+                params.getFirst("RoleArn"), params.getFirst("FeatureName"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("RemoveRoleFromDBCluster", AwsNamespaces.RDS)).build();
+    }
+
+    private Response handleAddRoleToDbInstance(MultivaluedMap<String, String> params, String region) {
+        service.addRoleToDbInstance(region, params.getFirst("DBInstanceIdentifier"),
+                params.getFirst("RoleArn"), params.getFirst("FeatureName"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("AddRoleToDBInstance", AwsNamespaces.RDS)).build();
+    }
+
+    private Response handleRemoveRoleFromDbInstance(MultivaluedMap<String, String> params, String region) {
+        service.removeRoleFromDbInstance(region, params.getFirst("DBInstanceIdentifier"),
+                params.getFirst("RoleArn"), params.getFirst("FeatureName"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("RemoveRoleFromDBInstance", AwsNamespaces.RDS)).build();
+    }
+
+    /**
+     * The {@code AssociatedRoles} a {@code CreateDBCluster} request names. botocore and the Java SDK
+     * send the model's member name ({@code AssociatedRoles.DBClusterAssociatedRole.N.RoleArn});
+     * {@code .member.N} is read too, as the other RDS lists accept it.
+     */
+    private static List<DbRoleAssociation> parseAssociatedRoles(MultivaluedMap<String, String> params) {
+        List<DbRoleAssociation> roles = new ArrayList<>();
+        for (String prefix : List.of("AssociatedRoles.DBClusterAssociatedRole", "AssociatedRoles.member")) {
+            // Every index the request names, in order, whichever field it carries: an entry with a
+            // FeatureName and no RoleArn reaches validation and is refused there, and a gap in the
+            // numbering does not hide the entries after it.
+            Pattern field = Pattern.compile(Pattern.quote(prefix) + "\\.(\\d+)\\.(RoleArn|FeatureName)");
+            SortedSet<Integer> indexes = new TreeSet<>();
+            for (String key : params.keySet()) {
+                Matcher matcher = field.matcher(key);
+                if (matcher.matches()) {
+                    indexes.add(Integer.parseInt(matcher.group(1)));
+                }
+            }
+            for (int i : indexes) {
+                roles.add(new DbRoleAssociation(params.getFirst(prefix + "." + i + ".RoleArn"),
+                        params.getFirst(prefix + "." + i + ".FeatureName")));
+            }
+        }
+        return roles;
     }
 
     private Response handleCreateDbClusterEndpoint(MultivaluedMap<String, String> params, String region) {
@@ -722,6 +788,109 @@ public class RdsQueryHandler {
         }
     }
 
+    private Response handleDescribeDbEngineVersions(MultivaluedMap<String, String> params) {
+        Map<String, List<String>> filters = new LinkedHashMap<>();
+        for (String name : List.of("db-parameter-group-family", "engine", "engine-mode", "engine-version", "status")) {
+            List<String> values = extractRdsFilterValues(params, name);
+            if (!values.isEmpty()) {
+                filters.put(name, values);
+            }
+        }
+        RdsService.EngineVersionPage page = service.describeDbEngineVersions(
+                params.getFirst("Engine"),
+                params.getFirst("EngineVersion"),
+                params.getFirst("DBParameterGroupFamily"),
+                Boolean.parseBoolean(params.getFirst("DefaultOnly")),
+                filters,
+                optionalInt(params.getFirst("MaxRecords")),
+                params.getFirst("Marker"));
+        XmlBuilder xml = new XmlBuilder().start("DBEngineVersions");
+        for (RdsEngineCatalog.EngineVersion v : page.versions()) {
+            xml.start("DBEngineVersion")
+               .elem("Engine", v.engine())
+               .elem("MajorEngineVersion", v.majorVersion())
+               .elem("EngineVersion", v.version())
+               .elem("DBParameterGroupFamily", v.family())
+               .elem("DBEngineDescription", v.engineDescription())
+               .elem("DBEngineVersionDescription", v.versionDescription())
+               .start("ValidUpgradeTarget");
+            for (RdsEngineCatalog.EngineVersion target : RdsEngineCatalog.upgradeTargets(v)) {
+                xml.start("UpgradeTarget")
+                   .elem("Engine", target.engine())
+                   .elem("EngineVersion", target.version())
+                   .elem("Description", target.versionDescription())
+                   .elem("AutoUpgrade", false)
+                   .elem("IsMajorVersionUpgrade", !target.majorVersion().equals(v.majorVersion()))
+                   .end("UpgradeTarget");
+            }
+            xml.end("ValidUpgradeTarget").start("ExportableLogTypes");
+            RdsEngineCatalog.exportableLogTypes(v).forEach(type -> xml.elem("member", type));
+            xml.end("ExportableLogTypes")
+               .elem("SupportsLogExportsToCloudwatchLogs", !RdsEngineCatalog.exportableLogTypes(v).isEmpty())
+               .elem("SupportsReadReplica", RdsEngineCatalog.supportsReadReplica(v))
+               .start("SupportedEngineModes");
+            v.engineModes().forEach(mode -> xml.elem("member", mode));
+            xml.end("SupportedEngineModes").start("SupportedFeatureNames");
+            RdsEngineCatalog.supportedFeatureNames(v).forEach(name -> xml.elem("member", name));
+            xml.end("SupportedFeatureNames")
+               .elem("Status", "available")
+               .elem("SupportsParallelQuery", false)
+               .elem("SupportsGlobalDatabases", RdsEngineCatalog.supportsGlobalDatabases(v))
+               .elem("SupportsBabelfish", false)
+               .end("DBEngineVersion");
+        }
+        xml.end("DBEngineVersions");
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBEngineVersions", AwsNamespaces.RDS,
+                xml.build())).build();
+    }
+
+    /** Serves both engine default calls; they share the request and the EngineDefaults shape. */
+    private Response handleDescribeEngineDefaultParameters(MultivaluedMap<String, String> params, String action) {
+        String family = params.getFirst("DBParameterGroupFamily");
+        List<Map<String, String>> parameters = service.describeEngineDefaultParameters(family);
+        XmlBuilder xml = new XmlBuilder().start("EngineDefaults")
+                .elem("DBParameterGroupFamily", family)
+                .start("Parameters");
+        for (Map<String, String> parameter : parameters) {
+            xml.start("Parameter")
+               .elem("ParameterName", parameter.get("name"))
+               .elem("ParameterValue", parameter.get("value"))
+               .end("Parameter");
+        }
+        xml.end("Parameters").end("EngineDefaults");
+        return Response.ok(AwsQueryResponse.envelope(action, AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleDescribeValidDbInstanceModifications(MultivaluedMap<String, String> params, String region) {
+        List<RdsService.StorageModification> storage = service.describeValidDbInstanceModifications(
+                params.getFirst("DBInstanceIdentifier"), region);
+        XmlBuilder xml = new XmlBuilder().start("ValidDBInstanceModificationsMessage").start("Storage");
+        for (RdsService.StorageModification option : storage) {
+            xml.start("ValidStorageOptions")
+               .elem("StorageType", option.storageType())
+               .start("StorageSize");
+            for (RdsService.SizeRange range : option.sizes()) {
+                xml.start("Range")
+                   .elem("From", range.from())
+                   .elem("To", range.to())
+                   .elem("Step", 1)
+                   .end("Range");
+            }
+            xml.end("StorageSize")
+               .elem("SupportsStorageAutoscaling", true)
+               .end("ValidStorageOptions");
+        }
+        xml.end("Storage")
+           .start("ValidProcessorFeatures").end("ValidProcessorFeatures")
+           .elem("SupportsDedicatedLogVolume", false)
+           .end("ValidDBInstanceModificationsMessage");
+        return Response.ok(AwsQueryResponse.envelope("DescribeValidDBInstanceModifications", AwsNamespaces.RDS,
+                xml.build())).build();
+    }
+
     private Response handleDescribeOrderableDbInstanceOptions(MultivaluedMap<String, String> params) {
         Collection<Map<String, String>> options = service.describeOrderableDbInstanceOptions(
                 params.getFirst("Engine"),
@@ -749,6 +918,9 @@ public class RdsQueryHandler {
     private static String licenseModel(String engine) {
         if (engine != null && engine.regionMatches(true, 0, "sqlserver", 0, 9)) {
             return "license-included";
+        }
+        if (engine != null && engine.equalsIgnoreCase("aurora-mysql")) {
+            return "general-public-license";
         }
         return "postgresql-license";
     }
@@ -1013,6 +1185,8 @@ public class RdsQueryHandler {
         }
 
         try {
+            List<DbRoleAssociation> associatedRoles = parseAssociatedRoles(params);
+            service.validateClusterRoleAssociations(id, engine, associatedRoles);
             Double serverlessV2Min = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MinCapacity");
             Double serverlessV2Max = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MaxCapacity");
             Integer serverlessV2SecondsUntilAutoPause = parseIntegerParam(
@@ -1046,6 +1220,14 @@ public class RdsQueryHandler {
                             serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
                             manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
                             requestedPort);
+            }
+            if (!associatedRoles.isEmpty()) {
+                try {
+                    cluster = service.addRolesToNewDbCluster(region, id, associatedRoles);
+                } catch (AwsException e) {
+                    service.deleteDbCluster(id, region);
+                    throw e;
+                }
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
@@ -2671,6 +2853,7 @@ public class RdsQueryHandler {
             xml.elem("DBClusterIdentifier", i.getDbClusterIdentifier());
         }
         xml.raw(readReplicaXml(i));
+        writeAssociatedRoles(xml, i.getAssociatedRoles(), "DBInstanceRole");
         xml.start("TagList");
         writeTags(xml, i.getTags());
         xml.end("TagList");
@@ -2880,7 +3063,21 @@ public class RdsQueryHandler {
             }
         }
         xml.end("DBClusterMembers");
+        writeAssociatedRoles(xml, c.getAssociatedRoles(), "DBClusterRole");
         return xml.build();
+    }
+
+    /** {@code AssociatedRoles}, each entry named as the model names it for the resource. */
+    private static void writeAssociatedRoles(XmlBuilder xml, List<DbRoleAssociation> roles, String elementName) {
+        xml.start("AssociatedRoles");
+        for (DbRoleAssociation role : roles) {
+            xml.start(elementName).elem("RoleArn", role.getRoleArn());
+            if (role.getFeatureName() != null) {
+                xml.elem("FeatureName", role.getFeatureName());
+            }
+            xml.elem("Status", role.getStatus()).end(elementName);
+        }
+        xml.end("AssociatedRoles");
     }
 
     private String paramGroupXml(DbParameterGroup g) {
@@ -3301,16 +3498,9 @@ public class RdsQueryHandler {
         }
     }
 
+    /** The catalogue's default for the engine, or {@code 1.0} for an engine it does not list. */
     private static String defaultEngineVersion(String engine) {
-        if (engine == null) {
-            return "16.3";
-        }
-        return switch (engine.toLowerCase()) {
-            case "postgres", "aurora-postgresql" -> "16.3";
-            case "mysql", "aurora-mysql", "aurora" -> "8.0.36";
-            case "mariadb" -> "11.2";
-            case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web" -> "15.00";
-            default -> "1.0";
-        };
+        String version = RdsEngineCatalog.defaultVersion(engine);
+        return version != null ? version : "1.0";
     }
 }

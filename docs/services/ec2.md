@@ -300,6 +300,14 @@ that publish those images.
 | DeleteTags | Removes tags from supported EC2 resources. |
 | DescribeTags | Lists tags stored for EC2 resources. |
 
+Public tag mutations reject keys beginning with `aws:` regardless of ASCII case.
+An empty `DeleteTags` tag list removes user tags and preserves AWS-managed tags.
+CloudFormation tag updates and rollbacks likewise leave AWS-managed tags intact.
+Instance and security-group templates validate desired tags before changing resource properties
+or deleting old tags. Volume and Spot request creation also reject reserved keys before allocation.
+Nested launch-template tags follow AWS's case-sensitive check: `aws:` is rejected with
+`InvalidTagKey.Malformed`, while `AWS:` and mixed-case prefixes can be stored in template versions.
+
 ### Internet Gateways
 
 | Action | Description |
@@ -600,6 +608,15 @@ fixed socket/core/vCPU shape rather than one derived from the instance family.
 | DisassociateAddress | Removes an Elastic IP address association. |
 | ReleaseAddress | Releases an Elastic IP address record. |
 
+`ReleaseAddress` automatically disassociates an instance's Elastic IP only in the default VPC.
+In a nondefault VPC it returns `InvalidIPAddress.InUse` without changing the association;
+call `DisassociateAddress` first, as specified by the
+[EC2 API reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ReleaseAddress.html).
+
+Deleting an interface, including deletion on instance termination, disassociates its
+Elastic IP without releasing the allocation. A retained interface keeps its association
+after termination; release still follows that interface's VPC rules.
+
 An allocated Elastic IP's `54.x.x.x` address is invented and routes nowhere, so associating
 it re-points it at the address the instance is actually reachable on — the same value
 DescribeInstances reports. This is a deliberate deviation from AWS, where an EIP's public IP
@@ -659,6 +676,17 @@ These members of `RequestLaunchTemplateData` are stored and read back unchanged 
 `InstanceRequirementsRequest`, including the nested `BaselinePerformanceFactors.Cpu.References`.
 Within `NetworkInterfaces`, `ConnectionTrackingSpecification` is stored and read back with all
 three of its timeout members.
+
+At launch, `RunInstances` and `CreateFleet` apply the template's `BlockDeviceMappings` under the
+request's, field by field: a request entry for a `DeviceName` the template maps changes only the
+members it sets, and the rest keep the template's values; devices only one side maps apply as
+given. An Auto Scaling group launching from a template gets the template's mappings the same
+way. The root volume's type comes from the mapping for the AMI's root device, else from the
+AMI's own root mapping, else `gp3`, and `CreateImage` records that type on the new AMI's root
+mapping. A mapping naming a `VolumeType` outside the service model's enum fails with
+`InvalidParameterValue`, as `ModifyVolume` does. Template versions are not checked when they are
+stored, so a template naming an unknown `VolumeType` is accepted by `CreateLaunchTemplate` and
+fails at launch.
 
 Both blocks are validated by `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` before
 anything is stored. An `InstanceRequirements` block must carry `VCpuCount` and `MemoryMiB`, each
@@ -942,6 +970,11 @@ Synthesised addresses come from the subnet's own CIDR block, skipping the first 
 and the last one as AWS reserves them, and skipping every address a persisted instance, network
 interface or NAT gateway in the subnet still holds, so a restart does not hand one out twice. A
 subnet with no free address left fails the request with `InsufficientFreeAddressesInSubnet`.
+
+`CreateSubnet` derives `AvailableIpAddressCount` from the IPv4 CIDR, excluding the
+five AWS-reserved addresses. `DescribeSubnets` subtracts addresses currently held
+by instances, network interfaces, NAT gateways and interface endpoints. ASG
+scale-out uses this count when selecting among subnets in the same zone.
 
 ## Requirements
 

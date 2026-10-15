@@ -228,11 +228,13 @@ public class StsQueryHandler {
 
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
         String accountId = regionResolver.getAccountId();
-        String authorization = headers == null ? null : headers.getHeaderString("Authorization");
-        String accessKeyId = authorization == null ? null : accountResolver.extractAccessKeyId(authorization);
+        String accessKeyId = callerAccessKeyId();
         String sessionToken = headers == null ? null : headers.getHeaderString("X-Amz-Security-Token");
         if (sessionToken == null && params != null) {
             sessionToken = getParam(params, "X-Amz-Security-Token");
+        }
+        if (sessionToken == null && uriInfo != null) {
+            sessionToken = uriInfo.getQueryParameters().getFirst("X-Amz-Security-Token");
         }
         String arn = iamService.resolveCallerArn(accessKeyId)
                 .orElse(regionResolver.buildGlobalArn("iam", accountId, "root"));
@@ -246,6 +248,10 @@ public class StsQueryHandler {
     }
 
     private Response handleGetSessionToken(MultivaluedMap<String, String> params) {
+        if (IamService.isTemporaryAccessKey(callerAccessKeyId())) {
+            return AwsQueryResponse.error("AccessDenied", "Cannot call GetSessionToken with session credentials",
+                    AwsNamespaces.STS, 403);
+        }
         Response durationValidation = validateDurationSeconds(params, 900, 129600);
         if (durationValidation != null) {
             return durationValidation;
@@ -523,13 +529,18 @@ public class StsQueryHandler {
 
     /** The access key that signed this request, in the header or presigned in the query. */
     private String callerAccessKeyId() {
+        String authorization = headers == null ? null : headers.getHeaderString("Authorization");
         String auth = IamEnforcementFilter.requestAuthorization(
-                headers == null ? null : headers.getHeaderString("Authorization"),
+                authorization == null || authorization.isBlank() ? null : authorization,
                 uriInfo == null ? null : uriInfo.getQueryParameters());
         return auth == null ? null : accountResolver.extractAccessKeyId(auth);
     }
 
     private Response handleGetFederationToken(MultivaluedMap<String, String> params) {
+        if (IamService.isTemporaryAccessKey(callerAccessKeyId())) {
+            return AwsQueryResponse.error("AccessDenied", IamService.FEDERATION_TOKEN_SESSION_MESSAGE,
+                    AwsNamespaces.STS, 403);
+        }
         Response validation = validateRequired(params, "Name");
         if (validation != null) {
             return validation;

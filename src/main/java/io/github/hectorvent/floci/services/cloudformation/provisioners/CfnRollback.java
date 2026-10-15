@@ -130,6 +130,15 @@ public final class CfnRollback {
     public static final String API_KEY_UPDATE_SNAPSHOT_ATTR = "__FlociApiKeyUpdateSnapshot";
 
     /**
+     * Holds the role, object prefixes, tagging action and tags a GuardDuty Malware Protection plan
+     * carried before an in-place update changed them, or the plan an update created because the one
+     * the stack held was gone, so a failed stack update can put the plan back or delete the created
+     * one. Written by {@code GuardDutyMalwareProtectionPlanCfnProvisioner} before its first mutating
+     * call or right after that creation, and spent by its {@code rollbackUpdate}.
+     */
+    public static final String GUARDDUTY_PLAN_UPDATE_SNAPSHOT_ATTR = "__FlociGuardDutyPlanUpdateSnapshot";
+
+    /**
      * Holds the name and tags an API Gateway V2 VPC link carried before an in-place update changed
      * them, so a failed stack update can put them back. Written by {@code ApiGatewayV2CfnProvisioner}
      * before its update call and spent by its {@code rollbackUpdate}.
@@ -188,6 +197,14 @@ public final class CfnRollback {
     public static final String REPLACEMENT_CLEANUP_ATTR = "__FlociReplacementCleanup";
 
     /**
+     * Holds the tags, stream setting and time-to-live setting a DynamoDB table carried before an
+     * in-place update changed them, with the account and region that address it, so a failed
+     * stack update can put all three back. Written by {@code DynamoDbCfnProvisioner} before its
+     * first mutating call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR = "__FlociDynamoDbTableUpdateSnapshot";
+
+    /**
      * Holds the attributes and tags a queue carried before an in-place update changed them,
      * so a failed stack update can restore them.
      */
@@ -199,6 +216,13 @@ public final class CfnRollback {
      * {@code CognitoCfnProvisioner} before its update call and spent by its {@code rollbackUpdate}.
      */
     public static final String COGNITO_UPDATE_SNAPSHOT_ATTR = "__FlociCognitoUpdateSnapshot";
+
+    /**
+     * Holds the settings and tags a serverless cache had before an in-place update changed them,
+     * so a failed stack update can put them back. Written by {@code ElastiCacheServerlessCfnProvisioner}
+     * before its modify call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String SERVERLESS_CACHE_UPDATE_SNAPSHOT_ATTR = "__FlociServerlessCacheUpdateSnapshot";
 
     /**
      * Holds the configuration an Auto Scaling group carried before an in-place update changed it,
