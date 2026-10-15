@@ -636,7 +636,7 @@ is recorded and reported only: the Data API (`rds-data`) does not refuse a clust
 ## Log files
 
 `DescribeDBLogFiles` and `DownloadDBLogFilePortion` read an instance's log from its database
-container (`docker logs`), cut into files the way RDS names them: PostgreSQL rotates hourly into
+container (`docker logs`, the most recent 100,000 lines), cut into files the way RDS names them: PostgreSQL rotates hourly into
 `error/postgresql.log.YYYY-MM-DD-HH` (UTC), MySQL and MariaDB keep `error/mysql-error.log`, and SQL
 Server keeps `log/ERROR`. An Aurora member reads its cluster's container. `LastWritten` is the time
 Docker recorded for the file's last line, and `Size` the bytes of its lines.
@@ -645,11 +645,13 @@ Docker recorded for the file's last line, and `Size` the bytes of its lines.
 `FileSize` (files larger than it), and pages by `MaxRecords` / `Marker`. `DownloadDBLogFilePortion`
 follows the API reference: without a `Marker` it returns the most recent `NumberOfLines` lines (the
 whole file, up to 10000 lines, without either), `Marker` `0` starts at the first line, and the
-returned `Marker` continues until `AdditionalDataPending` is false. A block stops at 1 MB. Control
-characters XML cannot carry (a terminal colour code) come back as U+FFFD.
+returned `Marker` continues until `AdditionalDataPending` is false. A block stops at 1 MB, and a
+single line longer than that is cut at 1 MB, as the API reference says the block is truncated.
+Control characters XML cannot carry (a terminal colour code) come back as U+FFFD.
 
-An instance that is not available is `DBInstanceNotReady`, and an unknown file name
-`DBLogFileNotFoundFault`. In mock RDS mode there is no container, so an instance has no log files.
+An instance that is not available, or whose database container cannot be found or started, is
+`DBInstanceNotReady`, and an unknown file name `DBLogFileNotFoundFault`. Negative `FileSize`,
+`FileLastWritten` or `Marker` values are `InvalidParameterValue`. In mock RDS mode there is no container, so an instance has no log files.
 
 ## IAM role associations
 

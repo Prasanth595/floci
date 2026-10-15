@@ -76,6 +76,11 @@ class RdsLogFilesIntegrationTest {
         query("DescribeDBLogFiles").formParam("DBInstanceIdentifier", INSTANCE).formParam("FileSize", "big")
         .when().post("/").then().statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
+        for (String[] bad : new String[][] {{"FileSize", "-1"}, {"FileLastWritten", "-1"}, {"Marker", "-1"}}) {
+            query("DescribeDBLogFiles").formParam("DBInstanceIdentifier", INSTANCE).formParam(bad[0], bad[1])
+            .when().post("/").then().statusCode(400)
+                    .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
+        }
 
         query("StopDBInstance").formParam("DBInstanceIdentifier", INSTANCE)
         .when().post("/").then().statusCode(200);

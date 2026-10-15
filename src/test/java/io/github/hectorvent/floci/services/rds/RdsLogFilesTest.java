@@ -117,4 +117,17 @@ class RdsLogFilesTest {
 
         assertEquals("10000", RdsLogFiles.portion(fileOf(12_000), "0", 50_000).marker());
     }
+
+    @Test
+    void aSingleLineOverOneMegabyteIsCutAtOneMegabyte() {
+        String huge = "\u00e9".repeat(RdsLogFiles.MAX_BYTES);
+        RdsLogFiles.LogFile file = new RdsLogFiles.LogFile("log/ERROR", Instant.EPOCH, 0, List.of(huge, "next"));
+        RdsLogFiles.Portion portion = RdsLogFiles.portion(file, "0", 10);
+        int bytes = portion.data().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        assertTrue(bytes <= RdsLogFiles.MAX_BYTES, Integer.toString(bytes));
+        assertTrue(portion.data().endsWith("\u00e9\n"), "cut between characters");
+        assertEquals("1", portion.marker());
+        assertTrue(portion.additionalDataPending());
+        assertEquals("next\n", RdsLogFiles.portion(file, portion.marker(), 10).data());
+    }
 }

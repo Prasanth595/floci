@@ -888,27 +888,34 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
         throw new IllegalStateException("Timed out initializing " + description + " in " + containerName + ": " + lastOutput);
     }
 
+    /** The most recent lines {@link #readLog} reads, so one call never holds an unbounded history. */
+    public static final int MAX_LOG_LINES = 100_000;
+
     /**
-     * The container's log as Docker keeps it, stdout and stderr, one line per entry with Docker's
-     * RFC 3339 timestamp in front. A partial last line is kept; a container Docker no longer knows
-     * has no lines.
+     * The container's log as Docker keeps it, stdout and stderr, at most the last
+     * {@link #MAX_LOG_LINES} lines, each with Docker's RFC 3339 timestamp in front. Null when Docker
+     * no longer knows the container, so the caller can tell a missing backend from an empty log. A
+     * read that does not finish in time fails rather than returning part of the log.
      */
     public List<String> readLog(String containerId) {
         ByteArrayOutputStream raw = new ByteArrayOutputStream();
         try {
-            lifecycleManager.getDockerClient().logContainerCmd(containerId)
-                    .withStdOut(true).withStdErr(true).withTimestamps(true)
+            boolean completed = lifecycleManager.getDockerClient().logContainerCmd(containerId)
+                    .withStdOut(true).withStdErr(true).withTimestamps(true).withTail(MAX_LOG_LINES)
                     .exec(new ResultCallback.Adapter<Frame>() {
                         @Override
                         public void onNext(Frame frame) {
                             raw.writeBytes(frame.getPayload());
                         }
                     }).awaitCompletion(Duration.ofSeconds(10).toMillis(), TimeUnit.MILLISECONDS);
+            if (!completed) {
+                throw new IllegalStateException("Timed out reading the log of container " + containerId);
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted while reading the log of container " + containerId, e);
         } catch (NotFoundException e) {
-            return List.of();
+            return null;
         }
         String text = raw.toString(StandardCharsets.UTF_8);
         if (text.isEmpty()) {
