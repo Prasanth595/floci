@@ -19,6 +19,7 @@ import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 /**
  * CloudFormation provisioning for {@code AWS::Lambda::WebFunction}, {@code WebFunctionRevision} and
@@ -35,6 +36,10 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
     private static final Logger LOG = Logger.getLogger(LambdaWebCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Set<String> ENDPOINT_CREATE_ONLY = Set.of("FunctionName", "EndpointName", "EndpointType", "Regions");
+    /** Integer properties. A parameter or mapping value arrives as text, which CloudFormation coerces. */
+    private static final Set<String> INTEGER_PROPERTIES =
+            Set.of("TimeoutSeconds", "MaxConcurrencyPerEnvironment", "Weight", "MaxEnvironments", "RateLimit");
+    private static final Pattern INTEGER_TEXT = Pattern.compile("-?[0-9]{1,10}");
 
     private final LambdaWebService service;
 
@@ -253,7 +258,12 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
                 return;
             }
             String key = Character.toLowerCase(entry.getKey().charAt(0)) + entry.getKey().substring(1);
-            out.set(key, "EnvironmentVariables".equals(entry.getKey()) ? entry.getValue() : lowerKeys(entry.getValue()));
+            JsonNode value = entry.getValue();
+            if (INTEGER_PROPERTIES.contains(entry.getKey()) && value.isTextual()
+                    && INTEGER_TEXT.matcher(value.textValue()).matches()) {
+                value = MAPPER.getNodeFactory().numberNode(Long.parseLong(value.textValue()));
+            }
+            out.set(key, "EnvironmentVariables".equals(entry.getKey()) ? value : lowerKeys(value));
         });
         return out;
     }

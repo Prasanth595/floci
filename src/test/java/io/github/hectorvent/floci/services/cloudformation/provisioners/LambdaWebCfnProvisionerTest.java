@@ -204,6 +204,34 @@ class LambdaWebCfnProvisionerTest {
     }
 
     @Test
+    void integerPropertiesGivenAsTextArriveAsNumbers() {
+        when(service.createRevision(eq(REGION), eq("app"), any())).thenReturn(revision("rev-aaaaa"));
+        when(service.createEndpoint(eq(REGION), eq("app"), any()))
+                .thenReturn(endpoint("prod", "HomeRegion", List.of("us-east-1")));
+        ObjectNode revisionProps = revisionProps();
+        ((ObjectNode) revisionProps.get("ServiceConfig")).put("TimeoutSeconds", "45").put("MaxConcurrencyPerEnvironment", "8");
+        ObjectNode endpointProps = endpointProps("HomeRegion");
+        ((ObjectNode) endpointProps.get("RevisionWeights").get(0)).put("Weight", "100");
+        endpointProps.putObject("ScalingConfig").put("MaxEnvironments", "4");
+        endpointProps.putObject("ThrottleConfig").put("RateLimit", "x");
+
+        provisioner.provision(resource(LambdaWebCfnProvisioner.REVISION), revisionProps, ctx(null));
+        provisioner.provision(resource(LambdaWebCfnProvisioner.ENDPOINT), endpointProps, ctx(null));
+
+        ArgumentCaptor<JsonNode> revision = ArgumentCaptor.forClass(JsonNode.class);
+        verify(service).createRevision(eq(REGION), eq("app"), revision.capture());
+        assertTrue(revision.getValue().path("serviceConfig").path("timeoutSeconds").isIntegralNumber());
+        assertEquals(45, revision.getValue().path("serviceConfig").path("timeoutSeconds").intValue());
+        assertEquals(8, revision.getValue().path("serviceConfig").path("maxConcurrencyPerEnvironment").intValue());
+        ArgumentCaptor<JsonNode> endpoint = ArgumentCaptor.forClass(JsonNode.class);
+        verify(service).createEndpoint(eq(REGION), eq("app"), endpoint.capture());
+        assertEquals(100, endpoint.getValue().path("revisionWeights").get(0).path("weight").intValue());
+        assertEquals(4, endpoint.getValue().path("scalingConfig").path("maxEnvironments").intValue());
+        assertTrue(endpoint.getValue().path("throttleConfig").path("rateLimit").isTextual(),
+                "text that is not an integer is left for the service to reject");
+    }
+
+    @Test
     void revisionPropertiesReachTheServiceInCamelCase() {
         when(service.createRevision(eq(REGION), eq("app"), any())).thenReturn(revision("rev-aaaaa"));
         StackResource r = resource(LambdaWebCfnProvisioner.REVISION);
