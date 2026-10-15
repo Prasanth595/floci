@@ -1083,16 +1083,15 @@ class SamTransformProcessor {
     }
 
     /**
-     * SAM's logical id for the version it publishes: {@code <Function>Version} and the first ten hex
-     * digits of the SHA-1 of the function's {@code Code}, with references to template parameters
-     * resolved, merged with its {@code Environment} and {@code MemorySize}, or of all its properties
-     * under {@code AutoPublishAliasAllProperties}, as sorted compact JSON. A string
-     * {@code AutoPublishCodeSha256} takes the hash's place with its own first ten characters, as
-     * SAM's {@code LogicalIdGenerator} does with a given hash. A change to the hashed input is a new
-     * logical id: the update publishes a new version and the alias moves to it. Unchanged, the id
-     * and the version it published stay, since the version provisioner never republishes under the
-     * same id. Like Python's {@code json.dumps} by default, the JSON escapes every character
-     * outside printable ASCII, in lowercase hex.
+     * The logical id SAM gives the version it publishes: {@code <Function>Version} and the first ten
+     * hex digits of the SHA-1 of the function's {@code Code}, with references to template parameters
+     * resolved, merged with its {@code Environment}, its {@code MemorySize} and a {@code SnapStart}
+     * that applies, or of all its properties under {@code AutoPublishAliasAllProperties}, as sorted
+     * compact JSON with every character outside printable ASCII escaped in lowercase hex. A string
+     * {@code AutoPublishCodeSha256} names the version itself, by its first ten characters. A change
+     * to the hashed input is a new logical id: the update publishes a new version and the alias moves
+     * to it. Unchanged, the id and the version it published stay, since the version provisioner never
+     * republishes under the same id.
      */
     private String versionLogicalId(String functionLogicalId, JsonNode samProperties, JsonNode functionProperties,
                                     JsonNode template, Map<String, String> parameterValues) {
@@ -1107,10 +1106,14 @@ class SamTransformProcessor {
         // SAM resolves the code in place, so the all-properties hash sees it resolved as well.
         JsonNode code = resolveParameterRefs(functionProperties.path("Code"), template, parameterValues);
         ObjectNode hashed = objectMapper.createObjectNode();
+        JsonNode snapStart = samProperties.path("SnapStart");
         if (samProperties.path("AutoPublishAliasAllProperties").asBoolean(false)) {
             hashed.setAll((ObjectNode) functionProperties.deepCopy());
             if (code.isObject()) {
                 hashed.set("Code", code);
+            }
+            if (isPropertyPresent(snapStart)) {
+                hashed.set("SnapStart", snapStart.deepCopy());
             }
         } else {
             if (code.isObject()) {
@@ -1122,6 +1125,10 @@ class SamTransformProcessor {
             }
             if (functionProperties.has("MemorySize")) {
                 hashed.set("MemorySize", functionProperties.get("MemorySize").deepCopy());
+            }
+            // Turning SnapStart on publishes a version, so that version gets its snapshot.
+            if (snapStart.isObject() && !"None".equals(snapStart.path("ApplyOn").asText("None"))) {
+                hashed.set("SnapStart", snapStart.deepCopy());
             }
         }
         String hashInput;

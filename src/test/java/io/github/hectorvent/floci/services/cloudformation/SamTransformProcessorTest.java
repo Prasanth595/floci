@@ -181,6 +181,40 @@ class SamTransformProcessorTest {
     }
 
     /**
+     * SAM also hashes a function's SnapStart when its ApplyOn is anything but "None", so turning
+     * SnapStart on publishes a new version; absent, empty or "None" leaves the id unchanged. With
+     * AutoPublishAliasAllProperties it is hashed like every other property.
+     */
+    @Test
+    void expandSamTemplate_autoPublishAliasVersionIdIncludesAppliedSnapStart() throws Exception {
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler", "Runtime": "java21", "AutoPublishAlias": "live",
+                    "InlineCode": "exports.handler = async () => ({});"%s
+                  }
+                }
+              }
+            }
+            """;
+        String snapStart = ", \"SnapStart\": {\"ApplyOn\": \"PublishedVersions\"}";
+
+        assertEquals("MyFuncVersiona8f283d3fa", publishedVersionId(template.formatted(snapStart)));
+        assertEquals("MyFuncVersion2154246fbb",
+                publishedVersionId(template.formatted(", \"MemorySize\": 256" + snapStart)));
+        for (String off : List.of("", ", \"SnapStart\": {\"ApplyOn\": \"None\"}", ", \"SnapStart\": {}")) {
+            assertEquals("MyFuncVersion102360dfc3", publishedVersionId(template.formatted(off)), off);
+        }
+        String allProperties = ", \"AutoPublishAliasAllProperties\": true";
+        assertNotEquals(publishedVersionId(template.formatted(allProperties)),
+                publishedVersionId(template.formatted(allProperties + ", \"SnapStart\": {\"ApplyOn\": \"None\"}")));
+    }
+
+    /**
      * Python's {@code json.dumps} escapes everything outside printable ASCII, DEL included, in
      * lowercase hex, and a character beyond the Basic Multilingual Plane as its surrogate pair.
      */
