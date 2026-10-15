@@ -1712,6 +1712,9 @@ public interface EmulatorConfig {
 
         @WithDefault("180")
         long transactionTtlSeconds();
+
+        @WithDefault("false")
+        boolean databaseResumingExceptionEnabled();
     }
 
     interface RedshiftDataServiceConfig {
