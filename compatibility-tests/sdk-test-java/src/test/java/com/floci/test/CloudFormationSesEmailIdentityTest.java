@@ -90,11 +90,10 @@ class CloudFormationSesEmailIdentityTest {
             zoneId = route53.createHostedZone(r -> r.name(domain).callerReference(stackName)).hostedZone().id();
             changeRecords(zoneId, records, ChangeAction.CREATE);
             published = true;
+            TestFixtures.await(() -> identity(domain).dkimAttributes().status() == DkimStatus.SUCCESS,
+                    domain, "DKIM verification", TestFixtures.isRealAws() ? 600_000_000_000L : 60_000_000_000L,
+                    TestFixtures.isRealAws() ? 2_000 : 500);
             GetEmailIdentityResponse verified = identity(domain);
-            for (int attempt = 0; attempt < 30 && verified.dkimAttributes().status() != DkimStatus.SUCCESS; attempt++) {
-                Thread.sleep(500L);
-                verified = identity(domain);
-            }
             assertThat(verified.dkimAttributes().status()).isEqualTo(DkimStatus.SUCCESS);
             assertThat(verified.verifiedForSendingStatus()).isTrue();
             assertThat(identity(email).dkimAttributes().status()).isEqualTo(DkimStatus.SUCCESS);
