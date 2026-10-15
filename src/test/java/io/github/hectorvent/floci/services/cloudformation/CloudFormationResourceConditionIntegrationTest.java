@@ -669,6 +669,98 @@ class CloudFormationResourceConditionIntegrationTest {
     }
 
     /**
+     * A create's dependency preflight evaluates {@code AWS::StackId} as the id the stack is given,
+     * so it agrees with the execution: a dependency on a resource the stack id excludes is refused
+     * up front, and one on a resource it includes deploys.
+     */
+    @Test
+    void aCreatesPreflightSeesTheStackIdItWillGet() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String template = """
+                {
+                  "Conditions": {
+                    "NoId": {"Fn::Equals": [{"Ref": "AWS::StackId"}, ""]},
+                    "HasId": {"Fn::Not": [{"Condition": "NoId"}]}
+                  },
+                  "Resources": {
+                    "Dependency": {"Type": "AWS::SQS::Queue", "Condition": "%s",
+                      "Properties": {"QueueName": "%s-dependency"}},
+                    "Dependent": {"Type": "AWS::SQS::Queue", "DependsOn": "Dependency",
+                      "Properties": {"QueueName": "%s-dependent"}}
+                  }
+                }
+                """;
+        String excluded = "cfn-stackid-excluded-" + suffix;
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", excluded)
+            .formParam("TemplateBody", template.formatted("NoId", excluded, excluded))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Message", containsString("Unresolved resource dependencies"));
+
+        String included = "cfn-stackid-included-" + suffix;
+        createStack(included, template.formatted("HasId", included, included));
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(included).status());
+            getQueueUrl(included + "-dependency").then().statusCode(200);
+            getQueueUrl(included + "-dependent").then().statusCode(200);
+        } finally {
+            deleteStack(included);
+            CfnStackWaits.awaitStackDeleted(included);
+        }
+    }
+
+    /**
+     * A create over a name in use is checked as the new stack it asks for, not as the stack that
+     * holds the name, so a template that is valid for a new stack gets AlreadyExistsException.
+     */
+    @Test
+    void aCreateOverATakenNameIsCheckedAsTheNewStack() {
+        String stackName = "cfn-stackid-taken-" + Long.toString(System.nanoTime(), 36);
+        createStack(stackName, """
+                {"Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "%s"}}}}
+                """.formatted(stackName));
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            String takenId = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath().getString("**.find { it.name() == 'StackId' }");
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", """
+                        {
+                          "Conditions": {"NotTheTakenStack": {"Fn::Not": [{"Fn::Equals": [
+                            {"Ref": "AWS::StackId"}, "%s"]}]}},
+                          "Resources": {
+                            "Dependency": {"Type": "AWS::SQS::Queue", "Condition": "NotTheTakenStack"},
+                            "Dependent": {"Type": "AWS::SQS::Queue", "DependsOn": "Dependency"}
+                          }
+                        }
+                        """.formatted(takenId))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("AlreadyExistsException"));
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    /**
      * The change-set preview, the preflight and the execution all evaluate {@code AWS::StackName}
      * against the stack. Read as an empty string, the condition was false and the stack held no
      * resources; with only the preview reading it so, the update would skip the queue's edit.

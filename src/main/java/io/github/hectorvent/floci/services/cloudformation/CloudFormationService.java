@@ -394,6 +394,17 @@ public class CloudFormationService implements ResourceProvider {
             requireParameterValues(resolvedTemplate, parameters);
         }
 
+        // The preflight evaluates AWS::StackName and AWS::StackId as the execution will: an update
+        // or a create attaching to a placeholder against that stack, any other create against the
+        // id it is given below, allocated now. A create over a name in use is checked as that new
+        // stack, never as the stack holding the name.
+        boolean attaches = isCreateType && named != null && !refusedForItsStack;
+        String createdStackId = isCreateType && !attaches ? newStackId(stackName, region, accountId) : null;
+        Stack identity = isCreateType ? (attaches ? named : null) : live;
+        String preflightStackName = identity != null ? identity.getStackName() : stackName;
+        String preflightStackId = identity != null ? identity.getStackId()
+                : createdStackId != null ? createdStackId : "";
+
         // Real CloudFormation runs a declared macro (here, only AWS::Serverless-2016-10-31)
         // before it ever evaluates the template's own resources or conditions. On real AWS,
         // create-change-set against a template with an invalid SAM resource (for example a local,
@@ -408,7 +419,8 @@ public class CloudFormationService implements ResourceProvider {
         // template declaring the SAM transform, whether or not that transform succeeded, so
         // gating this call on samTransformFailureReason == null duplicates that check for no
         // effect.
-        validateResourceDependencies(resolvedTemplate, parameters, stackName, region, accountId);
+        validateResourceDependencies(resolvedTemplate, parameters, preflightStackName, preflightStackId,
+                region, accountId);
 
         // A CREATE change set against a name that already has a stack of any status - including
         // ROLLBACK_COMPLETE - is a real conflict: AWS requires an explicit DeleteStack before a
@@ -446,7 +458,10 @@ public class CloudFormationService implements ResourceProvider {
                 if (!isCreateType) {
                     throw noStackToUpdate(stackName, region, accountId);
                 }
-                target = newStack(stackName, region, accountId);
+                // The id the preflight saw; a placeholder that left the map since then has none.
+                target = newStack(stackName,
+                        createdStackId != null ? createdStackId : newStackId(stackName, region, accountId),
+                        region, accountId);
                 if (tags != null) target.getTags().putAll(tags);
                 // A CREATE change set puts a brand-new stack into REVIEW_IN_PROGRESS. Record the
                 // matching stack-level event (as AWS and LocalStack do) so DescribeStackEvents is
@@ -2937,8 +2952,8 @@ public class CloudFormationService implements ResourceProvider {
      * Evaluates the template's {@code Conditions} through the template engine, so an operand of
      * {@code Fn::Equals} can be any intrinsic the engine resolves, {@code Fn::FindInMap} and the
      * pseudo parameters included. {@code AWS::StackName} and {@code AWS::StackId} resolve to the
-     * name and id given, so every evaluation of one stack's template passes the stack's own; only
-     * a create's preflight runs before the stack id exists, and passes an empty one.
+     * name and id given, so every evaluation of one stack's template passes the stack's own; a
+     * create's preflight passes the id createChangeSet allocates for the stack it then creates.
      */
     private Map<String, Boolean> resolveConditions(JsonNode template, Map<String, String> params,
                                                    String stackName, String stackId, String region,
@@ -3065,7 +3080,8 @@ public class CloudFormationService implements ResourceProvider {
      * graph the execution path resolves correctly.
      */
     private void validateResourceDependencies(String templateBody, Map<String, String> params,
-                                               String stackName, String region, String accountId) {
+                                               String stackName, String stackId, String region,
+                                               String accountId) {
         JsonNode template;
         try {
             template = parseTemplate(templateBody);
@@ -3084,13 +3100,9 @@ public class CloudFormationService implements ResourceProvider {
 
         requireStringConditionReferencesIn(template);
         Map<String, String> resolvedParams = resolveDefaultParameters(template, params);
-        // Execution evaluates AWS::StackName and AWS::StackId against the stack, so the preflight
-        // does too: the live stack an update targets, or the name a create is about to take. The
-        // stack lives in the account the change set is created in, a StackSet's target included.
-        Stack live = resolveStack(stackName, region, accountId);
-        Map<String, Boolean> conditions = live != null && !"DELETE_COMPLETE".equals(live.getStatus())
-                ? resolveConditions(template, resolvedParams, live, region, accountId)
-                : resolveConditions(template, resolvedParams, stackName, "", region, accountId);
+        // Against the stack name and id the execution will use, which createChangeSet decides.
+        Map<String, Boolean> conditions =
+                resolveConditions(template, resolvedParams, stackName, stackId, region, accountId);
 
         // Throws the ValidationError for either case; the order itself is computed again on execution.
         topologicalSort(resources, conditions);
@@ -3387,7 +3399,7 @@ public class CloudFormationService implements ResourceProvider {
             childCreate = childStack == null;
         }
         if (childCreate) {
-            childStack = newStack(childStackName, region, accountId);
+            childStack = newStack(childStackName, newStackId(childStackName, region, accountId), region, accountId);
             childStack.setStatus("CREATE_IN_PROGRESS");
             stacks.put(stackKey(accountId, childStackName, region), childStack);
         }
@@ -3420,13 +3432,16 @@ public class CloudFormationService implements ResourceProvider {
     }
 
 
-    private Stack newStack(String stackName, String region, String accountId) {
+    private static String newStackId(String stackName, String region, String accountId) {
+        return AwsArnUtils.Arn.of("cloudformation", region, accountId, "stack/" + stackName + "/" + UUID.randomUUID()).toString();
+    }
+
+    private Stack newStack(String stackName, String stackId, String region, String accountId) {
         Stack stack = new Stack();
         stack.setStackName(stackName);
         stack.setRegion(region);
         stack.setAccountId(accountId);
         stack.setStatus("REVIEW_IN_PROGRESS");
-        String stackId = AwsArnUtils.Arn.of("cloudformation", region, accountId, "stack/" + stackName + "/" + UUID.randomUUID()).toString();
         stack.setStackId(stackId);
         stack.setCreationTime(now());
         return stack;
