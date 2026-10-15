@@ -69,6 +69,7 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
     // How long one table may take to read out of the restored database.
     static final int TABLE_READ_TIMEOUT_SECONDS = 3600;
     static final int STAGING_CHUNK_BYTES = 32 * 1024 * 1024;
+    static final int DUCKDB_DEFAULT_MAXIMUM_OBJECT_SIZE = 16 * 1024 * 1024;
 
     private final RdsContainerManager containerManager;
     private final FlociDuckClient duckClient;
@@ -204,14 +205,16 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
                 return 0;
             }
             String stagingRoot = "rds-export/" + task.getRuntimeVolumeId() + "/" + tableNumber + "/";
-            stageChunks(rows, stagingRoot, staged);
+            int longestRow = stageChunksReturningTheLongestRow(rows, stagingRoot, staged);
             String stagedParquet = stagingRoot + "data.gz.parquet";
             staged.add(stagedParquet);
             // floci-duck's /execute wraps its sql field in a CSV export, so the Parquet COPY goes
             // in setup_sql and no output path is given, as FirehoseParquetConverter does.
             String copy = "COPY (SELECT " + String.join(", ", write) + " FROM read_json('"
                     + escapeLiteral("s3://" + stagingBucket + "/" + stagingRoot + "part-*.ndjson")
-                    + "', format='newline_delimited', columns={" + String.join(", ", types) + "})) TO '"
+                    + "', format='newline_delimited', maximum_object_size="
+                    + Math.max(DUCKDB_DEFAULT_MAXIMUM_OBJECT_SIZE, longestRow)
+                    + ", columns={" + String.join(", ", types) + "})) TO '"
                     + escapeLiteral("s3://" + stagingBucket + "/" + stagedParquet)
                     + "' (FORMAT PARQUET, COMPRESSION GZIP)";
             duckClient.execute("SELECT 1 AS ok", copy, null, task.getAccountId());
@@ -233,15 +236,19 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
     }
 
     /** Stages the rows as NDJSON objects of about {@link #STAGING_CHUNK_BYTES}, split between rows. */
-    private void stageChunks(Path rows, String stagingRoot, List<String> keys) throws IOException {
+    private int stageChunksReturningTheLongestRow(Path rows, String stagingRoot, List<String> keys)
+            throws IOException {
         ByteArrayOutputStream chunk = new ByteArrayOutputStream();
+        int longestRow = 0;
         try (BufferedReader reader = Files.newBufferedReader(rows, StandardCharsets.UTF_8)) {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.isBlank()) {
                     continue;
                 }
-                chunk.write(line.getBytes(StandardCharsets.UTF_8));
+                byte[] row = line.getBytes(StandardCharsets.UTF_8);
+                longestRow = Math.max(longestRow, row.length + 1);
+                chunk.write(row);
                 chunk.write('\n');
                 if (chunk.size() >= STAGING_CHUNK_BYTES) {
                     putChunk(stagingRoot, keys, chunk);
@@ -251,6 +258,7 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
         if (chunk.size() > 0) {
             putChunk(stagingRoot, keys, chunk);
         }
+        return longestRow;
     }
 
     private void putChunk(String stagingRoot, List<String> keys, ByteArrayOutputStream chunk) {

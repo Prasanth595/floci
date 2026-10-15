@@ -232,6 +232,31 @@ class PostgresSnapshotExporterTest {
     }
 
     @Test
+    void duckDbReadsARowLargerThanItsDefaultObjectSize() {
+        String largeRow = "{\"id\":\""
+                + "x".repeat(PostgresSnapshotExporter.DUCKDB_DEFAULT_MAXIMUM_OBJECT_SIZE) + "\"}";
+        tableRows("{\"id\":\"1\"}\n" + largeRow + "\n");
+
+        exporter.export(task(), source, progress);
+
+        ArgumentCaptor<String> setupSql = ArgumentCaptor.forClass(String.class);
+        verify(duckClient).execute(eq("SELECT 1 AS ok"), setupSql.capture(), isNull(), eq("000000000000"));
+        assertThat(setupSql.getValue(), containsString("maximum_object_size=" + (largeRow.length() + 1) + ","));
+    }
+
+    @Test
+    void duckDbKeepsItsDefaultObjectSizeForSmallRows() {
+        tableRows("{\"id\":1}\n");
+
+        exporter.export(task(), source, progress);
+
+        ArgumentCaptor<String> setupSql = ArgumentCaptor.forClass(String.class);
+        verify(duckClient).execute(eq("SELECT 1 AS ok"), setupSql.capture(), isNull(), eq("000000000000"));
+        assertThat(setupSql.getValue(), containsString(
+                "maximum_object_size=" + PostgresSnapshotExporter.DUCKDB_DEFAULT_MAXIMUM_OBJECT_SIZE + ","));
+    }
+
+    @Test
     void anEmptyTableWritesNoFile() {
         tableRows("");
 
