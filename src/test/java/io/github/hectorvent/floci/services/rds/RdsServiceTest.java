@@ -5316,6 +5316,20 @@ class RdsServiceTest {
     }
 
     @Test
+    void snapshotExportSourceRefusesAnArnFromAnotherPartition() {
+        rdsService.createDbInstance("mydb", "postgres", "16.3",
+                "admin", "password", "dbname", "db.t3.micro", 20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        DbSnapshot snapshot = rdsService.createDbSnapshot("mysnap", "mydb");
+        String otherPartition = snapshot.getDbSnapshotArn().replaceFirst("^arn:aws:", "arn:aws-cn:");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> rdsService.snapshotExportSource(otherPartition, "us-east-1"));
+
+        assertEquals("DBSnapshotNotFound", error.getErrorCode());
+    }
+
+    @Test
     void snapshotExportSourceRefusesASnapshotWhoseDumpIsMissing() {
         Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
         StorageFactory factory = mock(StorageFactory.class);

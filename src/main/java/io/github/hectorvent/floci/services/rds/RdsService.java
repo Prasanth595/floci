@@ -2274,7 +2274,8 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidParameterValue",
                     "SourceArn must name a DB snapshot or a DB cluster snapshot: " + sourceArn, 400);
         }
-        boolean ours = effectiveRegion.equals(arn.region()) && accountId.equals(arn.accountId());
+        boolean ours = AwsRegions.partitionFor(effectiveRegion).equals(arn.partition())
+                && effectiveRegion.equals(arn.region()) && accountId.equals(arn.accountId());
         String snapshotId = resource.substring(resource.indexOf(':') + 1);
         if (clusterSnapshot) {
             if (!ours) {
