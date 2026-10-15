@@ -22,9 +22,9 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
@@ -50,6 +50,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataService;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataJsonHandler;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.scheduler.SchedulerController;
@@ -103,6 +104,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
@@ -252,6 +254,9 @@ public class AslExecutor {
     private final SchedulerService schedulerService;
     private final SchedulerController schedulerController;
     private final RdsDataService rdsDataService;
+    private final RedshiftDataJsonHandler redshiftDataHandler;
+    private final ServiceRegistry serviceRegistry;
+    private final LambdaTaskAuthorizer lambdaTaskAuthorizer;
     private final ObjectMapper objectMapper;
     private final Configuration jsonPathConfiguration;
     private final JsonataEvaluator jsonataEvaluator;
@@ -281,13 +286,15 @@ public class AslExecutor {
                        SchedulerController schedulerController, RdsDataService rdsDataService,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
-                       CustomResourceLiveness customResourceLiveness) {
+                       CustomResourceLiveness customResourceLiveness, RedshiftDataJsonHandler redshiftDataHandler,
+                       ServiceRegistry serviceRegistry, LambdaTaskAuthorizer lambdaTaskAuthorizer) {
         this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null);
+                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler, serviceRegistry,
+                lambdaTaskAuthorizer);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -301,8 +308,13 @@ public class AslExecutor {
                 ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                 Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                 CustomResourceLiveness customResourceLiveness,
-                Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride) {
+                Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride,
+                RedshiftDataJsonHandler redshiftDataHandler, ServiceRegistry serviceRegistry,
+                LambdaTaskAuthorizer lambdaTaskAuthorizer) {
+        this.serviceRegistry = serviceRegistry;
+        this.lambdaTaskAuthorizer = lambdaTaskAuthorizer;
         this.customResourceLiveness = customResourceLiveness;
+        this.redshiftDataHandler = redshiftDataHandler;
         this.lambdaExecutor = lambdaExecutor;
         this.targetResolver = targetResolver;
         this.dynamoDb = dynamoDb;
@@ -338,6 +350,47 @@ public class AslExecutor {
         } else {
             webClient = null;
         }
+    }
+
+    // Kept for tests that do not exercise the Redshift Data API integration.
+    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
+                DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
+                SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
+                CloudFormationQueryHandler cloudFormationHandler,
+                Ec2Service ec2Service, S3Service s3Service,
+                EcsService ecsService, EcsJsonHandler ecsJsonHandler,
+                EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
+                SchedulerController schedulerController, RdsDataService rdsDataService,
+                ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
+                Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
+                CustomResourceLiveness customResourceLiveness) {
+        this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
+                sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
+                ec2Service, s3Service, ecsService, ecsJsonHandler,
+                eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
+                objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
+                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null);
+    }
+
+    // Kept for tests that do not exercise the Redshift Data API integration.
+    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
+                DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
+                SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
+                CloudFormationQueryHandler cloudFormationHandler,
+                Ec2Service ec2Service, S3Service s3Service,
+                EcsService ecsService, EcsJsonHandler ecsJsonHandler,
+                EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
+                SchedulerController schedulerController, RdsDataService rdsDataService,
+                ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
+                Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
+                CustomResourceLiveness customResourceLiveness,
+                Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride) {
+        this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
+                sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
+                ec2Service, s3Service, ecsService, ecsJsonHandler,
+                eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
+                objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
+                clock, sleeper, maxWaitSecondsOverride, null, null, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -799,6 +852,10 @@ public class AslExecutor {
         }
 
         JsonNode effectiveInput;
+        // The role a task's Credentials name is read the way its Parameters or Arguments are, and
+        // only under IAM enforcement, the one place it is used.
+        JsonNode credentials = null;
+        boolean readCredentials = stateDef.has("Credentials") && iamEnforcementEnabled();
         if (jsonata) {
             effectiveInput = input;
             if (stateDef.has("Arguments")) {
@@ -806,12 +863,20 @@ public class AslExecutor {
                 effectiveInput = jsonataEvaluator.resolveTemplate(
                         stateDef.get("Arguments"), "Arguments", statesVar, variables);
             }
+            if (readCredentials) {
+                credentials = jsonataEvaluator.resolveTemplate(stateDef.get("Credentials"), "Credentials",
+                        buildStatesVar(input, null, context), variables);
+            }
         } else {
             effectiveInput = applyInputPath(stateDef, input, context);
+            if (readCredentials) {
+                credentials = resolveParameters(stateDef.get("Credentials"), effectiveInput, context);
+            }
             if (stateDef.has("Parameters")) {
                 effectiveInput = resolveParameters(stateDef.get("Parameters"), effectiveInput, context);
             }
         }
+        String credentialsRoleArn = credentials == null ? null : credentials.path("RoleArn").asText(null);
 
         // Registered after the input template resolved, so a template failure leaves no token behind.
         CompletableFuture<JsonNode> tokenFuture = needsToken ? sfnService.get().registerPendingToken(taskToken) : null;
@@ -829,7 +894,7 @@ public class AslExecutor {
                         : invokeResource(effectiveResource, effectiveInput, sm, taskToken,
                                 context.path("Execution").path("Id").asText(null),
                                 executionDeadlineNanos, taskDeadlineNanos,
-                                jsonata ? null : stateDef.path("Parameters"),
+                                jsonata ? null : stateDef.path("Parameters"), credentialsRoleArn,
                                 jobResponse -> addTaskSubmittedEvent(chain, profile, jobResponse));
                 if (tokenFuture != null) {
                     taskResult = awaitToken(tokenFuture, stateDef, taskToken, executionDeadlineNanos,
@@ -1089,12 +1154,15 @@ public class AslExecutor {
     }
 
     /**
+     * @param credentialsRoleArn the role the task's {@code Credentials} name, read only under IAM
+     *                           enforcement, or null when the task runs as the execution role
      * @param jobSubmitted called with the response of the call that started a {@code .sync} job,
      *                     once it has returned and before the job is waited on
      */
     private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken,
                                     String executionArn, long executionDeadlineNanos, long taskDeadlineNanos,
-                                    JsonNode rawParameters, Consumer<JsonNode> jobSubmitted) throws Exception {
+                                    JsonNode rawParameters, String credentialsRoleArn,
+                                    Consumer<JsonNode> jobSubmitted) throws Exception {
         // Support Lambda resources: direct ARN or optimized integration
         String functionName = null;
         String functionRef = null;
@@ -1139,13 +1207,25 @@ public class AslExecutor {
             String region = ref.region() != null ? ref.region() : stateMachineArn.region();
             String accountId = ref.account() == null || ref.account().equals(stateMachineArn.accountId())
                     ? null : ref.account();
-            // Floci evaluates no Lambda resource policy, so under IAM enforcement it answers a
-            // cross-account function as its own Invoke API does: refused.
-            if (accountId != null && iamEnforcementEnabled()) {
-                throw new FailStateException("Lambda.AccessDeniedException",
-                        "User: " + sm.getRoleArn() + " is not authorized to perform: lambda:InvokeFunction"
-                                + " on resource: " + functionRef
-                                + " because no resource-based policy allows the lambda:InvokeFunction action");
+            // The task invokes the function as its role: the execution role, or the role its
+            // Credentials name once the execution role has assumed it. The role's policies or the
+            // function's have to allow the call, and both when the function is in another account.
+            if (iamEnforcementEnabled()) {
+                String invokingRoleArn = sm.getRoleArn();
+                if (credentialsRoleArn != null) {
+                    Optional<String> assumeRefusal = lambdaTaskAuthorizer.assumeRefusal(sm.getRoleArn(),
+                            credentialsRoleArn, sm.getStateMachineArn());
+                    if (assumeRefusal.isPresent()) {
+                        throw new FailStateException("States.Permissions", assumeRefusal.get());
+                    }
+                    invokingRoleArn = credentialsRoleArn;
+                }
+                String functionArn = LambdaArnUtils.functionArn(functionRef, stateMachineArn.partition(), region,
+                        stateMachineArn.accountId());
+                Optional<String> refusal = lambdaTaskAuthorizer.refusal(invokingRoleArn, functionArn);
+                if (refusal.isPresent()) {
+                    throw new FailStateException("Lambda.AccessDeniedException", refusal.get());
+                }
             }
             LambdaFunction fn = resolveLambdaFunction(accountId, region, functionName,
                     extractLambdaQualifier(functionRef));
@@ -1208,6 +1288,12 @@ public class AslExecutor {
             return invokeAwsSdkDynamoDb(camelCaseAction, input, region);
         }
 
+        // AWS SDK service integrations: Redshift Data API (provisioned clusters and Serverless workgroups)
+        if (integration.isSdkService("redshiftdata") && integration.suffix().isEmpty()) {
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeAwsSdkRedshiftData(integration, input, region);
+        }
+
         // AWS SDK service integration: RDS Data API ExecuteStatement
         if (integration.isSdkService("rdsdata")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
@@ -1253,7 +1339,7 @@ public class AslExecutor {
 
         // AWS SDK service integration: EC2 DescribeRegions
         if (integration.isSdk("ec2", "describeRegions")) {
-            return invokeAwsSdkEc2DescribeRegions();
+            return invokeAwsSdkEc2DescribeRegions(sm.getStateMachineArn());
         }
 
         // S3 PutObject — optimized and aws-sdk integrations
@@ -1360,11 +1446,17 @@ public class AslExecutor {
         }
     }
 
-    private JsonNode invokeAwsSdkEc2DescribeRegions() {
+    /**
+     * The regions of the partition the state machine lives in. The partition is read from its ARN,
+     * so a state machine in a region no partition publishes (allowed by
+     * {@code floci.partitions.allow-unknown-regions}) lists the regions of the partition its ARN
+     * was minted in.
+     */
+    private JsonNode invokeAwsSdkEc2DescribeRegions(String stateMachineArn) {
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode regions = objectMapper.createArrayNode();
-        AwsPartition partition = AwsPartitions.byId(
-                RegionResolver.effectivePartition(config.defaultRegion(), config.partitions().id()));
+        AwsPartition partition = AwsPartitions.find(AwsArnUtils.parse(stateMachineArn).partition())
+                .orElseGet(() -> AwsPartitions.forRegionOrCommercial(extractRegionFromArn(stateMachineArn)));
         for (AwsPartition.Region name : ec2Service.describeRegions(partition, false)) {
             ObjectNode region = objectMapper.createObjectNode();
             region.put("RegionName", name.id());
@@ -2283,6 +2375,49 @@ public class AslExecutor {
             return jsonNode;
         }
         return objectMapper.createObjectNode();
+    }
+
+    /**
+     * The Data API is a JSON 1.1 service, so the Task input is already the PascalCase wire request and
+     * the response needs no re-casing. Only the timestamps differ: the wire carries epoch seconds where
+     * the {@code aws-sdk:} integration renders the SDK's ISO-8601 {@code Instant}.
+     */
+    private JsonNode invokeAwsSdkRedshiftData(StatesIntegration integration, JsonNode input, String region) {
+        if (!serviceRegistry.isServiceEnabled("redshift-data")) {
+            throw new FailStateException(sdkExceptionName("RedshiftData", "ServiceNotAvailableException"),
+                    "Service redshift-data is not enabled.");
+        }
+        if (input != null && !input.isObject()) {
+            throw new FailStateException(sdkExceptionName("RedshiftData", "ValidationException"),
+                    "The task input must be a JSON object.");
+        }
+        JsonNode request = input != null ? input : objectMapper.createObjectNode();
+        Response response;
+        try {
+            response = redshiftDataHandler.handle(capitalizeFirst(integration.api()), request, region);
+        } catch (AwsException e) {
+            throw new FailStateException(sdkExceptionName("RedshiftData", e.getErrorCode()), e.getMessage());
+        }
+        if (!(response.getEntity() instanceof JsonNode body)) {
+            return objectMapper.createObjectNode();
+        }
+        JsonNode rendered = body.deepCopy();
+        renderRedshiftDataTimestamps(rendered);
+        return rendered;
+    }
+
+    private static void renderRedshiftDataTimestamps(JsonNode node) {
+        if (node instanceof ObjectNode object) {
+            for (String field : List.of("CreatedAt", "UpdatedAt")) {
+                JsonNode value = object.get(field);
+                if (value != null && value.isNumber()) {
+                    object.put(field, sdkTimestamp(value.asDouble()));
+                }
+            }
+            object.elements().forEachRemaining(AslExecutor::renderRedshiftDataTimestamps);
+        } else if (node instanceof ArrayNode array) {
+            array.elements().forEachRemaining(AslExecutor::renderRedshiftDataTimestamps);
+        }
     }
 
     private JsonNode invokeAwsSdkRdsData(StatesIntegration integration, JsonNode input, String region) {

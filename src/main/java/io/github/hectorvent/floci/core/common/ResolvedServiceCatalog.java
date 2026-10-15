@@ -40,10 +40,12 @@ import io.github.hectorvent.floci.services.iot.IotAuthorizerController;
 import io.github.hectorvent.floci.services.iot.IotController;
 import io.github.hectorvent.floci.services.iot.IotDataController;
 import io.github.hectorvent.floci.services.iot.IotDomainConfigurationController;
+import io.github.hectorvent.floci.services.iot.IotFleetIndexingController;
 import io.github.hectorvent.floci.services.lambda.LambdaController;
 import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionController;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsController;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaNetworkConnectorsController;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebController;
 import io.github.hectorvent.floci.services.macie2.MacieController;
 import io.github.hectorvent.floci.services.marketplace.MarketplaceCatalogController;
 import io.github.hectorvent.floci.services.marketplace.MarketplaceDeploymentController;
@@ -51,6 +53,7 @@ import io.github.hectorvent.floci.services.marketplace.MarketplaceDiscoveryContr
 import io.github.hectorvent.floci.services.marketplace.MarketplaceReportingController;
 import io.github.hectorvent.floci.services.mwaa.MwaaController;
 import io.github.hectorvent.floci.services.oam.OamController;
+import io.github.hectorvent.floci.services.opensearch.ElasticsearchController;
 import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
@@ -102,6 +105,7 @@ public class ResolvedServiceCatalog {
             java.util.Map.of(
                     "s3express", "s3",
                     "iot-jobs-data", "iot",
+                    "monitoring", "cloudwatch",
                     "awsssoportal", "sso");
 
     private final ServiceCatalog catalog;
@@ -144,7 +148,8 @@ public class ResolvedServiceCatalog {
                         Set.of(LambdaController.class,
                                 DurableExecutionController.class,
                                 LambdaMicrovmsController.class,
-                                LambdaNetworkConnectorsController.class)),
+                                LambdaNetworkConnectorsController.class,
+                                LambdaWebController.class)),
                 descriptor("apigateway", "apigateway", config.services().apigateway().enabled(), true,
                         "apigateway", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
@@ -330,7 +335,8 @@ public class ResolvedServiceCatalog {
                         "opensearch", storageMode(config.storage().services().opensearch().mode(), config.storage().mode()),
                         config.storage().services().opensearch().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("es"), Set.of(), Set.of(OpenSearchController.class)),
+                        Set.of(), Set.of("es"), Set.of(),
+                        Set.of(OpenSearchController.class, ElasticsearchController.class)),
                 descriptor("ec2", "ec2", config.services().ec2().enabled(), true,
                         "ec2", storageMode(config.storage().services().ec2().mode(), config.storage().mode()),
                         5000L, AwsNamespaces.EC2, ServiceProtocol.QUERY,
@@ -650,7 +656,7 @@ public class ResolvedServiceCatalog {
                         // signs under its own name while IotController serves its /things/*/jobs routes
                         Set.of(), Set.of("iot", "execute-api", "iot-jobs-data"), Set.of(),
                         Set.of(IotController.class, IotDomainConfigurationController.class,
-                                IotAuthorizerController.class)),
+                                IotAuthorizerController.class, IotFleetIndexingController.class)),
                 descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),

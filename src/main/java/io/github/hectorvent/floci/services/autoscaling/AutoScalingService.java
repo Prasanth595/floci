@@ -9,14 +9,17 @@ import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.autoscaling.model.*;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.Ec2UserDataDecoder;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
+import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -49,6 +52,55 @@ public class AutoScalingService {
             "Amazon EC2 Auto Scaling supports DesiredCapacityType for attribute-based instance type "
                     + "selection only. Specify InstanceRequirements on a MixedInstancesPolicy launch "
                     + "template override, or use the default DesiredCapacityType of units.";
+    static final String INSTANCE_MAINTENANCE_POLICY_BOTH_REQUIRED_MESSAGE =
+            "Both MinHealthyPercentage and MaxHealthyPercentage must be specified in InstanceMaintenancePolicy.";
+    static final String INVALID_MIN_HEALTHY_PERCENTAGE_MESSAGE =
+            "MinHealthyPercentage must be between 0 and 100, or -1 to clear a previously set value.";
+    static final String INVALID_MAX_HEALTHY_PERCENTAGE_MESSAGE =
+            "MaxHealthyPercentage must be between 100 and 200, or -1 to clear a previously set value.";
+    static final String INSTANCE_MAINTENANCE_POLICY_PARTIAL_CLEAR_MESSAGE =
+            "To clear an InstanceMaintenancePolicy, specify -1 for both MinHealthyPercentage and MaxHealthyPercentage.";
+    static final String INSTANCE_MAINTENANCE_POLICY_RANGE_MESSAGE =
+            "The difference between MaxHealthyPercentage and MinHealthyPercentage cannot be greater than 100.";
+    static final Set<String> CAPACITY_DISTRIBUTION_STRATEGIES =
+            Set.of("balanced-only", "balanced-best-effort", "reservations-then-balanced");
+    static final String INVALID_CAPACITY_DISTRIBUTION_STRATEGY_MESSAGE =
+            "The specified value for CapacityDistributionStrategy is not valid. Valid values are: "
+                    + "balanced-only, balanced-best-effort, reservations-then-balanced.";
+    static final Set<String> CAPACITY_RESERVATION_PREFERENCES =
+            Set.of("capacity-reservations-only", "capacity-reservations-first", "none", "default");
+    static final String INVALID_CAPACITY_RESERVATION_PREFERENCE_MESSAGE =
+            "The specified value for CapacityReservationPreference is not valid. Valid values are: "
+                    + "capacity-reservations-only, capacity-reservations-first, none, default.";
+    static final String CAPACITY_RESERVATION_TARGET_WITH_NONE_MESSAGE =
+            "You cannot specify a CapacityReservationTarget when CapacityReservationPreference is none.";
+    static final int MAX_SERVICE_LINKED_ROLE_ARN_LENGTH = 1600;
+    static final int MAX_RESOURCE_NAME_LENGTH = 1600;
+    private static final Pattern CAPACITY_RESERVATION_ID_PATTERN = Pattern.compile("^[A-Za-z0-9\\-_/]+$");
+    static final int MAX_WEIGHTED_CAPACITY_LENGTH = 32;
+    static final String INVALID_SERVICE_LINKED_ROLE_ARN_MESSAGE =
+            "ServiceLinkedRoleARN must be between 1 and 1600 characters long.";
+    static final int MIN_WEIGHTED_CAPACITY = 1;
+    static final int MAX_WEIGHTED_CAPACITY = 999;
+    static final String INVALID_WEIGHTED_CAPACITY_MESSAGE =
+            "WeightedCapacity must be an integer in the range of 1-999.";
+    static final String PARTIAL_WEIGHTED_CAPACITY_MESSAGE =
+            "If you specify a value for WeightedCapacity for one instance type, you must specify a value "
+                    + "for WeightedCapacity for all of them.";
+    public static final List<String> GROUP_METRICS = List.of(
+            "GroupMinSize", "GroupMaxSize", "GroupDesiredCapacity", "GroupInServiceInstances",
+            "GroupPendingInstances", "GroupStandbyInstances", "GroupTerminatingInstances",
+            "GroupTotalInstances", "GroupInServiceCapacity", "GroupPendingCapacity",
+            "GroupStandbyCapacity", "GroupTerminatingCapacity", "GroupTotalCapacity",
+            "WarmPoolDesiredCapacity", "WarmPoolWarmedCapacity", "WarmPoolPendingCapacity",
+            "WarmPoolTerminatingCapacity", "WarmPoolTotalCapacity",
+            "GroupAndWarmPoolDesiredCapacity", "GroupAndWarmPoolTotalCapacity");
+    public static final String METRICS_GRANULARITY = "1Minute";
+    static final String MISSING_GRANULARITY_MESSAGE =
+            "1 validation error detected: Value null at 'granularity' failed to satisfy constraint: "
+                    + "Member must not be null";
+    public static final String INVALID_GRANULARITY_MESSAGE =
+            "Granularity must be 1Minute. 1Minute is the only valid value.";
     static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
             "An active instance refresh with a desired configuration exists. All configuration options derived from the desired configuration are not available for update while the instance refresh is active.";
 
@@ -146,13 +198,18 @@ public class AutoScalingService {
                             .collect(Collectors.toList());
                 }
                 if (isBlank(userData)) {
-                    userData = source.getUserData();
+                    userData = source.getEncodedUserData();
+                    if (userData == null && source.getUserData() != null) {
+                        userData = Base64.getEncoder().encodeToString(
+                                source.getUserData().getBytes(StandardCharsets.UTF_8));
+                    }
                 }
                 if (isBlank(iamInstanceProfile)) {
                     iamInstanceProfile = source.getIamInstanceProfileArn();
                 }
             }
         }
+        Ec2UserDataDecoder.decode(userData);
         LaunchConfiguration lc = new LaunchConfiguration();
         lc.setLaunchConfigurationName(name);
         lc.setLaunchConfigurationArn(
@@ -163,6 +220,7 @@ public class AutoScalingService {
         lc.setKeyName(keyName);
         lc.setSecurityGroups(securityGroups != null ? new ArrayList<>(securityGroups) : new ArrayList<>());
         lc.setUserData(userData);
+        lc.setUserDataBase64Encoded(Boolean.TRUE);
         lc.setIamInstanceProfile(iamInstanceProfile);
         lc.setAssociatePublicIpAddress(associatePublicIpAddress);
         // AWS documents InstanceMonitoring as enabled by default and always returns the
@@ -332,6 +390,58 @@ public class AutoScalingService {
         groups.put(asgKey(region, name), asg);
     }
 
+    /**
+     * EnableMetricsCollection: {@code Granularity} is required and 1Minute is its only valid value.
+     * Naming no metrics enables all of them.
+     */
+    public void enableMetricsCollection(String region, String name, List<String> metrics, String granularity) {
+        if (granularity == null) {
+            throw new AwsException("ValidationError", MISSING_GRANULARITY_MESSAGE, 400);
+        }
+        if (!METRICS_GRANULARITY.equals(granularity)) {
+            throw new AwsException("ValidationError", INVALID_GRANULARITY_MESSAGE, 400);
+        }
+        validateMetricNames(metrics);
+        String key = asgKey(region, name);
+        synchronized (lockFor(key)) {
+            AutoScalingGroup asg = requireGroup(region, name);
+            List<String> requested = metrics == null || metrics.isEmpty() ? GROUP_METRICS : metrics;
+            LinkedHashSet<String> enabled = new LinkedHashSet<>(asg.getEnabledMetrics());
+            enabled.addAll(requested);
+            asg.setEnabledMetrics(new ArrayList<>(enabled));
+            groups.put(key, asg);
+        }
+    }
+
+    /** DisableMetricsCollection: naming no metrics disables all of them. */
+    public void disableMetricsCollection(String region, String name, List<String> metrics) {
+        validateMetricNames(metrics);
+        String key = asgKey(region, name);
+        synchronized (lockFor(key)) {
+            AutoScalingGroup asg = requireGroup(region, name);
+            if (metrics == null || metrics.isEmpty()) {
+                asg.setEnabledMetrics(new ArrayList<>());
+            } else {
+                List<String> remaining = new ArrayList<>(asg.getEnabledMetrics());
+                remaining.removeAll(metrics);
+                asg.setEnabledMetrics(remaining);
+            }
+            groups.put(key, asg);
+        }
+    }
+
+    public static void validateMetricNames(List<String> metrics) {
+        if (metrics == null) {
+            return;
+        }
+        for (String metric : metrics) {
+            if (!GROUP_METRICS.contains(metric)) {
+                throw new AwsException("ValidationError",
+                        "Metric " + metric + " is not a valid Auto Scaling group metric.", 400);
+            }
+        }
+    }
+
     public void deleteAutoScalingGroup(String region, String name, boolean forceDelete) {
         String key = asgKey(region, name);
         synchronized (lockFor(key)) {
@@ -358,11 +468,12 @@ public class AutoScalingService {
                         });
             }
             groups.remove(key);
+            instanceRefreshes.entrySet().removeIf(e -> region.equals(e.getValue().getRegion())
+                    && name.equals(e.getValue().getAutoScalingGroupName()));
         }
         // clean up associated hooks and policies
         hooks.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
         policies.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
-        instanceRefreshes.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
         scheduledActions.entrySet().removeIf(e -> region.equals(e.getValue().getRegion())
                 && name.equals(e.getValue().getAutoScalingGroupName()));
         warmPools.remove(warmPoolKey(region, name));
@@ -392,8 +503,17 @@ public class AutoScalingService {
         }
     }
 
+    void reconcileIfPresent(AutoScalingGroup asg, Runnable reconciliation) {
+        String key = asgKey(asg.getRegion(), asg.getAutoScalingGroupName());
+        synchronized (lockFor(key)) {
+            if (groups.get(key) == asg) {
+                reconciliation.run();
+            }
+        }
+    }
+
     private Object lockFor(String key) {
-        return groupLocks.computeIfAbsent(key, ignored -> new Object());
+        return groupLocks.computeIfAbsent(regionResolver.getAccountId() + "::" + key, ignored -> new Object());
     }
 
     Set<String> autoScalingGroupAccountIds() {
@@ -443,36 +563,38 @@ public class AutoScalingService {
         return requireGroup(region, resourceId);
     }
 
-    // Real AWS suspends the named scaling processes ("Launch", "Terminate", "HealthCheck", ...)
-    // so they stop running until resumed; an empty list suspends all of them. Floci has no
-    // scaling loop for these processes to pause, so this only needs to record which processes
-    // are suspended for DescribeAutoScalingGroups to report back - the same "accept and
-    // remember" shape as terminationPolicies. The AWS provider calls this unconditionally
-    // around ASG creation whenever wait_for_capacity_timeout is non-zero (the default), so an
-    // unimplemented SuspendProcesses fails ASG creation outright, not just a feature gap.
+    // An empty list suspends all processes. The reconciler honors Launch and Terminate
+    // for desired-capacity adjustments and owned refresh replacements. Other names remain
+    // stored state; InstanceRefresh also pauses its owned replacement work.
     private static final List<String> ALL_SCALING_PROCESSES = List.of(
             "Launch", "Terminate", "AddToLoadBalancer", "AlarmNotification", "AZRebalance",
             "HealthCheck", "InstanceRefresh", "ReplaceUnhealthy", "ScheduledActions");
 
     public void suspendProcesses(String region, String name, List<String> processes) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        List<String> toSuspend = processes.isEmpty() ? ALL_SCALING_PROCESSES : processes;
-        Set<String> suspended = new LinkedHashSet<>(asg.getSuspendedProcesses());
-        suspended.addAll(toSuspend);
-        asg.setSuspendedProcesses(new ArrayList<>(suspended));
-        groups.put(asgKey(region, name), asg);
+        String key = asgKey(region, name);
+        synchronized (lockFor(key)) {
+            AutoScalingGroup asg = requireGroup(region, name);
+            List<String> toSuspend = processes.isEmpty() ? ALL_SCALING_PROCESSES : processes;
+            Set<String> suspended = new LinkedHashSet<>(asg.getSuspendedProcesses());
+            suspended.addAll(toSuspend);
+            asg.setSuspendedProcesses(new ArrayList<>(suspended));
+            groups.put(key, asg);
+        }
     }
 
     public void resumeProcesses(String region, String name, List<String> processes) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        if (processes.isEmpty()) {
-            asg.setSuspendedProcesses(new ArrayList<>());
-        } else {
-            List<String> remaining = new ArrayList<>(asg.getSuspendedProcesses());
-            remaining.removeAll(processes);
-            asg.setSuspendedProcesses(remaining);
+        String key = asgKey(region, name);
+        synchronized (lockFor(key)) {
+            AutoScalingGroup asg = requireGroup(region, name);
+            if (processes.isEmpty()) {
+                asg.setSuspendedProcesses(new ArrayList<>());
+            } else {
+                List<String> remaining = new ArrayList<>(asg.getSuspendedProcesses());
+                remaining.removeAll(processes);
+                asg.setSuspendedProcesses(remaining);
+            }
+            groups.put(key, asg);
         }
-        groups.put(asgKey(region, name), asg);
     }
 
     // ── Instance management ────────────────────────────────────────────────────
@@ -562,13 +684,19 @@ public class AutoScalingService {
 
     public void detachInstances(String region, String name, List<String> instanceIds,
                                  boolean decrementDesiredCapacity) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
-        if (decrementDesiredCapacity) {
-            int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - instanceIds.size());
-            asg.setDesiredCapacity(newDesired);
+        String key = asgKey(region, name);
+        synchronized (lockFor(key)) {
+            AutoScalingGroup asg = requireGroup(region, name);
+            List<String> detached = asg.getInstances().stream().map(AsgInstance::getInstanceId)
+                    .filter(instanceIds::contains).toList();
+            releaseRefreshOwnership(asg, detached);
+            asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
+            if (decrementDesiredCapacity) {
+                int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - instanceIds.size());
+                asg.setDesiredCapacity(newDesired);
+            }
+            groups.put(key, asg);
         }
-        groups.put(asgKey(region, name), asg);
     }
 
     public void terminateInstanceInAutoScalingGroup(String region, String instanceId,
@@ -579,67 +707,109 @@ public class AutoScalingService {
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ValidationError",
                         "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
-        asg.getInstances().stream()
-                .filter(i -> instanceId.equals(i.getInstanceId()))
-                .findFirst()
-                .ifPresent(i -> i.setLifecycleState("Terminating"));
-        if (decrementDesiredCapacity) {
-            int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - 1);
-            asg.setDesiredCapacity(newDesired);
+        String key = asgKey(region, asg.getAutoScalingGroupName());
+        synchronized (lockFor(key)) {
+            if (groups.get(key) != asg) {
+                throw new AwsException("ValidationError",
+                        "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400);
+            }
+            AsgInstance instance = asg.getInstances().stream()
+                    .filter(i -> instanceId.equals(i.getInstanceId())).findFirst()
+                    .orElseThrow(() -> new AwsException("ValidationError",
+                            "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
+            releaseRefreshOwnership(asg, List.of(instanceId));
+            instance.setLifecycleState("Terminating");
+            if (decrementDesiredCapacity) {
+                int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - 1);
+                asg.setDesiredCapacity(newDesired);
+            }
+            groups.put(key, asg);
         }
-        groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
+    }
+
+    private void releaseRefreshOwnership(AutoScalingGroup asg, List<String> instanceIds) {
+        InstanceRefresh refresh = activeInstanceRefresh(asg);
+        if (refresh != null && refresh.getReplacements() != null) {
+            refresh.getReplacements().removeIf(replacement -> instanceIds.stream().anyMatch(instanceId ->
+                    instanceId.equals(replacement.getOriginalInstanceId())
+                            || instanceId.equals(replacement.getReplacementInstanceId())));
+            saveInstanceRefresh(refresh);
+        }
     }
 
     // ── Instance refreshes ────────────────────────────────────────────────────
 
     public InstanceRefresh startInstanceRefresh(String region, String asgName, InstanceRefresh requestedRefresh) {
-        AutoScalingGroup asg = requireGroup(region, asgName);
-        boolean activeRefresh = instanceRefreshes.values().stream()
-                .filter(r -> region.equals(r.getRegion()))
-                .filter(r -> asgName.equals(r.getAutoScalingGroupName()))
-                .anyMatch(r -> isActiveRefreshStatus(r.getStatus()));
-        if (activeRefresh) {
-            throw new AwsException("InstanceRefreshInProgress",
-                    "An active instance refresh already exists for Auto Scaling group '" + asgName + "'.", 400);
-        }
+        synchronized (lockFor(asgKey(region, asgName))) {
+            AutoScalingGroup asg = requireGroup(region, asgName);
+            boolean activeRefresh = instanceRefreshes.values().stream()
+                    .filter(r -> region.equals(r.getRegion()))
+                    .filter(r -> asgName.equals(r.getAutoScalingGroupName()))
+                    .anyMatch(r -> isActiveRefreshStatus(r.getStatus()));
+            if (activeRefresh) {
+                throw new AwsException("InstanceRefreshInProgress",
+                        "An active instance refresh already exists for Auto Scaling group '" + asgName + "'.", 400);
+            }
 
-        Instant now = Instant.now();
-        InstanceRefresh refresh = new InstanceRefresh();
-        refresh.setInstanceRefreshId(UUID.randomUUID().toString());
-        refresh.setAutoScalingGroupName(asgName);
-        refresh.setStrategy(normalizeRefreshStrategy(requestedRefresh.getStrategy()));
-        refresh.setStartTime(now);
-        refresh.setRegion(region);
-        copyDesiredConfiguration(requestedRefresh, refresh);
-        copyPreferences(requestedRefresh, refresh);
+            Instant now = Instant.now();
+            InstanceRefresh refresh = new InstanceRefresh();
+            refresh.setInstanceRefreshId(UUID.randomUUID().toString());
+            refresh.setAutoScalingGroupName(asgName);
+            refresh.setStrategy(normalizeRefreshStrategy(requestedRefresh.getStrategy()));
+            refresh.setStartTime(now);
+            refresh.setRegion(region);
+            copyDesiredConfiguration(requestedRefresh, refresh);
+            copyPreferences(requestedRefresh, refresh);
 
-        applyDesiredConfiguration(asg, refresh);
-        List<String> instanceIds = markInstancesForRefresh(asg, refresh);
-        if (instanceIds.isEmpty()) {
-            refresh.setStatus("Successful");
-            refresh.setStatusReason("Instance refresh completed.");
-            refresh.setPercentageComplete(100);
-            refresh.setInstancesToUpdate(0);
-            refresh.setEndTime(now);
-        } else {
-            refresh.setStatus("InProgress");
-            refresh.setStatusReason("Instance refresh in progress.");
-            refresh.setPercentageComplete(0);
-            refresh.setInstancesToUpdate(instanceIds.size());
-        }
-        instanceRefreshes.put(instanceRefreshKey(region, asgName, refresh.getInstanceRefreshId()), refresh);
-        groups.put(asgKey(region, asgName), asg);
-        if (!instanceIds.isEmpty()) {
+            applyDesiredConfiguration(asg, refresh);
+            List<String> instanceIds = markInstancesForRefresh(asg, refresh);
+            List<InstanceRefreshReplacement> replacements = new ArrayList<>();
+            for (String instanceId : instanceIds) {
+                InstanceRefreshReplacement replacement = new InstanceRefreshReplacement();
+                replacement.setOriginalInstanceId(instanceId);
+                replacement.setLaunchClientToken(UUID.randomUUID().toString());
+                replacements.add(replacement);
+            }
+            refresh.setReplacements(replacements);
+            if (instanceIds.isEmpty()) {
+                refresh.setStatus("Successful");
+                refresh.setStatusReason("Instance refresh completed.");
+                refresh.setPercentageComplete(100);
+                refresh.setInstancesToUpdate(0);
+                refresh.setEndTime(now);
+            } else {
+                refresh.setStatus("InProgress");
+                refresh.setStatusReason("Instance refresh in progress.");
+                refresh.setPercentageComplete(0);
+                refresh.setInstancesToUpdate(instanceIds.size());
+            }
+            instanceRefreshes.put(instanceRefreshKey(region, asgName, refresh.getInstanceRefreshId()), refresh);
+            groups.put(asgKey(region, asgName), asg);
+            if (!instanceIds.isEmpty()) {
+                recordActivity(region, asgName,
+                        "Marked EC2 instance(s) for refresh: " + instanceIds,
+                        "At " + now + " an instance refresh selected active instances for replacement.",
+                        "Successful");
+            }
             recordActivity(region, asgName,
-                    "Marked EC2 instance(s) for refresh: " + instanceIds,
-                    "At " + now + " an instance refresh selected active instances for replacement.",
+                    "Started instance refresh " + refresh.getInstanceRefreshId() + ".",
+                    "At " + now + " an instance refresh was started.",
                     "Successful");
+            return refresh;
         }
-        recordActivity(region, asgName,
-                "Started instance refresh " + refresh.getInstanceRefreshId() + ".",
-                "At " + now + " an instance refresh was started.",
-                "Successful");
-        return refresh;
+    }
+
+    InstanceRefresh activeInstanceRefresh(AutoScalingGroup asg) {
+        return instanceRefreshes.values().stream()
+                .filter(refresh -> asg.getRegion().equals(refresh.getRegion()))
+                .filter(refresh -> asg.getAutoScalingGroupName().equals(refresh.getAutoScalingGroupName()))
+                .filter(refresh -> isActiveRefreshStatus(refresh.getStatus()))
+                .findFirst().orElse(null);
+    }
+
+    void saveInstanceRefresh(InstanceRefresh refresh) {
+        instanceRefreshes.put(instanceRefreshKey(refresh.getRegion(), refresh.getAutoScalingGroupName(),
+                refresh.getInstanceRefreshId()), refresh);
     }
 
     public void completeInstanceRefreshIfSettled(String region, String asgName) {
@@ -650,7 +820,19 @@ public class AutoScalingService {
                 .filter(r -> isActiveRefreshStatus(r.getStatus()))
                 .collect(Collectors.toList());
         for (InstanceRefresh refresh : activeRefreshes) {
-            int remaining = remainingInstancesToUpdate(asg);
+            if (refresh.getReplacements() != null) {
+                for (InstanceRefreshReplacement replacement : refresh.getReplacements()) {
+                    if (asg.getInstances().stream().anyMatch(instance ->
+                            instance.getInstanceId().equals(replacement.getReplacementInstanceId())
+                                    && "InService".equals(instance.getLifecycleState()))) {
+                        replacement.setPhase("Complete");
+                    }
+                }
+            }
+            int remaining = refresh.getReplacements() == null ? remainingInstancesToUpdate(asg)
+                    : (int) refresh.getReplacements().stream()
+                    .filter(replacement -> !replacement.isComplete())
+                    .count();
             refresh.setInstancesToUpdate(remaining);
             refresh.setPercentageComplete(remaining == 0 ? 100 : 0);
             if (remaining == 0) {
@@ -1109,6 +1291,7 @@ public class AutoScalingService {
     }
 
     private static void validateLaunchTemplateOverrides(MixedInstancesPolicy mixedInstancesPolicy) {
+        validateWeightedCapacities(overridesOf(mixedInstancesPolicy));
         for (MixedInstancesPolicy.LaunchTemplateOverride override : overridesOf(mixedInstancesPolicy)) {
             MixedInstancesPolicy.InstanceRequirements requirements = override.getInstanceRequirements();
             if (requirements == null || requirements.isEmpty()) {
@@ -1122,6 +1305,36 @@ public class AutoScalingService {
                 throw new AwsException("ValidationError",
                         INSTANCE_REQUIREMENTS_MISSING_RANGES_MESSAGE, 400);
             }
+        }
+    }
+
+    /**
+     * Botocore types {@code WeightedCapacity} as a string of 1-32 characters, while its prose
+     * requires a value in the range 1-999 and requires every override to carry one once any does.
+     */
+    private static void validateWeightedCapacities(List<MixedInstancesPolicy.LaunchTemplateOverride> overrides) {
+        int weighted = 0;
+        for (MixedInstancesPolicy.LaunchTemplateOverride override : overrides) {
+            String weightedCapacity = override.getWeightedCapacity();
+            if (weightedCapacity == null) {
+                continue;
+            }
+            weighted++;
+            if (weightedCapacity.isEmpty() || weightedCapacity.length() > MAX_WEIGHTED_CAPACITY_LENGTH) {
+                throw new AwsException("ValidationError", INVALID_WEIGHTED_CAPACITY_MESSAGE, 400);
+            }
+            int value;
+            try {
+                value = Integer.parseInt(weightedCapacity.trim());
+            } catch (NumberFormatException e) {
+                throw new AwsException("ValidationError", INVALID_WEIGHTED_CAPACITY_MESSAGE, 400);
+            }
+            if (value < MIN_WEIGHTED_CAPACITY || value > MAX_WEIGHTED_CAPACITY) {
+                throw new AwsException("ValidationError", INVALID_WEIGHTED_CAPACITY_MESSAGE, 400);
+            }
+        }
+        if (weighted > 0 && weighted < overrides.size()) {
+            throw new AwsException("ValidationError", PARTIAL_WEIGHTED_CAPACITY_MESSAGE, 400);
         }
     }
 
@@ -1195,6 +1408,81 @@ public class AutoScalingService {
         if (defaultInstanceWarmup != null
                 && defaultInstanceWarmup < AsgOptionalFields.DEFAULT_INSTANCE_WARMUP_REMOVAL_SENTINEL) {
             throw new AwsException("ValidationError", INVALID_DEFAULT_INSTANCE_WARMUP_MESSAGE, 400);
+        }
+        String serviceLinkedRoleArn = optionalFields.serviceLinkedRoleArn();
+        if (serviceLinkedRoleArn != null
+                && (serviceLinkedRoleArn.isEmpty() || serviceLinkedRoleArn.length() > MAX_SERVICE_LINKED_ROLE_ARN_LENGTH)) {
+            throw new AwsException("ValidationError", INVALID_SERVICE_LINKED_ROLE_ARN_MESSAGE, 400);
+        }
+        validateInstanceMaintenancePolicy(optionalFields.instanceMaintenancePolicy());
+        AvailabilityZoneDistribution azDistribution = optionalFields.availabilityZoneDistribution();
+        if (azDistribution != null && azDistribution.getCapacityDistributionStrategy() != null
+                && !CAPACITY_DISTRIBUTION_STRATEGIES.contains(azDistribution.getCapacityDistributionStrategy())) {
+            throw new AwsException("ValidationError", INVALID_CAPACITY_DISTRIBUTION_STRATEGY_MESSAGE, 400);
+        }
+        validateCapacityReservationSpecification(optionalFields.capacityReservationSpecification());
+    }
+
+    /**
+     * Botocore bounds MinHealthyPercentage to [-1, 100] and MaxHealthyPercentage to [-1, 200], and
+     * its prose narrows the maximum to 100-200, requires both members, caps their difference at 100,
+     * and reserves -1 for clearing a previously set policy.
+     */
+    private static void validateInstanceMaintenancePolicy(InstanceMaintenancePolicy policy) {
+        if (policy == null) {
+            return;
+        }
+        Integer min = policy.getMinHealthyPercentage();
+        Integer max = policy.getMaxHealthyPercentage();
+        if (min == null || max == null) {
+            throw new AwsException("ValidationError", INSTANCE_MAINTENANCE_POLICY_BOTH_REQUIRED_MESSAGE, 400);
+        }
+        if (policy.isRemoval()) {
+            return;
+        }
+        if (min == InstanceMaintenancePolicy.REMOVAL_SENTINEL || max == InstanceMaintenancePolicy.REMOVAL_SENTINEL) {
+            throw new AwsException("ValidationError", INSTANCE_MAINTENANCE_POLICY_PARTIAL_CLEAR_MESSAGE, 400);
+        }
+        if (min < 0 || min > 100) {
+            throw new AwsException("ValidationError", INVALID_MIN_HEALTHY_PERCENTAGE_MESSAGE, 400);
+        }
+        if (max < 100 || max > 200) {
+            throw new AwsException("ValidationError", INVALID_MAX_HEALTHY_PERCENTAGE_MESSAGE, 400);
+        }
+        if (max - min > 100) {
+            throw new AwsException("ValidationError", INSTANCE_MAINTENANCE_POLICY_RANGE_MESSAGE, 400);
+        }
+    }
+
+    private static void validateCapacityReservationSpecification(CapacityReservationSpecification specification) {
+        if (specification == null) {
+            return;
+        }
+        String preference = specification.getCapacityReservationPreference();
+        if (preference != null && !CAPACITY_RESERVATION_PREFERENCES.contains(preference)) {
+            throw new AwsException("ValidationError", INVALID_CAPACITY_RESERVATION_PREFERENCE_MESSAGE, 400);
+        }
+        if ("none".equals(preference) && specification.hasTarget()) {
+            throw new AwsException("ValidationError", CAPACITY_RESERVATION_TARGET_WITH_NONE_MESSAGE, 400);
+        }
+        for (String id : specification.getCapacityReservationIds()) {
+            if (id == null || id.isEmpty() || id.length() > 255
+                    || !CAPACITY_RESERVATION_ID_PATTERN.matcher(id).matches()) {
+                throw new AwsException("ValidationError",
+                        "1 validation error detected: Value '" + id
+                                + "' at 'capacityReservationSpecification.capacityReservationTarget"
+                                + ".capacityReservationIds' failed to satisfy constraint: Member must have length "
+                                + "between 1 and 255 and satisfy regular expression pattern: [A-Za-z0-9\\-_\\/]+",
+                        400);
+            }
+        }
+        for (String arn : specification.getCapacityReservationResourceGroupArns()) {
+            if (arn == null || arn.isEmpty() || arn.length() > MAX_RESOURCE_NAME_LENGTH) {
+                throw new AwsException("ValidationError",
+                        "1 validation error detected: Value at 'capacityReservationSpecification"
+                                + ".capacityReservationTarget.capacityReservationResourceGroupArns' failed to "
+                                + "satisfy constraint: Member must have length between 1 and 1600", 400);
+            }
         }
     }
 
