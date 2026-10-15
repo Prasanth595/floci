@@ -223,11 +223,11 @@ public class RdsExportTaskService implements Resettable {
         }
         if (ExportTask.STATUS_CANCELING.equals(current.get().getStatus())) {
             // Canceled before its worker started: nothing to restore, nothing to stop.
-            finish(region, taskId, ExportTask.STATUS_CANCELED, null, null);
+            finish(region, taskId, startedIn, ExportTask.STATUS_CANCELED, null, null);
             return;
         }
         if (mock) {
-            finish(region, taskId, ExportTask.STATUS_COMPLETE, null,
+            finish(region, taskId, startedIn, ExportTask.STATUS_COMPLETE, null,
                     new SnapshotExporter.Outcome(0, List.of(), Instant.now(clock)));
             return;
         }
@@ -235,6 +235,9 @@ public class RdsExportTaskService implements Resettable {
             @Override
             public void extracting(int percent) {
                 synchronized (lock) {
+                    if (abandonedByReset()) {
+                        return;
+                    }
                     tasks.get(key(region, taskId))
                             .filter(task -> !task.isTerminal() && !ExportTask.STATUS_CANCELING.equals(task.getStatus()))
                             .ifPresent(task -> {
@@ -247,28 +250,33 @@ public class RdsExportTaskService implements Resettable {
 
             @Override
             public boolean canceled() {
-                return generation.get() != startedIn || tasks.get(key(region, taskId))
+                return abandonedByReset() || tasks.get(key(region, taskId))
                         .map(task -> ExportTask.STATUS_CANCELING.equals(task.getStatus()) || task.isTerminal())
                         .orElse(true);
+            }
+
+            @Override
+            public boolean abandonedByReset() {
+                return generation.get() != startedIn;
             }
         };
         try {
             SnapshotExporter.Outcome outcome = exporter.export(current.get(), source, progress);
-            if (generation.get() != startedIn) {
-                LOG.infov("RDS export task {0} abandoned by an emulator reset", taskId);
-                return;
-            }
-            finish(region, taskId, ExportTask.STATUS_COMPLETE, null, outcome);
+            finish(region, taskId, startedIn, ExportTask.STATUS_COMPLETE, null, outcome);
         } catch (RuntimeException e) {
             LOG.warnv(e, "RDS export task {0} failed", taskId);
-            finish(region, taskId, ExportTask.STATUS_FAILED, e.getMessage(), null);
+            finish(region, taskId, startedIn, ExportTask.STATUS_FAILED, e.getMessage(), null);
         }
     }
 
     /** A task canceled while it ran ends {@code CANCELED} whatever its worker reached. */
-    private void finish(String region, String taskId, String status, String failureCause,
+    private void finish(String region, String taskId, int startedIn, String status, String failureCause,
                         SnapshotExporter.Outcome outcome) {
         synchronized (lock) {
+            if (generation.get() != startedIn) {
+                LOG.infov("RDS export task {0} abandoned by an emulator reset", taskId);
+                return;
+            }
             Optional<ExportTask> current = tasks.get(key(region, taskId));
             if (current.isEmpty() || current.get().isTerminal()) {
                 return;

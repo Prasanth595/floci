@@ -144,7 +144,7 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
                 break;
             }
             Table table = tables.get(i);
-            long written = exportTable(task, source, containerId, layout, table, i + 1);
+            long written = exportTable(task, source, containerId, layout, table, i + 1, progress);
             bytes += written;
             perTableStatus.add(tableStatus(table, written));
             progress.extracting((i + 1) * 100 / tables.size());
@@ -178,7 +178,7 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
      * RDS writes none for an empty partition.
      */
     private long exportTable(ExportTask task, SnapshotExportSource source, String containerId,
-                             ExportLayout layout, Table table, int tableNumber) {
+                             ExportLayout layout, Table table, int tableNumber, Progress progress) {
         List<String> extract = new ArrayList<>();
         List<String> write = new ArrayList<>();
         List<String> types = new ArrayList<>();
@@ -216,6 +216,9 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
                     + "' (FORMAT PARQUET, COMPRESSION GZIP)";
             duckClient.execute("SELECT 1 AS ok", copy, null, task.getAccountId());
             byte[] parquet = s3Service.getObject(stagingBucket, stagedParquet).getData();
+            if (progress.abandonedByReset()) {
+                return size;
+            }
             s3Service.putObject(task.getS3Bucket(), layout.dataFileKey(table.database(), table.schema(), table.name()),
                     parquet, PARQUET, Map.of());
             return size;

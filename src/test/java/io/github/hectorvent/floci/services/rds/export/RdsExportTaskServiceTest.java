@@ -348,6 +348,27 @@ class RdsExportTaskServiceTest {
     }
 
     @Test
+    void aWorkerThatOutlivesAResetLeavesTheNewTaskWithItsIdentifierAlone() {
+        RdsExportTaskService[] holder = new RdsExportTaskService[1];
+        holder[0] = service((task, source, progress) -> {
+            holder[0].beforeReset();
+            holder[0].clear();
+            holder[0].afterReset();
+            start(holder[0], task.getExportTaskIdentifier(), List.of());
+            progress.extracting(50);
+            throw new IllegalStateException("the restore container was removed by the reset");
+        });
+        start(holder[0], "appdb-export", List.of());
+
+        runWorkers();
+
+        ExportTask restarted = describe(holder[0], "appdb-export");
+        assertThat(restarted.getStatus(), equalTo("STARTING"));
+        assertThat(restarted.getPercentProgress(), equalTo(0));
+        assertThat(restarted.getFailureCause(), nullValue());
+    }
+
+    @Test
     void theTaskEndsAtTheTimeItsExportRecorded() {
         Instant finished = Instant.parse("2026-10-13T09:05:00Z");
         RdsExportTaskService service = service((task, source, progress) ->

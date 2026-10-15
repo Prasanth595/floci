@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -65,6 +66,11 @@ class PostgresSnapshotExporterTest {
 
         @Override
         public boolean canceled() {
+            return false;
+        }
+
+        @Override
+        public boolean abandonedByReset() {
             return false;
         }
     };
@@ -166,6 +172,36 @@ class PostgresSnapshotExporterTest {
         verify(s3Service).deleteObject(STAGING, "rds-export/export-0123456789abcdef/1/part-0.ndjson");
         verify(s3Service).deleteObject(STAGING, "rds-export/export-0123456789abcdef/1/data.gz.parquet");
         verify(containerManager).discardExport("export-0123456789abcdef");
+    }
+
+    @Test
+    void aTableFinishedAfterAResetIsNotWrittenToTheExportBucket() {
+        tableRows("{\"id\":1}\n");
+        AtomicBoolean reset = new AtomicBoolean();
+        doAnswer(invocation -> {
+            reset.set(true);
+            return null;
+        }).when(duckClient).execute(anyString(), anyString(), isNull(), anyString());
+        SnapshotExporter.Progress resetMidTable = new SnapshotExporter.Progress() {
+            @Override
+            public void extracting(int percent) {
+            }
+
+            @Override
+            public boolean canceled() {
+                return reset.get();
+            }
+
+            @Override
+            public boolean abandonedByReset() {
+                return reset.get();
+            }
+        };
+
+        exporter.export(task(), source, resetMidTable);
+
+        verify(s3Service, never()).putObject(eq("exports"), anyString(), any(), anyString(), any());
+        verify(s3Service).deleteObject(STAGING, "rds-export/export-0123456789abcdef/1/data.gz.parquet");
     }
 
     @Test

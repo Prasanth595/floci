@@ -16,6 +16,8 @@ public interface SnapshotExporter {
 
         /** True once the task was canceled, which stops the export before its next table. */
         boolean canceled();
+
+        boolean abandonedByReset();
     }
 
     /**
