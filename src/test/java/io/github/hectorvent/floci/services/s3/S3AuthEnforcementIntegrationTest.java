@@ -2424,6 +2424,14 @@ class S3AuthEnforcementIntegrationTest {
 
         given().filter(LOCAL_SIGNER).body(controls)
             .when().put("/" + bucket + "?ownershipControls")
+            .then().statusCode(400).body(containsString("InvalidBucketAclWithObjectOwnership"));
+        given().filter(LOCAL_SIGNER).when().get("/" + bucket + "?ownershipControls")
+            .then().statusCode(404);
+        given().filter(LOCAL_SIGNER).header("x-amz-acl", "private")
+            .when().put("/" + bucket + "?acl")
+            .then().statusCode(200);
+        given().filter(LOCAL_SIGNER).body(controls)
+            .when().put("/" + bucket + "?ownershipControls")
             .then().statusCode(200);
 
         given().when().get("/" + bucket + "/data.txt").then().statusCode(403);
@@ -2436,6 +2444,10 @@ class S3AuthEnforcementIntegrationTest {
         given().filter(LOCAL_SIGNER).when().delete("/" + bucket + "?ownershipControls")
             .then().statusCode(204);
         given().when().get("/" + bucket + "/data.txt").then().statusCode(200);
+        given().when().get("/" + bucket + "?list-type=2").then().statusCode(403);
+        given().filter(LOCAL_SIGNER).header("x-amz-acl", "public-read")
+            .when().put("/" + bucket + "?acl")
+            .then().statusCode(200);
         given().when().get("/" + bucket + "?list-type=2").then().statusCode(200);
     }
 

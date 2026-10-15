@@ -202,4 +202,32 @@ class S3OwnershipControlsIntegrationTest {
             .statusCode(404)
             .body(containsString("OwnershipControlsNotFoundError"));
     }
+
+    @Test
+    @Order(9)
+    void enforcedOwnershipRejectsBucketAclGrantedToAnotherCanonicalUser() {
+        String bucket = BUCKET + "-nonowner-grant";
+        String acl = """
+                <AccessControlPolicy xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <Owner><ID>000000000000</ID></Owner>
+                  <AccessControlList>
+                    <Grant><Grantee><ID>000000000000</ID></Grantee><Permission>FULL_CONTROL</Permission></Grant>
+                    <Grant><Grantee><ID>111111111111</ID></Grantee><Permission>READ</Permission></Grant>
+                  </AccessControlList>
+                </AccessControlPolicy>
+                """;
+        String enforced = OWNERSHIP_CONTROLS_XML.replace("BucketOwnerPreferred", "BucketOwnerEnforced");
+
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body(acl).when().put("/" + bucket + "?acl").then().statusCode(200);
+        given().body(enforced).when().put("/" + bucket + "?ownershipControls")
+                .then().statusCode(400).body(containsString("InvalidBucketAclWithObjectOwnership"));
+        given().when().get("/" + bucket + "?ownershipControls")
+                .then().statusCode(404);
+
+        given().header("x-amz-acl", "private").when().put("/" + bucket + "?acl")
+                .then().statusCode(200);
+        given().body(enforced).when().put("/" + bucket + "?ownershipControls")
+                .then().statusCode(200);
+    }
 }

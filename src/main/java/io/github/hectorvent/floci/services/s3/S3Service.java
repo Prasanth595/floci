@@ -5193,6 +5193,11 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         validateOwnershipControls(ownershipControlsXml);
+        if (XmlParser.containsValue(ownershipControlsXml, "ObjectOwnership", "BucketOwnerEnforced")
+                && S3AclPublicAccessEvaluator.aclGrantsNonOwner(bucket.getAcl(), ownerId())) {
+            throw new AwsException("InvalidBucketAclWithObjectOwnership",
+                    "Bucket cannot have ACLs set with ObjectOwnership's BucketOwnerEnforced setting", 400);
+        }
         bucket.setOwnershipControlsConfiguration(ownershipControlsXml);
         bucketStore.put(bucketName, bucket);
     }
