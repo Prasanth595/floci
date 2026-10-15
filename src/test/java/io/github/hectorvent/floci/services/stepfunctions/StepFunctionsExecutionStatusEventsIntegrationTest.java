@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.StepFunctionsExecutions;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
@@ -18,9 +19,12 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * "Step Functions Execution Status Change" events reach an EventBridge rule's SQS target for every
- * status a STANDARD execution enters, and never for an EXPRESS one. Each test routes its own state
- * machine's events to its own queue, so executions started by other test classes sharing this
- * Quarkus app do not leak in.
+ * status a STANDARD execution enters. Each test routes its own state machine's events to its own
+ * queue, so executions started by other test classes sharing this Quarkus app do not leak in.
+ *
+ * <p>Only events that should arrive are asserted here. The absences, nothing for an EXPRESS
+ * execution and no second ABORTED from the worker after StopExecution, are verified without
+ * waiting on an empty queue in {@code StepFunctionsServiceExecutionEventsTest}.
  */
 @QuarkusTest
 class StepFunctionsExecutionStatusEventsIntegrationTest {
@@ -45,7 +49,7 @@ class StepFunctionsExecutionStatusEventsIntegrationTest {
         String queueUrl = routeEventsTo("status-events-pass", smArn);
 
         String execArn = startExecution(smArn, "{\\\"job\\\":1}");
-        waitForTerminalState(execArn);
+        StepFunctionsExecutions.waitForTerminalState(execArn);
 
         List<JsonNode> events = receiveEvents(queueUrl, 2);
         assertEquals(List.of("RUNNING", "SUCCEEDED"), statuses(events));
@@ -68,7 +72,6 @@ class StepFunctionsExecutionStatusEventsIntegrationTest {
         assertTrue(succeeded.path("stopDate").asLong() >= succeeded.path("startDate").asLong());
         // Epoch milliseconds, as AWS sends, not DescribeExecution's epoch seconds.
         assertTrue(succeeded.path("startDate").asLong() > 1_000_000_000_000L);
-        assertNoMoreEvents(queueUrl);
     }
 
     @Test
@@ -78,14 +81,13 @@ class StepFunctionsExecutionStatusEventsIntegrationTest {
                 """);
         String queueUrl = routeEventsTo("status-events-fail", smArn);
 
-        waitForTerminalState(startExecution(smArn, "{}"));
+        StepFunctionsExecutions.waitForTerminalState(startExecution(smArn, "{}"));
 
         List<JsonNode> events = receiveEvents(queueUrl, 2);
         assertEquals(List.of("RUNNING", "FAILED"), statuses(events));
         JsonNode failed = events.get(1).path("detail");
         assertEquals("Job.Broken", failed.path("error").asText());
         assertEquals("boom", failed.path("cause").asText());
-        assertNoMoreEvents(queueUrl);
     }
 
     @Test
@@ -95,7 +97,7 @@ class StepFunctionsExecutionStatusEventsIntegrationTest {
                 """);
         String queueUrl = routeEventsTo("status-events-timeout", smArn);
 
-        waitForTerminalState(startExecution(smArn, "{}"));
+        StepFunctionsExecutions.waitForTerminalState(startExecution(smArn, "{}"));
 
         List<JsonNode> events = receiveEvents(queueUrl, 2);
         assertEquals(List.of("RUNNING", "TIMED_OUT"), statuses(events));
@@ -103,7 +105,6 @@ class StepFunctionsExecutionStatusEventsIntegrationTest {
         assertEquals("States.Timeout", timedOut.path("error").asText());
         assertEquals("REDRIVABLE", timedOut.path("redriveStatus").asText());
         assertEquals("Execution is TIMED_OUT and is redrivable", timedOut.path("redriveStatusReason").asText());
-        assertNoMoreEvents(queueUrl);
     }
 
     @Test
@@ -126,20 +127,6 @@ class StepFunctionsExecutionStatusEventsIntegrationTest {
         List<JsonNode> events = receiveEvents(queueUrl, 2);
         assertEquals(List.of("RUNNING", "ABORTED"), statuses(events));
         assertEquals("Halted", events.get(1).path("detail").path("error").asText());
-        // The worker leaving the Wait state must not publish a second ABORTED.
-        assertNoMoreEvents(queueUrl);
-    }
-
-    @Test
-    void expressExecutionEmitsNothing() throws Exception {
-        String smArn = createStateMachine("status-events-express", "EXPRESS", """
-                {"StartAt": "P", "States": {"P": {"Type": "Pass", "End": true}}}
-                """);
-        String queueUrl = routeEventsTo("status-events-express", smArn);
-
-        startExecution(smArn, "{}");
-
-        assertNoMoreEvents(queueUrl);
     }
 
     private static List<String> statuses(List<JsonNode> events) {
@@ -209,11 +196,6 @@ class StepFunctionsExecutionStatusEventsIntegrationTest {
         return events;
     }
 
-    private static void assertNoMoreEvents(String queueUrl) throws Exception {
-        List<JsonNode> extra = receive(queueUrl, 2);
-        assertTrue(extra.isEmpty(), "Unexpected events on " + queueUrl + ": " + extra);
-    }
-
     private static List<JsonNode> receive(String queueUrl, int waitSeconds) throws Exception {
         Response resp = given()
                 .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
@@ -251,23 +233,6 @@ class StepFunctionsExecutionStatusEventsIntegrationTest {
                 .when().post("/");
         resp.then().statusCode(200);
         return resp.jsonPath().getString("executionArn");
-    }
-
-    private static void waitForTerminalState(String execArn) throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            Response resp = given()
-                    .header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
-                    .contentType(SFN_CONTENT_TYPE)
-                    .body("""
-                            {"executionArn": "%s"}
-                            """.formatted(execArn))
-                    .when().post("/");
-            if (!"RUNNING".equals(resp.jsonPath().getString("status"))) {
-                return;
-            }
-            Thread.sleep(100);
-        }
-        fail("Execution did not complete within timeout: " + execArn);
     }
 
     private static String quote(String raw) {
