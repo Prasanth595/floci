@@ -365,6 +365,17 @@ class LambdaWebServiceTest {
     }
 
     @Test
+    void revisionMatchesComparesTheConfigurationAfterDefaults() {
+        LambdaWebService service = service();
+        WebFunction fn = service.createFunction(REGION, createRequest("app"));
+        WebFunctionRevision revision = fn.revisions.values().iterator().next();
+        assertTrue(service.revisionMatches(revision, revisionConfig(30)));
+        assertFalse(service.revisionMatches(revision, revisionConfig(31)));
+        ObjectNode described = revisionConfig(30).put("description", "d");
+        assertFalse(service.revisionMatches(revision, described));
+    }
+
+    @Test
     void identifiersAcceptArnsOfTheHomeRegionAndAccount() {
         LambdaWebService service = service();
         WebFunction fn = service.createFunction(REGION, createRequest("app"));

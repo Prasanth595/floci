@@ -219,6 +219,27 @@ public class LambdaWebService implements Resettable {
         }
     }
 
+    /** A function with no revision and no endpoint, for AWS::Lambda::WebFunction. */
+    public WebFunction createFunctionShell(String region, String functionName, Map<String, String> tags) {
+        if (functionName == null || !FUNCTION_NAME.matcher(functionName).matches()) {
+            throw invalidFunctionName(functionName);
+        }
+        LambdaWebValidation validation = new LambdaWebValidation();
+        validateTagsShape(validation, "tags", tags);
+        validation.throwIfAny();
+        requireValidTags(tags);
+        String accountId = regionResolver.getAccountId();
+        synchronized (lockFor(region, functionName)) {
+            if (functions.get(key(region, functionName)).isPresent()) {
+                throw new AwsException("ConflictException",
+                        "The function " + functionArn(region, accountId, functionName) + " already exists.", 409);
+            }
+            WebFunction fn = newFunction(region, accountId, functionName, tags);
+            functions.put(key(region, functionName), fn);
+            return copy(fn, WebFunction.class);
+        }
+    }
+
     private WebFunction newFunction(String region, String accountId, String functionName, Map<String, String> tags) {
         WebFunction fn = new WebFunction();
         fn.functionName = functionName;
@@ -335,6 +356,26 @@ public class LambdaWebService implements Resettable {
             fn.updatedAt = now();
             persist(region, fn);
         }
+    }
+
+    /** Whether a revision already carries the configuration a request describes. */
+    public boolean revisionMatches(WebFunctionRevision existing, JsonNode request) {
+        WebFunctionRevision desired = new WebFunctionRevision();
+        desired.description = LambdaWebJson.text(request, "description");
+        desired.kmsKeyArn = LambdaWebJson.text(request, "kmsKeyArn");
+        desired.buildConfig = buildConfigOf(LambdaWebJson.structure(request, "buildConfig"));
+        desired.serviceConfig = serviceConfigOf(LambdaWebJson.structure(request, "serviceConfig"),
+                existing.serviceConfig.logGroup);
+        return objectMapper.valueToTree(configOnly(existing)).equals(objectMapper.valueToTree(configOnly(desired)));
+    }
+
+    private static WebFunctionRevision configOnly(WebFunctionRevision revision) {
+        WebFunctionRevision copy = new WebFunctionRevision();
+        copy.description = revision.description;
+        copy.kmsKeyArn = revision.kmsKeyArn;
+        copy.buildConfig = revision.buildConfig;
+        copy.serviceConfig = revision.serviceConfig;
+        return copy;
     }
 
     private static WebFunctionRevision revision(WebFunction fn, String revisionId) {
@@ -895,6 +936,21 @@ public class LambdaWebService implements Resettable {
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
             tagKeys.forEach(fn.tags::remove);
+            fn.updatedAt = now();
+            persist(region, fn);
+        }
+    }
+
+    /** Sets the stored tags to exactly {@code desired}, for AWS::Lambda::WebFunction. */
+    public void replaceTags(String region, String functionNameOrArn, Map<String, String> desired) {
+        LambdaWebValidation validation = new LambdaWebValidation();
+        validateTagsShape(validation, "tags", desired);
+        validation.throwIfAny();
+        requireValidTags(desired);
+        String functionName = resolveFunctionName(region, functionNameOrArn, "TagResource");
+        synchronized (lockFor(region, functionName)) {
+            WebFunction fn = function(region, functionName);
+            fn.tags = new LinkedHashMap<>(desired);
             fn.updatedAt = now();
             persist(region, fn);
         }
