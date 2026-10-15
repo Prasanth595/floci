@@ -20,7 +20,8 @@ import java.util.regex.Pattern;
  * the vendored {@code aws/redshift-serverless-request-shapes.json}, generated from botocore's
  * Redshift Serverless model by {@code tools/aws/regen_redshift_serverless_shapes.py}.
  *
- * <p>A JSON null counts as an absent member and a member the model does not know is ignored. A
+ * <p>A pattern must match the whole value, as AWS applies the unanchored ones such as the account id, and a
+ * length counts Unicode code points, not UTF-16 units. A JSON null counts as an absent member and a member the model does not know is ignored. A
  * member of the wrong JSON type is left for {@link ServerlessSupport} to report when the handler
  * reads it, so this check only judges values it can read as the modeled type.
  */
@@ -114,11 +115,11 @@ final class RedshiftServerlessRequestShapes {
     }
 
     private static void checkString(Shape shape, String value, String path) {
-        checkBounds(shape, value.length(), path, "length");
+        checkBounds(shape, value.codePointCount(0, value.length()), path, "length");
         if (shape.enumValues() != null && !shape.enumValues().contains(value)) {
             throw ServerlessSupport.validation(path + " must be one of " + shape.enumValues() + ".");
         }
-        if (shape.pattern() != null && !shape.pattern().matcher(value).find()) {
+        if (shape.pattern() != null && !shape.pattern().matcher(value).matches()) {
             throw ServerlessSupport.validation(path + " must match the pattern " + shape.pattern().pattern() + ".");
         }
     }

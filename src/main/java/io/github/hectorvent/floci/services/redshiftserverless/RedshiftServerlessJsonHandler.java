@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Redshift Serverless JSON 1.1 handler. Dispatched from
@@ -60,38 +61,42 @@ public class RedshiftServerlessJsonHandler {
     public Response handle(String action, JsonNode request, String region, String authorizationHeader) {
         LOG.debugv("Redshift Serverless action: {0}", action);
         try {
-            RedshiftServerlessRequestShapes.check(action, request);
-            return switch (action) {
-                case "CreateNamespace" -> handleCreateNamespace(request, region);
-                case "GetNamespace" -> handleGetNamespace(request, region);
-                case "ListNamespaces" -> handleListNamespaces(request, region);
-                case "UpdateNamespace" -> handleUpdateNamespace(request, region);
-                case "DeleteNamespace" -> handleDeleteNamespace(request, region);
-                case "CreateWorkgroup" -> handleCreateWorkgroup(request, region);
-                case "GetWorkgroup" -> handleGetWorkgroup(request, region);
-                case "ListWorkgroups" -> handleListWorkgroups(request, region);
-                case "UpdateWorkgroup" -> handleUpdateWorkgroup(request, region);
-                case "DeleteWorkgroup" -> handleDeleteWorkgroup(request, region);
-                case "CreateSnapshot" -> handleCreateSnapshot(request, region);
-                case "GetSnapshot" -> handleGetSnapshot(request, region);
-                case "ListSnapshots" -> handleListSnapshots(request, region);
-                case "UpdateSnapshot" -> handleUpdateSnapshot(request, region);
-                case "DeleteSnapshot" -> handleDeleteSnapshot(request, region);
-                case "RestoreFromSnapshot" -> handleRestoreFromSnapshot(request, region);
-                case "CreateUsageLimit" -> handleCreateUsageLimit(request, region);
-                case "GetUsageLimit" -> handleGetUsageLimit(request, region);
-                case "ListUsageLimits" -> handleListUsageLimits(request, region);
-                case "UpdateUsageLimit" -> handleUpdateUsageLimit(request, region);
-                case "DeleteUsageLimit" -> handleDeleteUsageLimit(request, region);
-                case "GetCredentials" -> handleGetCredentials(request, region, authorizationHeader);
-                case "ListTagsForResource" -> handleListTagsForResource(request, region);
-                case "TagResource" -> handleTagResource(request, region);
-                case "UntagResource" -> handleUntagResource(request, region);
-                default -> Response.status(400)
+            Supplier<Response> operation = switch (action) {
+                case "CreateNamespace" -> () -> handleCreateNamespace(request, region);
+                case "GetNamespace" -> () -> handleGetNamespace(request, region);
+                case "ListNamespaces" -> () -> handleListNamespaces(request, region);
+                case "UpdateNamespace" -> () -> handleUpdateNamespace(request, region);
+                case "DeleteNamespace" -> () -> handleDeleteNamespace(request, region);
+                case "CreateWorkgroup" -> () -> handleCreateWorkgroup(request, region);
+                case "GetWorkgroup" -> () -> handleGetWorkgroup(request, region);
+                case "ListWorkgroups" -> () -> handleListWorkgroups(request, region);
+                case "UpdateWorkgroup" -> () -> handleUpdateWorkgroup(request, region);
+                case "DeleteWorkgroup" -> () -> handleDeleteWorkgroup(request, region);
+                case "CreateSnapshot" -> () -> handleCreateSnapshot(request, region);
+                case "GetSnapshot" -> () -> handleGetSnapshot(request, region);
+                case "ListSnapshots" -> () -> handleListSnapshots(request, region);
+                case "UpdateSnapshot" -> () -> handleUpdateSnapshot(request, region);
+                case "DeleteSnapshot" -> () -> handleDeleteSnapshot(request, region);
+                case "RestoreFromSnapshot" -> () -> handleRestoreFromSnapshot(request, region);
+                case "CreateUsageLimit" -> () -> handleCreateUsageLimit(request, region);
+                case "GetUsageLimit" -> () -> handleGetUsageLimit(request, region);
+                case "ListUsageLimits" -> () -> handleListUsageLimits(request, region);
+                case "UpdateUsageLimit" -> () -> handleUpdateUsageLimit(request, region);
+                case "DeleteUsageLimit" -> () -> handleDeleteUsageLimit(request, region);
+                case "GetCredentials" -> () -> handleGetCredentials(request, region, authorizationHeader);
+                case "ListTagsForResource" -> () -> handleListTagsForResource(request, region);
+                case "TagResource" -> () -> handleTagResource(request, region);
+                case "UntagResource" -> () -> handleUntagResource(request, region);
+                default -> null;
+            };
+            if (operation == null) {
+                return Response.status(400)
                         .entity(new AwsErrorResponse("UnknownOperationException",
                                 "Operation " + action + " is not supported."))
                         .build();
-            };
+            }
+            RedshiftServerlessRequestShapes.check(action, request);
+            return operation.get();
         } catch (AwsException e) {
             return JsonErrorResponseUtils.createErrorResponse(e);
         } catch (Exception e) {
@@ -102,12 +107,12 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleCreateNamespace(JsonNode request, String region) {
         Namespace namespace = service.createNamespace(
-                text(request, "namespaceName"),
-                text(request, "adminUsername"),
-                text(request, "adminUserPassword"),
-                text(request, "dbName"),
-                text(request, "kmsKeyId"),
-                text(request, "defaultIamRoleArn"),
+                ServerlessSupport.text(request, "namespaceName"),
+                ServerlessSupport.text(request, "adminUsername"),
+                ServerlessSupport.text(request, "adminUserPassword"),
+                ServerlessSupport.text(request, "dbName"),
+                ServerlessSupport.text(request, "kmsKeyId"),
+                ServerlessSupport.text(request, "defaultIamRoleArn"),
                 ServerlessSupport.stringList(request, "iamRoles"),
                 ServerlessSupport.stringList(request, "logExports"),
                 parseTagList(request.path("tags"), "tags"),
@@ -116,12 +121,12 @@ public class RedshiftServerlessJsonHandler {
     }
 
     private Response handleGetNamespace(JsonNode request, String region) {
-        return namespaceResponse(service.getNamespace(text(request, "namespaceName"), region));
+        return namespaceResponse(service.getNamespace(ServerlessSupport.text(request, "namespaceName"), region));
     }
 
     private Response handleListNamespaces(JsonNode request, String region) {
         PaginatedResult<Namespace> page = service.listNamespaces(
-                region, ServerlessSupport.maxResults(request), text(request, "nextToken"));
+                region, ServerlessSupport.maxResults(request), ServerlessSupport.text(request, "nextToken"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("namespaces");
         page.items().forEach(namespace -> items.add(namespaceNode(namespace)));
@@ -133,11 +138,11 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleUpdateNamespace(JsonNode request, String region) {
         Namespace namespace = service.updateNamespace(
-                text(request, "namespaceName"),
-                text(request, "adminUsername"),
-                text(request, "adminUserPassword"),
-                text(request, "kmsKeyId"),
-                text(request, "defaultIamRoleArn"),
+                ServerlessSupport.text(request, "namespaceName"),
+                ServerlessSupport.text(request, "adminUsername"),
+                ServerlessSupport.text(request, "adminUserPassword"),
+                ServerlessSupport.text(request, "kmsKeyId"),
+                ServerlessSupport.text(request, "defaultIamRoleArn"),
                 ServerlessSupport.stringList(request, "iamRoles"),
                 ServerlessSupport.stringList(request, "logExports"),
                 region);
@@ -145,13 +150,13 @@ public class RedshiftServerlessJsonHandler {
     }
 
     private Response handleDeleteNamespace(JsonNode request, String region) {
-        return namespaceResponse(service.deleteNamespace(text(request, "namespaceName"), region));
+        return namespaceResponse(service.deleteNamespace(ServerlessSupport.text(request, "namespaceName"), region));
     }
 
     private Response handleCreateWorkgroup(JsonNode request, String region) {
         Workgroup workgroup = service.createWorkgroup(
-                text(request, "workgroupName"),
-                text(request, "namespaceName"),
+                ServerlessSupport.text(request, "workgroupName"),
+                ServerlessSupport.text(request, "namespaceName"),
                 parseWorkgroupSettings(request),
                 parseTagList(request.path("tags"), "tags"),
                 region);
@@ -159,12 +164,12 @@ public class RedshiftServerlessJsonHandler {
     }
 
     private Response handleGetWorkgroup(JsonNode request, String region) {
-        return workgroupResponse(service.getWorkgroup(text(request, "workgroupName"), region));
+        return workgroupResponse(service.getWorkgroup(ServerlessSupport.text(request, "workgroupName"), region));
     }
 
     private Response handleListWorkgroups(JsonNode request, String region) {
         PaginatedResult<Workgroup> page = service.listWorkgroups(
-                region, ServerlessSupport.maxResults(request), text(request, "nextToken"));
+                region, ServerlessSupport.maxResults(request), ServerlessSupport.text(request, "nextToken"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("workgroups");
         page.items().forEach(workgroup -> items.add(workgroupNode(workgroup)));
@@ -176,11 +181,11 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleUpdateWorkgroup(JsonNode request, String region) {
         return workgroupResponse(service.updateWorkgroup(
-                text(request, "workgroupName"), parseWorkgroupSettings(request), region));
+                ServerlessSupport.text(request, "workgroupName"), parseWorkgroupSettings(request), region));
     }
 
     private Response handleDeleteWorkgroup(JsonNode request, String region) {
-        return workgroupResponse(service.deleteWorkgroup(text(request, "workgroupName"), region));
+        return workgroupResponse(service.deleteWorkgroup(ServerlessSupport.text(request, "workgroupName"), region));
     }
 
     /**
@@ -193,8 +198,8 @@ public class RedshiftServerlessJsonHandler {
             throw ServerlessSupport.validation("customDomainName is not supported; use workgroupName.");
         }
         TempCredential credential = service.getCredentials(
-                text(request, "workgroupName"),
-                text(request, "dbName"),
+                ServerlessSupport.text(request, "workgroupName"),
+                ServerlessSupport.text(request, "dbName"),
                 ServerlessSupport.integer(request, "durationSeconds"),
                 iamDbUserResolver.resolveDbUser(authorizationHeader),
                 region);
@@ -208,7 +213,7 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleCreateSnapshot(JsonNode request, String region) {
         return snapshotResponse(service.createSnapshot(
-                text(request, "snapshotName"), text(request, "namespaceName"),
+                ServerlessSupport.text(request, "snapshotName"), ServerlessSupport.text(request, "namespaceName"),
                 ServerlessSupport.integer(request, "retentionPeriod"), parseTagList(request.path("tags"), "tags"), region));
     }
 
@@ -222,9 +227,9 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleListSnapshots(JsonNode request, String region) {
         PaginatedResult<RedshiftServerlessSnapshot> page = service.listSnapshots(
-                text(request, "namespaceName"), text(request, "namespaceArn"), text(request, "ownerAccount"),
+                ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "namespaceArn"), ServerlessSupport.text(request, "ownerAccount"),
                 ServerlessSupport.epochSeconds(request, "startTime"), ServerlessSupport.epochSeconds(request, "endTime"), region,
-                ServerlessSupport.maxResults(request), text(request, "nextToken"));
+                ServerlessSupport.maxResults(request), ServerlessSupport.text(request, "nextToken"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("snapshots");
         page.items().forEach(snapshot -> items.add(snapshotNode(snapshot)));
@@ -236,17 +241,17 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleUpdateSnapshot(JsonNode request, String region) {
         return snapshotResponse(service.updateSnapshot(
-                text(request, "snapshotName"), ServerlessSupport.integer(request, "retentionPeriod"), region));
+                ServerlessSupport.text(request, "snapshotName"), ServerlessSupport.integer(request, "retentionPeriod"), region));
     }
 
     private Response handleDeleteSnapshot(JsonNode request, String region) {
-        return snapshotResponse(service.deleteSnapshot(text(request, "snapshotName"), region));
+        return snapshotResponse(service.deleteSnapshot(ServerlessSupport.text(request, "snapshotName"), region));
     }
 
     private Response handleRestoreFromSnapshot(JsonNode request, String region) {
         RedshiftServerlessService.RestoreResult result = service.restoreFromSnapshot(
-                text(request, "namespaceName"), text(request, "workgroupName"),
-                snapshotNameOf(request, region), text(request, "ownerAccount"), region);
+                ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "workgroupName"),
+                snapshotNameOf(request, region), ServerlessSupport.text(request, "ownerAccount"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("namespace", namespaceNode(result.namespace()));
         response.put("ownerAccount", result.snapshot().getOwnerAccount());
@@ -256,8 +261,8 @@ public class RedshiftServerlessJsonHandler {
 
     /** The snapshot name from {@code snapshotName}, or recovered from {@code snapshotArn} when absent. */
     private String snapshotNameOf(JsonNode request, String region) {
-        String snapshotName = text(request, "snapshotName");
-        String snapshotArn = text(request, "snapshotArn");
+        String snapshotName = ServerlessSupport.text(request, "snapshotName");
+        String snapshotArn = ServerlessSupport.text(request, "snapshotArn");
         if (snapshotName != null && snapshotArn != null) {
             throw ServerlessSupport.validation("snapshotName and snapshotArn cannot both be specified.");
         }
@@ -323,19 +328,19 @@ public class RedshiftServerlessJsonHandler {
     }
 
     private Response handleListTagsForResource(JsonNode request, String region) {
-        Map<String, String> tags = service.listTagsForResource(text(request, "resourceArn"), region);
+        Map<String, String> tags = service.listTagsForResource(ServerlessSupport.text(request, "resourceArn"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("tags", tagListNode(tags));
         return Response.ok(response).build();
     }
 
     private Response handleTagResource(JsonNode request, String region) {
-        service.tagResource(text(request, "resourceArn"), parseTagList(request.path("tags"), "tags"), region);
+        service.tagResource(ServerlessSupport.text(request, "resourceArn"), parseTagList(request.path("tags"), "tags"), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleUntagResource(JsonNode request, String region) {
-        service.untagResource(text(request, "resourceArn"), ServerlessSupport.stringList(request, "tagKeys"), region);
+        service.untagResource(ServerlessSupport.text(request, "resourceArn"), ServerlessSupport.stringList(request, "tagKeys"), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -486,8 +491,8 @@ public class RedshiftServerlessJsonHandler {
                 ServerlessSupport.stringList(request, "subnetIds"),
                 ServerlessSupport.integer(request, "port"),
                 parsePricePerformanceTarget(request.path("pricePerformanceTarget")),
-                text(request, "ipAddressType"),
-                text(request, "trackName"));
+                ServerlessSupport.text(request, "ipAddressType"),
+                ServerlessSupport.text(request, "trackName"));
     }
 
     private List<ConfigParameter> parseConfigParameters(JsonNode node) {
@@ -502,7 +507,7 @@ public class RedshiftServerlessJsonHandler {
             if (!element.isObject()) {
                 throw ServerlessSupport.validation("configParameters must contain only parameter objects.");
             }
-            parameters.add(new ConfigParameter(text(element, "parameterKey"), text(element, "parameterValue")));
+            parameters.add(new ConfigParameter(ServerlessSupport.text(element, "parameterKey"), ServerlessSupport.text(element, "parameterValue")));
         }
         return parameters;
     }
@@ -514,7 +519,7 @@ public class RedshiftServerlessJsonHandler {
         if (!node.isObject()) {
             throw ServerlessSupport.validation("pricePerformanceTarget must be an object.");
         }
-        return new PricePerformanceTarget(text(node, "status"), ServerlessSupport.integer(node, "level"));
+        return new PricePerformanceTarget(ServerlessSupport.text(node, "status"), ServerlessSupport.integer(node, "level"));
     }
 
     private Long parseLong(JsonNode request, String field) {
@@ -540,16 +545,12 @@ public class RedshiftServerlessJsonHandler {
             if (!tag.isObject()) {
                 throw ServerlessSupport.validation(field + " must contain only tag objects.");
             }
-            String key = tag.path("key").asText(null);
+            String key = ServerlessSupport.text(tag, "key");
+            String value = ServerlessSupport.text(tag, "value");
             if (key != null) {
-                tags.put(key, tag.path("value").asText(null));
+                tags.put(key, value);
             }
         }
         return tags;
-    }
-
-    private static String text(JsonNode request, String field) {
-        JsonNode node = request == null ? null : request.get(field);
-        return node != null && node.isTextual() ? node.textValue() : null;
     }
 }

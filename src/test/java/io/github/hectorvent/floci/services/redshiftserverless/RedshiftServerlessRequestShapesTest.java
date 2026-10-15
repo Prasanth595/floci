@@ -71,6 +71,26 @@ class RedshiftServerlessRequestShapesTest {
     }
 
     @Test
+    void aPatternMustMatchTheWholeValue() {
+        assertDoesNotThrow(() -> RedshiftServerlessRequestShapes.check("ListWorkgroups",
+                parse("{\"ownerAccount\":\"123456789012\"}")));
+        assertTrue(rejected("ListWorkgroups", "{\"ownerAccount\":\"x123456789012y\"}")
+                .getMessage().contains("ownerAccount"));
+    }
+
+    @Test
+    void aLengthCountsCodePointsNotUtf16Units() {
+        String arn = "arn:aws:redshift-serverless:us-east-1:000000000000:namespace/x";
+        String emoji200 = "\uD83D\uDE00".repeat(200);
+        String emoji257 = "\uD83D\uDE00".repeat(257);
+
+        assertDoesNotThrow(() -> RedshiftServerlessRequestShapes.check("TagResource", parse(
+                "{\"resourceArn\":\"" + arn + "\",\"tags\":[{\"key\":\"k\",\"value\":\"" + emoji200 + "\"}]}")));
+        assertTrue(rejected("TagResource", "{\"resourceArn\":\"" + arn + "\",\"tags\":[{\"key\":\"k\",\"value\":\""
+                + emoji257 + "\"}]}").getMessage().contains("at most 256"));
+    }
+
+    @Test
     void aMemberOfTheWrongTypeIsLeftForTheHandlerToReport() {
         assertDoesNotThrow(() -> RedshiftServerlessRequestShapes.check("GetTrack", parse("{\"trackName\":7}")));
     }
