@@ -458,12 +458,34 @@ class LambdaWebServiceTest {
                 message(() -> service.putResourcePolicy(REGION, missing, policy("{\"Statement\":[{\"Effect\":\"Allow\","
                         + "\"Principal\":{\"AWS\":[\"arn:aws:iam::000000000000:root\",\"*\"]},"
                         + "\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + resource + "\"}]}"))));
+        // A wildcard principal is public unless a positive operator pins a trusted key without a wildcard.
+        String blocked = "Lambda blocked the creation of this policy because it would grant public access"
+                + " to your function.";
+        for (String condition : List.of(
+                "{\"StringNotEquals\":{\"aws:PrincipalAccount\":\"000000000000\"}}",
+                "{\"StringLike\":{\"aws:PrincipalAccount\":\"0000*\"}}",
+                "{\"StringEqualsIfExists\":{\"aws:PrincipalAccount\":\"000000000000\"}}",
+                "{\"ArnLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::*:role/x\"}}",
+                "{\"StringLike\":{\"aws:PrincipalOrgID\":\"o-*\"}}",
+                "{\"StringEquals\":{\"aws:username\":\"alice\"}}")) {
+            assertEquals(blocked, message(() -> service.putResourcePolicy(REGION, missing,
+                    policy(conditioned(resource, condition)))), condition);
+        }
+        for (String pinned : List.of(
+                "{\"StringEquals\":{\"aws:SourceAccount\":\"000000000000\"}}",
+                "{\"StringLike\":{\"aws:PrincipalAccount\":\"000000000000\"}}",
+                "{\"StringEquals\":{\"aws:PrincipalAccount\":[\"000000000000\",\"*\"]}}",
+                "{\"ArnLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::000000000000:*\"}}",
+                "{\"StringNotEquals\":{\"aws:PrincipalAccount\":\"111122223333\"},"
+                        + "\"StringEquals\":{\"aws:PrincipalArn\":\"arn:aws:iam::000000000000:root\"}}",
+                "{\"Bool\":{\"aws:PrincipalIsAWSService\":\"true\"}}")) {
+            assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
+                    policy(conditioned(resource, pinned)))).getErrorCode(), pinned);
+        }
         for (String accepted : List.of(
                 "{\"Statement\":{\"Effect\":\"Deny\",\"Principal\":\"*\",\"Action\":\"lambda:*\",\"Resource\":\"" + missing + "\"}}",
                 "{\"Statement\":[{\"Effect\":\"allow\",\"Principal\":{\"Federated\":\"*\"},"
-                        + "\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + resource + "\"}]}",
-                "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":\"*\",\"Action\":\"lambda:InvokeWebFunctionEndpoint\","
-                        + "\"Resource\":\"" + resource + "\",\"Condition\":{\"StringEquals\":{\"aws:SourceAccount\":\"000000000000\"}}}]}")) {
+                        + "\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + resource + "\"}]}")) {
             assertEquals("ResourceNotFoundException",
                     error(() -> service.putResourcePolicy(REGION, missing, policy(accepted))).getErrorCode(), accepted);
         }
@@ -471,6 +493,11 @@ class LambdaWebServiceTest {
 
     private ObjectNode policy(String document) {
         return mapper.createObjectNode().put("Policy", document);
+    }
+
+    private static String conditioned(String resource, String condition) {
+        return "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":\"*\",\"Action\":\"lambda:InvokeWebFunctionEndpoint\","
+                + "\"Resource\":\"" + resource + "\",\"Condition\":" + condition + "}]}";
     }
 
     @Test

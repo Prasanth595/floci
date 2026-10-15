@@ -82,6 +82,11 @@ public class LambdaWebService implements Resettable {
             "aws:SourceVpcArn", "aws:SourceVpce", "aws:VpceAccount", "aws:VpceOrgID", "aws:VpceOrgPaths",
             "aws:Ec2InstanceSourceVpc", "aws:UserId", "aws:PrincipalServiceName", "aws:PrincipalServiceNamesList",
             "aws:PrincipalIsAWSService", "lambda:SourceFunctionArn");
+    /** The operators whose match pins the caller. Negated and IfExists forms do not. */
+    private static final Set<String> PINNING_OPERATORS = Set.of(
+            "StringEquals", "StringEqualsIgnoreCase", "StringLike", "ArnEquals", "ArnLike", "Bool");
+    private static final Set<String> ARN_CONDITION_KEYS = Set.of(
+            "aws:PrincipalArn", "aws:SourceArn", "aws:SourceVpcArn", "lambda:SourceFunctionArn");
     private static final Set<String> STATEMENT_KEYS = Set.of(
             "Sid", "Effect", "Principal", "NotPrincipal", "Action", "NotAction", "Resource", "NotResource", "Condition");
     private static final Set<String> PRINCIPAL_KEYS = Set.of("AWS", "Service", "Federated", "CanonicalUser");
@@ -1114,15 +1119,46 @@ public class LambdaWebService implements Resettable {
         if (!condition.isObject()) {
             return false;
         }
-        for (JsonNode operator : condition) {
-            Iterator<String> keys = operator.fieldNames();
+        Iterator<Map.Entry<String, JsonNode>> operators = condition.fields();
+        while (operators.hasNext()) {
+            Map.Entry<String, JsonNode> operator = operators.next();
+            if (!PINNING_OPERATORS.contains(operator.getKey())) {
+                continue;
+            }
+            boolean pattern = operator.getKey().endsWith("Like") || "ArnEquals".equals(operator.getKey());
+            Iterator<Map.Entry<String, JsonNode>> keys = operator.getValue().fields();
             while (keys.hasNext()) {
-                if (TRUSTED_CONDITION_KEYS.contains(keys.next())) {
+                Map.Entry<String, JsonNode> key = keys.next();
+                if (TRUSTED_CONDITION_KEYS.contains(key.getKey()) && (!pattern || pinned(key.getKey(), key.getValue()))) {
                     return true;
                 }
             }
         }
         return false;
+    }
+
+    /** Under a pattern operator a value pins the caller only without a wildcard, or none in an ARN's account. */
+    private static boolean pinned(String key, JsonNode values) {
+        List<String> each = new ArrayList<>();
+        if (values.isArray()) {
+            values.forEach(value -> each.add(value.asText()));
+        } else {
+            each.add(values.asText());
+        }
+        for (String value : each) {
+            String checked = value;
+            if (ARN_CONDITION_KEYS.contains(key)) {
+                String[] fields = value.split(":", 6);
+                if (fields.length < 6) {
+                    return false;
+                }
+                checked = fields[4];
+            }
+            if (checked.contains("*") || checked.contains("?")) {
+                return false;
+            }
+        }
+        return !each.isEmpty();
     }
 
     private static AwsException policySyntax() {
