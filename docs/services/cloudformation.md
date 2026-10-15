@@ -361,7 +361,7 @@ numeric `Version` attribute. CloudFormation resolves the version before creating
 alias. As in SAM, the version's logical id is `<Function>Version` followed by ten hex digits of a
 SHA-1 over the function's code, with its template parameter references resolved (pseudo
 parameters such as `${AWS::Region}` stay as written), its `Environment` and `MemorySize` as
-written, and its `SnapStart` when `ApplyOn` is anything but `None`. An update that changes the
+written, and its `SnapStart` when it sets an `ApplyOn` other than `None`. An update that changes the
 code, `Environment` or `MemorySize`, or a parameter the code uses, publishes a new version and
 moves the alias to it. A parameter used only in `Environment` or `MemorySize` does not, and neither
 does a property outside the hash, such as `Timeout`. Under `AutoPublishAliasAllProperties` the hash

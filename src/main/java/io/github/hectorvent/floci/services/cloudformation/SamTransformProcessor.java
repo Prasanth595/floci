@@ -1087,7 +1087,8 @@ class SamTransformProcessor {
      * hex digits of the SHA-1 of the function's {@code Code}, with references to template parameters
      * resolved, merged with its {@code Environment}, its {@code MemorySize} and a {@code SnapStart}
      * that applies, or of all its properties under {@code AutoPublishAliasAllProperties}, as sorted
-     * compact JSON with characters outside printable ASCII escaped, in lowercase hex. A string
+     * compact JSON with characters outside printable ASCII as lowercase hex escapes, apart from
+     * JSON's short escapes such as a newline's. A string
      * {@code AutoPublishCodeSha256} names the version itself, by its first ten characters. A change
      * to the hashed input is a new logical id: the update publishes a new version and the alias moves
      * to it. Unchanged, the id and the version it published stay, since the version provisioner never

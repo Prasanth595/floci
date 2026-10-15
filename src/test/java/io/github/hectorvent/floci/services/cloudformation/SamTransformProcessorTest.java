@@ -217,8 +217,9 @@ class SamTransformProcessorTest {
     }
 
     /**
-     * SAM hashes the code with everything outside printable ASCII, DEL included, escaped in lowercase
-     * hex, and a character beyond the Basic Multilingual Plane as its surrogate pair.
+     * SAM hashes the code with every character outside printable ASCII, DEL included, written as a
+     * lowercase hex escape (JSON's short escapes such as a newline's stay short), and a character
+     * beyond the Basic Multilingual Plane as its surrogate pair.
      */
     @Test
     void expandSamTemplate_autoPublishAliasVersionIdEscapesTheCodeAsSamDoes() throws Exception {
