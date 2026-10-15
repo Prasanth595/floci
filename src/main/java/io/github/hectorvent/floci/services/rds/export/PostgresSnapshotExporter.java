@@ -204,7 +204,7 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
                 return 0;
             }
             String stagingRoot = "rds-export/" + task.getRuntimeVolumeId() + "/" + tableNumber + "/";
-            staged.addAll(stageChunks(rows, stagingRoot));
+            stageChunks(rows, stagingRoot, staged);
             String stagedParquet = stagingRoot + "data.gz.parquet";
             staged.add(stagedParquet);
             // floci-duck's /execute wraps its sql field in a CSV export, so the Parquet COPY goes
@@ -233,8 +233,7 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
     }
 
     /** Stages the rows as NDJSON objects of about {@link #STAGING_CHUNK_BYTES}, split between rows. */
-    private List<String> stageChunks(Path rows, String stagingRoot) throws IOException {
-        List<String> keys = new ArrayList<>();
+    private void stageChunks(Path rows, String stagingRoot, List<String> keys) throws IOException {
         ByteArrayOutputStream chunk = new ByteArrayOutputStream();
         try (BufferedReader reader = Files.newBufferedReader(rows, StandardCharsets.UTF_8)) {
             String line;
@@ -245,21 +244,20 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
                 chunk.write(line.getBytes(StandardCharsets.UTF_8));
                 chunk.write('\n');
                 if (chunk.size() >= STAGING_CHUNK_BYTES) {
-                    keys.add(putChunk(stagingRoot, keys.size(), chunk));
+                    putChunk(stagingRoot, keys, chunk);
                 }
             }
         }
         if (chunk.size() > 0) {
-            keys.add(putChunk(stagingRoot, keys.size(), chunk));
+            putChunk(stagingRoot, keys, chunk);
         }
-        return keys;
     }
 
-    private String putChunk(String stagingRoot, int index, ByteArrayOutputStream chunk) {
-        String key = stagingRoot + "part-" + index + ".ndjson";
+    private void putChunk(String stagingRoot, List<String> keys, ByteArrayOutputStream chunk) {
+        String key = stagingRoot + "part-" + keys.size() + ".ndjson";
+        keys.add(key);
         s3Service.putObject(stagingBucket, key, chunk.toByteArray(), NDJSON, Map.of());
         chunk.reset();
-        return key;
     }
 
     /**
@@ -317,11 +315,11 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
         info.put("status", ExportTask.STATUS_COMPLETE);
         info.put("percentProgress", 100);
         info.put("totalExportedDataInGB", (double) bytes / RdsExportTaskService.GIB);
-        putJson(task.getS3Bucket(), layout.exportInfoKey(), info);
 
         ObjectNode tablesInfo = mapper.createObjectNode();
         tablesInfo.set("perTableStatus", perTableStatus);
         putJson(task.getS3Bucket(), layout.tablesInfoKey(Math.max(tableCount, 1)), tablesInfo);
+        putJson(task.getS3Bucket(), layout.exportInfoKey(), info);
     }
 
     private void putJson(String bucket, String key, JsonNode body) {

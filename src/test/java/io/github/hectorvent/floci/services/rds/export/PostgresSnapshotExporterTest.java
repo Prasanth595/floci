@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -37,6 +38,7 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -202,6 +204,31 @@ class PostgresSnapshotExporterTest {
 
         verify(s3Service, never()).putObject(eq("exports"), anyString(), any(), anyString(), any());
         verify(s3Service).deleteObject(STAGING, "rds-export/export-0123456789abcdef/1/data.gz.parquet");
+    }
+
+    @Test
+    void aChunkWhoseUploadFailsIsStillRemovedFromStaging() {
+        tableRows("{\"id\":1}\n");
+        doThrow(new IllegalStateException("staging bucket unavailable")).when(s3Service)
+                .putObject(eq(STAGING), eq("rds-export/export-0123456789abcdef/1/part-0.ndjson"), any(), anyString(),
+                        any());
+
+        assertThrows(IllegalStateException.class, () -> exporter.export(task(), source, progress));
+
+        verify(s3Service).deleteObject(STAGING, "rds-export/export-0123456789abcdef/1/part-0.ndjson");
+    }
+
+    @Test
+    void theSuccessRecordIsWrittenAfterTheTablesRecord() {
+        tableRows("{\"id\":1}\n");
+
+        exporter.export(task(), source, progress);
+
+        InOrder order = inOrder(s3Service);
+        order.verify(s3Service).putObject(eq("exports"),
+                eq("search/rds/appdb-export/export_tables_info_appdb-export_from_1_to_1.json"), any(), anyString(), any());
+        order.verify(s3Service).putObject(eq("exports"), eq("search/rds/appdb-export/export_info_appdb-export.json"),
+                any(), anyString(), any());
     }
 
     @Test
