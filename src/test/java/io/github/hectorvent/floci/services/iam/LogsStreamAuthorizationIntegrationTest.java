@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
@@ -261,7 +262,7 @@ class LogsStreamAuthorizationIntegrationTest {
         String group = "logs-key-alias-" + UUID.randomUUID();
         String protectedGroup = group + "::x";
         createGroup(ACCOUNT, REGION, group, Map.of("team", "blue"));
-        createGroup(ACCOUNT, REGION, protectedGroup, Map.of("team", "red"));
+        seedHistoricalGroup(protectedGroup, Map.of("team", "red"));
         seedHistoricalStream(protectedGroup, "s");
         assertPresent(protectedGroup, "s", true);
         assertEvent(protectedGroup, "s");
@@ -280,7 +281,7 @@ class LogsStreamAuthorizationIntegrationTest {
         String group = "logs-arn-alias-" + UUID.randomUUID();
         String actualGroup = group + ":log-stream:x";
         createGroup(ACCOUNT, REGION, group, Map.of());
-        createGroup(ACCOUNT, REGION, actualGroup, Map.of());
+        seedHistoricalGroup(actualGroup, Map.of());
         boolean delete = action.equals("DeleteLogStream");
         if (delete) {
             seedHistoricalStream(actualGroup, "s");
@@ -362,6 +363,11 @@ class LogsStreamAuthorizationIntegrationTest {
     }
 
     /** Existing service storage APIs seed historical invalid names without bypassing the HTTP request under test. */
+    private void seedHistoricalGroup(String group, Map<String, String> tags) {
+        cleanup.register(() -> RequestScopes.runAs(ACCOUNT, REGION, () -> logsService.deleteLogGroup(group, REGION)));
+        logsService.createLogGroupForAccount(ACCOUNT, group, null, tags, REGION);
+    }
+
     private void seedHistoricalStream(String group, String stream) {
         seedHistoricalStream(group, stream, "retained");
     }

@@ -100,19 +100,37 @@ public class IamConditionContextResolver {
             case "ec2" -> ec2ConditionContext(action, ctx);
             case "dynamodb" -> dynamoDbConditionContext(action, ctx);
             case "iam" -> iamConditionContext(action, ctx);
-            case "logs" -> logStreamConditionContext(action, ctx);
+            case "logs" -> logsConditionContext(action, ctx);
             default -> null;
         };
     }
 
-    /** Stream access uses the owning log group's tags, in the handler's account and region. */
-    private Map<String, List<String>> logStreamConditionContext(String action, ContainerRequestContext ctx) {
+    /** Group mutations and stream access use the handler's group and request scope. */
+    private Map<String, List<String>> logsConditionContext(String action, ContainerRequestContext ctx) {
         if (!("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action)
-                || LogGroupTagTarget.supports(action))) {
+                || LogGroupTagTarget.supports(action) || "logs:CreateLogGroup".equals(action) || "logs:DeleteLogGroup".equals(action)
+                || "logs:PutRetentionPolicy".equals(action) || "logs:DeleteRetentionPolicy".equals(action))) {
             return null;
         }
         JsonNode body = bufferedJsonBody(ctx);
-        if (body == null || !logsService.isResolvable()) {
+        if (body == null) {
+            return null;
+        }
+        if ("logs:CreateLogGroup".equals(action)) {
+            JsonNode tags = body.path("tags");
+            if (!tags.isObject() || tags.isEmpty()) {
+                return null;
+            }
+            Map<String, List<String>> conditions = new LinkedHashMap<>();
+            List<String> keys = new ArrayList<>();
+            tags.properties().forEach(entry -> {
+                keys.add(entry.getKey());
+                conditions.put("aws:RequestTag/" + entry.getKey(), List.of(entry.getValue().asText()));
+            });
+            conditions.put("aws:TagKeys", keys);
+            return conditions;
+        }
+        if (!logsService.isResolvable()) {
             return null;
         }
         String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();

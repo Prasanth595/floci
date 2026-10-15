@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.testing.LogsAuthorizationFixtures;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
@@ -93,8 +94,8 @@ class LogsUnknownRegionAuthorizationIntegrationTest {
         String historicalStream = streamAlias ? "x::" + group + "::s" : "s";
         String aliasRegion = streamAlias ? REGION + "::" + group + "::x" : REGION + "::x";
         String validUnknownRegion = "custom-region-1";
-        cleanup.register(() -> call(port, ACCOUNT, REGION, "DeleteLogGroup", Map.of("logGroupName", historical))
-                .then().statusCode(200));
+        cleanup.register(() -> RequestScopes.runAs(ACCOUNT, REGION,
+                () -> logsService.deleteLogGroup(historical, REGION)));
         cleanup.register(() -> call(port, ACCOUNT, validUnknownRegion, "DeleteLogGroup", Map.of("logGroupName", group))
                 .then().statusCode(200));
         logsService.createLogGroupForAccount(ACCOUNT, historical, null, Map.of("team", "blue"), REGION);
@@ -174,6 +175,43 @@ class LogsUnknownRegionAuthorizationIntegrationTest {
                                     Map.of("logGroupName", group, "logStreamName", "s"))
                                     .then().statusCode(200).body("events[0].message", equalTo("retained"));
                         }
+                    }
+                });
+    }
+
+    @ParameterizedTest
+    @CsvSource({"TagResource,Allow", "TagLogGroup,Allow", "TagResource,Deny", "TagLogGroup,Deny"})
+    void taggedGroupCreationUsesCanonicalOwnerForBothAlternatives(String taggingAction, String effect) {
+        int port = endpoint.getPort();
+        String region = "custom-222222222222";
+        String group = "logs-create-owner-" + UUID.randomUUID();
+        cleanup.register(() -> {
+            List<Map<String, Object>> groups = call(port, ACCOUNT, region, "DescribeLogGroups",
+                    Map.of("logGroupNamePrefix", group)).then().statusCode(200).extract().path("logGroups");
+            if (groups.stream().anyMatch(item -> group.equals(item.get("logGroupName")))) {
+                call(port, ACCOUNT, region, "DeleteLogGroup", Map.of("logGroupName", group)).then().statusCode(200);
+            }
+        });
+        String statements = "{\"Effect\":\"Allow\",\"Action\":\"logs:CreateLogGroup\",\"Resource\":\"*\"},";
+        if (effect.equals("Deny")) {
+            statements += "{\"Effect\":\"Allow\",\"Action\":\"logs:" + taggingAction + "\",\"Resource\":\"*\"},";
+        }
+        statements += "{\"Effect\":\"" + effect + "\",\"Action\":\"logs:" + taggingAction
+                + "\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceAccount\":\""
+                + ACCOUNT + "\"}}}";
+        String caller = LogsAuthorizationFixtures.user(cleanup, port, ACCOUNT, "logs-create-owner-",
+                "tagging-owner", statements);
+        Response response = call(port, caller, region, "CreateLogGroup",
+                Map.of("logGroupName", group, "tags", Map.of("team", "blue")));
+        List<Map<String, Object>> groups = call(port, ACCOUNT, region, "DescribeLogGroups",
+                Map.of("logGroupNamePrefix", group)).then().statusCode(200).extract().path("logGroups");
+        boolean allowed = effect.equals("Allow");
+        assertAll("both tagging alternatives use the actual storage owner",
+                () -> response.then().statusCode(allowed ? 200 : 400),
+                () -> assertEquals(allowed, groups.stream().anyMatch(item -> group.equals(item.get("logGroupName")))),
+                () -> {
+                    if (!allowed) {
+                        response.then().body(containsString("AccessDeniedException"));
                     }
                 });
     }

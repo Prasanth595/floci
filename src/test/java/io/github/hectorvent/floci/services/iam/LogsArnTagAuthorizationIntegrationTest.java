@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.github.hectorvent.floci.testing.LogsAuthorizationFixtures;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
@@ -8,6 +10,7 @@ import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -39,6 +42,9 @@ class LogsArnTagAuthorizationIntegrationTest {
 
     @TestHTTPResource
     URI endpoint;
+
+    @Inject
+    CloudWatchLogsService logsService;
 
     @BeforeAll
     static void configureContentTypes() {
@@ -111,7 +117,7 @@ class LogsArnTagAuthorizationIntegrationTest {
     @ParameterizedTest
     @ValueSource(strings = {"TagResource", "UntagResource", "ListTagsForResource"})
     void incompleteArnPrefixRemainsALiteralLegacyName(String action) {
-        String name = groupNamed("arn:archive-" + UUID.randomUUID(), Map.of("team", "blue"));
+        String name = historicalGroupNamed("arn:archive-" + UUID.randomUUID(), Map.of("team", "blue"));
         String caller = user(statement("Allow", action, arn(name)));
         assertSuccess(invoke(caller, action, name), action);
         assertTags(name, expectedTags(action));
@@ -140,7 +146,7 @@ class LogsArnTagAuthorizationIntegrationTest {
         assertAll("noncanonical input cannot access the shortened local name",
                 () -> response.statusCode(400).body(containsString("ResourceNotFoundException")),
                 () -> assertTags(local, Map.of("team", "blue")));
-        String literal = groupNamed(input, Map.of("team", "blue"));
+        String literal = historicalGroupNamed(input, Map.of("team", "blue"));
         assertSuccess(invoke(caller, action, input), action);
         assertTags(literal, expectedTags(action));
         assertTags(local, Map.of("team", "blue"));
@@ -216,6 +222,12 @@ class LogsArnTagAuthorizationIntegrationTest {
         cleanup.register(() -> call(port, ACCOUNT, "DeleteLogGroup", Map.of("logGroupName", name)).statusCode(200));
         call(port, ACCOUNT, "CreateLogGroup", Map.of("logGroupName", name, "tags", tags))
                 .statusCode(200);
+        return name;
+    }
+
+    private String historicalGroupNamed(String name, Map<String, String> tags) {
+        cleanup.register(() -> RequestScopes.runAs(ACCOUNT, REGION, () -> logsService.deleteLogGroup(name, REGION)));
+        logsService.createLogGroupForAccount(ACCOUNT, name, null, tags, REGION);
         return name;
     }
 

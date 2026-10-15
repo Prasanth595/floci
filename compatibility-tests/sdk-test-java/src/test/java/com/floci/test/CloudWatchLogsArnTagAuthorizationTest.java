@@ -42,17 +42,6 @@ class CloudWatchLogsArnTagAuthorizationTest extends CloudWatchLogsAuthorizationF
 
     @ParameterizedTest
     @ValueSource(strings = {"TagResource", "UntagResource", "ListTagsForResource"})
-    void incompleteArnPrefixIsALiteralName(String action) {
-        String name = "arn:" + TestFixtures.uniqueName("archive");
-        createGroup(name, Map.of("protected", "true"));
-        policy(statement("Allow", action, arn(name)));
-        Map<String, String> response = invokeResource(caller, action, name);
-        assertResult(action, name, "true", response);
-        assertTags(protectedGroup, Map.of("protected", "true"));
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"TagResource", "UntagResource", "ListTagsForResource"})
     void rootCannotResolveNoncanonicalMarkersIntoLocalNames(String action) {
         String foreign = TestFixtures.arn("logs", "999999999999", "log-group:" + protectedGroup);
         for (String input : new String[]{"ARN:" + foreign.substring(4), " " + foreign,

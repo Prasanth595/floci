@@ -1270,6 +1270,16 @@ before changing storage, preventing delimiter aliases from targeting another str
 These checks also apply to deletion: legacy streams with names containing `:` or `*` cannot be
 deleted through `DeleteLogStream`. Existing stored names are not automatically migrated.
 
+**CloudWatch Logs groups.** `CreateLogGroup`, `DeleteLogGroup`, `PutRetentionPolicy` and
+`DeleteRetentionPolicy` evaluate the selected group ARN ending in `:*`. The three operations on
+existing groups read that group's resource tags; creation uses the request's `tags` for
+`aws:RequestTag/<key>` and `aws:TagKeys`. Tagged creation additionally requires either
+`logs:TagResource` on the bare group ARN or `logs:TagLogGroup` on the group ARN ending in `:*`.
+The group name constraints apply before mutation, and deletion preserves streams and filters
+whose stored group identity belongs to another historical group. These four operations reject `:`
+or `*` in a group name. Historical names remain taggable through the ARN tagging APIs below;
+they cannot be newly created or deleted through the group lifecycle APIs. Stored names are not migrated.
+
 **CloudWatch Logs ARN tagging.** For log groups, `logs:TagResource`, `logs:UntagResource`
 and `logs:ListTagsForResource` evaluate the group's ARN without a trailing `:*`. The ARN must
 identify a group in the request's account, region and partition; a different owner or resource
@@ -1465,8 +1475,9 @@ floci populates:
   `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucket` and the
   `s3:PutBucketTagging` that `DeleteBucketTagging` is checked as (the bucket). A request naming several EC2 resources is evaluated
   once per resource and denied when any of them fails the condition, as on AWS.
-  `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:TagResource`, `logs:UntagResource`
-  and `logs:ListTagsForResource` use the owning log group's tags.
+  `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:TagResource`, `logs:UntagResource`,
+  `logs:ListTagsForResource`, `logs:DeleteLogGroup`, `logs:PutRetentionPolicy` and
+  `logs:DeleteRetentionPolicy` use the owning log group's tags.
 - `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
   `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
   `s3:DeleteObjectTagging`, `s3:PutObjectTagging` and the annotation actions, and for their

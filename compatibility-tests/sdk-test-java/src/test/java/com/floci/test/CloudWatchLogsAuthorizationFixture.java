@@ -100,8 +100,12 @@ abstract class CloudWatchLogsAuthorizationFixture {
 
     final String createGroup(String name, Map<String, String> tags) {
         root.createLogGroup(r -> r.logGroupName(name).tags(tags));
-        groups.add(() -> root.deleteLogGroup(r -> r.logGroupName(name)));
+        groups.add(() -> deleteGroup(name));
         return name;
+    }
+
+    void deleteGroup(String name) {
+        root.deleteLogGroup(r -> r.logGroupName(name));
     }
 
     final void policy(String statements) {

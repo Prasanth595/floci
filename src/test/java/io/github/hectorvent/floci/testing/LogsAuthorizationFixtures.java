@@ -27,7 +27,11 @@ public final class LogsAuthorizationFixtures {
     }
 
     public static Response call(int port, String caller, String region, String action, Map<String, ?> body) {
-        String authorization = "AWS4-HMAC-SHA256 Credential=" + caller + "/20261015/" + region
+        return call(port, caller, "20261015", region, action, body);
+    }
+
+    public static Response call(int port, String caller, String date, String region, String action, Map<String, ?> body) {
+        String authorization = "AWS4-HMAC-SHA256 Credential=" + caller + "/" + date + "/" + region
                 + "/logs/aws4_request, SignedHeaders=host, Signature=abc";
         return given().port(port).contentType("application/x-amz-json-1.1")
                 .header("Authorization", authorization).header("X-Amz-Target", "Logs_20140328." + action)
