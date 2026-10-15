@@ -6,10 +6,13 @@ import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
+import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientRequest;
 import io.vertx.core.http.HttpClientResponse;
+import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.RequestOptions;
+import io.vertx.core.net.SocketAddress;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -199,28 +202,38 @@ class ElbV2PreserveHostHeaderIntegrationTest {
     }
 
     private void assertStreamsRequestAndResponse(String loadBalancerArn) throws Exception {
-        HttpClientRequest request = vertx.createHttpClient()
-                .request(new RequestOptions()
-                        .setHost(loadBalancerDnsName(loadBalancerArn))
-                        .setPort(LISTENER_PORT)
-                        .setMethod(io.vertx.core.http.HttpMethod.POST)
-                        .setURI("/stream"))
-                .toCompletionStage()
-                .toCompletableFuture()
-                .get(2, TimeUnit.SECONDS);
-        CompletableFuture<Buffer> bodyFuture = new CompletableFuture<>();
-        CompletableFuture<HttpClientResponse> responseFuture = request.response()
-                .onSuccess(response -> response.bodyHandler(bodyFuture::complete))
-                .toCompletionStage()
-                .toCompletableFuture();
-        request.putHeader("Content-Length", "11");
-        request.write(Buffer.buffer("hello "));
-        request.end(Buffer.buffer("world"));
+        String dnsName = loadBalancerDnsName(loadBalancerArn);
+        HttpClient client = vertx.createHttpClient();
+        try {
+            // The DNS name resolves only through public DNS, so connect to loopback and send it as Host.
+            HttpClientRequest request = client
+                    .request(new RequestOptions()
+                            .setServer(SocketAddress.inetSocketAddress(LISTENER_PORT, "127.0.0.1"))
+                            .setHost(dnsName)
+                            .setPort(LISTENER_PORT)
+                            .setMethod(HttpMethod.POST)
+                            .setURI("/stream"))
+                    .toCompletionStage()
+                    .toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+            assertEquals(dnsName, request.getHost());
+            CompletableFuture<Buffer> bodyFuture = new CompletableFuture<>();
+            CompletableFuture<HttpClientResponse> responseFuture = request.response()
+                    .onSuccess(response -> response.bodyHandler(bodyFuture::complete))
+                    .toCompletionStage()
+                    .toCompletableFuture();
+            request.putHeader("Content-Length", "11");
+            request.write(Buffer.buffer("hello "));
+            request.end(Buffer.buffer("world"));
 
-        HttpClientResponse response = responseFuture.get(2, TimeUnit.SECONDS);
-        assertEquals(200, response.statusCode());
-        assertEquals("11", response.getHeader("X-Received-Content-Length"));
-        assertEquals("stream-hello world", bodyFuture.get(2, TimeUnit.SECONDS).toString());
+            HttpClientResponse response = responseFuture.get(2, TimeUnit.SECONDS);
+            assertEquals(200, response.statusCode());
+            assertEquals("11", response.getHeader("X-Received-Content-Length"));
+            assertEquals("stream-hello world", bodyFuture.get(2, TimeUnit.SECONDS).toString());
+        } finally {
+            // Not awaited, so a slow close cannot replace the failure raised above.
+            client.close();
+        }
     }
 
     private static String createLoadBalancer() {
