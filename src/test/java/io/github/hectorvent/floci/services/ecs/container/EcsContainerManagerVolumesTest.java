@@ -436,9 +436,11 @@ class EcsContainerManagerVolumesTest {
             verify(builder).withGroupAdd("4001");
         } else {
             verifyFallbackOwnership();
-            verify(builder).withUser("10001:10002");
+            verify(builder).withUser("42:42");
+            verify(builder).withGroupAdd("10002");
             verify(builder).withGroupAdd("20001");
             verify(builder).withGroupAdd("20002");
+            verify(builder, never()).withUser("10001:10002");
             verify(builder, never()).withUser("3001:3002");
             verify(builder, never()).withGroupAdd("4001");
         }

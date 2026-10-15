@@ -2339,7 +2339,7 @@ public class EcsContainerManager {
                 throw new AwsException("ClientException",
                         "EFS access point " + efs.accessPointId() + " has incomplete PosixUser", 400);
             }
-            specBuilder.withUser(posixUser.getUid() + ":" + posixUser.getGid());
+            specBuilder.withGroupAdd(String.valueOf(posixUser.getGid()));
             if (posixUser.getSecondaryGids() != null) {
                 for (Long gid : posixUser.getSecondaryGids()) {
                     specBuilder.withGroupAdd(String.valueOf(gid));

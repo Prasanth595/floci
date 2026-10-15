@@ -161,7 +161,7 @@ class EcsContainerManagerEfsIsolationDockerIntegrationTest {
                 AccessPointDescription ap = efsService.createAccessPoint("us-east-1", request);
                 accessPoints.add(ap.getAccessPointId());
                 String check = "test \"$(stat -c '%u:%g %a' /mnt/efs)\" = '" + uid + ":" + processUid + " " + mode
-                        + "' && test \"$(id -u)\" = " + processUid + " && test \"$(id -g)\" = " + processUid
+                        + "' && id -G | grep -qw " + processUid
                         + " && id -G | grep -qw 20001 && id -G | grep -qw 20002";
                 assertEquals(0, runEfsCommand(fileSystemId, null, ap.getAccessPointId(),
                         check + " && mkdir /mnt/efs/sub && echo persisted > /mnt/efs/sub/marker"));
