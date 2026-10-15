@@ -233,6 +233,43 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void dbClusterEnableHttpEndpointIsAppliedOnCreateAndUpdate() {
+        createDbClusterEchoesRequestedId();
+        DbCluster enabled = mock(DbCluster.class);
+        when(enabled.getDbClusterIdentifier()).thenReturn("dataapi");
+        when(enabled.isHttpEndpointEnabled()).thenReturn(true);
+        when(rdsService.setHttpEndpoint("us-east-1", "dataapi", true)).thenReturn(enabled);
+
+        StackResource r = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"dataapi","Engine":"aurora-postgresql","EnableHttpEndpoint":true}
+                """);
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        verify(rdsService).setHttpEndpoint("us-east-1", "dataapi", true);
+
+        // An update that leaves the property out turns the endpoint off again.
+        when(rdsService.getDbCluster("dataapi")).thenReturn(enabled);
+        when(rdsService.modifyDbCluster(eq("dataapi"), any(), any(), any(), any(), any(), any())).thenReturn(enabled);
+        DbCluster disabled = mock(DbCluster.class);
+        when(disabled.getDbClusterIdentifier()).thenReturn("dataapi");
+        when(rdsService.setHttpEndpoint("us-east-1", "dataapi", false)).thenReturn(disabled);
+        provisionExisting("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"dataapi","Engine":"aurora-postgresql"}
+                """, "us-east-1", "dataapi", Map.of("DBClusterIdentifier", "dataapi"));
+        verify(rdsService).setHttpEndpoint("us-east-1", "dataapi", false);
+    }
+
+    @Test
+    void dbClusterEnableHttpEndpointOnANonAuroraEngineFailsBeforeCreating() {
+        StackResource r = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"dataapi","Engine":"postgres","EnableHttpEndpoint":true}
+                """);
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("Aurora"), r.getStatusReason());
+        verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
+    }
+
+    @Test
     void provisionsDbClusterInStackRegion() {
         DbCluster cluster = mock(DbCluster.class);
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");

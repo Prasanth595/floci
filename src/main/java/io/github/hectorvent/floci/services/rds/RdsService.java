@@ -9753,6 +9753,75 @@ public class RdsService implements Resettable, ResourceProvider {
         return subscription;
     }
 
+    // ── Data API endpoint ─────────────────────────────────────────────────────
+
+    /**
+     * Turns a cluster's Data API endpoint on or off by the cluster's ARN, as EnableHttpEndpoint and
+     * DisableHttpEndpoint do. An ARN that names no cluster here is {@code ResourceNotFoundFault}, a
+     * cluster that is not available {@code InvalidResourceStateFault}. The flag is recorded and
+     * reported; the Data API does not consult it.
+     */
+    public synchronized DbCluster setHttpEndpointByArn(String region, String resourceArn, boolean enabled) {
+        requireParameter(resourceArn, "ResourceArn");
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = clusterForResourceArn(resourceArn, effectiveRegion);
+        if (cluster.getStatus() != null && cluster.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidResourceStateFault",
+                    "DB cluster " + cluster.getDbClusterIdentifier() + " is not in available state.", 400);
+        }
+        return setHttpEndpoint(effectiveRegion, cluster, enabled);
+    }
+
+    /** Sets the flag on a cluster named by identifier, for CreateDBCluster, ModifyDBCluster and CloudFormation. */
+    public synchronized DbCluster setHttpEndpoint(String region, String clusterId, boolean enabled) {
+        String effectiveRegion = effectiveRegion(region);
+        return setHttpEndpoint(effectiveRegion, getDbCluster(clusterId, effectiveRegion), enabled);
+    }
+
+    private DbCluster setHttpEndpoint(String effectiveRegion, DbCluster cluster, boolean enabled) {
+        if (enabled) {
+            requireDataApiEngine(engineName(cluster));
+        }
+        cluster.setHttpEndpointEnabled(enabled);
+        putClusterForScope(currentAccountId(), effectiveRegion, cluster.getDbClusterIdentifier(), cluster);
+        LOG.infov("Data API endpoint {0} for DB cluster {1}", enabled ? "enabled" : "disabled",
+                cluster.getDbClusterIdentifier());
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    /**
+     * The Data API is offered for Aurora PostgreSQL and Aurora MySQL only, so turning it on for any
+     * other engine is refused; a create checks this before the cluster exists.
+     */
+    public static void requireDataApiEngine(String engine) {
+        String name = engine == null ? "postgres" : engine.toLowerCase(Locale.ROOT);
+        if (!name.startsWith("aurora")) {
+            throw new AwsException("InvalidParameterCombination", "The Data API (HTTP endpoint) is available for "
+                    + "Aurora PostgreSQL and Aurora MySQL DB clusters only, not for engine " + name + ".", 400);
+        }
+    }
+
+    private DbCluster clusterForResourceArn(String resourceArn, String region) {
+        AwsException notFound = new AwsException("ResourceNotFoundFault",
+                "The specified resource ARN " + resourceArn + " doesn't refer to an existing DB cluster.", 404);
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceArn);
+        } catch (IllegalArgumentException malformed) {
+            throw notFound;
+        }
+        if (!"rds".equals(arn.service()) || !arn.resource().startsWith("cluster:")
+                || !region.equals(arn.region()) || !currentAccountId().equals(arn.accountId())) {
+            throw notFound;
+        }
+        DbCluster cluster = findClusterForScope(currentAccountId(), region,
+                arn.resource().substring("cluster:".length()));
+        if (cluster == null || !resourceArn.equals(cluster.getDbClusterArn())) {
+            throw notFound;
+        }
+        return cluster;
+    }
+
     // ── IAM role associations ─────────────────────────────────────────────────
 
     /**
