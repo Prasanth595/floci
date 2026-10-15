@@ -1,10 +1,16 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ssm.SsmService;
+import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import jakarta.enterprise.context.ApplicationScoped;
+import org.jboss.logging.Logger;
 
 import java.util.Arrays;
 import java.util.List;
@@ -16,6 +22,8 @@ import java.util.TreeSet;
 @ApplicationScoped
 public class SsmCfnProvisioner implements CfnResourceProvisioner {
 
+    private static final Logger LOG = Logger.getLogger(SsmCfnProvisioner.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int PARAMETER_NAME_MAX_LENGTH = 2048;
     private static final String SSM_TEMPLATE_TAG_KEYS_ATTR = "FlociSsmTemplateTagKeys";
 
@@ -44,6 +52,9 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         }
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         SsmService.validateTagKeys(tags);
+        if (ctx.reusesPriorEntity(name)) {
+            snapshotParameter(r, name, ctx.region());
+        }
         ssmService.putParameter(name, value, type, null, true, ctx.region());
         reconcileTags(name, r.getAttributes().get(SSM_TEMPLATE_TAG_KEYS_ATTR), tags, ctx.region());
         r.setPhysicalId(name);
@@ -57,6 +68,64 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         } else {
             r.getAttributes().put(SSM_TEMPLATE_TAG_KEYS_ATTR, String.join(",", new TreeSet<>(tags.keySet())));
         }
+    }
+
+    /**
+     * Records the value, type and description the parameter already held, so a later failed stack
+     * update can put them back. Only an in-place update reaches this: a create has no prior value to
+     * keep, and the snapshot is dropped once the update commits. The name keeps whatever it held
+     * because a replacing update creates a fresh parameter rather than overwriting this one.
+     */
+    private void snapshotParameter(StackResource r, String name, String region) {
+        Parameter current;
+        try {
+            current = ssmService.getParameter(name, region);
+        } catch (AwsException e) {
+            // The parameter the stack points at was deleted out of band, so the update recreates it
+            // and a rollback has no older value to restore. Nothing to snapshot.
+            return;
+        }
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("name", name);
+        snapshot.put("region", region);
+        snapshot.put("value", current.getValue());
+        snapshot.put("type", current.getType());
+        snapshot.put("description", current.getDescription());
+        r.getAttributes().put(CfnRollback.SSM_PARAMETER_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        String rawSnapshot = resource.getAttributes().remove(CfnRollback.SSM_PARAMETER_UPDATE_SNAPSHOT_ATTR);
+        if (rawSnapshot == null) {
+            return false;
+        }
+        try {
+            JsonNode snapshot = MAPPER.readTree(rawSnapshot);
+            JsonNode description = snapshot.get("description");
+            ssmService.putParameter(
+                    snapshot.get("name").asText(),
+                    snapshot.get("value").asText(),
+                    snapshot.get("type").asText(),
+                    description == null || description.isNull() ? null : description.asText(),
+                    true,
+                    snapshot.get("region").asText());
+            return true;
+        } catch (JsonProcessingException e) {
+            LOG.errorv("Could not parse SSM parameter update snapshot for {0}: {1}",
+                    resource.getLogicalId(), e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * The engine calls this for every resource once a stack update commits, so an in-place update's
+     * snapshot is dropped here: the update committed and nothing will roll it back.
+     */
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.SSM_PARAMETER_UPDATE_SNAPSHOT_ATTR);
+        return UpdateCleanupResult.notApplicable();
     }
 
     /**

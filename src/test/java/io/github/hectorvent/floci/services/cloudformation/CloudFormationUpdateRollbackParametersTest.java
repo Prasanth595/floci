@@ -124,9 +124,13 @@ class CloudFormationUpdateRollbackParametersTest {
      * UPDATE_ROLLBACK_FAILED rather than UPDATE_ROLLBACK_COMPLETE. Parameter restoration must not be
      * skipped in that path — the last successfully deployed values are independent of whether the
      * resource rollback succeeded.
+     *
+     * <p>The parameter is deleted out of band before the update, so the provisioner has no older
+     * value to snapshot and cannot restore it: the resource rollback then fails on its own, which is
+     * the remaining way {@code AWS::SSM::Parameter} rollback can fail now that it is implemented.
      */
     @Test
-    void failedUpdateWithFailedResourceRollback_stillRetainsLastSuccessfulParameterValues() {
+    void failedUpdateWithUnrestorableResourceRollback_retainsLastSuccessfulParameterValues() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "rollback-failed-params-stack-" + suffix;
         String parameterName = "/cfn/test/rollback-failed-params-" + suffix;
@@ -174,9 +178,20 @@ class CloudFormationUpdateRollbackParametersTest {
         .then()
             .statusCode(200);
 
+        // Delete the parameter outside CloudFormation, so the update recreates it with no older
+        // value snapshotted for a rollback to restore.
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DeleteParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{\"Name\":\"" + parameterName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         // The update changes Suffix (which the Parameter resource's Value depends on) and also
-        // introduces BadSecret, which fails to create. Rollback must then also fail: rollback isn't
-        // implemented for AWS::SSM::Parameter, so the stack lands in UPDATE_ROLLBACK_FAILED.
+        // introduces BadSecret, which fails to create. The parameter's rollback has nothing to
+        // restore, so it too fails and the stack lands in UPDATE_ROLLBACK_FAILED.
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")

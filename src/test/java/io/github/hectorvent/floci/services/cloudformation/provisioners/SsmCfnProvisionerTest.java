@@ -3,9 +3,12 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ssm.SsmService;
+import io.github.hectorvent.floci.services.ssm.model.Parameter;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -14,6 +17,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -38,6 +42,14 @@ class SsmCfnProvisionerTest {
     private final SsmService ssm = mock(SsmService.class);
     private final SsmCfnProvisioner provisioner = new SsmCfnProvisioner(ssm);
     private final ObjectMapper mapper = new ObjectMapper();
+
+    @BeforeEach
+    void stubPriorParameter() {
+        // An in-place update reads the existing parameter back to snapshot it. Default that read to a
+        // plain parameter so a test not about the snapshot still provisions; a test asserting the
+        // snapshot re-stubs it, and the later stub wins.
+        when(ssm.getParameter(NAME, REGION)).thenReturn(new Parameter(NAME, "v", "String"));
+    }
 
     private ProvisionContext ctx() {
         // Scalar properties and a flat tag map only, so a passthrough engine keeps this isolated.
@@ -137,5 +149,62 @@ class SsmCfnProvisionerTest {
 
         verify(ssm, never()).removeTagsFromResource(anyString(), any(), anyString());
         verify(ssm).addTagsToResource(NAME, Map.of("team", "b"), REGION);
+    }
+
+    @Test
+    void updateSnapshotsThePriorParameterAndRollbackRestoresIt() {
+        Parameter prior = new Parameter(NAME, "old", "String");
+        prior.setDescription("old-desc");
+        when(ssm.getParameter(NAME, REGION)).thenReturn(prior);
+        StackResource r = parameter(NAME, null);
+
+        provisioner.provision(r, props(), updateCtx());
+
+        verify(ssm).putParameter(NAME, "v", "String", null, true, REGION);
+        assertTrue(r.getAttributes().containsKey(CfnRollback.SSM_PARAMETER_UPDATE_SNAPSHOT_ATTR));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(ssm).putParameter(NAME, "old", "String", "old-desc", true, REGION);
+        assertFalse(r.getAttributes().containsKey(CfnRollback.SSM_PARAMETER_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void rollbackSnapshotsAParameterWithNoDescriptionAsNull() {
+        when(ssm.getParameter(NAME, REGION)).thenReturn(new Parameter(NAME, "old", "String"));
+        StackResource r = parameter(NAME, null);
+        provisioner.provision(r, props(), updateCtx());
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(ssm).putParameter(NAME, "old", "String", null, true, REGION);
+    }
+
+    @Test
+    void completeUpdateDropsTheSnapshot() {
+        when(ssm.getParameter(NAME, REGION)).thenReturn(new Parameter(NAME, "old", "String"));
+        StackResource r = parameter(NAME, null);
+        provisioner.provision(r, props(), updateCtx());
+
+        assertEquals(UpdateCleanupResult.notApplicable(), provisioner.completeUpdate(r));
+
+        assertFalse(r.getAttributes().containsKey(CfnRollback.SSM_PARAMETER_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void rollbackWithoutASnapshotIsANoOp() {
+        assertFalse(provisioner.rollbackUpdate(parameter(NAME, null)));
+    }
+
+    @Test
+    void updateOfAnOutOfBandDeletedParameterKeepsNoSnapshot() {
+        when(ssm.getParameter(NAME, REGION))
+                .thenThrow(new AwsException("ParameterNotFound", "Parameter not found.", 400));
+        StackResource r = parameter(NAME, null);
+
+        provisioner.provision(r, props(), updateCtx());
+
+        assertFalse(r.getAttributes().containsKey(CfnRollback.SSM_PARAMETER_UPDATE_SNAPSHOT_ATTR));
+        assertFalse(provisioner.rollbackUpdate(r));
     }
 }

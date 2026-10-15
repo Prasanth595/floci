@@ -10002,10 +10002,10 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
-    void updateStack_unsupportedResourceRollbackRemainsExplicitlyFailed() {
+    void updateStack_ssmParameterRollbackRestoresPriorValue() {
         String suffix = Long.toString(System.nanoTime(), 36);
-        String stackName = "unsupported-update-rollback-" + suffix;
-        String parameterName = "/cfn/unsupported-update-rollback/" + suffix;
+        String stackName = "ssm-param-update-rollback-" + suffix;
+        String parameterName = "/cfn/ssm-param-update-rollback/" + suffix;
         String template = """
             {
               "Resources": {
@@ -10031,7 +10031,7 @@ class CloudFormationIntegrationTest {
                   "Type": "AWS::SecretsManager::Secret",
                   "DependsOn": "Parameter",
                   "Properties": {
-                    "Name": "unsupported-update-rollback-secret-%s",
+                    "Name": "ssm-param-update-rollback-secret-%s",
                     "SecretString": "explicit",
                     "GenerateSecretString": {"PasswordLength": 32}
                   }
@@ -10046,8 +10046,11 @@ class CloudFormationIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .body(containsString("<StackId>"));
 
+        // The update rewrites the parameter and then introduces BadSecret, which fails to create,
+        // so the stacked parameter must be rolled back to the value it held before the attempt.
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
@@ -10066,8 +10069,18 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<StackStatus>UPDATE_ROLLBACK_FAILED</StackStatus>"))
-            .body(containsString("Parameter"));
+            .body(containsString("<StackStatus>UPDATE_ROLLBACK_COMPLETE</StackStatus>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("Resource update rolled back"))
+            .body(not(containsString("Rollback is not implemented for AWS::SSM::Parameter")));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10078,9 +10091,10 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<LogicalResourceId>Parameter</LogicalResourceId>"))
-            .body(containsString("<ResourceStatus>UPDATE_FAILED</ResourceStatus>"))
+            .body(not(containsString("<ResourceStatus>UPDATE_FAILED</ResourceStatus>")))
             .body(not(containsString("<LogicalResourceId>BadSecret</LogicalResourceId>")));
 
+        // The parameter carries its pre-update value again, not the failed attempt's "updated".
         given()
             .header("X-Amz-Target", "AmazonSSM.GetParameter")
             .contentType(SSM_CONTENT_TYPE)
@@ -10089,7 +10103,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Parameter.Value", equalTo("updated"));
+            .body("Parameter.Value", equalTo("initial"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10099,7 +10113,8 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("updated"));
+            .body(containsString("initial"))
+            .body(not(containsString("updated")));
 
         given()
             .contentType("application/x-www-form-urlencoded")
