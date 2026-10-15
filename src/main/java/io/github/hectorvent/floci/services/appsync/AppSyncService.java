@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
@@ -59,7 +60,7 @@ public class AppSyncService {
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final String baseUrl;
-    private final String cloudFrontDomainSuffix;
+    private final String configuredCloudFrontDomainSuffix;
     private final LambdaAuthorizerCache lambdaAuthorizerCache;
 
     @Inject
@@ -89,7 +90,7 @@ public class AppSyncService {
         this.objectMapper = objectMapper;
         this.clock = clock;
         this.baseUrl = trimTrailingSlash(config.effectiveBaseUrl());
-        this.cloudFrontDomainSuffix = config.services().cloudfront().domainSuffix();
+        this.configuredCloudFrontDomainSuffix = config.services().cloudfront().domainSuffix().orElse(null);
         this.lambdaAuthorizerCache = lambdaAuthorizerCache;
     }
 
@@ -760,7 +761,8 @@ public class AppSyncService {
      * Gateway domain gets.
      */
     private void applyCloudFrontFront(DomainName dn, String region) {
-        CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(region, cloudFrontDomainSuffix);
+        CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(regionResolver.partitionForRegion(region),
+                configuredCloudFrontDomainSuffix);
         dn.setAppsyncDomainName(edge.domainName());
         dn.setHostedZoneId(edge.hostedZoneId());
     }
@@ -1370,8 +1372,7 @@ public class AppSyncService {
     }
 
     static String encodeToken(int offset) {
-        return Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(Integer.toString(offset).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return Base64Url.encode(Integer.toString(offset));
     }
 
     static int decodeToken(String token) {

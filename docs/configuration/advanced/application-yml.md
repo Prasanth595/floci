@@ -247,12 +247,18 @@ floci:
 
     cognito:
       enabled: true
+      enforce-token-validity-limits: true  # Reject app clients whose token validity is outside AWS's limits; false allows shorter tokens
 
     stepfunctions:
       enabled: true
 
     cloudformation:
       enabled: true
+
+    cloudcontrol:
+      enabled: true
+      create-worker-threads: 4                # Threads that run CreateResource provisioning
+      create-queue-capacity: 64               # Creates that may wait for a thread before ThrottlingException
 
     acm:
       enabled: true

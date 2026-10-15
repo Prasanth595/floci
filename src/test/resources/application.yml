@@ -222,6 +222,9 @@ floci:
     redshift-data:
       enabled: true
       result-ttl-hours: 24
+      max-concurrent-statements: 10
+      queue-capacity: 100
+      shutdown-timeout-seconds: 10
     redshift-serverless:
       enabled: true
     neptune:
@@ -252,13 +255,14 @@ floci:
       list-shards-next-token-ttl-millis: 300000
     firehose:
       enabled: true
-      tick-interval-seconds: 10
+      tick-interval-seconds: 1
       flush-record-count: 0
       staging-bucket: floci-firehose-staging
     kms:
       enabled: true
     cognito:
       enabled: true
+      enforce-token-validity-limits: true
     stepfunctions:
       enabled: true
       allow-plaintext-http: true
