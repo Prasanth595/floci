@@ -476,7 +476,7 @@ class AutoScalingServiceTest {
         withVanished.put(REGION + "::vanished", null);
         field.set(service, withVanished);
 
-        AutoScalingService.TagPage page = service.describeTags(REGION, Map.of(), null, null);
+        AutoScalingService.TagPage page = service.describeTags(REGION, List.of(), null, null);
 
         assertEquals(List.of("k"), page.tags().stream().map(AutoScalingService.TagDescription::key).toList());
     }

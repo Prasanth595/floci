@@ -494,7 +494,7 @@ public class AutoScalingQueryHandler {
     }
 
     private Response handleDescribeTags(MultivaluedMap<String, String> p, String region) {
-        Map<String, List<String>> filters = new LinkedHashMap<>();
+        List<Map.Entry<String, List<String>>> filters = new ArrayList<>();
         int filterCount = 0;
         for (int i = 1; ; i++) {
             String name = p.getFirst("Filters.member." + i + ".Name");
@@ -502,7 +502,7 @@ public class AutoScalingQueryHandler {
             filterCount = i;
             List<String> values = memberList(p, "Filters.member." + i + ".Values");
             rejectIndexGap(p, "Filters.member." + i + ".Values.member.", values.size());
-            filters.computeIfAbsent(name, k -> new ArrayList<>()).addAll(values);
+            filters.add(Map.entry(name, values));
         }
         rejectIndexGap(p, "Filters.member.", filterCount);
         String maxRecords = p.getFirst("MaxRecords");

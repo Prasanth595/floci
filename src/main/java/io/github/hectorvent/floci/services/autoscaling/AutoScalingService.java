@@ -562,11 +562,11 @@ public class AutoScalingService {
     // AWS: values inside one filter are ORed, separate filters are ANDed; only these four
     // filter names exist. Ordered by (group, key); NextToken is the last pair returned, so tags
     // added or removed between pages neither skip nor repeat an entry.
-    public TagPage describeTags(String region, Map<String, List<String>> filters,
+    public TagPage describeTags(String region, List<Map.Entry<String, List<String>>> filters,
                                 Integer maxRecords, String nextToken) {
-        for (String name : filters.keySet()) {
-            if (!Set.of("auto-scaling-group", "key", "value", "propagate-at-launch").contains(name)) {
-                throw new AwsException("ValidationError", "Filter name '" + name + "' is not valid.", 400);
+        for (Map.Entry<String, List<String>> filter : filters) {
+            if (!Set.of("auto-scaling-group", "key", "value", "propagate-at-launch").contains(filter.getKey())) {
+                throw new AwsException("ValidationError", "Filter name '" + filter.getKey() + "' is not valid.", 400);
             }
         }
         String[] after = parseTagCursor(region, nextToken);
@@ -642,11 +642,13 @@ public class AutoScalingService {
         throw new AwsException("InvalidNextToken", "The NextToken value is not valid.", 400);
     }
 
-    private static boolean matchesFilter(Map<String, List<String>> filters, String name, String actual) {
-        List<String> values = filters.get(name);
+    // Every filter of this name must match (a repeated name is a second filter, ANDed).
+    private static boolean matchesFilter(List<Map.Entry<String, List<String>>> filters, String name, String actual) {
         boolean caseInsensitive = name.equals("propagate-at-launch");
-        return values == null || values.isEmpty() || values.stream()
-                .anyMatch(v -> caseInsensitive ? v.equalsIgnoreCase(actual) : v.equals(actual));
+        return filters.stream()
+                .filter(f -> f.getKey().equals(name) && !f.getValue().isEmpty())
+                .allMatch(f -> f.getValue().stream()
+                        .anyMatch(v -> caseInsensitive ? v.equalsIgnoreCase(actual) : v.equals(actual)));
     }
 
     public record TagDescription(String resourceId, String key, String value, boolean propagateAtLaunch) {}

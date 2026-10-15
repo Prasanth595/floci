@@ -106,6 +106,23 @@ class AutoScalingDescribeTagsIntegrationTest {
         assertEquals(List.of("team", "AsgId"), xml.getList(ROOT + ".Key"));
     }
 
+    // Two filters with the same name are still two filters: ANDed, not merged into one ORed list.
+    @Test
+    void repeatedFilterNamesAreAndedNotMerged() {
+        XmlPath xml = describe()
+                .formParam("Filters.member.1.Name", "key")
+                .formParam("Filters.member.1.Values.member.1", "AsgId")
+                .formParam("Filters.member.1.Values.member.2", "team")
+                .formParam("Filters.member.2.Name", "key")
+                .formParam("Filters.member.2.Values.member.1", "team")
+                .formParam("Filters.member.3.Name", "auto-scaling-group")
+                .formParam("Filters.member.3.Values.member.1", GROUP_A)
+            .when().post("/")
+            .then().statusCode(200).extract().xmlPath();
+
+        assertEquals(List.of("team"), xml.getList(ROOT + ".Key"));
+    }
+
     @Test
     void maxRecordsPagesWithNextToken() {
         XmlPath first = describe()
@@ -184,7 +201,18 @@ class AutoScalingDescribeTagsIntegrationTest {
     // A tag deleted from an already-returned page must not shift the next page past an unread tag.
     @Test
     void nextTokenSurvivesATagDeletedBeforeTheCursor() {
-        String group = "describe-tags-cursor";
+        assertSecondPageAfterDeleting("describe-tags-cursor", "k1");
+    }
+
+    // The exact tag the NextToken encodes is deleted: the next page resumes at the first greater
+    // key, rather than failing or restarting the listing.
+    @Test
+    void nextTokenSurvivesDeletingTheCursorTagItself() {
+        assertSecondPageAfterDeleting("describe-tags-cursor-gone", "k2");
+    }
+
+    // Group has tags k1, k2, k3; the first page (MaxRecords=2) returns k1, k2, so the token encodes k2.
+    private static void assertSecondPageAfterDeleting(String group, String deletedKey) {
         createGroup(group, "k1", "v", false);
         given()
                 .formParam("Action", "CreateOrUpdateTags")
@@ -213,7 +241,7 @@ class AutoScalingDescribeTagsIntegrationTest {
                 .formParam("Action", "DeleteTags")
                 .formParam("Tags.member.1.ResourceId", group)
                 .formParam("Tags.member.1.ResourceType", "auto-scaling-group")
-                .formParam("Tags.member.1.Key", "k1")
+                .formParam("Tags.member.1.Key", deletedKey)
                 .header("Authorization", AUTH)
             .when().post("/")
             .then().statusCode(200);
