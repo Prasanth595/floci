@@ -684,7 +684,7 @@ floci:
       prefer-local-images: true
     ui:
       enabled: true
-      image: "floci/floci-ui:latest"
+      image: "floci/floci-ui:0.7.0"
       container-name: floci-ui
       port: 4500
       # bind-address: unset by default, so Docker publishes the console on every interface.

@@ -2590,7 +2590,7 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        @WithDefault("floci/floci-ui:latest")
+        @WithDefault("floci/floci-ui:0.7.0")
         String image();
 
         @WithDefault("floci-ui")
