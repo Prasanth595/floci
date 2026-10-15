@@ -396,7 +396,8 @@ before provisioning:
   empty value counts as a value. An update does not carry values over: set `UsePreviousValue` to
   keep the deployed one. `UsePreviousValue` on a parameter that has no deployed value passes none.
   A request for a stack that does not exist, cannot be updated, or already exists gets that error
-  rather than this one; template errors such as a dependency cycle still come first. The same check
+  rather than this one. The check runs before the template's dependency checks (a cycle, an
+  unresolved dependency, a malformed condition), which read the values. The same check
   refuses `CreateStackSet` and `UpdateStackSet`, and fails a nested stack's resource whose
   `Parameters` leave a child parameter without a value. A parameter that an `AWS::Include` defines
   is not checked, nor is any parameter in a section that carries an `AWS::Include` of its own.
