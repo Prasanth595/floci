@@ -265,7 +265,8 @@ public class RdsExportTaskService implements Resettable {
             finish(region, taskId, startedIn, ExportTask.STATUS_COMPLETE, null, outcome);
         } catch (RuntimeException e) {
             LOG.warnv(e, "RDS export task {0} failed", taskId);
-            finish(region, taskId, startedIn, ExportTask.STATUS_FAILED, e.getMessage(), null);
+            finish(region, taskId, startedIn, ExportTask.STATUS_FAILED,
+                    e.getMessage() != null ? e.getMessage() : e.toString(), null);
         }
     }
 
@@ -357,12 +358,16 @@ public class RdsExportTaskService implements Resettable {
             if (task.isTerminal()) {
                 continue;
             }
-            task.setStatus(ExportTask.STATUS_FAILED);
-            task.setFailureCause(RESTART_FAILURE_CAUSE);
+            if (ExportTask.STATUS_CANCELING.equals(task.getStatus())) {
+                task.setStatus(ExportTask.STATUS_CANCELED);
+            } else {
+                task.setStatus(ExportTask.STATUS_FAILED);
+                task.setFailureCause(RESTART_FAILURE_CAUSE);
+            }
             task.setTaskEndTime(Instant.now(clock));
             accountTasks.putForAccount(entry.accountId(), entry.key(), task);
-            LOG.warnv("RDS export task {0} was interrupted by a restart and is now FAILED",
-                    task.getExportTaskIdentifier());
+            LOG.warnv("RDS export task {0} was interrupted by a restart and is now {1}",
+                    task.getExportTaskIdentifier(), task.getStatus());
             if (!mock) {
                 try {
                     exporter.discard(task);

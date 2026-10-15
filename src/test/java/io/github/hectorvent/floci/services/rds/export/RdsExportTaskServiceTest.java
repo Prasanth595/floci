@@ -143,6 +143,18 @@ class RdsExportTaskServiceTest {
     }
 
     @Test
+    void aFailureWithoutAMessageStillReportsACause() {
+        RdsExportTaskService service = service((task, source, progress) -> {
+            throw new NullPointerException();
+        });
+        start(service, "appdb-export", List.of());
+
+        runWorkers();
+
+        assertThat(describe(service, "appdb-export").getFailureCause(), equalTo("java.lang.NullPointerException"));
+    }
+
+    @Test
     void skippedTablesBecomeTheWarningMessage() {
         RdsExportTaskService service = service((task, source, progress) ->
                 outcome(10, List.of("The table appdb.public.odd was skipped.")));
@@ -283,6 +295,26 @@ class RdsExportTaskServiceTest {
         ExportTask recovered = describe(service, "appdb-export");
         assertThat(recovered.getStatus(), equalTo("FAILED"));
         assertThat(recovered.getFailureCause(), equalTo(RdsExportTaskService.RESTART_FAILURE_CAUSE));
+        verify(exporter).discard(argThat(task -> "appdb-export".equals(task.getExportTaskIdentifier())));
+    }
+
+    @Test
+    void aTaskBeingCanceledWhenARestartInterruptedItIsCanceled() {
+        AccountAwareStorageBackend<ExportTask> persisted =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT);
+        ExportTask canceling = new ExportTask();
+        canceling.setExportTaskIdentifier("appdb-export");
+        canceling.setStatus(ExportTask.STATUS_CANCELING);
+        canceling.setTaskStartTime(SNAPSHOT_TIME);
+        persisted.putForAccount(ACCOUNT, "export-task::us-east-1::appdb-export", canceling);
+        SnapshotExporter exporter = mock(SnapshotExporter.class);
+
+        RdsExportTaskService service = new RdsExportTaskService(persisted, rdsService, s3Service, exporter,
+                regionResolver, false, CLOCK, workers::add);
+
+        ExportTask recovered = describe(service, "appdb-export");
+        assertThat(recovered.getStatus(), equalTo("CANCELED"));
+        assertThat(recovered.getFailureCause(), nullValue());
         verify(exporter).discard(argThat(task -> "appdb-export".equals(task.getExportTaskIdentifier())));
     }
 

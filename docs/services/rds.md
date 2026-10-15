@@ -700,7 +700,7 @@ while its tables are written, then `COMPLETE` or `FAILED` with a `FailureCause`.
 moves a running task to `CANCELING`; it stops before its next table and becomes `CANCELED`, and the
 data it already wrote stays in the bucket, as on RDS. A table the export skips is named in
 `WarningMessage`. A task still running when Floci stops is `FAILED` as soon as Floci starts again,
-and the container and volume it was using are removed then. A `StartExportTask` that arrives while
+or `CANCELED` if it was being canceled, and the container and volume it was using are removed then. A `StartExportTask` that arrives while
 Floci is resetting waits for the reset to finish, and is refused with `Throttling` if it lasts more
 than 30 seconds.
 
