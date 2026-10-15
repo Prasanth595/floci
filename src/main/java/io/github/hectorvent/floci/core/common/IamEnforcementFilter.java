@@ -752,10 +752,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             for (Map<String, List<String>> targetContext : targetContexts) {
                 Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
                         targetContext, resource, region, accountId, resourceOwnerAccountId);
-                if ("logs".equals(credentialScope)
-                        && ("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action))) {
-                    effectiveContext.put("aws:ResourceAccount", List.of(accountId));
-                }
                 if ("dynamodb".equals(credentialScope)) {
                     Map<String, List<String>> batchContext =
                             conditionContextResolver.dynamoDbBatchConditionContext(action, ctx, resource);

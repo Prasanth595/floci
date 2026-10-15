@@ -3844,13 +3844,16 @@ public class S3Controller {
      * {@code AuthorizationHeaderMalformed}.
      */
     private void rejectUnknownPostRegion(String credential) {
-        if (credential == null || credential.isEmpty() || config.partitions().allowUnknownRegions()) {
+        if (credential == null || credential.isEmpty()) {
             return;
         }
         String region = regionResolver.resolveRegionFromPresignedCredential(credential);
-        if (!RegionResolver.isKnownRegion(region)) {
-            throw new AwsException("AuthorizationHeaderMalformed", "The authorization header is malformed; "
-                    + "the region '" + region + "' is wrong; expecting a region AWS publishes.", 400);
+        boolean ambiguous = RegionResolver.containsArnDelimiter(region);
+        if (ambiguous || (!RegionResolver.isKnownRegion(region) && !config.partitions().allowUnknownRegions())) {
+            String message = ambiguous ? "The authorization header is malformed; the region '" + region
+                    + "' must not contain ':'." : "The authorization header is malformed; "
+                    + "the region '" + region + "' is wrong; expecting a region AWS publishes.";
+            throw new AwsException("AuthorizationHeaderMalformed", message, 400);
         }
     }
 
