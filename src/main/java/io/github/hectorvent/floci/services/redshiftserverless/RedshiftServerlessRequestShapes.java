@@ -2,9 +2,8 @@ package io.github.hectorvent.floci.services.redshiftserverless;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.VendoredResources;
 
-import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -31,7 +30,10 @@ final class RedshiftServerlessRequestShapes {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    /** Their out-of-range values are an InvalidPaginationException, which the services report themselves. */
+    /**
+     * Skipped because only ListUsageLimits answers InvalidPaginationException for out-of-range
+     * pagination values, while the other lists use ValidationException; the services report both themselves.
+     */
     private static final Set<String> PAGINATION_MEMBERS = Set.of("maxResults", "nextToken");
 
     record Shape(String type, Map<String, String> members, List<String> required, String element,
@@ -42,7 +44,9 @@ final class RedshiftServerlessRequestShapes {
     }
 
     private static final class Holder {
-        static final Model MODEL = load();
+        static final Model MODEL = VendoredResources.read(RESOURCE_NAME,
+                "Redshift Serverless request shapes",
+                in -> parse(MAPPER.readTree(in)));
     }
 
     private RedshiftServerlessRequestShapes() {
@@ -134,17 +138,6 @@ final class RedshiftServerlessRequestShapes {
         }
         if (shape.max() != null && actual > shape.max()) {
             throw ServerlessSupport.validation(path + " must have " + what + " at most " + shape.max() + ".");
-        }
-    }
-
-    private static Model load() {
-        try (InputStream in = Thread.currentThread().getContextClassLoader().getResourceAsStream(RESOURCE_NAME)) {
-            if (in == null) {
-                throw new IllegalStateException("Redshift Serverless request shape resource not found: " + RESOURCE_NAME);
-            }
-            return parse(MAPPER.readTree(in));
-        } catch (IOException e) {
-            throw new IllegalStateException("Failed to read the Redshift Serverless request shapes " + RESOURCE_NAME, e);
         }
     }
 

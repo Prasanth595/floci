@@ -650,8 +650,7 @@ public class RedshiftServerlessService implements Resettable {
     }
 
     private static AwsException resourceNotFound(String resourceArn) {
-        return new AwsException("ResourceNotFoundException",
-                "The resource " + resourceArn + " was not found.", 400);
+        return ServerlessSupport.notFound("The resource " + resourceArn + " was not found.");
     }
 
     public synchronized Workgroup createWorkgroup(String workgroupName, String namespaceName,
@@ -1028,8 +1027,7 @@ public class RedshiftServerlessService implements Resettable {
     }
 
     private static AwsException workgroupNotFound(String workgroupName) {
-        return new AwsException("ResourceNotFoundException",
-                "The workgroup " + workgroupName + " was not found.", 400);
+        return ServerlessSupport.notFound("The workgroup " + workgroupName + " was not found.");
     }
 
     private static String storageKey(String region, String namespaceName) {
@@ -1037,12 +1035,10 @@ public class RedshiftServerlessService implements Resettable {
     }
 
     private static AwsException notFound(String namespaceName) {
-        return new AwsException("ResourceNotFoundException",
-                "The namespace " + namespaceName + " was not found.", 400);
+        return ServerlessSupport.notFound("The namespace " + namespaceName + " was not found.");
     }
 
     private static AwsException snapshotNotFound(String snapshotName) {
-        return new AwsException("ResourceNotFoundException",
-                "The snapshot " + snapshotName + " was not found.", 400);
+        return ServerlessSupport.notFound("The snapshot " + snapshotName + " was not found.");
     }
 }
