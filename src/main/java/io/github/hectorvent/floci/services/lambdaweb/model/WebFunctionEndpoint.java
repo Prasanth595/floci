@@ -22,13 +22,10 @@ public final class WebFunctionEndpoint {
     public String autoDeploymentMode;
     public List<RevisionWeight> revisionWeights = new ArrayList<>();
     public List<String> regions = new ArrayList<>();
-    /** Null until set. Clearing it leaves an empty object, which the wire shows as {@code {}}. */
+    /** Clearing a config on AWS leaves an empty object, which the wire shows as {@code {}}. */
     public ScalingConfig scalingConfig;
-    /** Null until set. Clearing it leaves an empty object, which the wire shows as {@code {}}. */
     public ThrottleConfig throttleConfig;
-    /** Null until the first update. */
     public String updateStatus;
-    /** PerRegion endpoints: the domain name each region serves, keyed by region. */
     public Map<String, String> regionalDomainNames = new LinkedHashMap<>();
     public Instant createdAt;
     public Instant updatedAt;

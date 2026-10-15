@@ -424,6 +424,20 @@ class LambdaWebIntegrationTest {
                 .body("message", equalTo("The logGroup aws/lambda/x is invalid. Log group names starting with aws/"
                         + " (case-insensitive) are reserved for AWS."));
 
+        given().contentType("application/json")
+                .body("""
+                        {"buildConfig": %s, "serviceConfig": {"executionRoleArn": "%s", "timeoutSeconds": "60"}}
+                        """.formatted(BUILD, ROLE))
+                .when().post(revisions)
+                .then().statusCode(400)
+                .header("X-Amzn-Errortype", "SerializationException")
+                .body("message", equalTo("STRING_VALUE can not be converted to an Integer"));
+
+        given().contentType("application/json").body("not json")
+                .when().post(revisions)
+                .then().statusCode(400)
+                .header("X-Amzn-Errortype", "SerializationException");
+
         given().when().get(revisions + "/rev-nope")
                 .then().statusCode(400)
                 .body("message", equalTo("Invalid revision id or ARN 'rev-nope'"));
@@ -536,6 +550,23 @@ class LambdaWebIntegrationTest {
                 .then().statusCode(404)
                 .body("message", equalTo("The function arn:aws:lambda:us-east-1:000000000000:web-function/does-not-exist"
                         + " does not exist."));
+        given().urlEncodingEnabled(false)
+                .when().get(BASE + "/web-functions/" + URLEncoder.encode(ARN.replace(":us-east-1:", ":eu-west-1:"),
+                        StandardCharsets.UTF_8))
+                .then().statusCode(400)
+                .body("message", equalTo("The operation is only allowed in the function's home region eu-west-1."));
+        given().urlEncodingEnabled(false)
+                .when().get(BASE + "/web-functions/" + URLEncoder.encode(ARN.replace("000000000000", "111111111111"),
+                        StandardCharsets.UTF_8))
+                .then().statusCode(403)
+                .header("X-Amzn-Errortype", "AccessDeniedException")
+                .body("message", equalTo("User: arn:aws:iam::000000000000:user/unknown is not authorized to perform:"
+                        + " lambda:GetWebFunction on resource: arn:aws:lambda:us-east-1:111111111111:web-function/" + FN
+                        + " because no resource-based policy allows the lambda:GetWebFunction action"));
+        given().contentType("application/json").body("{\"nextToken\": \"00000000-0000-0000-0000-000000000000\"}")
+                .when().post(BASE + "/web-functions")
+                .then().statusCode(400)
+                .body("message", equalTo("The nextToken 00000000-0000-0000-0000-000000000000 is invalid or has expired."));
     }
 
     @Test

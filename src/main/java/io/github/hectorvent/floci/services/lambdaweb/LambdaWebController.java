@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.lambdaweb;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebResponses.View;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
@@ -23,17 +22,15 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * AWS Lambda Web Functions control plane ("Lambda Web", apiVersion 2025-03-07, rest-json, signs as
- * {@code lambda}). Routes live under the {@code /2025-03-07} prefix. Request members are camelCase
- * except on the tag and resource-policy operations, whose bodies carry {@code Tags}, {@code Policy}
- * and {@code RevisionId}. Tags ride {@code /2025-03-07/tags}, separate from the classic
- * {@code /2017-03-31/tags} routes.
+ * Lambda Web Functions (apiVersion 2025-03-07, rest-json, signs as {@code lambda}). The tag and
+ * resource-policy bodies carry {@code Tags}, {@code Policy} and {@code RevisionId}. Every other
+ * member is camelCase.
  */
 @Path("/2025-03-07")
 @Produces(MediaType.APPLICATION_JSON)
@@ -55,7 +52,7 @@ public class LambdaWebController {
     @Path("/web-functions")
     public Response createWebFunction(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
-        WebFunction fn = service.createFunction(region, regionResolver.getAccountId(), parse(body));
+        WebFunction fn = service.createFunction(region, parse(body));
         WebFunctionRevision revision = fn.revisions.values().iterator().next();
         WebFunctionEndpoint endpoint = fn.endpoints.values().iterator().next();
         return Response.status(202).entity(LambdaWebResponses.createdFunction(fn, revision, endpoint)).build();
@@ -130,8 +127,7 @@ public class LambdaWebController {
     public Response createWebFunctionEndpoint(@Context HttpHeaders headers,
                                               @PathParam("functionName") String functionName, String body) {
         String region = regionResolver.resolveRegion(headers);
-        WebFunctionEndpoint endpoint = service.createEndpoint(region, regionResolver.getAccountId(), functionName,
-                parse(body));
+        WebFunctionEndpoint endpoint = service.createEndpoint(region, functionName, parse(body));
         return Response.status(202).entity(LambdaWebResponses.endpoint(endpoint, endpoint, View.CREATED)).build();
     }
 
@@ -195,26 +191,28 @@ public class LambdaWebController {
     @Path("/tags/{resource: .+}")
     public Response tagResource(@Context HttpHeaders headers, @PathParam("resource") String resource, String body) {
         String region = regionResolver.resolveRegion(headers);
-        JsonNode request = parse(body);
-        JsonNode tags = request.get("Tags");
-        if (tags == null || tags.isNull()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'tags' failed to satisfy constraint: Member must not be null",
-                    400);
-        }
-        Map<String, String> map = new LinkedHashMap<>();
-        tags.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().isNull() ? null : e.getValue().asText()));
-        service.tagResource(region, resource, map);
+        service.tagResource(region, resource, parse(body));
         return Response.noContent().build();
     }
 
     @DELETE
     @Path("/tags/{resource: .+}")
-    public Response untagResource(@Context HttpHeaders headers, @PathParam("resource") String resource,
+    public Response untagResource(@Context HttpHeaders headers, @Context UriInfo uriInfo,
+                                  @PathParam("resource") String resource,
                                   @QueryParam("tagKeys") List<String> tagKeys) {
         String region = regionResolver.resolveRegion(headers);
-        service.untagResource(region, resource, tagKeys);
+        service.untagResource(region, resource, tagKeys(uriInfo, tagKeys));
         return Response.noContent().build();
+    }
+
+    /** JAX-RS drops an empty query value, which AWS reads as one empty key. */
+    private static List<String> tagKeys(UriInfo uriInfo, List<String> tagKeys) {
+        if (tagKeys != null && !tagKeys.isEmpty()) {
+            return tagKeys;
+        }
+        String query = uriInfo.getRequestUri().getRawQuery();
+        boolean present = query != null && (query.startsWith("tagKeys=") || query.contains("&tagKeys="));
+        return present ? List.of("") : null;
     }
 
     @PUT
@@ -222,9 +220,7 @@ public class LambdaWebController {
     public Response putResourcePolicy(@Context HttpHeaders headers, @PathParam("resourceArn") String resourceArn,
                                       String body) {
         String region = regionResolver.resolveRegion(headers);
-        JsonNode request = parse(body);
-        LambdaWebService.ResourcePolicy policy = service.putResourcePolicy(region, resourceArn,
-                text(request, "Policy"), text(request, "RevisionId"));
+        LambdaWebService.ResourcePolicy policy = service.putResourcePolicy(region, resourceArn, parse(body));
         return Response.ok(LambdaWebResponses.policy(policy)).build();
     }
 
@@ -245,15 +241,6 @@ public class LambdaWebController {
     }
 
     private JsonNode parse(String body) {
-        try {
-            return objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
-        } catch (Exception e) {
-            throw new AwsException("ValidationException", "The request body is not valid JSON.", 400);
-        }
-    }
-
-    private static String text(JsonNode node, String field) {
-        JsonNode value = node.get(field);
-        return value == null || value.isNull() ? null : value.asText();
+        return LambdaWebJson.parseBody(objectMapper, body);
     }
 }

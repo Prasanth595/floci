@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.lambdaweb;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.util.ArrayList;
@@ -9,15 +8,16 @@ import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
- * Collects the input-shape errors the service reports before any business rule runs, in the wording
- * AWS uses: one {@code ValidationException} that counts the errors and joins them with "; ".
+ * Collects the input-shape errors of one request into the single {@code ValidationException} AWS
+ * reports, which counts the errors and joins them with "; ".
  */
 final class LambdaWebValidation {
 
     private final List<String> errors = new ArrayList<>();
 
-    LambdaWebValidation required(String path, JsonNode value) {
-        if (value == null || value.isNull() || value.isMissingNode()) {
+    /** A member read by {@link LambdaWebJson}, so an absent JSON member arrives as null. */
+    LambdaWebValidation required(String path, Object value) {
+        if (value == null) {
             errors.add("Value null at '" + path + "' failed to satisfy constraint: Member must not be null");
         }
         return this;
@@ -42,6 +42,16 @@ final class LambdaWebValidation {
         } else if (size > max) {
             errors.add("Value at '" + path + "' failed to satisfy constraint: "
                     + "Member must have length less than or equal to " + max);
+        }
+        return this;
+    }
+
+    /** AWS reports one error for the whole list, printing it, when any member breaks a constraint. */
+    LambdaWebValidation listMembers(String path, List<String> values, int min, int max, Pattern pattern) {
+        boolean bad = values.stream().anyMatch(v -> v.length() < min || v.length() > max || !pattern.matcher(v).matches());
+        if (bad) {
+            errors.add(valueAt(values, path) + "Member must satisfy constraint: [" + lengthConstraints(min, max)
+                    + ", Member must satisfy regular expression pattern: " + pattern.pattern() + "]");
         }
         return this;
     }
@@ -72,7 +82,7 @@ final class LambdaWebValidation {
         return this;
     }
 
-    /** Every key must satisfy every constraint; AWS lists all of them whichever one failed. */
+    /** AWS lists every key constraint whichever one failed. */
     LambdaWebValidation mapKeys(String path, Map<String, ?> map, int min, int max, Pattern pattern) {
         boolean bad = map.keySet().stream()
                 .anyMatch(k -> k.length() < min || k.length() > max || !pattern.matcher(k).matches());
@@ -92,6 +102,26 @@ final class LambdaWebValidation {
             errors.add(valueAt(map, path) + "Map value must satisfy constraint: ["
                     + lengthConstraints(min, max) + ", Member must satisfy regular expression pattern: "
                     + pattern.pattern() + "]");
+        }
+        return this;
+    }
+
+    /** A sensitive map: AWS prints no value and the keys have a minimum length and a pattern only. */
+    LambdaWebValidation sensitiveMapKeys(String path, Map<String, ?> map, int min, Pattern pattern) {
+        boolean bad = map.keySet().stream().anyMatch(k -> k.length() < min || !pattern.matcher(k).matches());
+        if (bad) {
+            errors.add("Value at '" + path + "' failed to satisfy constraint: Map keys must satisfy constraint: ["
+                    + "Member must have length greater than or equal to " + min
+                    + ", Member must satisfy regular expression pattern: " + pattern.pattern() + "]");
+        }
+        return this;
+    }
+
+    LambdaWebValidation sensitiveMapValues(String path, Map<String, String> map, int min) {
+        boolean bad = map.values().stream().anyMatch(v -> v.length() < min);
+        if (bad) {
+            errors.add("Value at '" + path + "' failed to satisfy constraint: Map value must satisfy constraint: ["
+                    + "Member must have length greater than or equal to " + min + "]");
         }
         return this;
     }

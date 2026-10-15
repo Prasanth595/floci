@@ -5,11 +5,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.time.Instant;
 import java.util.Map;
 
-/**
- * An immutable snapshot of a Web Function's code and configuration. The wire nests the code under
- * {@code buildConfig.codeConfig.s3Object} and the runtime under {@code buildConfig.runtimeConfig};
- * both are flattened here and nested again when rendered.
- */
+/** A snapshot of a Web Function's code and configuration. The wire nesting is rebuilt when rendered. */
 @RegisterForReflection
 public final class WebFunctionRevision {
 
@@ -36,7 +32,6 @@ public final class WebFunctionRevision {
         public int timeoutSeconds = 30;
         public String egressNetworkConnectorArn;
         public int maxConcurrencyPerEnvironment = 64;
-        /** Null when the revision sets none; the wire omits the member then. */
         public Map<String, String> environmentVariables;
         public String logGroup;
         public String applicationLogLevel = "INFO";

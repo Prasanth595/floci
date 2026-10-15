@@ -12,10 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
-/**
- * The wire shapes of Lambda Web responses. Members are emitted in alphabetical order, as the service
- * does, and an absent member is absent rather than null. Timestamps carry microseconds.
- */
+/** The wire shapes of Lambda Web responses. AWS emits members in alphabetical order with microsecond timestamps. */
 final class LambdaWebResponses {
 
     private static final DateTimeFormatter TIMESTAMP =
@@ -38,7 +35,7 @@ final class LambdaWebResponses {
         return out;
     }
 
-    /** CreateWebFunction: the function with summaries of its first revision and endpoint, both Pending. */
+    /** CreateWebFunction shows its first revision and endpoint as Pending. */
     static Map<String, Object> createdFunction(WebFunction fn, WebFunctionRevision revision,
                                                WebFunctionEndpoint endpoint) {
         Map<String, Object> out = function(fn);
@@ -100,7 +97,7 @@ final class LambdaWebResponses {
         }
     }
 
-    /** The list and CreateWebFunction shape: no functionArn and no per-region detail. */
+    /** The summary has no functionArn and no per-region block. */
     static Map<String, Object> endpointSummary(WebFunctionEndpoint endpoint, View view) {
         Map<String, Object> out = node();
         out.put("endpointArn", endpoint.endpointArn);
@@ -119,10 +116,7 @@ final class LambdaWebResponses {
         return out;
     }
 
-    /**
-     * The Get, Create and Update shape. An update response shows the per-region block as it was
-     * before the update, which is what the service reports while the update is in progress.
-     */
+    /** An update response shows the per-region block as it was before the update. */
     static Map<String, Object> endpoint(WebFunctionEndpoint endpoint, WebFunctionEndpoint regionalSource, View view) {
         Map<String, Object> out = endpointSummary(endpoint, view);
         out.put("functionArn", endpoint.functionArn);
