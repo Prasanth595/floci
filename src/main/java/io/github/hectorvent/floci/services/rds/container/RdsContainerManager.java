@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.rds.container;
 
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -883,6 +886,35 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
             }
         }
         throw new IllegalStateException("Timed out initializing " + description + " in " + containerName + ": " + lastOutput);
+    }
+
+    /**
+     * The container's log as Docker keeps it, stdout and stderr, one line per entry with Docker's
+     * RFC 3339 timestamp in front. A partial last line is kept; a container Docker no longer knows
+     * has no lines.
+     */
+    public List<String> readLog(String containerId) {
+        ByteArrayOutputStream raw = new ByteArrayOutputStream();
+        try {
+            lifecycleManager.getDockerClient().logContainerCmd(containerId)
+                    .withStdOut(true).withStdErr(true).withTimestamps(true)
+                    .exec(new ResultCallback.Adapter<Frame>() {
+                        @Override
+                        public void onNext(Frame frame) {
+                            raw.writeBytes(frame.getPayload());
+                        }
+                    }).awaitCompletion(Duration.ofSeconds(10).toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while reading the log of container " + containerId, e);
+        } catch (NotFoundException e) {
+            return List.of();
+        }
+        String text = raw.toString(StandardCharsets.UTF_8);
+        if (text.isEmpty()) {
+            return List.of();
+        }
+        return List.of(text.split("\r?\n"));
     }
 
     public String createPostgresSnapshot(String containerId, String masterUsername) {

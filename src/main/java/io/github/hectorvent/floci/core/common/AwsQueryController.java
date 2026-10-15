@@ -567,6 +567,7 @@ public class AwsQueryController {
             "CreateDBCluster", "DescribeDBClusters", "DeleteDBCluster", "ModifyDBCluster",
             "AddRoleToDBCluster", "RemoveRoleFromDBCluster", "AddRoleToDBInstance", "RemoveRoleFromDBInstance",
             "EnableHttpEndpoint", "DisableHttpEndpoint",
+            "DescribeDBLogFiles", "DownloadDBLogFilePortion",
             "DescribeGlobalClusters",
             "CreateDBParameterGroup", "DescribeDBParameterGroups",
             "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters",

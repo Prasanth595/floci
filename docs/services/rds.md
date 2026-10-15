@@ -73,6 +73,8 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DeleteDBClusterEndpoint` | Delete a custom endpoint |
 | `EnableHttpEndpoint` | Turn on an Aurora cluster's Data API endpoint by ARN; see [Data API endpoint](#data-api-endpoint) |
 | `DisableHttpEndpoint` | Turn off a cluster's Data API endpoint by ARN |
+| `DescribeDBLogFiles` | List an instance's log files, read from its database container; see [Log files](#log-files) |
+| `DownloadDBLogFilePortion` | Read a block of a log file, from the start or the most recent lines |
 | `AddRoleToDBCluster` | Associate an IAM role with a cluster, optionally for a feature; see [IAM role associations](#iam-role-associations) |
 | `RemoveRoleFromDBCluster` | Remove a role from a cluster |
 | `AddRoleToDBInstance` | Associate an IAM role with an instance for a feature |
@@ -630,6 +632,24 @@ other engine is `InvalidParameterCombination` (a create checks before the cluste
 it off is always accepted. An ARN that names no cluster in the caller's account and Region is
 `ResourceNotFoundFault`, and a cluster that is not available is `InvalidResourceStateFault`. The flag
 is recorded and reported only: the Data API (`rds-data`) does not refuse a cluster with it off.
+
+## Log files
+
+`DescribeDBLogFiles` and `DownloadDBLogFilePortion` read an instance's log from its database
+container (`docker logs`), cut into files the way RDS names them: PostgreSQL rotates hourly into
+`error/postgresql.log.YYYY-MM-DD-HH` (UTC), MySQL and MariaDB keep `error/mysql-error.log`, and SQL
+Server keeps `log/ERROR`. An Aurora member reads its cluster's container. `LastWritten` is the time
+Docker recorded for the file's last line, and `Size` the bytes of its lines.
+
+`DescribeDBLogFiles` takes `FilenameContains`, `FileLastWritten` (files written at or after it) and
+`FileSize` (files larger than it), and pages by `MaxRecords` / `Marker`. `DownloadDBLogFilePortion`
+follows the API reference: without a `Marker` it returns the most recent `NumberOfLines` lines (the
+whole file, up to 10000 lines, without either), `Marker` `0` starts at the first line, and the
+returned `Marker` continues until `AdditionalDataPending` is false. A block stops at 1 MB. Control
+characters XML cannot carry (a terminal colour code) come back as U+FFFD.
+
+An instance that is not available is `DBInstanceNotReady`, and an unknown file name
+`DBLogFileNotFoundFault`. In mock RDS mode there is no container, so an instance has no log files.
 
 ## IAM role associations
 

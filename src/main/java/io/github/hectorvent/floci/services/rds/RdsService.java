@@ -9826,6 +9826,61 @@ public class RdsService implements Resettable, ResourceProvider {
         return cluster;
     }
 
+    // ── Log files ─────────────────────────────────────────────────────────────
+
+    /** One page of an instance's log files, plus the marker to continue from. */
+    public record LogFilePage(List<RdsLogFiles.LogFile> files, String marker) {}
+
+    /**
+     * The instance's log files, read from its database container's log and named as RDS names them.
+     * An instance without a container (mock RDS) has none.
+     */
+    public LogFilePage describeDbLogFiles(String region, String instanceId, String filenameContains,
+                                          Long fileLastWritten, Long fileSize, Integer maxRecords, String marker) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireValidMaxRecords(maxRecords);
+        List<RdsLogFiles.LogFile> files = RdsLogFiles.matching(logFiles(region, instanceId),
+                filenameContains, fileLastWritten, fileSize);
+        OffsetPage<RdsLogFiles.LogFile> page = offsetPage(files, maxRecords, marker);
+        return new LogFilePage(page.items(), page.marker());
+    }
+
+    /** One block of a log file; see {@link RdsLogFiles#portion}. */
+    public RdsLogFiles.Portion downloadDbLogFilePortion(String region, String instanceId, String logFileName,
+                                                        String marker, Integer numberOfLines) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireParameter(logFileName, "LogFileName");
+        RdsLogFiles.LogFile file = logFiles(region, instanceId).stream()
+                .filter(f -> f.name().equals(logFileName))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("DBLogFileNotFoundFault",
+                        "DBLogFile " + logFileName + " not found for DB instance " + instanceId + ".", 404));
+        return RdsLogFiles.portion(file, marker, numberOfLines);
+    }
+
+    private List<RdsLogFiles.LogFile> logFiles(String region, String instanceId) {
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
+        if (instance.getStatus() != null && instance.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("DBInstanceNotReady",
+                    "DB instance " + instanceId + " is not in available state.", 400);
+        }
+        if (config.services().rds().mock()) {
+            return List.of();
+        }
+        String containerId = instance.getContainerId();
+        if (containerId == null) {
+            // Container ids are not persisted: after a restart the backend is found or started first.
+            containerId = ensureInstanceBackend(instanceId, effectiveRegion).getContainerId();
+        }
+        if (containerId == null) {
+            return List.of();
+        }
+        String engine = !isBlank(instance.getEngineIdentifier()) ? instance.getEngineIdentifier()
+                : instance.getEngine() != null ? instance.getEngine().name() : null;
+        return RdsLogFiles.files(engine, RdsLogFiles.parseDockerLines(containerManager.readLog(containerId)));
+    }
+
     // ── IAM role associations ─────────────────────────────────────────────────
 
     /**
