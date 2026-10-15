@@ -2612,8 +2612,8 @@ class CognitoServiceTest {
     @ParameterizedTest
     @ValueSource(strings = {"", " ", "\t\r\n", "\u2003"})
     void blankAdminEmailUpdateDeletesAttributesAndClearsOnlyMatchingVerification(String email) {
-        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
-        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = inlineMock(CognitoMessageDispatcher.class);
         PendingContactFixture fixture = createPendingContactFixture(verificationCodeService, messageDispatcher);
         clearInvocations(verificationCodeService, messageDispatcher);
 
