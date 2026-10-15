@@ -436,6 +436,20 @@ class LambdaWebServiceTest {
         assertEquals("The provided principal was invalid. Please check the principal and try again.",
                 message(() -> service.putResourcePolicy(REGION, missing, policy("{\"Statement\":[{\"Effect\":\"Allow\","
                         + "\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + resource + "\"}]}"))));
+        // Empty arrays: the principal is checked first, then the action and resource grammar.
+        String members = "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":%s,\"Action\":%s,\"Resource\":%s}]}";
+        String root = "{\"AWS\":\"arn:aws:iam::000000000000:root\"}";
+        String invoke = "\"lambda:InvokeWebFunctionEndpoint\"";
+        assertEquals("Policy has syntax errors.", message(() -> service.putResourcePolicy(REGION, missing,
+                policy(members.formatted(root, "[]", "\"" + resource + "\"")))));
+        assertEquals("Policy has syntax errors.", message(() -> service.putResourcePolicy(REGION, missing,
+                policy(members.formatted(root, invoke, "[]")))));
+        assertEquals("The provided principal was invalid. Please check the principal and try again.",
+                message(() -> service.putResourcePolicy(REGION, missing,
+                        policy(members.formatted("{\"AWS\":[]}", invoke, "\"" + resource + "\"")))));
+        assertEquals("The provided principal was invalid. Please check the principal and try again.",
+                message(() -> service.putResourcePolicy(REGION, missing,
+                        policy(members.formatted("{\"AWS\":[]}", "[]", "[]")))));
         assertEquals("The provided input'*'was invalid. Member must satisfy expression: [\\w+=,.@-]* Please check your"
                 + " input and try again.", message(() -> service.putResourcePolicy(REGION, missing,
                 policy("{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"*\"},"

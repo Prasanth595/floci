@@ -1059,6 +1059,9 @@ public class LambdaWebService implements Resettable {
                 throw policySyntax();
             }
             Pattern allowed = "Service".equals(field.getKey()) ? PRINCIPAL_SERVICE : PRINCIPAL_AWS;
+            if (field.getValue().isArray() && field.getValue().isEmpty()) {
+                throw new AwsException("ValidationException", INVALID_PRINCIPAL, 400);
+            }
             for (String value : policyValues(field.getValue())) {
                 if (!"*".equals(value) && !allowed.matcher(value).matches()) {
                     throw new AwsException("ValidationException", "The provided input'" + value
@@ -1091,6 +1094,9 @@ public class LambdaWebService implements Resettable {
                 throw policySyntax();
             }
             values.add(item.textValue());
+        }
+        if (values.isEmpty()) {
+            throw policySyntax();
         }
         return values;
     }
