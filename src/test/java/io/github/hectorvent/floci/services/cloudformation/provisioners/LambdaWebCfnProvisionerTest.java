@@ -324,6 +324,16 @@ class LambdaWebCfnProvisionerTest {
     }
 
     @Test
+    void autoDeploymentModeIsNotACloudFormationProperty() {
+        ObjectNode props = endpointProps("HomeRegion").put("AutoDeploymentMode", "LatestRevision");
+        StackResource r = resource(LambdaWebCfnProvisioner.ENDPOINT);
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> provisioner.provision(r, props, ctx(null)));
+        assertTrue(e.getMessage().contains("AutoDeploymentMode"), e.getMessage());
+        verify(service, never()).createEndpoint(anyString(), anyString(), any());
+    }
+
+    @Test
     void endpointPropertiesReachTheServiceInCamelCase() {
         when(service.createEndpoint(eq(REGION), eq("app"), any()))
                 .thenReturn(endpoint("prod", "MultiRegion", List.of("us-east-1", "us-west-2")));

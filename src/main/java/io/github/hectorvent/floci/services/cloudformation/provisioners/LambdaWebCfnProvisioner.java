@@ -181,6 +181,11 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
     private void provisionEndpoint(StackResource r, JsonNode props, ProvisionContext ctx) {
         String functionName = require(props, "FunctionName", r, ctx);
         JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(props);
+        if (resolved.has("AutoDeploymentMode")) {
+            // Not in the registry schema: a CloudFormation endpoint routes by RevisionWeights only.
+            throw new IllegalArgumentException(r.getResourceType() + " has no AutoDeploymentMode property ("
+                    + r.getLogicalId() + ")");
+        }
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         WebFunctionEndpoint endpoint = null;
         if (reusablePrior(ctx, attributesBefore)) {
