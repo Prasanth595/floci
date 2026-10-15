@@ -1019,6 +1019,13 @@ class ResourceArnBuilderTest {
                 "/2025-03-07/web-functions/arn:aws:lambda:us-east-1:111122223333:web-function/app/endpoints/prod");
         assertEquals("arn:aws:lambda:us-east-1:111122223333:web-function/app/endpoint/prod",
                 builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        // A revision or endpoint named by its ARN resolves to its id under the path's function.
+        when(uriInfo.getPath()).thenReturn("/2025-03-07/web-functions/app/revisions/"
+                + "arn:aws:lambda:us-east-1:000000000000:web-function/app/revision/rev-abcde");
+        assertEquals(fn + "/revision/rev-abcde", builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/2025-03-07/web-functions/app/endpoints/"
+                + "arn:aws:lambda:us-east-1:000000000000:web-function/app/endpoint/prod");
+        assertEquals(fn + "/endpoint/prod", builder.build("lambda", ctx, "us-east-1", "000000000000"));
         // The tag and policy routes carry the function ARN in the path.
         when(uriInfo.getPath()).thenReturn("/2025-03-07/tags/" + fn);
         assertEquals(fn, builder.build("lambda", ctx, "us-east-1", "000000000000"));

@@ -670,7 +670,12 @@ public class ResourceArnBuilder {
         }
         if (segments.size() >= 2 && ("revisions".equals(segments.get(0)) || "endpoints".equals(segments.get(0)))) {
             String child = "revisions".equals(segments.get(0)) ? "revision" : "endpoint";
-            return functionArn + "/" + child + "/" + segments.get(1);
+            String id = String.join("/", segments.subList(1, segments.size()));
+            if (id.startsWith("arn:") && id.contains("/" + child + "/")) {
+                // A revision or endpoint ARN ends in its id: arn:...:web-function/<name>/revision/<id>.
+                id = id.substring(id.lastIndexOf('/') + 1);
+            }
+            return functionArn + "/" + child + "/" + id;
         }
         return functionArn;
     }
