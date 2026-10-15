@@ -22,9 +22,11 @@ import java.security.PrivateKey;
 import java.security.SecureRandom;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -52,18 +54,24 @@ public class RdsProxyTlsCertificates {
 
     private final EmulatorConfig config;
     private final CertificateGenerator certificateGenerator;
+    private final Clock clock;
     private final Object lock = new Object();
 
     private volatile ServerCertificate current;
     private CertificateGenerator.Issuer issuer;
 
-    private record ServerCertificate(SSLContext context, Set<String> sans) {
+    private record ServerCertificate(SSLContext context, Set<String> sans, Instant notAfter) {
     }
 
     @Inject
     public RdsProxyTlsCertificates(EmulatorConfig config, CertificateGenerator certificateGenerator) {
+        this(config, certificateGenerator, Clock.systemUTC());
+    }
+
+    RdsProxyTlsCertificates(EmulatorConfig config, CertificateGenerator certificateGenerator, Clock clock) {
         this.config = config;
         this.certificateGenerator = certificateGenerator;
+        this.clock = clock;
     }
 
     /**
@@ -98,11 +106,15 @@ public class RdsProxyTlsCertificates {
     }
 
     private void ensureInitialized() {
-        if (current != null) {
+        if (!needsRenewal()) {
             return;
         }
         synchronized (lock) {
+            if (!needsRenewal()) {
+                return;
+            }
             if (current != null) {
+                regenerate(current.sans());
                 return;
             }
             Path tlsDir = tlsDir();
@@ -132,7 +144,9 @@ public class RdsProxyTlsCertificates {
         try {
             Path tlsDir = tlsDir();
             List<String> sanList = new ArrayList<>(sans);
-            Instant notAfter = Instant.now().plus(365, ChronoUnit.DAYS);
+            Instant now = clock.instant();
+            issuer.certificate().checkValidity(Date.from(now));
+            Instant notAfter = now.plus(365, ChronoUnit.DAYS);
             if (issuer.certificate().getNotAfter().toInstant().isBefore(notAfter)) {
                 notAfter = issuer.certificate().getNotAfter().toInstant();
             }
@@ -143,10 +157,23 @@ public class RdsProxyTlsCertificates {
             PrivateKey privateKey = Pem.parsePrivateKey(generated.privateKeyPem());
             SSLContext context = buildSslContext(certificate, privateKey);
             writeMetadata(tlsDir.resolve(METADATA_NAME), sanList);
-            current = new ServerCertificate(context, Set.copyOf(sans));
+            current = new ServerCertificate(context, Set.copyOf(sans), generated.notAfter());
         } catch (Exception e) {
             throw new IllegalStateException("Failed to generate RDS proxy TLS certificate", e);
         }
+    }
+
+    private boolean needsRenewal() {
+        ServerCertificate certificate = current;
+        if (certificate == null) {
+            return true;
+        }
+        Instant renewAt = certificate.notAfter();
+        // A leaf capped at CA expiry cannot be extended without replacing the trust anchor.
+        if (renewAt.isBefore(issuer.certificate().getNotAfter().toInstant())) {
+            renewAt = renewAt.minusSeconds(60);
+        }
+        return !renewAt.isAfter(clock.instant());
     }
 
     private CertificateGenerator.Issuer loadOrGenerateCa(Path tlsDir) throws Exception {

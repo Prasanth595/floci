@@ -802,7 +802,10 @@ or RDS Proxy host: the Docker bridge IP, `host.docker.internal`, `localhost`, or
 
 The CA is persisted at `{storage.persistent-path}/tls/rds-ca.crt`, with its owner-only private
 key in `rds-ca.key`. The server certificate is issued in memory on startup and when a new host
-appears; its SAN list is recorded in `rds-ca.metadata.json`. The CA certificate and key do not
+appears, and renewed before expiry during TLS use; its SAN list is recorded in `rds-ca.metadata.json`.
+Renewal preserves the CA and SANs. If the CA itself expires, the proxy refuses new TLS use
+rather than silently changing client trust; restart to regenerate the unusable CA and trust its replacement.
+The CA certificate and key do not
 change during SAN growth, restarts, or migration from older Floci versions, so existing client
 trust stores keep working. Missing or corrupt SAN metadata is rebuilt without replacing a valid
 CA. An invalid or unusable CA/key pair is replaced with a warning; only then must clients trust

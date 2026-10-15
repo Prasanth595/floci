@@ -17,6 +17,9 @@ import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.cert.X509Certificate;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Set;
 
@@ -25,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.mock;
@@ -194,11 +198,59 @@ class RdsProxyTlsCertificatesTest {
         assertTrue(Pem.isPair(Pem.parsePrivateKey(Files.readString(keyFile)), ca.getPublicKey()));
     }
 
+    @Test
+    void renewsAnExpiringLeafWithoutChangingTheCaOrRegisteringANewHost() throws Exception {
+        Clock clock = mock(Clock.class);
+        when(clock.instant()).thenAnswer(invocation -> Instant.now());
+        RdsProxyTlsCertificates certs = newCertificates(clock);
+        certs.ensureHost("host.docker.internal");
+        SSLContext previous = certs.sslContext();
+        Path certFile = tempDir.resolve("tls/rds-ca.crt");
+        String trustedCa = Files.readString(certFile);
+
+        when(clock.instant()).thenReturn(Instant.now().plus(365, ChronoUnit.DAYS).minusSeconds(30));
+        SSLContext renewed = certs.sslContext();
+
+        assertNotSame(previous, renewed);
+        assertSame(renewed, certs.sslContext());
+        certs.ensureHost("host.docker.internal");
+        assertSame(renewed, certs.sslContext(), "renewal retains the previous SAN set");
+        assertEquals(trustedCa, Files.readString(certFile));
+        RdsProxyTlsCertificates reloaded = newCertificates(clock);
+        SSLContext reloadedContext = reloaded.sslContext();
+        reloaded.ensureHost("host.docker.internal");
+        assertSame(reloadedContext, reloaded.sslContext(), "renewal persists the previous SAN set");
+    }
+
+    @Test
+    void aLeafCappedAtCaExpiryDoesNotRenewContinuouslyOrRotateTheCa() throws Exception {
+        CertificateGenerator.GeneratedCertificate ca = new CertificateGenerator().generateCaCertificate(
+                "Short-lived CA", Instant.now().plusSeconds(60));
+        Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
+        Path certFile = tlsDir.resolve("rds-ca.crt");
+        Files.writeString(certFile, ca.certificatePem());
+        Files.writeString(tlsDir.resolve("rds-ca.key"), ca.privateKeyPem());
+        Clock clock = mock(Clock.class);
+        when(clock.instant()).thenReturn(Instant.now());
+        RdsProxyTlsCertificates certs = newCertificates(clock);
+        SSLContext context = certs.sslContext();
+
+        when(clock.instant()).thenReturn(ca.notAfter().minusSeconds(1));
+        assertSame(context, certs.sslContext());
+        when(clock.instant()).thenReturn(ca.notAfter().plusSeconds(1));
+        assertThrows(IllegalStateException.class, certs::sslContext);
+        assertEquals(ca.certificatePem(), Files.readString(certFile));
+    }
+
     private RdsProxyTlsCertificates newCertificates() {
+        return newCertificates(Clock.systemUTC());
+    }
+
+    private RdsProxyTlsCertificates newCertificates(Clock clock) {
         EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
         when(storage.persistentPath()).thenReturn(tempDir.toString());
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.storage()).thenReturn(storage);
-        return new RdsProxyTlsCertificates(config, new CertificateGenerator());
+        return new RdsProxyTlsCertificates(config, new CertificateGenerator(), clock);
     }
 }
