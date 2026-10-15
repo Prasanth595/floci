@@ -1268,7 +1268,12 @@ public class LambdaWebService implements Resettable {
                     }
                 }
                 if ("state".equals(name)) {
-                    states = filterValues;
+                    if (states == null) {
+                        states = new ArrayList<>();
+                    }
+                    if (filterValues != null) {
+                        states.addAll(filterValues);
+                    }
                 } else if (name != null) {
                     badNames.add(name);
                 }

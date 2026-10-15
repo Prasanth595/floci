@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambdaweb;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -352,6 +353,15 @@ class LambdaWebServiceTest {
         unknown.putArray("filters").addObject().put("name", "nope").putArray("values").add("x");
         assertEquals("The filter names [nope] are invalid. Supported filter names are: [state].",
                 message(() -> service.listFunctions(REGION, unknown)));
+        // A repeated state filter adds its values, whatever the order, as on AWS.
+        for (List<String> order : List.of(List.of("Failed", "Active"), List.of("Active", "Failed"))) {
+            ObjectNode repeated = mapper.createObjectNode();
+            ArrayNode filters = repeated.putArray("filters");
+            for (String state : order) {
+                filters.addObject().put("name", "state").putArray("values").add(state);
+            }
+            assertEquals(1, service.listFunctions(REGION, repeated).items().size(), order.toString());
+        }
     }
 
     @Test
