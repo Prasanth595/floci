@@ -129,7 +129,7 @@ public class LambdaWebService implements Resettable {
     private StorageBackend<String, WebFunction> functions;
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
     /** The key of the item each minted page token ended on. */
-    private final ConcurrentHashMap<String, String> pageAnchors = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, PageAnchor> pageAnchors = new ConcurrentHashMap<>();
 
     @Inject
     public LambdaWebService(RegionResolver regionResolver, StorageFactory storageFactory, EmulatorConfig config,
@@ -213,7 +213,7 @@ public class LambdaWebService implements Resettable {
             functions.put(key(region, functionName), fn);
             LOG.infov("Created web function {0} with revision {1} and endpoint {2}",
                     functionName, revision.revisionId, endpoint.endpointName);
-            return fn;
+            return copy(fn, WebFunction.class);
         }
     }
 
@@ -234,7 +234,7 @@ public class LambdaWebService implements Resettable {
             }
             WebFunction fn = newFunction(region, accountId, functionName, tags);
             functions.put(key(region, functionName), fn);
-            return fn;
+            return copy(fn, WebFunction.class);
         }
     }
 
@@ -249,13 +249,24 @@ public class LambdaWebService implements Resettable {
     }
 
     public WebFunction getFunction(String region, String functionNameOrArn) {
-        return function(region, resolveFunctionName(region, functionNameOrArn, "GetWebFunction"));
+        String functionName = resolveFunctionName(region, functionNameOrArn, "GetWebFunction");
+        synchronized (lockFor(region, functionName)) {
+            return copy(function(region, functionName), WebFunction.class);
+        }
     }
 
     public Page<WebFunction> listFunctions(String region, JsonNode request) {
         ListRequest list = parseListRequest(request);
-        List<WebFunction> byName = in(region).stream().sorted(Comparator.comparing(f -> f.functionName)).toList();
-        return page(list.matchesState("Active") ? byName : List.of(), list, f -> f.functionName);
+        List<WebFunction> byName = in(region).stream()
+                .map(fn -> {
+                    synchronized (lockFor(region, fn.functionName)) {
+                        return copy(fn, WebFunction.class);
+                    }
+                })
+                .sorted(Comparator.comparing(f -> f.functionName))
+                .toList();
+        return page(list.matchesState("Active") ? byName : List.of(), list,
+                scope("ListWebFunctions", region, null, list), f -> f.functionName, true);
     }
 
     public void deleteFunction(String region, String functionNameOrArn) {
@@ -292,13 +303,16 @@ public class LambdaWebService implements Resettable {
             }
             fn.updatedAt = now();
             persist(region, fn);
-            return revision;
+            return copy(revision, WebFunctionRevision.class);
         }
     }
 
     public WebFunctionRevision getRevision(String region, String functionNameOrArn, String revisionIdOrArn) {
-        WebFunction fn = function(region, resolveFunctionName(region, functionNameOrArn, "GetWebFunctionRevision"));
-        return revision(fn, resolveRevisionId(region, revisionIdOrArn, "GetWebFunctionRevision"));
+        String functionName = resolveFunctionName(region, functionNameOrArn, "GetWebFunctionRevision");
+        String revisionId = resolveRevisionId(region, revisionIdOrArn, "GetWebFunctionRevision");
+        synchronized (lockFor(region, functionName)) {
+            return copy(revision(function(region, functionName), revisionId), WebFunctionRevision.class);
+        }
     }
 
     public Page<WebFunctionRevision> listRevisions(String region, String functionNameOrArn, JsonNode request) {
@@ -308,8 +322,11 @@ public class LambdaWebService implements Resettable {
             WebFunction fn = function(region, functionName);
             List<WebFunctionRevision> newestFirst = fn.revisions.values().stream()
                     .sorted(Comparator.comparing((WebFunctionRevision r) -> r.createdAt).reversed())
+                    .map(r -> copy(r, WebFunctionRevision.class))
                     .toList();
-            return page(list.matchesState("Active") ? newestFirst : List.of(), list, r -> r.revisionId);
+            return page(list.matchesState("Active") ? newestFirst : List.of(), list,
+                    scope("ListWebFunctionRevisions", region, functionName, list),
+                    r -> LambdaWebResponses.timestamp(r.createdAt) + " " + r.revisionId, false);
         }
     }
 
@@ -543,12 +560,15 @@ public class LambdaWebService implements Resettable {
         }
         LOG.infov("Created web function endpoint {0} on {1}: {2}", endpoint.endpointName, functionName,
                 endpoint.domainName);
-        return endpoint;
+        return copy(endpoint, WebFunctionEndpoint.class);
     }
 
     public WebFunctionEndpoint getEndpoint(String region, String functionNameOrArn, String endpointNameOrArn) {
-        WebFunction fn = function(region, resolveFunctionName(region, functionNameOrArn, "GetWebFunctionEndpoint"));
-        return endpoint(fn, resolveEndpointName(region, endpointNameOrArn, "GetWebFunctionEndpoint"));
+        String functionName = resolveFunctionName(region, functionNameOrArn, "GetWebFunctionEndpoint");
+        String endpointName = resolveEndpointName(region, endpointNameOrArn, "GetWebFunctionEndpoint");
+        synchronized (lockFor(region, functionName)) {
+            return copy(endpoint(function(region, functionName), endpointName), WebFunctionEndpoint.class);
+        }
     }
 
     public Page<WebFunctionEndpoint> listEndpoints(String region, String functionNameOrArn, JsonNode request) {
@@ -558,8 +578,10 @@ public class LambdaWebService implements Resettable {
             WebFunction fn = function(region, functionName);
             List<WebFunctionEndpoint> byName = fn.endpoints.values().stream()
                     .sorted(Comparator.comparing(e -> e.endpointName))
+                    .map(e -> copy(e, WebFunctionEndpoint.class))
                     .toList();
-            return page(list.matchesState("Active") ? byName : List.of(), list, e -> e.endpointName);
+            return page(list.matchesState("Active") ? byName : List.of(), list,
+                    scope("ListWebFunctionEndpoints", region, functionName, list), e -> e.endpointName, true);
         }
     }
 
@@ -579,7 +601,7 @@ public class LambdaWebService implements Resettable {
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
             WebFunctionEndpoint endpoint = endpoint(fn, endpointName);
-            WebFunctionEndpoint before = copy(endpoint);
+            WebFunctionEndpoint before = copy(endpoint, WebFunctionEndpoint.class);
 
             String effectiveMode = mode != null ? mode : endpoint.autoDeploymentMode;
             rejectWeightsWithLatestRevision(effectiveMode, weights);
@@ -618,7 +640,7 @@ public class LambdaWebService implements Resettable {
             endpoint.updatedAt = now();
             fn.updatedAt = endpoint.updatedAt;
             persist(region, fn);
-            return new EndpointUpdate(before, endpoint);
+            return new EndpointUpdate(before, copy(endpoint, WebFunctionEndpoint.class));
         }
     }
 
@@ -1258,8 +1280,9 @@ public class LambdaWebService implements Resettable {
         return regionResolver.buildArn("lambda", region, accountId, "web-function/" + functionName);
     }
 
-    private WebFunctionEndpoint copy(WebFunctionEndpoint endpoint) {
-        return objectMapper.convertValue(objectMapper.valueToTree(endpoint), WebFunctionEndpoint.class);
+    /** A deep copy, so a caller never holds the stored object a later request mutates. */
+    private <T> T copy(T value, Class<T> type) {
+        return objectMapper.convertValue(objectMapper.valueToTree(value), type);
     }
 
     // ---------------------------------------------------------------- listing
@@ -1315,31 +1338,49 @@ public class LambdaWebService implements Resettable {
         return new ListRequest(states, maxResults == null ? DEFAULT_PAGE_SIZE : maxResults, nextToken);
     }
 
-    /** Pages a sorted listing. A token names the item its page ended on, so the next page starts after it. */
-    private <T> Page<T> page(List<T> items, ListRequest list, Function<T, String> keyOf) {
+    /** The request a page token belongs to and the sort key of the item its page ended on. */
+    private record PageAnchor(String scope, String sortKey) {
+    }
+
+    private static String scope(String operation, String region, String functionName, ListRequest list) {
+        return operation + "|" + region + "|" + functionName + "|" + list.states() + "|" + list.maxResults();
+    }
+
+    /**
+     * Pages a listing sorted by {@code sortKey}. A token continues the request it was issued for, after
+     * the item its page ended on; when that item is gone the next page starts at the first item past
+     * it in sort order, as on AWS.
+     */
+    private <T> Page<T> page(List<T> items, ListRequest list, String scope, Function<T, String> sortKey,
+                             boolean ascending) {
         int start = 0;
         if (list.nextToken() != null) {
-            String anchor = pageAnchors.get(list.nextToken());
-            int index = -1;
-            for (int i = 0; anchor != null && i < items.size(); i++) {
-                if (anchor.equals(keyOf.apply(items.get(i)))) {
-                    index = i;
-                    break;
-                }
-            }
-            if (index < 0) {
+            PageAnchor anchor = pageAnchors.get(list.nextToken());
+            if (anchor == null) {
                 throw new AwsException("ValidationException",
                         "The nextToken " + list.nextToken() + " is invalid or has expired.", 400);
             }
-            start = index + 1;
+            if (!anchor.scope().equals(scope)) {
+                throw new AwsException("ValidationException", "The nextToken " + list.nextToken()
+                        + " does not match the request. Subsequent pagination requests must use the same"
+                        + " parameters as the initial request.", 400);
+            }
+            start = items.size();
+            for (int i = 0; i < items.size(); i++) {
+                int order = sortKey.apply(items.get(i)).compareTo(anchor.sortKey());
+                if (ascending ? order > 0 : order < 0) {
+                    start = i;
+                    break;
+                }
+            }
         }
         int end = Math.min(items.size(), start + list.maxResults());
         List<T> pageItems = items.subList(start, end);
         String nextToken = null;
         if (end < items.size()) {
-            String key = keyOf.apply(items.get(end - 1));
-            nextToken = UUID.nameUUIDFromBytes(("lambda-web:" + key).getBytes(StandardCharsets.UTF_8)).toString();
-            pageAnchors.put(nextToken, key);
+            String key = sortKey.apply(items.get(end - 1));
+            nextToken = UUID.nameUUIDFromBytes((scope + "|" + key).getBytes(StandardCharsets.UTF_8)).toString();
+            pageAnchors.put(nextToken, new PageAnchor(scope, key));
         }
         return new Page<>(pageItems, nextToken);
     }

@@ -297,9 +297,48 @@ class LambdaWebServiceTest {
         ObjectNode unknown = mapper.createObjectNode().put("nextToken", "00000000-0000-0000-0000-000000000000");
         assertEquals("The nextToken 00000000-0000-0000-0000-000000000000 is invalid or has expired.",
                 message(() -> service.listFunctions(REGION, unknown)));
+        // The item a page ended on is gone: the next page starts past it in sort order, as on AWS.
         service.deleteFunction(REGION, "bravo");
-        assertEquals("The nextToken " + first.nextToken() + " is invalid or has expired.",
-                message(() -> service.listFunctions(REGION, request)));
+        assertEquals(List.of("charlie"),
+                service.listFunctions(REGION, request).items().stream().map(f -> f.functionName).toList());
+    }
+
+    @Test
+    void pageTokensBelongToTheRequestThatIssuedThem() {
+        LambdaWebService service = service();
+        service.createFunction(REGION, createRequest("alpha"));
+        service.createFunction(REGION, createRequest("bravo"));
+        service.createRevision(REGION, "alpha", revisionConfig(60));
+        ObjectNode request = mapper.createObjectNode().put("maxResults", 1);
+        String functionsToken = service.listFunctions(REGION, request).nextToken();
+        String mismatch = "The nextToken " + functionsToken + " does not match the request. Subsequent pagination"
+                + " requests must use the same parameters as the initial request.";
+        ObjectNode reused = mapper.createObjectNode().put("maxResults", 1).put("nextToken", functionsToken);
+        assertEquals(mismatch, message(() -> service.listRevisions(REGION, "alpha", reused)));
+        assertEquals(mismatch, message(() -> service.listEndpoints(REGION, "alpha", reused)));
+        ObjectNode otherSize = mapper.createObjectNode().put("maxResults", 2).put("nextToken", functionsToken);
+        assertEquals(mismatch, message(() -> service.listFunctions(REGION, otherSize)));
+
+        ObjectNode revisions = mapper.createObjectNode().put("maxResults", 1);
+        LambdaWebService.Page<WebFunctionRevision> newest = service.listRevisions(REGION, "alpha", revisions);
+        assertEquals(60, newest.items().get(0).serviceConfig.timeoutSeconds);
+        revisions.put("nextToken", newest.nextToken());
+        assertEquals(30, service.listRevisions(REGION, "alpha", revisions).items().get(0).serviceConfig.timeoutSeconds);
+    }
+
+    @Test
+    void readsAreSnapshotsOfTheStoredState() {
+        LambdaWebService service = service();
+        service.createFunction(REGION, createRequest("app"));
+        WebFunctionEndpoint endpoint = service.getEndpoint(REGION, "app", "dev");
+        endpoint.description = "changed by the caller";
+        endpoint.revisionWeights.clear();
+        WebFunctionEndpoint again = service.getEndpoint(REGION, "app", "dev");
+        assertNull(again.description);
+        assertEquals(1, again.revisionWeights.size());
+        WebFunction fn = service.getFunction(REGION, "app");
+        fn.tags.put("leak", "x");
+        assertFalse(service.getFunction(REGION, "app").tags.containsKey("leak"));
     }
 
     @Test
