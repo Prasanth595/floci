@@ -26,19 +26,20 @@ import java.util.Set;
  * Provisions {@code AWS::S3::Bucket} and {@code AWS::S3::BucketPolicy}.
  *
  * <p>A property this class covers is translated into the XML its own S3 API call takes and handed
- * to the same service method, so the service validates and stores it exactly as it would a direct
- * {@code PutBucket*} request. A property the template does not declare is left alone, except that
- * an update removing {@code NotificationConfiguration} clears it.
+ * to the same S3 service method used by a direct {@code PutBucket*} request. Ownership controls
+ * are validated here before the service stores their XML. A property the template does not declare is left alone, except that
+ * an update removing {@code NotificationConfiguration} or {@code OwnershipControls} clears it.
  *
  * <p>Covered on {@code AWS::S3::Bucket}: {@code BucketName}, {@code CorsConfiguration},
  * {@code VersioningConfiguration}, {@code PublicAccessBlockConfiguration},
- * {@code BucketEncryption}, {@code LifecycleConfiguration}, {@code NotificationConfiguration} and
+ * {@code BucketEncryption}, {@code LifecycleConfiguration},
+ * {@code OwnershipControls}, {@code NotificationConfiguration} and
  * {@code Tags}. {@code NotificationConfiguration} is the exception to the XML translation: its
  * service method takes the parsed model, so the provisioner builds that model instead.
  *
  * <p><b>Silently dropped</b>, each of which has a service method waiting for it:
  * {@code WebsiteConfiguration}, {@code LoggingConfiguration},
- * {@code ObjectLockConfiguration}, {@code OwnershipControls}, {@code ReplicationConfiguration},
+ * {@code ObjectLockConfiguration}, {@code ReplicationConfiguration},
  * {@code AccelerateConfiguration}, {@code AccessControl}, and the four numbered configuration
  * lists ({@code AnalyticsConfigurations}, {@code IntelligentTieringConfigurations},
  * {@code InventoryConfigurations}, {@code MetricsConfigurations}). Declaring one of these still
@@ -90,6 +91,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         try {
             // Built before anything is created, so a configuration that fails validation creates nothing.
             NotificationConfiguration notifications = notificationConfiguration(props, ctx);
+            String ownershipControlsXml = ownershipControlsXml(props, ctx);
             if (!ctx.reusesPriorEntity(bucketName)) {
                 // In us-east-1 CreateBucket also answers for a bucket the account already owns,
                 // which this resource must never delete.
@@ -113,6 +115,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             applyBucketEncryption(bucketName, props, ctx);
             applyLifecycleConfiguration(bucketName, props, ctx);
             applyBucketTags(bucketName, props, ctx);
+            applyBucketOwnershipControls(bucketName, ownershipControlsXml, ctx);
         } catch (RuntimeException failure) {
             unwind(r, bucketName, unwind, ctx, failure);
             throw failure;
@@ -228,6 +231,45 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         s3Service.putBucketLifecycle(bucketName, lifecycleXml(lifecycle.get("Rules"), ctx), null);
     }
 
+    private String ownershipControlsXml(JsonNode props, ProvisionContext ctx) {
+        JsonNode declaredNode = declared(props, "OwnershipControls");
+        if (declaredNode == null) {
+            return null;
+        }
+        JsonNode controls = ctx.engine().resolveNodeOmittingNoValue(declaredNode);
+        if (controls == null || controls.isMissingNode() || controls.isNull()) {
+            return null;
+        }
+        String path = "#/OwnershipControls";
+        requireObject(controls, path);
+        JsonNode rules = declaredArray(controls, "Rules", path);
+        if (rules == null || rules.isEmpty()) {
+            throw new AwsException("InvalidRequest", "OwnershipControls requires at least one rule", 400);
+        }
+        XmlBuilder xml = new XmlBuilder().start("OwnershipControls", AwsNamespaces.S3);
+        for (int index = 0; index < rules.size(); index++) {
+            String rulePath = path + "/Rules/" + index;
+            JsonNode rule = requireObject(rules.get(index), rulePath);
+            String ownership = required(rule, "ObjectOwnership", rulePath);
+            if (!Set.of("BucketOwnerPreferred", "ObjectWriter", "BucketOwnerEnforced").contains(ownership)) {
+                throw new AwsException("InvalidRequest",
+                        "Invalid ObjectOwnership at " + rulePath + ": " + ownership, 400);
+            }
+            xml.start("Rule");
+            xml.elem("ObjectOwnership", ownership);
+            xml.end("Rule");
+        }
+        return xml.end("OwnershipControls").build();
+    }
+
+    private void applyBucketOwnershipControls(String bucketName, String ownershipControlsXml,
+                                              ProvisionContext ctx) {
+        if (ownershipControlsXml != null) {
+            s3Service.putBucketOwnershipControls(bucketName, ownershipControlsXml);
+        } else if (ctx.reusesPriorEntity(bucketName) && ctx.previouslyDeclared("OwnershipControls")) {
+            s3Service.deleteBucketOwnershipControls(bucketName);
+        }
+    }
     private void applyBucketTags(String bucketName, JsonNode props, ProvisionContext ctx) {
         if (declared(props, "Tags") == null) {
             return;

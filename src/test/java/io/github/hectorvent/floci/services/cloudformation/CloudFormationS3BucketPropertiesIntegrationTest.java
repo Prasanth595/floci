@@ -70,6 +70,39 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
     }
 
     @Test
+    void ownershipControlsFollowTheTemplateWithoutErasingUnmanagedChanges() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-ownership-" + suffix;
+        String stackName = "cfn-ownership-stack-" + suffix;
+        String stackId = stack("CreateStack", stackName, ownershipTemplate(bucket, "BucketOwnerEnforced", "create"));
+        await(stackId, "CREATE_COMPLETE");
+        bucketGet(bucket, "ownershipControls").body(containsString("<ObjectOwnership>BucketOwnerEnforced</ObjectOwnership>"));
+
+        stack("UpdateStack", stackName, ownershipTemplate(bucket, "ObjectWriter", "update"));
+        await(stackId, "UPDATE_COMPLETE");
+        bucketGet(bucket, "ownershipControls").body(containsString("<ObjectOwnership>ObjectWriter</ObjectOwnership>"));
+
+        stack("UpdateStack", stackName, ownershipTemplate(bucket, null, "removed"));
+        await(stackId, "UPDATE_COMPLETE");
+        given().when().get("/" + bucket + "?ownershipControls").then().statusCode(404);
+
+        given().contentType("application/xml")
+            .body("<OwnershipControls><Rule><ObjectOwnership>BucketOwnerPreferred</ObjectOwnership></Rule></OwnershipControls>")
+        .when().put("/" + bucket + "?ownershipControls").then().statusCode(200);
+        stack("UpdateStack", stackName, ownershipTemplate(bucket, null, "unmanaged"));
+        await(stackId, "UPDATE_COMPLETE");
+        bucketGet(bucket, "ownershipControls").body(containsString("<ObjectOwnership>BucketOwnerPreferred</ObjectOwnership>"));
+    }
+
+    private static String ownershipTemplate(String bucket, String ownership, String marker) {
+        String controls = ownership == null ? "" : ", \"OwnershipControls\": { \"Rules\": "
+                + "[{ \"ObjectOwnership\": \"" + ownership + "\" }] }";
+        return "{ \"Resources\": { \"Bucket\": { \"Type\": \"AWS::S3::Bucket\", \"Properties\": { "
+                + "\"BucketName\": \"" + bucket + "\", \"Tags\": [{ \"Key\": \"marker\", \"Value\": \""
+                + marker + "\" }]" + controls + " } } } }";
+    }
+
+    @Test
     void theBucketCarriesWhatItsTemplateDeclares() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String bucket = "cfn-props-bucket-" + suffix;

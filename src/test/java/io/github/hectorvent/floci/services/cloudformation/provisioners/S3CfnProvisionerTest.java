@@ -81,6 +81,23 @@ class S3CfnProvisionerTest {
         return r;
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            {"Rules":[{"ObjectOwnership":"Bogus"}]}                    | Invalid ObjectOwnership at #/OwnershipControls/Rules/0: Bogus
+            {"Rules":[{}]}                                               | Model validation failed (#/OwnershipControls/Rules/0: required key [ObjectOwnership] not found)
+            {"Rules":[{"ObjectOwnership":["BucketOwnerEnforced"]}]}    | Model validation failed (#/OwnershipControls/Rules/0/ObjectOwnership: expected type: String, found: JSONArray)
+            {"Rules":[]}                                                 | OwnershipControls requires at least one rule
+            {"Rules":"not-an-array"}                                     | Model validation failed (#/OwnershipControls/Rules: expected type: JSONArray, found: String)
+            """)
+    void invalidOwnershipControlsFailBeforeCreatingTheBucket(String controls, String message) {
+        AwsException error = assertThrows(AwsException.class,
+                () -> provisionBucket("{\"BucketName\":\"my-bucket\",\"OwnershipControls\":" + controls + "}"));
+
+        assertEquals(message, error.getMessage());
+        verify(s3, never()).createBucket(anyString(), anyString());
+        verify(s3, never()).putBucketOwnershipControls(anyString(), anyString());
+    }
+
     @Test
     void refIsTheBucketNameAndGetAttExposesTheDocumentedAttributes() {
         StackResource r = provisionBucket("""
