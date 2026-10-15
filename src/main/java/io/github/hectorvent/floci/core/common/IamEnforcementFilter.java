@@ -745,7 +745,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /** Floci's account-root principal, which is both the caller and the request's aws:PrincipalArn. */
     private CallerArns accountRootArns(String accountId) {
         String rootArn = AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString();
-        return new CallerArns(rootArn, rootArn, CallerArns.TYPE_ACCOUNT, accountId, null);
+        return CallerArns.accountRoot(rootArn, accountId);
     }
 
     /**

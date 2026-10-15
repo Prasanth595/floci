@@ -1543,10 +1543,14 @@ that way applies when the key is missing.
 
 The keys that say who is calling are written onto every context a request is evaluated against:
 the one the enforcement filter builds, one per resource the request names, one per transaction
-item, and the one S3 builds when it evaluates a bucket policy itself under `s3.enforce-auth`. A
-role trust policy is the exception: `sts:AssumeRole` evaluates its conditions with
-`aws:PrincipalArn` alone, so a trust policy keyed on `aws:userid`, `aws:PrincipalType` or
-`aws:username` does not match yet.
+item, the one S3 builds when it evaluates a bucket policy itself under `s3.enforce-auth`, and the
+trust policy `sts:AssumeRole` reads, which sees the caller through the same writer. A trust policy
+keyed on `aws:userid`, `aws:PrincipalType` or `aws:username` therefore matches the calling user or
+session, and a value the caller carries wins over one the request supplied. A credential that
+resolves to no IAM identity is the account root stand-in, which carries the account id as its
+`aws:userid` and `Account` as its `aws:PrincipalType`. One caller carries no `aws:userid`: the role
+Step Functions assumes for a task, which is a session and says so with `AssumedRole`, but is minted
+without a session name, and a session's `aws:userid` is `role-id:session-name`.
 
 Transactions check each item as `PutItem`, `UpdateItem`, `DeleteItem`, `GetItem`, or
 `ConditionCheckItem` before executing the request. Each item uses its own table, leading key
