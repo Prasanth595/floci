@@ -373,6 +373,16 @@ class LambdaWebServiceTest {
         assertFalse(service.revisionMatches(revision, revisionConfig(31)));
         ObjectNode described = revisionConfig(30).put("description", "d");
         assertFalse(service.revisionMatches(revision, described));
+        // The default log group is the function's, so writing it out matches and dropping a custom one does not.
+        ObjectNode explicit = revisionConfig(30);
+        ((ObjectNode) explicit.get("serviceConfig")).putObject("telemetryConfig").putObject("loggingConfig")
+                .put("logGroup", "/aws/lambda/web/app");
+        assertTrue(service.revisionMatches(revision, explicit));
+        ObjectNode custom = revisionConfig(30);
+        ((ObjectNode) custom.get("serviceConfig")).putObject("telemetryConfig").putObject("loggingConfig")
+                .put("logGroup", "custom-group");
+        WebFunctionRevision customized = service.createRevision(REGION, "app", custom);
+        assertFalse(service.revisionMatches(customized, revisionConfig(30)));
     }
 
     @Test

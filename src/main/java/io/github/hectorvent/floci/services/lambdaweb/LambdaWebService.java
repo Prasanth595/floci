@@ -364,9 +364,14 @@ public class LambdaWebService implements Resettable {
         desired.description = LambdaWebJson.text(request, "description");
         desired.kmsKeyArn = LambdaWebJson.text(request, "kmsKeyArn");
         desired.buildConfig = buildConfigOf(LambdaWebJson.structure(request, "buildConfig"));
+        String functionName = existing.functionArn.substring(existing.functionArn.lastIndexOf('/') + 1);
         desired.serviceConfig = serviceConfigOf(LambdaWebJson.structure(request, "serviceConfig"),
-                existing.serviceConfig.logGroup);
+                defaultLogGroup(functionName));
         return objectMapper.valueToTree(configOnly(existing)).equals(objectMapper.valueToTree(configOnly(desired)));
+    }
+
+    private static String defaultLogGroup(String functionName) {
+        return "/aws/lambda/web/" + functionName;
     }
 
     private static WebFunctionRevision configOnly(WebFunctionRevision revision) {
@@ -413,7 +418,7 @@ public class LambdaWebService implements Resettable {
                     "The runtime " + revision.buildConfig.runtime + " is invalid.", 400);
         }
         revision.serviceConfig = serviceConfigOf(LambdaWebJson.structure(request, "serviceConfig"),
-                "/aws/lambda/web/" + fn.functionName);
+                defaultLogGroup(fn.functionName));
         requireCodeObject(revision.buildConfig);
         revision.description = LambdaWebJson.text(request, "description");
         revision.kmsKeyArn = LambdaWebJson.text(request, "kmsKeyArn");
@@ -942,7 +947,7 @@ public class LambdaWebService implements Resettable {
     }
 
     /** Sets the stored tags to exactly {@code desired}, for AWS::Lambda::WebFunction. */
-    public void replaceTags(String region, String functionNameOrArn, Map<String, String> desired) {
+    public WebFunction replaceTags(String region, String functionNameOrArn, Map<String, String> desired) {
         LambdaWebValidation validation = new LambdaWebValidation();
         validateTagsShape(validation, "tags", desired);
         validation.throwIfAny();
@@ -953,6 +958,7 @@ public class LambdaWebService implements Resettable {
             fn.tags = new LinkedHashMap<>(desired);
             fn.updatedAt = now();
             persist(region, fn);
+            return copy(fn, WebFunction.class);
         }
     }
 
