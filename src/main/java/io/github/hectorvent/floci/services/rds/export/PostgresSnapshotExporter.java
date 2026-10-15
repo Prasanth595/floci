@@ -108,7 +108,7 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
             progress.extracting(0);
             return exportTables(task, source, handle.getContainerId(), progress);
         } finally {
-            removeContainer(handle, task.getRuntimeVolumeId());
+            removeContainer(handle, task);
         }
     }
 
@@ -371,7 +371,8 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
      * Stops the container, then removes it and its volume whether or not the stop succeeded: a
      * volume left behind holds a whole copy of the database.
      */
-    private void removeContainer(RdsContainerHandle handle, String volumeId) {
+    private void removeContainer(RdsContainerHandle handle, ExportTask task) {
+        String volumeId = task.getRuntimeVolumeId();
         if (handle != null) {
             try {
                 containerManager.stop(handle);
@@ -381,6 +382,7 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
         }
         try {
             containerManager.discardExport(volumeId);
+            containerManager.stopByRuntimeId(task.getRuntimeArn());
         } catch (RuntimeException e) {
             LOG.warnv(e, "Could not remove the export container and volume {0}", volumeId);
         }

@@ -268,25 +268,29 @@ class PostgresSnapshotExporterTest {
     }
 
     @Test
-    void theVolumeIsRemovedWhenStoppingTheContainerFails() {
+    void theVolumeIsRemovedAndTheRuntimeReleasedWhenStoppingTheContainerFails() {
         tableRows("{\"id\":1}\n");
         doThrow(new IllegalStateException("Docker refused to stop the container"))
                 .when(containerManager).stop(any());
 
         exporter.export(task(), source, progress);
 
-        verify(containerManager).discardExport("export-0123456789abcdef");
+        InOrder order = inOrder(containerManager);
+        order.verify(containerManager).discardExport("export-0123456789abcdef");
+        order.verify(containerManager).stopByRuntimeId("arn:aws:rds:us-east-1:000000000000:export-task:appdb-export");
     }
 
     @Test
-    void theVolumeIsRemovedWhenTheContainerNeverStarted() {
+    void theVolumeIsRemovedAndTheRuntimeReleasedWhenTheContainerNeverStarted() {
         when(containerManager.startForExport(any(), any(), any(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("image not found"));
 
         assertThrows(IllegalStateException.class, () -> exporter.export(task(), source, progress));
 
         verify(containerManager, never()).stop(any());
-        verify(containerManager).discardExport("export-0123456789abcdef");
+        InOrder order = inOrder(containerManager);
+        order.verify(containerManager).discardExport("export-0123456789abcdef");
+        order.verify(containerManager).stopByRuntimeId("arn:aws:rds:us-east-1:000000000000:export-task:appdb-export");
     }
 
     @Test
