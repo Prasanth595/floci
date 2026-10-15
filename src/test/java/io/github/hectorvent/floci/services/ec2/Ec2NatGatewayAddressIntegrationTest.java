@@ -253,13 +253,29 @@ class Ec2NatGatewayAddressIntegrationTest {
         .when().post("/");
     }
 
-    /** An Elastic IP held by another gateway or by an instance is refused, not taken over. */
+    /**
+     * As on AWS, CreateNatGateway with an Elastic IP another gateway or an instance holds
+     * succeeds, but the gateway is failed: no interface, and the holder keeps the address.
+     */
     @Test
-    void aGatewayCannotTakeAnElasticIpThatIsAlreadyAssociated() {
+    void aGatewayGivenAnAssociatedElasticIpIsCreatedFailed() {
         String heldByGateway = allocate();
         createNat(heldByGateway).then().statusCode(200);
-        createNat(heldByGateway).then().statusCode(400)
-            .body("Response.Errors.Error.Code", equalTo("Resource.AlreadyAssociated"));
+        String failedId = createNat(heldByGateway).then().statusCode(200)
+            .body("CreateNatGatewayResponse.natGateway.state", equalTo("failed"))
+            .extract().path("CreateNatGatewayResponse.natGateway.natGatewayId");
+        given()
+            .formParam("Action", "DescribeNatGateways")
+            .formParam("NatGatewayId.1", failedId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeNatGatewaysResponse.natGatewaySet.item.state", equalTo("failed"))
+            .body("DescribeNatGatewaysResponse.natGatewaySet.item.failureCode",
+                    equalTo("Resource.AlreadyAssociated"))
+            .body("DescribeNatGatewaysResponse.natGatewaySet.item.failureMessage",
+                    equalTo("Elastic IP address " + heldByGateway + " is already associated"))
+            .body(not(containsString("<networkInterfaceId>")));
 
         String heldByInstance = allocate();
         given()
@@ -269,17 +285,53 @@ class Ec2NatGatewayAddressIntegrationTest {
             .header("Authorization", AUTH_HEADER)
         .when().post("/")
         .then().statusCode(200);
-        createNat(heldByInstance).then().statusCode(400)
-            .body("Response.Errors.Error.Code", equalTo("Resource.AlreadyAssociated"));
+        createNat(heldByInstance).then().statusCode(200)
+            .body("CreateNatGatewayResponse.natGateway.state", equalTo("failed"))
+            .body("CreateNatGatewayResponse.natGateway.failureCode", equalTo("Resource.AlreadyAssociated"));
+        String instanceAssociation = given()
+            .formParam("Action", "DescribeAddresses")
+            .formParam("AllocationId.1", heldByInstance)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeAddressesResponse.addressesSet.item.instanceId", equalTo("i-0123456789abcdef0"))
+            .extract().path("DescribeAddressesResponse.addressesSet.item.associationId");
+        // The failed gateway does not hold the address: once the instance lets go it can be released.
+        given()
+            .formParam("Action", "DisassociateAddress")
+            .formParam("AssociationId", instanceAssociation)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+        given()
+            .formParam("Action", "ReleaseAddress")
+            .formParam("AllocationId", heldByInstance)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
 
-        // The refused call left the first gateway's association alone.
+        // The failed gateway claimed nothing, and deleting it leaves the first gateway's association alone.
+        String held = given()
+            .formParam("Action", "DescribeAddresses")
+            .formParam("AllocationId.1", heldByGateway)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeAddressesResponse.addressesSet.item.associationId", startsWith("eipassoc-"))
+            .extract().path("DescribeAddressesResponse.addressesSet.item.associationId");
+        given()
+            .formParam("Action", "DeleteNatGateway")
+            .formParam("NatGatewayId", failedId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
         given()
             .formParam("Action", "DescribeAddresses")
             .formParam("AllocationId.1", heldByGateway)
             .header("Authorization", AUTH_HEADER)
         .when().post("/")
         .then().statusCode(200)
-            .body("DescribeAddressesResponse.addressesSet.item.associationId", startsWith("eipassoc-"));
+            .body("DescribeAddressesResponse.addressesSet.item.associationId", equalTo(held));
     }
 
     /** The association a gateway publishes is released by deleting the gateway, not by disassociating. */
@@ -312,9 +364,31 @@ class Ec2NatGatewayAddressIntegrationTest {
         .then().statusCode(200)
             .body("DescribeAddressesResponse.addressesSet.item.associationId", equalTo(associationId));
 
+        // Nor released out from under the gateway: AWS answers InvalidIPAddress.InUse.
+        given()
+            .formParam("Action", "ReleaseAddress")
+            .formParam("AllocationId", allocationId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidIPAddress.InUse"));
+        given()
+            .formParam("Action", "DescribeAddresses")
+            .formParam("AllocationId.1", allocationId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeAddressesResponse.addressesSet.item.associationId", equalTo(associationId));
+
         given()
             .formParam("Action", "DeleteNatGateway")
             .formParam("NatGatewayId", natGatewayId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+        given()
+            .formParam("Action", "ReleaseAddress")
+            .formParam("AllocationId", allocationId)
             .header("Authorization", AUTH_HEADER)
         .when().post("/")
         .then().statusCode(200);

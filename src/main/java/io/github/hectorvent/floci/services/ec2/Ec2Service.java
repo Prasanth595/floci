@@ -5305,7 +5305,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * <p>Split out so that everything reporting an endpoint's interfaces -- the ids on
      * the wire, the objects flow-log attribution reads -- comes from one place and
      * cannot disagree. The alternative, deriving ids independently from the same
-     * {@link #endpointEniId}, looks equivalent and is not: this method skips a subnet
+     * {@link #eniIdFromSeed}, looks equivalent and is not: this method skips a subnet
      * whose record has gone, and a second derivation that forgot to would report an
      * interface the first one denies exists. Congruence by construction beats congruence
      * by inspection, and the two had in fact already diverged.
@@ -5337,7 +5337,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 continue;
             }
             NetworkInterface ni = new NetworkInterface();
-            ni.setNetworkInterfaceId(endpointEniId(endpoint.getVpcEndpointId(), subnetId));
+            ni.setNetworkInterfaceId(eniIdFromSeed(endpoint.getVpcEndpointId() + "|" + subnetId));
             ni.setSubnetId(subnetId);
             ni.setVpcId(endpoint.getVpcId());
             ni.setAvailabilityZone(subnet.getAvailabilityZone());
@@ -5400,9 +5400,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return result;
     }
 
-    private static String endpointEniId(String endpointId, String subnetId) {
-        String hex = java.util.UUID.nameUUIDFromBytes(
-                (endpointId + "|" + subnetId).getBytes(StandardCharsets.UTF_8))
+    /** A stable interface id derived from {@code seed}, for interfaces Floci projects rather than stores. */
+    private static String eniIdFromSeed(String seed) {
+        String hex = UUID.nameUUIDFromBytes(seed.getBytes(StandardCharsets.UTF_8))
                 .toString().replace("-", "");
         return "eni-" + hex.substring(0, 17);
     }
@@ -5418,7 +5418,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * <p>Mapped over {@link #endpointNetworkInterfacesOf(VpcEndpoint)} rather than derived
      * separately, so the ids on the wire come BY CONSTRUCTION from the same derivation
      * flow-log attribution uses, and no endpoint can be described two ways. An earlier
-     * version of this method called {@link #endpointEniId} itself and looked equivalent;
+     * version of this method called {@link #eniIdFromSeed} itself and looked equivalent;
      * it was not, because it lacked that method's skip of a subnet whose record has gone,
      * and the two were measured reporting different sets after a subnet was deleted out
      * from under a live endpoint.
@@ -9329,30 +9329,34 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         natGateway.setRegion(region);
         synchronized (privateIpAllocationLock) {
             // Checked under the same lock that writes the association below, so two gateways
-            // cannot both see the allocation free. An allocation already held by an instance or
-            // another gateway is refused, not taken over.
+            // cannot both see the allocation free. As on AWS, an allocation already held by an
+            // instance or another gateway does not fail the call: the gateway is created in state
+            // failed, with no interface, and the allocation is left with its holder.
             if (isSet(allocationId)) {
                 Address held = getRequiredAddress(region, allocationId);
                 // The gateway scan covers gateways persisted before the Address record was marked.
                 if (isSet(held.getAssociationId()) || isSet(held.getInstanceId())
                         || isHeldByNatGateway(region, allocationId)) {
-                    throw new AwsException("Resource.AlreadyAssociated",
-                            "Elastic IP address " + allocationId + " is already associated.", 400);
+                    natGateway.setState("failed");
+                    natGateway.setFailureCode("Resource.AlreadyAssociated");
+                    natGateway.setFailureMessage("Elastic IP address " + allocationId + " is already associated");
                 }
             }
-            NatGatewayAddress gatewayAddress =
-                    natGatewayAddress(region, natGateway.getNatGatewayId(), subnetId, allocationId);
-            natGateway.getNatGatewayAddresses().add(gatewayAddress);
-            // The Elastic IP is now held by the gateway's interface, so DescribeAddresses has to
-            // say so: an allocation that looks free is one Terraform and the console would offer
-            // to reuse. No instanceId, a NAT gateway is not an instance.
-            if (isSet(allocationId)) {
-                addresses.get(key(region, allocationId)).ifPresent(eip -> {
-                    eip.setAssociationId(gatewayAddress.getAssociationId());
-                    eip.setNetworkInterfaceId(gatewayAddress.getNetworkInterfaceId());
-                    eip.setPrivateIpAddress(gatewayAddress.getPrivateIp());
-                    addresses.put(key(region, allocationId), eip);
-                });
+            if (!"failed".equals(natGateway.getState())) {
+                NatGatewayAddress gatewayAddress =
+                        natGatewayAddress(region, natGateway.getNatGatewayId(), subnetId, allocationId);
+                natGateway.getNatGatewayAddresses().add(gatewayAddress);
+                // The Elastic IP is now held by the gateway's interface, so DescribeAddresses has to
+                // say so: an allocation that looks free is one Terraform and the console would offer
+                // to reuse. No instanceId, a NAT gateway is not an instance.
+                if (isSet(allocationId)) {
+                    addresses.get(key(region, allocationId)).ifPresent(eip -> {
+                        eip.setAssociationId(gatewayAddress.getAssociationId());
+                        eip.setNetworkInterfaceId(gatewayAddress.getNetworkInterfaceId());
+                        eip.setPrivateIpAddress(gatewayAddress.getPrivateIp());
+                        addresses.put(key(region, allocationId), eip);
+                    });
+                }
             }
             if (natGatewayTags != null && !natGatewayTags.isEmpty()) {
                 natGateway.setTags(new ArrayList<>(natGatewayTags));
@@ -9373,7 +9377,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private NatGatewayAddress natGatewayAddress(String region, String natGatewayId, String subnetId,
                                                 String allocationId) {
         NatGatewayAddress address = new NatGatewayAddress();
-        address.setNetworkInterfaceId(natEniId(natGatewayId));
+        address.setNetworkInterfaceId(eniIdFromSeed("nat|" + natGatewayId));
         address.setPrivateIp(assignPrivateIp(region, subnetId));
         if (isSet(allocationId)) {
             address.setAllocationId(allocationId);
@@ -9386,14 +9390,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return address;
     }
 
-    /** Derived from the gateway id, like {@link #endpointEniId}, so it is stable across restarts. */
-    private static String natEniId(String natGatewayId) {
-        String hex = UUID.nameUUIDFromBytes(
-                ("nat|" + natGatewayId).getBytes(StandardCharsets.UTF_8))
-                .toString().replace("-", "");
-        return "eni-" + hex.substring(0, 17);
-    }
-
     /**
      * The interfaces a NAT gateway owns, one per stored address, built from that address so the id
      * DescribeNatGateways publishes is the id DescribeNetworkInterfaces resolves. Empty when the
@@ -9402,7 +9398,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private List<NetworkInterface> natNetworkInterfacesOf(NatGateway natGateway, String ownerId) {
         String subnetKey = key(natGateway.getRegion(), natGateway.getSubnetId());
         Subnet subnet = (subnets instanceof AccountAwareStorageBackend<Subnet> aware
-                ? aware.getForAccount(ownerId, subnetKey) : subnets.get(subnetKey)).orElse(null);
+                ? aware.getForAccount(ownerId, subnetKey).or(() -> aware.getLegacyForAccount(ownerId, subnetKey))
+                : subnets.get(subnetKey)).orElse(null);
         if (subnet == null) {
             return List.of();
         }
@@ -9477,6 +9474,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             natGateways.delete(key(region, natGatewayId));
             tags.delete(natGatewayId);
+            natGateway.getNatGatewayAddresses().forEach(a -> tags.delete(a.getNetworkInterfaceId()));
         }
         return natGateway;
     }
@@ -9615,28 +9613,32 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public void disassociateAddress(String region, String associationId) {
         ensureDefaultResources(region);
-        for (Address addr : addresses.scan(k -> true)) {
-            if (addr.getRegion().equals(region) && associationId.equals(addr.getAssociationId())) {
-                // A NAT gateway holds its Elastic IP for its whole life and is released by
-                // DeleteNatGateway; clearing only the allocation would leave the gateway and its
-                // interface still claiming the address.
-                if (isNatGatewayAssociation(region, associationId)) {
-                    throw new AwsException("InvalidParameterValue", "The association " + associationId
-                            + " belongs to a NAT gateway and cannot be disassociated; delete the NAT gateway.",
-                            400);
+        // Under the lock NAT create and delete take, so the gateway check and the clear see the
+        // same association.
+        synchronized (privateIpAllocationLock) {
+            for (Address addr : addresses.scan(k -> true)) {
+                if (addr.getRegion().equals(region) && associationId.equals(addr.getAssociationId())) {
+                    // A NAT gateway holds its Elastic IP for its whole life and is released by
+                    // DeleteNatGateway; clearing only the allocation would leave the gateway and its
+                    // interface still claiming the address.
+                    if (isNatGatewayAssociation(region, associationId)) {
+                        throw new AwsException("InvalidParameterValue", "The association " + associationId
+                                + " belongs to a NAT gateway and cannot be disassociated; delete the NAT gateway.",
+                                400);
+                    }
+                    addr.setInstanceId(null);
+                    addr.setAssociationId(null);
+                    updateStoredAddressAssociation(addr);
+                    addr.setNetworkInterfaceId(null);
+                    addr.setPrivateIpAddress(null);
+                    // Hand the allocation back its allocated address: with no instance behind it,
+                    // there is nothing reachable left for it to stand for.
+                    if (addr.getAllocatedPublicIp() != null) {
+                        addr.setPublicIp(addr.getAllocatedPublicIp());
+                    }
+                    addresses.put(key(region, addr.getAllocationId()), addr);
+                    return;
                 }
-                addr.setInstanceId(null);
-                addr.setAssociationId(null);
-                updateStoredAddressAssociation(addr);
-                addr.setNetworkInterfaceId(null);
-                addr.setPrivateIpAddress(null);
-                // Hand the allocation back its allocated address: with no instance behind it,
-                // there is nothing reachable left for it to stand for.
-                if (addr.getAllocatedPublicIp() != null) {
-                    addr.setPublicIp(addr.getAllocatedPublicIp());
-                }
-                addresses.put(key(region, addr.getAllocationId()), addr);
-                return;
             }
         }
     }
@@ -9646,10 +9648,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * the default account (they belong to it); never another account's.
      */
     private List<NatGateway> callerNatGateways() {
+        return natGatewaysOf(callerAccountId());
+    }
+
+    private List<NatGateway> natGatewaysOf(String account) {
         if (natGateways instanceof AccountAwareStorageBackend<NatGateway> aware) {
-            String caller = callerAccountId();
-            List<NatGateway> own = aware.scanForAccount(caller, k -> true);
-            if (!caller.equals(defaultAccountId)) {
+            List<NatGateway> own = aware.scanForAccount(account, k -> true);
+            if (!account.equals(defaultAccountId)) {
                 return own;
             }
             List<NatGateway> all = new ArrayList<>(own);
@@ -9661,7 +9666,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private boolean isHeldByNatGateway(String region, String allocationId) {
         return callerNatGateways().stream()
-                .filter(g -> region.equals(g.getRegion()) && !"deleted".equals(g.getState()))
+                .filter(g -> region.equals(g.getRegion())
+                        && !"deleted".equals(g.getState()) && !"failed".equals(g.getState()))
                 .anyMatch(g -> allocationId.equals(g.getAllocationId())
                         || g.getNatGatewayAddresses().stream().anyMatch(a -> allocationId.equals(a.getAllocationId())));
     }
@@ -9675,18 +9681,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public void releaseAddress(String region, String allocationId) {
         ensureDefaultResources(region);
-        Address address = getRequiredAddress(region, allocationId);
-        if (address.getAssociationId() != null) {
-            NetworkInterface ni = networkInterfaces.get(key(region, address.getNetworkInterfaceId())).orElse(null);
-            String vpcId = ni != null ? ni.getVpcId()
-                    : getRequiredInstance(region, address.getInstanceId()).getVpcId();
-            if (!getRequiredVpc(region, vpcId).isDefault()) {
+        synchronized (privateIpAllocationLock) {
+            Address address = getRequiredAddress(region, allocationId);
+            // A NAT gateway's Elastic IP is released by DeleteNatGateway, never out from under it.
+            if (isHeldByNatGateway(region, allocationId)) {
                 throw new AwsException("InvalidIPAddress.InUse",
                         "Address " + address.getPublicIp() + " is in use.", 400);
             }
-            disassociateAddress(region, address.getAssociationId());
+            if (address.getAssociationId() != null) {
+                NetworkInterface ni = networkInterfaces.get(key(region, address.getNetworkInterfaceId())).orElse(null);
+                String vpcId = ni != null ? ni.getVpcId()
+                        : getRequiredInstance(region, address.getInstanceId()).getVpcId();
+                if (!getRequiredVpc(region, vpcId).isDefault()) {
+                    throw new AwsException("InvalidIPAddress.InUse",
+                            "Address " + address.getPublicIp() + " is in use.", 400);
+                }
+                disassociateAddress(region, address.getAssociationId());
+            }
+            addresses.delete(key(region, allocationId));
         }
-        addresses.delete(key(region, allocationId));
     }
 
     private void releaseInterfaceAddresses(String region, String networkInterfaceId, boolean deleted) {
@@ -10984,10 +10997,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // The ENI a NAT gateway owns. DescribeNatGateways publishes its id (aws_nat_gateway's
         // network_interface_id), so it has to resolve here too. Unlike the endpoint arm above this
         // one honours the explicit account: gateways and their subnets are read for safeAccount.
-        List<NatGateway> accountNatGateways = natGateways instanceof AccountAwareStorageBackend<NatGateway> aware
-                ? aware.scanForAccount(safeAccount, k -> true)
-                : natGateways.scan(k -> true);
-        for (NatGateway natGateway : accountNatGateways) {
+        for (NatGateway natGateway : natGatewaysOf(safeAccount)) {
             if (!region.equals(natGateway.getRegion())) {
                 continue;
             }
@@ -11000,6 +11010,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     continue;
                 }
                 foundIds.add(natEniId);
+                natNi.getTagSet().addAll((tags instanceof AccountAwareStorageBackend<List<Tag>> aware
+                        ? aware.getForAccount(safeAccount, natEniId) : tags.get(natEniId)).orElse(List.of()));
                 if (!matchesFilters(natNi, filters, region)) {
                     continue;
                 }

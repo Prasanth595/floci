@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
+import io.github.hectorvent.floci.services.ec2.model.NatGatewayAddress;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceAssociation;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceListResult;
@@ -1026,10 +1027,10 @@ class Ec2ServiceTest {
 
     /**
      * A gateway persisted before Address records were marked has an allocation that looks free.
-     * The gateway still holds it, so a second gateway is refused it.
+     * The gateway still holds it, so a second gateway is created failed and claims nothing.
      */
     @Test
-    void natGatewayRefusesAnElasticIpHeldByALegacyGatewayWithAnUnmarkedAddress() {
+    void natGatewayGivenAnElasticIpHeldByALegacyGatewayWithAnUnmarkedAddressIsFailed() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
@@ -1042,9 +1043,12 @@ class Ec2ServiceTest {
         legacy.setNetworkInterfaceId(null);
         legacy.setPrivateIpAddress(null);
 
-        AwsException e = assertThrows(AwsException.class,
-                () -> service.createNatGateway("us-east-1", subnetId, allocationId, null, null));
-        assertEquals("Resource.AlreadyAssociated", e.getErrorCode());
+        NatGateway failed = service.createNatGateway("us-east-1", subnetId, allocationId, null, null);
+        assertEquals("failed", failed.getState());
+        assertEquals("Resource.AlreadyAssociated", failed.getFailureCode());
+        assertTrue(failed.getNatGatewayAddresses().isEmpty());
+        assertNull(service.describeAddresses("us-east-1", List.of(allocationId), Map.of())
+                .getFirst().getAssociationId(), "a failed gateway must not claim the allocation");
     }
 
     /** AssociateAddress refuses an allocation a NAT gateway holds; the gateway keeps it. */
@@ -1070,9 +1074,12 @@ class Ec2ServiceTest {
                 .getFirst().getAssociationId(), "delete must still release the gateway's Elastic IP");
     }
 
-    /** A gateway persisted before account isolation (unprefixed key) still holds its Elastic IP. */
+    /**
+     * A gateway persisted before account isolation (unprefixed key) still holds its Elastic IP:
+     * a second gateway is created failed, and ReleaseAddress answers InvalidIPAddress.InUse.
+     */
     @Test
-    void createNatGatewayRefusesALegacyUnprefixedGatewaysElasticIp() {
+    void aLegacyUnprefixedGatewaysElasticIpCannotBeTakenOrReleased() {
         InMemoryStorage<String, NatGateway> rawGateways = new InMemoryStorage<>();
         Map<String, AccountAwareStorageBackend<?>> stores = Map.of("ec2-nat-gateways.json",
                 new AccountAwareStorageBackend<>(rawGateways, null, "000000000000"));
@@ -1089,9 +1096,95 @@ class Ec2ServiceTest {
         legacy.setRegion("us-east-1");
         rawGateways.put("us-east-1::nat-0legacy000000000", legacy);
 
+        NatGateway failed = service.createNatGateway("us-east-1", subnetId, allocationId, null, null);
+        assertEquals("failed", failed.getState());
+        assertEquals("Resource.AlreadyAssociated", failed.getFailureCode());
         AwsException e = assertThrows(AwsException.class,
-                () -> service.createNatGateway("us-east-1", subnetId, allocationId, null, null));
-        assertEquals("Resource.AlreadyAssociated", e.getErrorCode());
+                () -> service.releaseAddress("us-east-1", allocationId));
+        assertEquals("InvalidIPAddress.InUse", e.getErrorCode());
+        assertEquals(1, service.describeAddresses("us-east-1", List.of(allocationId), Map.of()).size());
+    }
+
+    /** A legacy unprefixed gateway in a legacy unprefixed subnet resolves its interface for the default account. */
+    @Test
+    void aLegacyUnprefixedGatewaysInterfaceResolvesForTheDefaultAccount() {
+        InMemoryStorage<String, NatGateway> rawGateways = new InMemoryStorage<>();
+        InMemoryStorage<String, Subnet> rawSubnets = new InMemoryStorage<>();
+        Map<String, AccountAwareStorageBackend<?>> stores = Map.of(
+                "ec2-nat-gateways.json", new AccountAwareStorageBackend<>(rawGateways, null, "000000000000"),
+                "ec2-subnets.json", new AccountAwareStorageBackend<>(rawSubnets, null, "000000000000"));
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(stores));
+        service.describeSubnets("us-east-1", List.of(), Map.of());
+        Subnet subnet = new Subnet();
+        subnet.setSubnetId("subnet-0legacy00000000");
+        subnet.setVpcId("vpc-0legacy000000000");
+        subnet.setAvailabilityZone("us-east-1a");
+        subnet.setRegion("us-east-1");
+        rawSubnets.put("us-east-1::subnet-0legacy00000000", subnet);
+        NatGateway legacy = new NatGateway();
+        legacy.setNatGatewayId("nat-0legacy000000000");
+        legacy.setSubnetId("subnet-0legacy00000000");
+        legacy.setVpcId("vpc-0legacy000000000");
+        legacy.setRegion("us-east-1");
+        NatGatewayAddress address = new NatGatewayAddress();
+        address.setNetworkInterfaceId("eni-0legacy000000000");
+        address.setPrivateIp("10.0.0.5");
+        legacy.getNatGatewayAddresses().add(address);
+        rawGateways.put("us-east-1::nat-0legacy000000000", legacy);
+
+        NetworkInterface ni = service.describeNetworkInterfaces(service.callerAccountId(), "us-east-1",
+                List.of("eni-0legacy000000000"), Map.of()).networkInterfaces().getFirst();
+        assertEquals("nat_gateway", ni.getInterfaceType());
+        assertEquals("us-east-1a", ni.getAvailabilityZone());
+        AwsException e = assertThrows(AwsException.class, () -> service.describeNetworkInterfaces(
+                "999999999999", "us-east-1", List.of("eni-0legacy000000000"), Map.of()));
+        assertEquals("InvalidNetworkInterfaceID.NotFound", e.getErrorCode());
+    }
+
+    /** Tags on a NAT gateway's interface read back through DescribeNetworkInterfaces and go with the gateway. */
+    @Test
+    void aNatGatewayInterfacesTagsReadBackAndAreDeletedWithTheGateway() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of()).getFirst().getSubnetId();
+        NatGateway nat = service.createNatGateway("us-east-1", subnetId, null, "private", null);
+        String eniId = nat.getNatGatewayAddresses().getFirst().getNetworkInterfaceId();
+        service.createTags("us-east-1", List.of(eniId), List.of(new Tag("Name", "nat-eni")));
+
+        NetworkInterface ni = service.describeNetworkInterfaces(service.callerAccountId(), "us-east-1",
+                List.of(eniId), Map.of()).networkInterfaces().getFirst();
+        assertEquals("nat-eni", ni.getTagSet().getFirst().getValue());
+
+        service.deleteNatGateway("us-east-1", nat.getNatGatewayId());
+        assertTrue(service.describeTags("us-east-1", Map.of("resource-id", List.of(eniId))).isEmpty());
+    }
+
+    /** DisassociateAddress checks and clears under the lock NAT create and delete take. */
+    @Test
+    void disassociateAddressWaitsForTheAllocationLock() throws Exception {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String allocationId = service.allocateAddress("us-east-1").getAllocationId();
+        String associationId = service.associateAddress("us-east-1", allocationId, "i-0123456789abcdef0")
+                .getAssociationId();
+        Field field = Ec2Service.class.getDeclaredField("privateIpAllocationLock");
+        field.setAccessible(true);
+        Object lock = field.get(service);
+
+        Thread disassociator = new Thread(() -> service.disassociateAddress("us-east-1", associationId));
+        synchronized (lock) {
+            disassociator.start();
+            disassociator.join(500);
+            assertTrue(disassociator.isAlive(), "disassociate must wait for the allocation lock");
+        }
+        disassociator.join(5000);
+        assertFalse(disassociator.isAlive());
+        assertNull(service.describeAddresses("us-east-1", List.of(allocationId), Map.of())
+                .getFirst().getAssociationId());
     }
 
     /** DeleteNatGateway releases the Elastic IP under the lock CreateNatGateway takes. */
