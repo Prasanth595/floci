@@ -24,7 +24,6 @@ import java.time.format.DateTimeParseException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 /** Provisions schedules through the same Scheduler service used by its REST API. */
 @ApplicationScoped
@@ -36,7 +35,6 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
     private static final String NAME_MODE_ATTR = "FlociSchedulerNameMode";
     private static final String NAME_REPLACEMENT_ATTR = "__FlociSchedulerNameReplacement";
     private static final String SNAPSHOT_ATTR = "__FlociSchedulerUpdateSnapshot";
-    private static final Pattern ADDRESS_PATTERN = Pattern.compile("[0-9a-zA-Z._-]{1,64}/[0-9a-zA-Z._-]{1,64}");
     private static final ObjectMapper MAPPER = JsonMapper.builder()
             .enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES)
             .addModule(new JavaTimeModule())
@@ -409,7 +407,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
                     }
                 }
                 if (!priorStub) {
-                    if (!ADDRESS_PATTERN.matcher(priorId.textValue()).matches()) {
+                    if (!isValidAddress(priorId.textValue())) {
                         throw new IllegalStateException("Invalid schedule replacement cleanup");
                     }
                     String priorGroup = priorId.textValue().substring(0, priorId.textValue().indexOf('/'));
@@ -429,7 +427,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
                 JsonNode failure = entry.path("cleanupFailureReason");
                 boolean legacyStubEntry = id.isTextual() && id.textValue().equals(legacyStubAddress);
                 if (!entry.isObject() || !id.isTextual()
-                        || (!legacyStubEntry && !ADDRESS_PATTERN.matcher(id.textValue()).matches())
+                        || (!legacyStubEntry && !isValidAddress(id.textValue()))
                         || (!type.isMissingNode() && (!type.isTextual() || !TYPE.equals(type.textValue())))
                         || (!region.isMissingNode() && !region.isNull() && !region.isTextual())
                         || (!retainable.isMissingNode() && !retainable.isBoolean())
@@ -457,9 +455,19 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private static void validateAddress(String physicalId) {
-        if (physicalId == null || !ADDRESS_PATTERN.matcher(physicalId).matches()) {
+        if (!isValidAddress(physicalId)) {
             throw new IllegalStateException("Invalid schedule address");
         }
+    }
+
+    private static boolean isValidAddress(String physicalId) {
+        if (physicalId == null) {
+            return false;
+        }
+        int separator = physicalId.indexOf('/');
+        return separator > 0
+                && SchedulerService.isValidName(physicalId.substring(0, separator))
+                && SchedulerService.isValidName(physicalId.substring(separator + 1));
     }
 
     private static void retireDisplaced(StackResource resource, String physicalId) {
