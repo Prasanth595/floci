@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -1539,6 +1540,49 @@ class BackupIntegrationTest {
         } finally {
             log.removeHandler(capture);
         }
+    }
+
+    @Test
+    @Order(172)
+    void aJobWhoseVaultWasReplacedDoesNotNotifyTheReplacement() {
+        String replacementQueue = createQueue("backup-notify-replacement-queue");
+        String replacementTopic = topicDeliveringTo("backup-notify-replacement-topic", replacementQueue);
+        String sentinelQueue = createQueue("backup-notify-sentinel-queue");
+        String sentinelTopic = topicDeliveringTo("backup-notify-sentinel-topic", sentinelQueue);
+        String vault = "notify-replaced-vault";
+
+        // Vault incarnations are told apart by creation second, so the replacement must be
+        // created in a later second than the original, and before the 1s job completes.
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+        long created = given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault).then().statusCode(200)
+            .extract().jsonPath().getLong("CreationDate");
+        await().atMost(Duration.ofSeconds(3)).pollInterval(Duration.ofMillis(5))
+            .until(() -> Instant.now().getEpochSecond() > created);
+
+        String oldJob = given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {"BackupVaultName": "%s", "ResourceArn": "%s", "IamRoleArn": "%s"}
+                """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + vault).then().statusCode(204);
+        // Recreates the name and points it at a topic the old job must never reach.
+        startJobInNotifiedVault(vault, replacementTopic, "BACKUP_JOB_COMPLETED");
+        // Completions run in start order on one thread: once this one is delivered, the
+        // old job's completion, and any publish it was going to make, has already happened.
+        startJobInNotifiedVault("notify-sentinel-vault", sentinelTopic, "BACKUP_JOB_COMPLETED");
+
+        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100))
+            .until(() -> { String b = receiveBody(sentinelQueue); return b != null && !b.isEmpty(); });
+        awaitJobCompleted(oldJob);
+
+        // The replacement's own job does publish; the old job must not have published too.
+        String first = receiveBody(replacementQueue);
+        assertThat(first, not(containsString("BackupJob ID : " + oldJob)));
+        String second = receiveBody(replacementQueue);
+        assertThat(second == null ? "" : second, not(containsString("BackupJob ID : " + oldJob)));
     }
 
 }

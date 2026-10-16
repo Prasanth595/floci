@@ -604,13 +604,16 @@ public class BackupService {
         String accountId = regionResolver.getAccountId();
         job.setAccountId(accountId);
         jobStore.put(jobId, job);
+        // Pinned now, not looked up by name at completion: if this vault is deleted and the name
+        // reused while the job runs, the job must not notify the replacement vault's topic.
+        String notificationKey = subResourceKey(region, vault);
 
         // The scheduler thread has no request context; run in the caller's account
         // so the account-aware stores and buildArn resolve the right partition.
         scheduler.schedule(() -> RequestScopes.runAs(accountId,
                 () -> transitionJob(jobId, vaultName, region)), 1, TimeUnit.SECONDS);
         scheduler.schedule(() -> RequestScopes.runAs(accountId,
-                () -> completeJob(jobId, vaultName, region)), jobCompletionDelaySeconds, TimeUnit.SECONDS);
+                () -> completeJob(jobId, vaultName, region, notificationKey)), jobCompletionDelaySeconds, TimeUnit.SECONDS);
 
         return job;
     }
@@ -728,7 +731,7 @@ public class BackupService {
         });
     }
 
-    private void completeJob(String jobId, String vaultName, String region) {
+    private void completeJob(String jobId, String vaultName, String region, String notificationKey) {
         jobStore.get(jobId).ifPresent(job -> {
             if ("RUNNING".equals(job.getState())) {
                 long now = Instant.now().getEpochSecond();
@@ -760,7 +763,7 @@ public class BackupService {
 
                 incrementVaultCount(vaultName, region);
                 LOG.infov("Backup job {0} completed, recovery point: {1}", jobId, rpArn);
-                notifyJobCompleted(job, vaultName, region);
+                notifyJobCompleted(job, vaultName, region, notificationKey);
             }
         });
     }
@@ -769,11 +772,14 @@ public class BackupService {
      * Publishes BACKUP_JOB_COMPLETED to the vault's SNS topic, if the vault asked for it.
      * Runs after the job and recovery point are stored, and never fails the completion: AWS
      * does not undo a backup because its notification could not be delivered.
+     *
+     * <p>{@code notificationKey} is the sub-resource key of the vault the job started in. A vault
+     * deleted mid-job takes its configuration with it, so the job publishes nothing rather than
+     * reaching a later vault that took the same name.
      */
-    private void notifyJobCompleted(BackupJob job, String vaultName, String region) {
+    private void notifyJobCompleted(BackupJob job, String vaultName, String region, String notificationKey) {
         try {
-            vaultStore.get(vaultKey(region, vaultName))
-                    .flatMap(vault -> notificationStore.get(subResourceKey(region, vault)))
+            notificationStore.get(notificationKey)
                     .filter(n -> n.getBackupVaultEvents() != null
                             && n.getBackupVaultEvents().contains("BACKUP_JOB_COMPLETED"))
                     .ifPresent(n -> snsService.publish(n.getSnsTopicArn(), null,
