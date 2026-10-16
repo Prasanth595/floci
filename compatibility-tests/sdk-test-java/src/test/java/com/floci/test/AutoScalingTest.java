@@ -19,9 +19,6 @@ import software.amazon.awssdk.services.autoscaling.model.DisableMetricsCollectio
 import software.amazon.awssdk.services.autoscaling.model.EnableMetricsCollectionRequest;
 import software.amazon.awssdk.services.autoscaling.model.EnabledMetric;
 import software.amazon.awssdk.services.autoscaling.model.InstanceMaintenancePolicy;
-import software.amazon.awssdk.services.autoscaling.model.InstanceMetadataEndpointState;
-import software.amazon.awssdk.services.autoscaling.model.InstanceMetadataHttpTokensState;
-import software.amazon.awssdk.services.autoscaling.model.InstanceMetadataOptions;
 import software.amazon.awssdk.services.autoscaling.model.LaunchTemplate;
 import software.amazon.awssdk.services.autoscaling.model.LaunchTemplateOverrides;
 import software.amazon.awssdk.services.autoscaling.model.LaunchTemplateSpecification;
@@ -141,52 +138,6 @@ class AutoScalingTest {
                     assertThat(error.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
                     assertThat(error.awsErrorDetails().errorMessage())
                             .isEqualTo(INVALID_LAUNCH_CONFIGURATION_PARAMETERS_MESSAGE);
-                });
-    }
-
-    @Test
-    @DisplayName("Launch configuration metadata options round-trip through the SDK")
-    void launchConfigurationMetadataOptionsRoundTripThroughTheSdk() {
-        String partial = TestFixtures.uniqueName("sdk-lc-metadata");
-        String omitted = TestFixtures.uniqueName("sdk-lc-no-metadata");
-        autoScaling.createLaunchConfiguration(CreateLaunchConfigurationRequest.builder()
-                .launchConfigurationName(partial)
-                .imageId("ami-12345678")
-                .instanceType("t3.micro")
-                .metadataOptions(InstanceMetadataOptions.builder()
-                        .httpTokens(InstanceMetadataHttpTokensState.REQUIRED)
-                        .build())
-                .build());
-        try {
-            autoScaling.createLaunchConfiguration(CreateLaunchConfigurationRequest.builder()
-                    .launchConfigurationName(omitted)
-                    .imageId("ami-12345678")
-                    .instanceType("t3.micro")
-                    .build());
-            try {
-                InstanceMetadataOptions described = autoScaling.describeLaunchConfigurations(r -> r
-                                .launchConfigurationNames(partial))
-                        .launchConfigurations().get(0).metadataOptions();
-                assertThat(described.httpTokens()).isEqualTo(InstanceMetadataHttpTokensState.REQUIRED);
-                assertThat(described.httpEndpoint()).isEqualTo(InstanceMetadataEndpointState.ENABLED);
-                assertThat(described.httpPutResponseHopLimit()).isEqualTo(1);
-                assertThat(autoScaling.describeLaunchConfigurations(r -> r.launchConfigurationNames(omitted))
-                        .launchConfigurations().get(0).metadataOptions()).isNull();
-            } finally {
-                autoScaling.deleteLaunchConfiguration(r -> r.launchConfigurationName(omitted));
-            }
-        } finally {
-            autoScaling.deleteLaunchConfiguration(r -> r.launchConfigurationName(partial));
-        }
-        assertThatThrownBy(() -> autoScaling.createLaunchConfiguration(CreateLaunchConfigurationRequest.builder()
-                .launchConfigurationName(TestFixtures.uniqueName("sdk-lc-bad-metadata"))
-                .imageId("ami-12345678")
-                .instanceType("t3.micro")
-                .metadataOptions(InstanceMetadataOptions.builder().httpPutResponseHopLimit(65).build())
-                .build()))
-                .isInstanceOfSatisfying(AutoScalingException.class, error -> {
-                    assertThat(error.statusCode()).isEqualTo(400);
-                    assertThat(error.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
                 });
     }
 
