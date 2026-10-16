@@ -235,14 +235,19 @@ class RdsExportTaskServiceTest {
     }
 
     @Test
-    void aBucketInAnotherRegionIsRefused() {
+    void aBucketInAnotherRegionFailsTheTaskWithoutExporting() {
         when(s3Service.getBucketRegion("exports")).thenReturn("eu-west-1");
-        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
+        SnapshotExporter exporter = mock(SnapshotExporter.class);
+        RdsExportTaskService service = service(exporter);
 
-        AwsException error = assertThrows(AwsException.class, () -> start(service, "appdb-export", List.of()));
+        assertThat(start(service, "appdb-export", List.of()).getStatus(), equalTo("STARTING"));
+        runWorkers();
 
-        assertThat(error.getErrorCode(), equalTo("InvalidS3BucketFault"));
-        assertThat(workers, empty());
+        ExportTask failed = describe(service, "appdb-export");
+        assertThat(failed.getStatus(), equalTo("FAILED"));
+        assertThat(failed.getFailureCause(), equalTo("The S3 bucket exports isn't located in the current AWS Region."
+                + " Review your S3 bucket name and retry the export."));
+        verify(exporter, never()).export(any(), any(), any());
     }
 
     @Test

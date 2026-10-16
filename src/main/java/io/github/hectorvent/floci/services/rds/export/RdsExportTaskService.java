@@ -122,10 +122,7 @@ public class RdsExportTaskService implements Resettable {
         if (bucketRegion == null || bucketRegion.isBlank()) {
             bucketRegion = regionResolver.getDefaultRegion();
         }
-        if (!bucketRegion.equalsIgnoreCase(effectiveRegion)) {
-            throw new AwsException("InvalidS3BucketFault", "The S3 bucket " + s3BucketName + " is in "
-                    + bucketRegion + ", not in the snapshot's region " + effectiveRegion + ".", 400);
-        }
+        boolean bucketInAnotherRegion = !bucketRegion.equalsIgnoreCase(effectiveRegion);
 
         ExportTask task = new ExportTask();
         task.setExportTaskIdentifier(exportTaskIdentifier);
@@ -157,7 +154,7 @@ public class RdsExportTaskService implements Resettable {
             // The worker runs on a fresh thread, where account-aware storage would otherwise fall
             // back to the default account and never find this task again.
             workers.execute(() -> RequestScopes.runAs(accountId, effectiveRegion,
-                    () -> run(effectiveRegion, exportTaskIdentifier, source, startedIn)));
+                    () -> run(effectiveRegion, exportTaskIdentifier, source, bucketInAnotherRegion, startedIn)));
             return started;
         }
     }
@@ -225,12 +222,13 @@ public class RdsExportTaskService implements Resettable {
         return new AwsException("Throttling", "Export tasks are not accepted while the emulator is resetting.", 429);
     }
 
-    private void run(String region, String taskId, SnapshotExportSource source, int startedIn) {
+    private void run(String region, String taskId, SnapshotExportSource source, boolean bucketInAnotherRegion,
+                     int startedIn) {
         synchronized (workerMonitor) {
             activeWorkers++;
         }
         try {
-            runTask(region, taskId, source, startedIn);
+            runTask(region, taskId, source, bucketInAnotherRegion, startedIn);
         } finally {
             synchronized (workerMonitor) {
                 activeWorkers--;
@@ -239,7 +237,8 @@ public class RdsExportTaskService implements Resettable {
         }
     }
 
-    private void runTask(String region, String taskId, SnapshotExportSource source, int startedIn) {
+    private void runTask(String region, String taskId, SnapshotExportSource source, boolean bucketInAnotherRegion,
+                         int startedIn) {
         Optional<ExportTask> current = tasks.get(key(region, taskId));
         if (current.isEmpty() || current.get().isTerminal() || generation.get() != startedIn) {
             return;
@@ -247,6 +246,12 @@ public class RdsExportTaskService implements Resettable {
         if (ExportTask.STATUS_CANCELING.equals(current.get().getStatus())) {
             // Canceled before its worker started: nothing to restore, nothing to stop.
             finish(region, taskId, startedIn, ExportTask.STATUS_CANCELED, null, null);
+            return;
+        }
+        if (bucketInAnotherRegion) {
+            finish(region, taskId, startedIn, ExportTask.STATUS_FAILED, "The S3 bucket "
+                    + current.get().getS3Bucket() + " isn't located in the current AWS Region. Review your S3 bucket"
+                    + " name and retry the export.", null);
             return;
         }
         if (mock) {
