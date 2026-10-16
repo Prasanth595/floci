@@ -15,7 +15,6 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
-import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -145,9 +144,57 @@ class DmsIntegrationTest {
         }
     }
 
+    /**
+     * Runs in its own region so no instance another test left behind already uses {@code default}.
+     * AWS creates that group only when an instance first needs it, so before then listing shows
+     * just the created group and filtering on {@code default} faults.
+     */
     @Test
-    void describeResolvesTheDefaultGroupFromTheDefaultVpc() {
-        dms("DescribeReplicationSubnetGroups")
+    void describeListsTheDefaultGroupOnlyOnceAnInstanceUsesIt() {
+        String region = "ap-southeast-2";
+        dms("CreateReplicationSubnetGroup", region)
+                .body("{\"ReplicationSubnetGroupIdentifier\":\"tf-default-probe\","
+                        + "\"ReplicationSubnetGroupDescription\":\"terraform managed\","
+                        + "\"SubnetIds\":[\"subnet-default-ap-southeast-2-a\",\"subnet-default-ap-southeast-2-b\"]}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        dms("DescribeReplicationSubnetGroups", region)
+                .body("{}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .body("ReplicationSubnetGroups.ReplicationSubnetGroupIdentifier", contains("tf-default-probe"));
+
+        dms("DescribeReplicationSubnetGroups", region)
+                .body("{\"Filters\":[{\"Name\":\"replication-subnet-group-id\",\"Values\":[\"default\"]}]}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundFault"));
+
+        dms("CreateReplicationInstance", region)
+                .body("{\"ReplicationInstanceIdentifier\":\"tf-default-user\","
+                        + "\"ReplicationInstanceClass\":\"dms.t3.micro\"}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        dms("DescribeReplicationSubnetGroups", region)
+                .body("{}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .body("ReplicationSubnetGroups.ReplicationSubnetGroupIdentifier",
+                        contains("default", "tf-default-probe"));
+
+        dms("DescribeReplicationSubnetGroups", region)
                 .body("{\"Filters\":[{\"Name\":\"replication-subnet-group-id\",\"Values\":[\"default\"]}]}")
         .when()
                 .post("/")
@@ -155,15 +202,7 @@ class DmsIntegrationTest {
                 .statusCode(200)
                 .body("ReplicationSubnetGroups", hasSize(1))
                 .body("ReplicationSubnetGroups[0].ReplicationSubnetGroupIdentifier", equalTo("default"))
-                .body("ReplicationSubnetGroups[0].VpcId", equalTo("vpc-default-us-east-1"));
-
-        dms("DescribeReplicationSubnetGroups")
-                .body("{}")
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .body("ReplicationSubnetGroups.ReplicationSubnetGroupIdentifier", hasItem("default"));
+                .body("ReplicationSubnetGroups[0].VpcId", equalTo("vpc-default-ap-southeast-2"));
     }
 
     @Test
@@ -395,9 +434,13 @@ class DmsIntegrationTest {
     }
 
     private static RequestSpecification dms(String action) {
+        return dms(action, "us-east-1");
+    }
+
+    private static RequestSpecification dms(String action, String region) {
         return given()
                 .contentType(CONTENT_TYPE)
                 .header("X-Amz-Target", TARGET_PREFIX + action)
-                .header("Authorization", AUTH_HEADER);
+                .header("Authorization", AUTH_HEADER.replace("/us-east-1/", "/" + region + "/"));
     }
 }

@@ -249,11 +249,17 @@ public class DmsService implements Resettable {
 
     /**
      * "default" cannot be created, so it is never stored: it resolves to the region's default-VPC
-     * subnets at read time, which is the group an instance created without one lands in.
+     * subnets at read time, which is the group an instance created without one lands in. AWS only
+     * creates that group the first time an instance needs it, so it exists here only while a
+     * replication instance in the region uses it. That check comes first, so a region with no such
+     * instance never reaches EC2 and never seeds its default VPC.
      */
     public Optional<ReplicationSubnetGroup> findReplicationSubnetGroup(String region, String identifier) {
         if (!"default".equals(identifier)) {
             return subnetGroups.get(storageKey(region, identifier));
+        }
+        if (!subnetGroupInUse(region, identifier)) {
+            return Optional.empty();
         }
         List<String> defaultSubnets = ec2Service.describeSubnets(region, List.of(), Map.of()).stream()
                 .filter(Subnet::isDefaultForAz)
@@ -364,7 +370,8 @@ public class DmsService implements Resettable {
      * resumable when a group is created or deleted between requests. DMS documents a default
      * {@code MaxRecords} of 100 and a valid range of 20 to 100, and rejects a value outside that
      * range rather than clamping it. The synthetic {@code default} group is listed and filterable
-     * like a stored one whenever {@link #findReplicationSubnetGroup} resolves it.
+     * like a stored one whenever {@link #findReplicationSubnetGroup} resolves it, which is only once
+     * a replication instance in the region uses it.
      */
     public PaginatedResult<ReplicationSubnetGroup> describeReplicationSubnetGroups(JsonNode request, String region) {
         Integer maxRecords = maxRecords(request);
@@ -391,14 +398,17 @@ public class DmsService implements Resettable {
         if (subnetGroups.get(key).isEmpty()) {
             throw notFound(identifier);
         }
-        boolean inUse = regionScan(instances, region).stream()
-                .anyMatch(instance -> identifier.equals(instance.getAttributes()
-                        .path("ReplicationSubnetGroup").path("ReplicationSubnetGroupIdentifier").asText(null)));
-        if (inUse) {
+        if (subnetGroupInUse(region, identifier)) {
             throw invalidState("Replication subnet group " + identifier
                     + " is in use by a replication instance and cannot be deleted.");
         }
         subnetGroups.delete(key);
+    }
+
+    private boolean subnetGroupInUse(String region, String identifier) {
+        return regionScan(instances, region).stream()
+                .anyMatch(instance -> identifier.equals(instance.getAttributes()
+                        .path("ReplicationSubnetGroup").path("ReplicationSubnetGroupIdentifier").asText(null)));
     }
 
     public List<ResourceTag> listTagsForResource(JsonNode request, String region) {
