@@ -240,10 +240,11 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * The document the template declares, or null when it declares none. A key the registry schema
-     * does not define, a rule listed twice, a value of the wrong type or a rule without
-     * {@code ObjectOwnership} fails in the class's {@code Model validation failed} form. The
-     * document then goes through S3's own check, which answers {@code MalformedXML} for no rule,
-     * more than one, or an unknown mode.
+     * does not define, a value of the wrong type, a rule without {@code ObjectOwnership} or a rule
+     * listed twice fails in the class's {@code Model validation failed} form. The repeat is checked
+     * once every rule passes on its own, so a malformed rule fails for its own fault even when
+     * repeated. The document then goes through S3's own check, which answers {@code MalformedXML}
+     * for no rule, more than one, or an unknown mode.
      */
     private String ownershipControlsXml(JsonNode props, ProvisionContext ctx) {
         JsonNode declaredNode = declared(props, "OwnershipControls");
@@ -256,7 +257,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         }
         String path = "#/OwnershipControls";
         requireOnly(requireObject(controls, path), path, "Rules");
-        JsonNode rules = requireDistinct(declaredArray(controls, "Rules", path), path + "/Rules");
+        JsonNode rules = declaredArray(controls, "Rules", path);
         XmlBuilder xml = new XmlBuilder().start("OwnershipControls", AwsNamespaces.S3);
         for (int index = 0; rules != null && index < rules.size(); index++) {
             String rulePath = path + "/Rules/" + index;
@@ -266,6 +267,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             xml.elem("ObjectOwnership", ownership);
             xml.end("Rule");
         }
+        requireDistinct(rules, path + "/Rules");
         String document = xml.end("OwnershipControls").build();
         S3Service.validateOwnershipControls(document);
         return document;
@@ -491,10 +493,10 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * The list itself when no item repeats another, or null when it is not declared. A repeat
-     * fails, as the schema's {@code uniqueItems} does.
+     * Fails when an item of the list repeats another, as the schema's {@code uniqueItems} does. A
+     * list that is not declared, null here, has no repeat.
      */
-    private static JsonNode requireDistinct(JsonNode items, String pointer) {
+    private static void requireDistinct(JsonNode items, String pointer) {
         Set<JsonNode> seen = new HashSet<>();
         for (int index = 0; items != null && index < items.size(); index++) {
             if (!seen.add(items.get(index))) {
@@ -502,7 +504,6 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
                         "Model validation failed (" + pointer + ": array items are not unique)", 400);
             }
         }
-        return items;
     }
 
     private static AwsException typeMismatch(String pointer, String expected, JsonNode value) {
