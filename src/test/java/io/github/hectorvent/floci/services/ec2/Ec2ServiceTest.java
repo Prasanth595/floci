@@ -3378,18 +3378,9 @@ class Ec2ServiceTest {
 
     @Test
     void runInstancesRejectsIncompatibleInstanceTypeForCreatedArmImage() {
-        Ec2ImageCatalog catalog = mock(Ec2ImageCatalog.class);
-        Ec2ImageCatalog.CatalogImage source = new Ec2ImageCatalog.CatalogImage();
-        source.imageId = "ami-arm-source";
-        source.architecture = "arm64";
-        source.rootDeviceName = "/dev/xvda";
-        when(catalog.findByIdOrAlias("ami-arm-source")).thenReturn(Optional.of(source));
-
         AmiImageResolver resolver = mock(AmiImageResolver.class);
-        when(resolver.resolveImage("ami-arm-source"))
-                .thenReturn(new ResolvedAmiImage("arm-image", ResolvedAmiImage.DEFAULT_RUNTIME, false,
-                        "linux/arm64"));
-        Ec2Service service = liveService(capturingContainerManager(), resolver, catalog);
+        Ec2Service service = serviceWithCatalogImage(resolver, "ami-arm-source", "arm64", "arm-image",
+                "linux/arm64");
         Reservation sourceReservation = service.runInstances("us-east-1", "ami-arm-source", "t4g.medium",
                 1, 1, null, List.of(), null, null, List.of(), null, null);
 
@@ -3411,18 +3402,8 @@ class Ec2ServiceTest {
 
     @Test
     void runInstancesAcceptsI386ImageOnT2MediumAndRefusesItOnT2Large() {
-        Ec2ImageCatalog catalog = mock(Ec2ImageCatalog.class);
-        Ec2ImageCatalog.CatalogImage source = new Ec2ImageCatalog.CatalogImage();
-        source.imageId = "ami-i386";
-        source.architecture = "i386";
-        source.rootDeviceName = "/dev/xvda";
-        when(catalog.findByIdOrAlias("ami-i386")).thenReturn(Optional.of(source));
-
-        AmiImageResolver resolver = mock(AmiImageResolver.class);
-        when(resolver.resolveImage("ami-i386"))
-                .thenReturn(new ResolvedAmiImage("i386/alpine:3", ResolvedAmiImage.DEFAULT_RUNTIME, false,
-                        "linux/386"));
-        Ec2Service service = liveService(capturingContainerManager(), resolver, catalog);
+        Ec2Service service = serviceWithCatalogImage(mock(AmiImageResolver.class), "ami-i386", "i386",
+                "i386/alpine:3", "linux/386");
 
         Reservation medium = service.runInstances("us-east-1", "ami-i386", "t2.medium", 1, 1,
                 null, List.of(), null, null, List.of(), null, null);
@@ -3432,6 +3413,20 @@ class Ec2ServiceTest {
                 () -> service.runInstances("us-east-1", "ami-i386", "t2.large", 1, 1,
                         null, List.of(), null, null, List.of(), null, null));
         assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    private Ec2Service serviceWithCatalogImage(AmiImageResolver resolver, String imageId, String architecture,
+                                               String dockerImage, String dockerPlatform) {
+        Ec2ImageCatalog catalog = mock(Ec2ImageCatalog.class);
+        Ec2ImageCatalog.CatalogImage source = new Ec2ImageCatalog.CatalogImage();
+        source.imageId = imageId;
+        source.architecture = architecture;
+        source.rootDeviceName = "/dev/xvda";
+        when(catalog.findByIdOrAlias(imageId)).thenReturn(Optional.of(source));
+        when(resolver.resolveImage(imageId))
+                .thenReturn(new ResolvedAmiImage(dockerImage, ResolvedAmiImage.DEFAULT_RUNTIME, false,
+                        dockerPlatform));
+        return liveService(capturingContainerManager(), resolver, catalog);
     }
 
     @Test
