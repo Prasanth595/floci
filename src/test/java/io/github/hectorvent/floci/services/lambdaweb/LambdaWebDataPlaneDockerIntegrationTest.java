@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambdaweb;
 import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
@@ -13,6 +14,9 @@ import org.junit.jupiter.api.Timeout;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.zip.ZipEntry;
@@ -25,7 +29,9 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Requests to an endpoint domain reach a Node.js server that Floci starts from the revision's S3
@@ -44,6 +50,15 @@ class LambdaWebDataPlaneDockerIntegrationTest {
             const [host, port] = process.env.AWS_LAMBDA_HTTP_ENDPOINT.split(':');
             http.createServer((req, res) => {
               if (req.url.startsWith('/slow')) { setTimeout(() => res.end('late'), 8000); return; }
+              if (req.url.startsWith('/stream')) {
+                res.writeHead(200, {'content-type': 'text/plain'});
+                let i = 0;
+                const timer = setInterval(() => {
+                  res.write('chunk ' + (i++) + '\\n');
+                  if (i >= 10) { clearInterval(timer); res.end('done\\n'); }
+                }, 500);
+                return;
+              }
               if (req.url.startsWith('/status/')) {
                 res.writeHead(Number(req.url.split('/')[2]), {'x-app': 'yes'}); res.end('status body'); return;
               }
@@ -86,7 +101,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
 
     @Test
     @Timeout(180)
-    void requestsReachTheServerWithTheHeadersAwsAddsAndDrops() throws IOException {
+    void requestsReachTheServerWithTheHeadersAwsAddsAndDrops() throws Exception {
         String domain = createFunction(30);
 
         Response echo = given().header("Host", domain)
@@ -125,11 +140,18 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 .then().statusCode(200).body("bodyLength", equalTo(10));
         given().header("Host", domain).when().get("/status/418")
                 .then().statusCode(418).header("x-app", "yes").body(equalTo("status body"));
+
+        // A body without a Content-Length reaches the app chunked, as on AWS.
+        String chunked = raw("POST /upload HTTP/1.1\r\nHost: " + domain + "\r\nTransfer-Encoding: chunked\r\n"
+                + "Connection: close\r\n\r\n11\r\nchunked body here\r\n0\r\n\r\n");
+        assertTrue(chunked.startsWith("HTTP/1.1 200 "), chunked);
+        assertTrue(chunked.contains("\"bodyLength\":17"), chunked);
+        assertTrue(chunked.contains("\"transfer-encoding\":\"chunked\""), chunked);
     }
 
     @Test
     @Timeout(180)
-    void aTimeoutAndACrashAnswerWithThePlatformPagesAndTheNextRequestGetsAFreshEnvironment() throws IOException {
+    void aTimeoutAndACrashAnswerWithThePlatformPagesAndTheNextRequestGetsAFreshEnvironment() throws Exception {
         String domain = createFunction(3);
 
         Response first = given().header("Host", domain).when().get("/status/200");
@@ -141,6 +163,12 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 .header("lambda-web-error-type", "Runtime.RequestTimeout")
                 .body(equalTo(LambdaWebErrorPages.html(LambdaWebErrorPages.REQUEST_TIMEOUT,
                         timeout.header("lambda-web-request-id"))));
+
+        // A response that is still streaming at the deadline is cut, as on AWS.
+        String streamed = raw("GET /stream HTTP/1.1\r\nHost: " + domain + "\r\nConnection: close\r\n\r\n");
+        assertTrue(streamed.startsWith("HTTP/1.1 200 "), streamed);
+        assertTrue(streamed.contains("chunk 0"), streamed);
+        assertFalse(streamed.contains("done"), streamed);
 
         Response crash = given().header("Host", domain).when().get("/crash");
         crash.then().statusCode(503)
@@ -171,6 +199,18 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 .when().put(BASE + "/web-functions")
                 .then().statusCode(202)
                 .extract().path("endpoint.domainName");
+    }
+
+    /** Sends one raw HTTP/1.1 request with {@code Connection: close} and reads until the server closes. */
+    private static String raw(String request) throws IOException {
+        try (Socket socket = new Socket("localhost", RestAssured.port)) {
+            socket.setSoTimeout(30_000);
+            OutputStream out = socket.getOutputStream();
+            out.write(request.getBytes(StandardCharsets.US_ASCII));
+            out.flush();
+            InputStream in = socket.getInputStream();
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
     }
 
     private static byte[] zip(String indexJs) throws IOException {

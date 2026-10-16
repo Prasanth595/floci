@@ -6,8 +6,11 @@ import io.github.hectorvent.floci.services.lambdaweb.LambdaWebEnvironmentManager
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebEnvironmentManager.StartFailure;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService.WebFunctionTarget;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionRevision;
+import io.vertx.core.Future;
+import io.vertx.core.Handler;
 import io.vertx.core.MultiMap;
 import io.vertx.core.Vertx;
+import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpClientRequest;
@@ -17,6 +20,7 @@ import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.http.HttpVersion;
 import io.vertx.core.http.RequestOptions;
+import io.vertx.core.streams.ReadStream;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -34,7 +38,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
@@ -49,8 +52,8 @@ public class LambdaWebDataPlane {
     static final Set<String> SUPPORTED_METHODS = Set.of("GET", "HEAD", "POST", "PUT", "PATCH", "OPTIONS", "DELETE");
     /** Dropped before forwarding. {@code te} passes through, as recorded. */
     static final Set<String> DROPPED_REQUEST_HEADERS = Set.of("host", "connection", "keep-alive", "upgrade", "expect",
-            "trailer", "proxy-authenticate", "proxy-authorization", "proxy-connection", "x-real-ip",
-            "x-http-method-override", "x-http-method", "x-method-override");
+            "trailer", "transfer-encoding", "proxy-authenticate", "proxy-authorization", "proxy-connection",
+            "x-real-ip", "x-http-method-override", "x-http-method", "x-method-override");
     static final Set<String> DROPPED_RESPONSE_HEADERS = Set.of("connection", "keep-alive", "transfer-encoding",
             "upgrade", "te", "trailer", "trailers", "proxy-authenticate", "proxy-authorization");
     static final String REQUEST_ID_HEADER = "lambda-web-request-id";
@@ -144,12 +147,18 @@ public class LambdaWebDataPlane {
                 });
     }
 
+    /**
+     * One forwarded request. {@code timeoutSeconds} bounds the whole exchange: past it an answer
+     * that has not started is the 504 page and one that has is cut. The edge takes the whole
+     * request body before it answers, so a slow upload gets its 504 once the body is in.
+     */
     private void forward(HttpServerRequest request, String host, WebFunctionTarget target,
                          WebFunctionRevision revision, Environment environment, String requestId, boolean firstTry) {
-        environment.begin();
         Instant started = Instant.now();
-        AtomicBoolean finished = new AtomicBoolean();
+        Exchange exchange = new Exchange(request, environment);
         boolean hasBody = hasRequestBody(request);
+        AtomicBoolean bodyIn = new AtomicBoolean(!hasBody);
+        AtomicBoolean expired = new AtomicBoolean();
         RequestOptions options = new RequestOptions()
                 .setHost(environment.host())
                 .setPort(environment.port())
@@ -157,32 +166,51 @@ public class LambdaWebDataPlane {
                 .setMethod(request.method());
         client.request(options).onSuccess(upstream -> {
             copyRequestHeaders(request, upstream, host, target.endpoint().endpointName, requestId);
-            upstream.idleTimeout(TimeUnit.SECONDS.toMillis(revision.serviceConfig.timeoutSeconds));
-            upstream.response().onSuccess(response -> relay(request, response, environment, requestId, finished))
+            if (hasBody && request.getHeader("Content-Length") == null) {
+                upstream.setChunked(true);
+            }
+            Runnable timeOut = () -> {
+                if (exchange.finish()) {
+                    upstream.reset();
+                    if (request.response().headWritten()) {
+                        request.response().close();
+                    } else {
+                        page(request, LambdaWebErrorPages.REQUEST_TIMEOUT, requestId, false);
+                    }
+                }
+            };
+            exchange.deadline = vertx.setTimer(TimeUnit.SECONDS.toMillis(revision.serviceConfig.timeoutSeconds), id -> {
+                expired.set(true);
+                if (bodyIn.get()) {
+                    timeOut.run();
+                }
+            });
+            Future<HttpClientResponse> sent = hasBody
+                    ? upstream.send(new RequestBody(request, () -> {
+                        bodyIn.set(true);
+                        if (expired.get()) {
+                            timeOut.run();
+                        }
+                    }))
+                    : upstream.send();
+            sent.onSuccess(response -> relay(request, response, exchange, requestId))
                     .onFailure(error -> vertx.runOnContext(ignored -> {
                         LOG.debugv("The environment {0} did not answer request {1}: {2}",
                                 environment.containerId(), requestId, error.toString());
-                        HttpServerResponse out = request.response();
-                        if (out.headWritten()) {
-                            out.close();
-                            finish(environment, finished);
-                        } else if (error instanceof TimeoutException) {
-                            page(request, LambdaWebErrorPages.REQUEST_TIMEOUT, requestId, false);
-                            finish(environment, finished);
-                        } else {
-                            failed(request, host, target, revision, environment, requestId, started,
-                                    firstTry && !hasBody, finished);
+                        if (request.response().headWritten()) {
+                            if (exchange.finish()) {
+                                request.response().close();
+                            }
+                            return;
                         }
+                        failed(request, host, target, revision, exchange, requestId, started, firstTry && !hasBody);
                     }));
             if (hasBody) {
-                upstream.send(request);
                 request.resume();
-            } else {
-                upstream.end();
             }
         }).onFailure(error -> {
             LOG.debugv("The environment {0} refused the connection: {1}", environment.containerId(), error.toString());
-            failed(request, host, target, revision, environment, requestId, started, firstTry, finished);
+            failed(request, host, target, revision, exchange, requestId, started, firstTry);
         });
     }
 
@@ -192,9 +220,12 @@ public class LambdaWebDataPlane {
      * because the body is spent, fails the request.
      */
     private void failed(HttpServerRequest request, String host, WebFunctionTarget target,
-                        WebFunctionRevision revision, Environment environment, String requestId, Instant started,
-                        boolean retry, AtomicBoolean finished) {
-        finish(environment, finished);
+                        WebFunctionRevision revision, Exchange exchange, String requestId, Instant started,
+                        boolean retry) {
+        if (!exchange.finish()) {
+            return;
+        }
+        Environment environment = exchange.environment;
         vertx.<Boolean>executeBlocking(() -> environments.exitedBefore(environment, started), false)
                 .onComplete(exited -> {
                     if (retry && exited.succeeded() && exited.result()) {
@@ -206,35 +237,116 @@ public class LambdaWebDataPlane {
                 });
     }
 
-    static boolean hasRequestBody(HttpServerRequest request) {
-        String length = request.getHeader("Content-Length");
-        return (length != null && !"0".equals(length.trim())) || request.headers().contains("Transfer-Encoding");
-    }
-
-    private void relay(HttpServerRequest request, HttpClientResponse response, Environment environment,
-                       String requestId, AtomicBoolean finished) {
+    private void relay(HttpServerRequest request, HttpClientResponse response, Exchange exchange, String requestId) {
+        if (exchange.isFinished()) {
+            return;
+        }
         HttpServerResponse out = request.response();
         out.setStatusCode(response.statusCode());
         copyResponseHeaders(response.headers(), out);
-        out.headers().set("lambda-web-logstream", environment.logStream());
+        out.headers().set("lambda-web-logstream", exchange.environment.logStream());
         out.headers().set(REQUEST_ID_HEADER, requestId);
         if (response.getHeader("Content-Length") == null && hasBody(request.method(), response.statusCode())) {
             out.setChunked(true);
         }
-        response.exceptionHandler(error -> {
+        response.pipeTo(out).onComplete(piped -> {
+            if (!exchange.finish()) {
+                return;
+            }
+            if (piped.succeeded()) {
+                return;
+            }
             if (out.headWritten()) {
                 out.close();
             } else {
                 page(request, LambdaWebErrorPages.ORIGIN_REQUEST_ERROR, requestId, false);
             }
         });
-        response.pipeTo(out).onComplete(ignored -> finish(environment, finished));
     }
 
-    private static void finish(Environment environment, AtomicBoolean finished) {
-        if (finished.compareAndSet(false, true)) {
-            environment.end();
+    /** One request against one environment. The first finisher releases the reservation and the deadline. */
+    private final class Exchange {
+        private final HttpServerRequest request;
+        private final Environment environment;
+        private final AtomicBoolean finished = new AtomicBoolean();
+        private long deadline = -1;
+
+        Exchange(HttpServerRequest request, Environment environment) {
+            this.request = request;
+            this.environment = environment;
         }
+
+        boolean finish() {
+            if (!finished.compareAndSet(false, true)) {
+                return false;
+            }
+            if (deadline >= 0) {
+                vertx.cancelTimer(deadline);
+            }
+            environment.release();
+            return true;
+        }
+
+        boolean isFinished() {
+            return finished.get();
+        }
+    }
+
+    /** The request body as the upstream reads it, telling {@code onEnd} when the last byte went by. */
+    private static final class RequestBody implements ReadStream<Buffer> {
+        private final HttpServerRequest request;
+        private final Runnable onEnd;
+
+        RequestBody(HttpServerRequest request, Runnable onEnd) {
+            this.request = request;
+            this.onEnd = onEnd;
+        }
+
+        @Override
+        public ReadStream<Buffer> exceptionHandler(Handler<Throwable> handler) {
+            request.exceptionHandler(handler);
+            return this;
+        }
+
+        @Override
+        public ReadStream<Buffer> handler(Handler<Buffer> handler) {
+            request.handler(handler);
+            return this;
+        }
+
+        @Override
+        public ReadStream<Buffer> pause() {
+            request.pause();
+            return this;
+        }
+
+        @Override
+        public ReadStream<Buffer> resume() {
+            request.resume();
+            return this;
+        }
+
+        @Override
+        public ReadStream<Buffer> fetch(long amount) {
+            request.fetch(amount);
+            return this;
+        }
+
+        @Override
+        public ReadStream<Buffer> endHandler(Handler<Void> handler) {
+            request.endHandler(end -> {
+                onEnd.run();
+                if (handler != null) {
+                    handler.handle(end);
+                }
+            });
+            return this;
+        }
+    }
+
+    static boolean hasRequestBody(HttpServerRequest request) {
+        String length = request.getHeader("Content-Length");
+        return (length != null && !"0".equals(length.trim())) || request.headers().contains("Transfer-Encoding");
     }
 
     /** The shapes Floci mints, in any case and with any port, so a near miss gets the AWS 404 and not another service. */
