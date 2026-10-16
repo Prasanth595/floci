@@ -25,6 +25,18 @@ class BridgeGatewayRelayTest {
     }
 
     @Test
+    void withoutTlsTheHttpPortIsRelayedEvenWhenItDiffersFromTheFlociPort() {
+        assertThat(BridgeGatewayRelay.relayPorts(false, 4566, 4570, 443), equalTo(List.of(4570)));
+    }
+
+    @Test
+    void withTlsTheProxyPortsAreRelayed() {
+        assertThat(BridgeGatewayRelay.relayPorts(true, 4566, 4510, 443), equalTo(List.of(4566, 443)));
+        assertThat(BridgeGatewayRelay.relayPorts(true, 4566, 4510, 0), equalTo(List.of(4566)));
+        assertThat(BridgeGatewayRelay.relayPorts(true, 443, 4510, 443), equalTo(List.of(443)));
+    }
+
+    @Test
     void gatewayIsTheFirstIpv4Gateway() {
         assertThat(BridgeGatewayRelay.gatewayOf(network(ipam("fd00::1"), ipam("172.17.0.1"))), equalTo("172.17.0.1"));
     }

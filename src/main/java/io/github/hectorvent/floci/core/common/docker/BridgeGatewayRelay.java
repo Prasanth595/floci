@@ -17,6 +17,7 @@ import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Lets containers reach a Floci that runs directly on a Linux host and listens only on loopback.
@@ -26,8 +27,8 @@ import java.util.Locale;
  * ({@code host-gateway}, normally {@code 172.17.0.1}). Docker Desktop forwards that address to the
  * host's loopback; native Linux Docker does not, so a Floci bound to {@code 127.0.0.1} refuses
  * those connections. This relay listens on the bridge gateway address, which belongs to the host
- * but is not routed from the LAN, and pipes each connection to Floci's own port on loopback. It
- * carries raw TCP, so plain HTTP and the TLS proxy both pass through.
+ * but is not routed from the LAN, and pipes each connection to the same port on the loopback address
+ * Floci listens on. It carries raw TCP, so plain HTTP and the TLS proxy both pass through.
  *
  * <p>It starts only on a Linux host (not inside a container, where containers reach Floci by its
  * own address), only while the public listener is on loopback (a wider bind already covers the
@@ -46,8 +47,9 @@ public class BridgeGatewayRelay {
     private final ContainerDetector containerDetector;
     private final ContainerLifecycleManager lifecycleManager;
 
-    private volatile NetServer server;
+    private final List<NetServer> servers = new CopyOnWriteArrayList<>();
     private volatile NetClient client;
+    private volatile boolean stopped;
 
     @Inject
     public BridgeGatewayRelay(Vertx vertx, EmulatorConfig config, Config mpConfig,
@@ -74,6 +76,21 @@ public class BridgeGatewayRelay {
                 && NetworkExposureGuard.isLoopback(publicHost);
     }
 
+    /**
+     * The ports containers call Floci on, the same ones {@code ContainerReachableEndpoint}
+     * advertises: with TLS, the proxy's public port plus its AWS-HTTPS port; without it, the HTTP
+     * server's port, which can differ from {@code floci.port}.
+     */
+    static List<Integer> relayPorts(boolean tlsEnabled, int flociPort, int httpPort, int awsHttpsPort) {
+        if (!tlsEnabled) {
+            return List.of(httpPort);
+        }
+        if (awsHttpsPort > 0 && awsHttpsPort != flociPort) {
+            return List.of(flociPort, awsHttpsPort);
+        }
+        return List.of(flociPort);
+    }
+
     void start() {
         String gateway;
         try {
@@ -89,31 +106,48 @@ public class BridgeGatewayRelay {
                     + " containers may not reach Floci on loopback");
             return;
         }
-        int port = config.port();
+        String target = NetworkExposureGuard.publicHost(mpConfig);
+        List<Integer> ports = relayPorts(config.tls().enabled(), config.port(),
+                mpConfig.getValue("quarkus.http.port", Integer.class), config.tls().awsHttpsPort());
         NetClient netClient = vertx.createNetClient();
+        client = netClient;
+        if (stopped) {
+            onStop(null);
+            return;
+        }
+        for (int port : ports) {
+            listen(gateway, port, target, netClient, port == ports.getFirst());
+        }
+    }
+
+    private void listen(String gateway, int port, String target, NetClient netClient, boolean primary) {
         NetServer netServer = vertx.createNetServer();
-        netServer.connectHandler(front -> relay(front, netClient, port));
+        netServer.connectHandler(front -> relay(front, netClient, target, port));
+        servers.add(netServer);
         netServer.listen(port, gateway).onComplete(ar -> {
-            if (ar.succeeded()) {
-                client = netClient;
-                server = netServer;
-                LOG.infov("Containers reach Floci through {0}:{1}, relayed to 127.0.0.1:{1}", gateway,
-                        String.valueOf(port));
-            } else {
-                netClient.close();
+            if (stopped) {
+                netServer.close();
+            } else if (ar.succeeded()) {
+                LOG.infov("Containers reach Floci through {0}:{1}, relayed to {2}:{1}", gateway,
+                        String.valueOf(port), target);
+            } else if (primary) {
                 LOG.warnv("Could not listen on the Docker bridge gateway {0}:{1} ({2}); containers will not"
                                 + " reach Floci on loopback. Set QUARKUS_HTTP_HOST to an address they can reach"
                                 + " (with FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE=true) instead.",
                         gateway, String.valueOf(port), ar.cause().getMessage());
+            } else {
+                // The AWS-HTTPS port (443 by default) is privileged, like the TLS proxy's own bind.
+                LOG.debugv("Bridge gateway relay: could not listen on {0}:{1} ({2})", gateway,
+                        String.valueOf(port), ar.cause().getMessage());
             }
         });
     }
 
-    private static void relay(NetSocket front, NetClient netClient, int port) {
+    private static void relay(NetSocket front, NetClient netClient, String target, int port) {
         front.pause();
-        netClient.connect(port, "127.0.0.1").onComplete(ar -> {
+        netClient.connect(port, target).onComplete(ar -> {
             if (ar.failed()) {
-                LOG.debugv("Bridge gateway relay: could not reach 127.0.0.1:{0}: {1}", String.valueOf(port),
+                LOG.debugv("Bridge gateway relay: could not reach {0}:{1}: {2}", target, String.valueOf(port),
                         ar.cause().getMessage());
                 front.close();
                 return;
@@ -142,9 +176,10 @@ public class BridgeGatewayRelay {
     }
 
     void onStop(@Observes ShutdownEvent ignored) {
-        NetServer current = server;
-        if (current != null) {
-            current.close();
+        // A startup still inspecting the network or binding checks this flag and closes what it opens.
+        stopped = true;
+        for (NetServer server : servers) {
+            server.close();
         }
         NetClient currentClient = client;
         if (currentClient != null) {
