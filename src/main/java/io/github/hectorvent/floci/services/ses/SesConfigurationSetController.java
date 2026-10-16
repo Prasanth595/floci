@@ -47,7 +47,6 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.parseSuppressedR
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMapMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
@@ -248,10 +247,7 @@ public class SesConfigurationSetController {
                                                           String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("PutConfigurationSetSuppressionOptions", request);
             List<String> reasons = parseSuppressedReasons(request.path("SuppressedReasons"));
             configSetService.putSuppressionOptions(name, reasons, region);
@@ -259,8 +255,6 @@ public class SesConfigurationSetController {
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
