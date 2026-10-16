@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.testutil.SesMailbox;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -46,6 +47,77 @@ class CognitoSignUpTriggerIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    void customMessageAdminConfirmationIsReflectedInSignUpResponseOverHttp() throws Exception {
+        String id = UUID.randomUUID().toString();
+        String username = "trigger-" + id;
+        String email = "original-" + id + "@example.com";
+        String changedEmail = "changed-" + id + "@example.com";
+        String function = "arn:aws:lambda:us-east-1:000000000000:function:custom-message-" + id;
+        String poolId = cognitoJson("CreateUserPool", MAPPER.writeValueAsString(Map.of(
+                "PoolName", "signup-message-trigger-" + id, "AutoVerifiedAttributes", List.of("email"),
+                "LambdaConfig", Map.of("CustomMessage", function)))).path("UserPool").path("Id").asText();
+        ExecutorService callbackExecutor = Executors.newSingleThreadExecutor();
+        AtomicReference<Throwable> callbackFailure = new AtomicReference<>();
+        try {
+            String clientId = cognitoJson("CreateUserPoolClient", MAPPER.writeValueAsString(Map.of(
+                    "UserPoolId", poolId, "ClientName", "app")))
+                    .path("UserPoolClient").path("ClientId").asText();
+            when(lambdaService.invoke(anyString(), eq(function), any(byte[].class),
+                    eq(InvocationType.RequestResponse))).thenAnswer(invocation -> {
+                        Future<?> callback = null;
+                        try {
+                            JsonNode event = MAPPER.readTree((byte[]) invocation.getArgument(2));
+                            assertEquals("CustomMessage_SignUp", event.path("triggerSource").asText());
+                            assertEquals(username, event.path("userName").asText());
+                            assertEquals(email, event.path("request").path("userAttributes").path("email").asText());
+                            callback = callbackExecutor.submit(() -> {
+                                String userRequest = MAPPER.writeValueAsString(Map.of(
+                                        "UserPoolId", poolId, "Username", username));
+                                cognitoAction("AdminConfirmSignUp", userRequest).then().statusCode(200);
+                                cognitoAction("AdminUpdateUserAttributes", MAPPER.writeValueAsString(Map.of(
+                                        "UserPoolId", poolId, "Username", username, "UserAttributes",
+                                        List.of(Map.of("Name", "email", "Value", changedEmail)))))
+                                        .then().statusCode(200);
+                                return null;
+                            });
+                            callback.get(5, TimeUnit.SECONDS);
+                        } catch (InterruptedException failure) {
+                            Thread.currentThread().interrupt();
+                            callbackFailure.set(failure);
+                        } catch (Exception | AssertionError failure) {
+                            callbackFailure.set(failure);
+                        } finally {
+                            if (callback != null) {
+                                callback.cancel(true);
+                            }
+                        }
+                        return response(Map.of());
+                    });
+
+            JsonNode signUp = cognitoJson("SignUp", MAPPER.writeValueAsString(Map.of("ClientId", clientId,
+                    "Username", username, "Password", "Perm1234!", "UserAttributes",
+                    List.of(Map.of("Name", "email", "Value", email)))));
+
+            assertNull(callbackFailure.get(), () -> "CustomMessage HTTP callback failed before Lambda returned: "
+                    + callbackFailure.get());
+            cognitoAction("AdminGetUser", MAPPER.writeValueAsString(Map.of("UserPoolId", poolId,
+                    "Username", username))).then().statusCode(200).body("UserStatus", equalTo("CONFIRMED"));
+            assertEquals(1, SesMailbox.messagesTo(email).size(), "signup must send to the captured email address");
+            assertTrue(SesMailbox.messagesTo(changedEmail).isEmpty(), "the callback's new email must not receive the code");
+            assertTrue(signUp.path("UserConfirmed").asBoolean(),
+                    "SignUp must report confirmation completed by its synchronous CustomMessage callback");
+        } finally {
+            callbackExecutor.shutdownNow();
+            try {
+                assertTrue(callbackExecutor.awaitTermination(5, TimeUnit.SECONDS), "HTTP callback executor must stop");
+            } finally {
+                cognitoAction("DeleteUserPool", MAPPER.writeValueAsString(Map.of("UserPoolId", poolId)))
+                        .then().statusCode(200);
+            }
+        }
     }
 
     @ParameterizedTest

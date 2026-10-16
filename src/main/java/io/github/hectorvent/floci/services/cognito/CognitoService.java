@@ -3392,6 +3392,9 @@ public class CognitoService implements ResourceProvider {
         if (preSignUp.autoConfirmUser()) {
             authFlowHandler.firePostConfirmation(pool, client, triggerUser, Map.of(), "PostConfirmation_ConfirmSignUp");
         }
+        synchronized (userLock(userPoolId, user.getUsername())) {
+            triggerUser.setUserStatus(user.getUserStatus());
+        }
         return triggerUser;
     }
 
@@ -3419,18 +3422,18 @@ public class CognitoService implements ResourceProvider {
                         400));
         String userPoolId = client.getUserPoolId();
         CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        UserPool pool;
         CognitoUser triggerUser;
         synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
-            triggerUser = confirmSignUpUnderUserLock(client, userPoolId, resolvedUser.getUsername(), confirmationCode);
+            pool = poolStore.get(userPoolId).orElseThrow(() -> userPoolNotFound(userPoolId));
+            triggerUser = confirmSignUpUnderUserLock(client, pool, resolvedUser.getUsername(), confirmationCode);
         }
-        authFlowHandler.firePostConfirmation(describeUserPool(userPoolId), client, triggerUser,
+        authFlowHandler.firePostConfirmation(pool, client, triggerUser,
                 clientMetadata, "PostConfirmation_ConfirmSignUp");
     }
 
-    private CognitoUser confirmSignUpUnderUserLock(UserPoolClient client, String userPoolId, String username,
+    private CognitoUser confirmSignUpUnderUserLock(UserPoolClient client, UserPool pool, String username,
             String confirmationCode) {
-        UserPool pool = poolStore.get(userPoolId)
-                .orElseThrow(() -> userPoolNotFound(userPoolId));
         CognitoUser user = adminGetUser(client.getUserPoolId(), username);
         if (verificationCodeService != null && isSignUpConfirmationEnabled(pool)) {
             try {

@@ -129,6 +129,57 @@ class CognitoSignUpTriggerReentrancyTest {
     }
 
     @Test
+    void confirmationStillDispatchesPostConfirmationWhenThePersistedUsersPoolIsDeleted() throws Exception {
+        AtomicReference<String> confirmationCode = new AtomicReference<>();
+        AtomicBoolean poolDeleted = new AtomicBoolean();
+        InMemoryStorage<String, CognitoUser> userStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, CognitoUser user) {
+                super.put(key, user);
+                if ("CONFIRMED".equals(user.getUserStatus())) {
+                    assertEquals("CONFIRMED", get(key).orElseThrow().getUserStatus());
+                    assertEquals("true", user.getAttributes().get("phone_number_verified"));
+                    VerificationCodeException consumed = assertThrows(VerificationCodeException.class,
+                            () -> codes.consume(user.getUserPoolId(), user.getUsername(),
+                                    VerificationCode.Purpose.SIGNUP_CONFIRMATION, confirmationCode.get()));
+                    assertEquals(VerificationCodeException.Kind.NOT_FOUND, consumed.getKind());
+                    service.deleteUserPool(user.getUserPoolId());
+                    assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                            () -> service.describeUserPool(user.getUserPoolId())).getErrorCode());
+                    poolDeleted.set(true);
+                }
+            }
+        };
+        service = new CognitoService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), userStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), "http://localhost:4566",
+                regionResolver, lambdaService, null, codes,
+                new CognitoMessageDispatcher(null, sns, "us-east-1"), null);
+        UserPool pool = pool(Map.of("PostConfirmation", FUNCTION));
+        UserPoolClient client = client(pool);
+        service.signUp(client.getClientId(), "alice", "Perm1234!", Map.of("phone_number", PHONE));
+        confirmationCode.set(sns.getSentMessages().getFirst().getMessage().replaceAll("\\D", ""));
+        AtomicReference<JsonNode> event = new AtomicReference<>();
+        when(lambdaService.invoke(anyString(), eq(FUNCTION), any(byte[].class),
+                eq(InvocationType.RequestResponse))).thenAnswer(invocation -> {
+                    assertTrue(poolDeleted.get(), "the pool must already be deleted when the trigger is dispatched");
+                    event.set(MAPPER.readTree((byte[]) invocation.getArgument(2)));
+                    return response(Map.of());
+                });
+
+        service.confirmSignUp(client.getClientId(), "alice", confirmationCode.get(), Map.of("source", "confirm"));
+
+        assertTrue(poolDeleted.get());
+        assertNotNull(event.get(), "persisted confirmation must still invoke its captured PostConfirmation trigger");
+        assertEquals("PostConfirmation_ConfirmSignUp", event.get().path("triggerSource").asText());
+        assertEquals(pool.getId(), event.get().path("userPoolId").asText());
+        assertEquals("alice", event.get().path("userName").asText());
+        assertEquals("true", event.get().path("request").path("userAttributes").path("phone_number_verified").asText());
+        assertEquals("confirm", event.get().path("request").path("clientMetadata").path("source").asText());
+    }
+
+    @Test
     void autoConfirmedSignUpPostConfirmationCanUpdateTheSameUserBeforeReturning() throws Exception {
         UserPool pool = pool(Map.of("PreSignUp", "auto-confirm", "PostConfirmation", FUNCTION));
         UserPoolClient client = client(pool);
