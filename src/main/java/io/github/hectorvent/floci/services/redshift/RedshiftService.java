@@ -1520,7 +1520,7 @@ public class RedshiftService {
                         || tagValues.stream().anyMatch(s.getTags()::containsValue))
                 .toList();
         return Pagination.paginate(matching, SnapshotSchedule::getScheduleIdentifier, maxRecords, marker,
-                SNAPSHOT_SCHEDULE_PAGE_MAX, "InvalidParameterValue");
+                SNAPSHOT_SCHEDULE_PAGE_MAX, SNAPSHOT_SCHEDULE_PAGE_MAX, "InvalidParameterValue", "Marker");
     }
 
     /** Identifiers of the clusters currently using the schedule, sorted for a stable response. */
