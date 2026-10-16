@@ -82,6 +82,7 @@ public class IotService {
     static final String DEFAULT_ENDPOINT_TYPE = "iot:Data-ATS";
 
     private static final Pattern THING_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]{1,128}");
+    private static final Pattern SHADOW_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]{1,64}");
     /** The {@code FirehoseSeparator} shape of the IoT API model. */
     private static final Pattern FIREHOSE_SEPARATOR = Pattern.compile("([\\n\\t])|(\\r\\n)|(,)");
     public static final int MAX_POLICY_VERSIONS = 5;
@@ -1596,7 +1597,15 @@ public class IotService {
     private String policyKey(String region, String policyName) { return "policy:" + region + ":" + policyName; }
     private String policyAttachmentKey(String region, String policyName) { return "policy-attachment:" + region + ":" + policyName; }
     private String thingPrincipalKey(String region, String thingName) { return "thing-principal:" + region + ":" + thingName; }
-    private String shadowKey(String region, String thingName, String shadowName) { return "shadow:" + region + ":" + thingName + ":" + (shadowName == null || shadowName.isBlank() ? "" : shadowName); }
+    private String shadowKey(String region, String thingName, String shadowName) {
+        if (shadowName == null || shadowName.isEmpty()) {
+            return "shadow:" + region + ":" + thingName + ":";
+        }
+        if (!SHADOW_NAME_PATTERN.matcher(shadowName).matches()) {
+            throw new AwsException("InvalidRequestException", "Invalid shadow name: " + shadowName, 400);
+        }
+        return "shadow:" + region + ":" + thingName + ":" + shadowName;
+    }
     private String topicRuleKey(String region, String ruleName) { return "topic-rule:" + region + ":" + ruleName; }
     private String retainedMessageKey(String topic) { return "retained:" + topic; }
     private String jobKey(String region, String jobId) { return "job:" + region + ":" + jobId; }

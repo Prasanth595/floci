@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
@@ -925,11 +926,32 @@ class IotServiceTest {
     }
 
     @Test
-    void aBlankShadowNameIsTheClassicShadow() throws Exception {
-        service.updateThingShadow("sensor-6", " ", json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+    void anEmptyShadowNameIsTheClassicShadow() throws Exception {
+        service.updateThingShadow("sensor-6", "", json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
 
         assertEquals("$aws/things/sensor-6/shadow/update/accepted", recordedTopics().get(0));
         assertEquals("blue", service.getThingShadow("sensor-6", null, REGION).at("/state/desired/color").asText());
+    }
+
+    @Test
+    void aShadowNameOutsideThePatternIsRejectedAndLeavesTheClassicShadowIntact() throws Exception {
+        JsonNode update = json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}");
+        service.updateThingShadow("sensor-6", null, update, REGION);
+
+        List<Executable> calls = List.of(
+                () -> service.getThingShadow("sensor-6", " ", REGION),
+                () -> service.updateThingShadow("sensor-6", " ", update, REGION),
+                () -> service.deleteThingShadow("sensor-6", " ", REGION),
+                () -> service.getThingShadow("sensor-6", "bad!", REGION));
+        for (Executable call : calls) {
+            AwsException e = assertThrows(AwsException.class, call);
+            assertEquals("InvalidRequestException", e.getErrorCode());
+            assertEquals(400, e.getHttpStatus());
+        }
+
+        JsonNode classic = service.getThingShadow("sensor-6", null, REGION);
+        assertEquals("blue", classic.at("/state/desired/color").asText());
+        assertEquals(1, classic.get("version").asLong());
     }
 
     @Test

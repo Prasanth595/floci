@@ -272,6 +272,8 @@ A successful classic or named shadow change reaches MQTT subscribers and the top
 - `delete/accepted`: the deleted `version`, `timestamp`, and `clientToken`. `DeleteThingShadow` returns `version` and `timestamp`.
 - `rejected`, for an MQTT request only: `code` (the HTTP status as a number), `message`, and `clientToken` once the request parsed. A version conflict is `409` with `Version conflict`, a payload that is not JSON is `400` with `Invalid JSON`.
 
+An empty `name` is the classic shadow; a shadow name that is not 1 to 64 of `a-z`, `A-Z`, `0-9`, `:`, `_` and `-` fails with `InvalidRequestException`.
+
 Shadow events are evaluated only against the rules of the shadow's region. A REST change belongs to the region of its SigV4 credential, and MQTT shadows live in the default region (`FLOCI_DEFAULT_REGION`). `clientid()` is `N/A` for every shadow event, as on AWS. The MQTT broker itself has no region or account, so its subscribers receive the shadow events of every region and account, as they receive a republish.
 
 Shadow responses are produced only by the shadow service in reaction to a request, and each one is fanned out once, recorded once and rule-evaluated once. Response topics are never parsed as requests. A `republish` action stays record plus fan-out, with no rule re-evaluation and no shadow processing, even when it targets a shadow request topic. Broker publish and fan-out are not recursive.
