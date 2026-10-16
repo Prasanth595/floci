@@ -1001,12 +1001,17 @@ public class CognitoJsonHandler {
     private Response handleSignUp(JsonNode request) {
         Map<String, String> attrs = new HashMap<>();
         request.path("UserAttributes").forEach(a -> attrs.put(a.path("Name").asText(), a.path("Value").asText()));
+        Map<String, String> validationData = new HashMap<>();
+        request.path("ValidationData").forEach(a -> validationData.put(a.path("Name").asText(), a.path("Value").asText()));
+        Map<String, String> clientMetadata = clientMetadata(request);
 
         CognitoUser user = service.signUp(
                 request.path("ClientId").asText(),
                 request.path("Username").asText(),
                 request.path("Password").asText(),
-                attrs
+                attrs,
+                validationData,
+                clientMetadata
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.put("UserConfirmed", "CONFIRMED".equals(user.getUserStatus()));

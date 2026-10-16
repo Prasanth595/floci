@@ -3282,7 +3282,8 @@ public class CognitoService implements ResourceProvider {
 
     // ──────────────────────────── Self-Service Registration ────────────────────────────
 
-    public CognitoUser signUp(String clientId, String username, String password, Map<String, String> attributes) {
+    public CognitoUser signUp(String clientId, String username, String password, Map<String, String> attributes,
+            Map<String, String> validationData, Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
                         400));
@@ -3292,14 +3293,16 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("UsernameExistsException", "User already exists", 400);
         }
         try {
-            return signUpWithReservedUsername(client, userPoolId, username, password, attributes);
+            return signUpWithReservedUsername(client, userPoolId, username, password, attributes,
+                    validationData, clientMetadata);
         } finally {
             userCreatesInFlight.remove(inFlightKey);
         }
     }
 
     private CognitoUser signUpWithReservedUsername(UserPoolClient client, String userPoolId,
-            String username, String password, Map<String, String> attributes) {
+            String username, String password, Map<String, String> attributes,
+            Map<String, String> validationData, Map<String, String> clientMetadata) {
         UserPool pool = describeUserPool(userPoolId);
         requireAvailableSignUpUsername(pool, username);
 
@@ -3333,7 +3336,7 @@ public class CognitoService implements ResourceProvider {
         // Fire PreSignUp BEFORE persisting: allows the trigger to block signup
         // (via lambda error) or auto-confirm/auto-verify the user (via response).
         CognitoAuthFlowHandler.PreSignUpResponse preSignUp = authFlowHandler.firePreSignUp(
-                pool, client, user, Map.of(), Map.of(), "PreSignUp_SignUp");
+                pool, client, user, validationData, clientMetadata, "PreSignUp_SignUp");
         if (preSignUp.autoConfirmUser()) {
             user.setUserStatus("CONFIRMED");
         }
@@ -3390,7 +3393,7 @@ public class CognitoService implements ResourceProvider {
         // When PreSignUp auto-confirms, AWS Cognito also fires PostConfirmation.
         // See: docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-sign-up.html
         if (preSignUp.autoConfirmUser()) {
-            authFlowHandler.firePostConfirmation(pool, client, triggerUser, Map.of(), "PostConfirmation_ConfirmSignUp");
+            authFlowHandler.firePostConfirmation(pool, client, triggerUser, clientMetadata, "PostConfirmation_ConfirmSignUp");
         }
         synchronized (userLock(userPoolId, user.getUsername())) {
             triggerUser.setUserStatus(user.getUserStatus());
