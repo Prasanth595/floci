@@ -483,6 +483,46 @@ export table — so two accounts can each own an export with the same name witho
 how CloudFormation isolates exports per account and region. This is what lets a multi-account LZA
 deployment reuse identical export names across its member accounts.
 
+## Stack Output References (`Fn::GetStackOutput`)
+
+`Fn::GetStackOutput` reads an output of another stack, which needs no `Export`. It is what the CDK
+synthesizes for a weak cross-stack reference. The value is read when the consuming resource is created
+or updated. Floci follows what CloudFormation does, measured against it, where that departs from the
+intrinsic's reference page:
+
+- `StackName` and `OutputName` are required; `Region` defaults to the consuming stack's Region, and
+  `RoleArn` names a role in the account that owns the referenced stack. A key the function does not
+  define is ignored.
+- A parameter value may use any intrinsic function, including a `Ref` or `Fn::GetAtt` to a resource
+  of the same stack, `Fn::ImportValue` and another `Fn::GetStackOutput`; it resolves like any property.
+  A dynamic reference is not resolved there: the stack name reaches DescribeStacks as written and
+  fails its name constraint (`1 validation error detected: Value '{{resolve:ssm:...}}' at 'stackName'
+  failed to satisfy constraint: ...`), as on AWS.
+- A referenced stack that does not exist fails the resource with DescribeStacks' `ValidationError`
+  (`Stack with id X does not exist (Service: AmazonCloudFormation; ...)`), and an output that does not
+  exist with `TemplateError: Fn::GetStackOutput references output O from stack S, but this output was
+  not found. The output may have been deleted.` The reference never resolves to an empty string.
+- A `Region` that is not a Region fails with `TemplateError: Region R in Fn::GetStackOutput is not a
+  valid AWS region.`, and one of another partition with `InvalidClientTokenId`, as the call to it does.
+- A `RoleArn` that is not an ARN fails with `TemplateError: Invalid RoleArn parameter X in
+  Fn::GetStackOutput`. Any other ARN that is not an existing role (a user, a role of another
+  partition, a role that does not exist) fails with STS's `AccessDenied`, naming the account's root
+  as the caller. On AWS the role is assumed by the stack's execution role, or without one by the
+  caller of the stack operation, and the CDK's role trusts the consuming account's execution role.
+  Floci runs stack operations under no execution role and keeps no caller for them, so, as
+  `AssumeRole` does with IAM enforcement off, the role's trust policy and its
+  `cloudformation:DescribeStacks` permission are not evaluated.
+- Arguments that are not a map, or that lack `StackName` or `OutputName`, are refused when the stack
+  operation is requested, with `ValidationError` `TemplateError: Fn::GetStackOutput requires a map of
+  named parameters` or `GetStackOutput: StackName is required`, as on AWS.
+- An output whose `Condition` is false is never read, so one naming a stack that does not exist
+  leaves the operation complete; like any output whose condition is false, it is not listed.
+- It resolves inside an `Fn::Sub` variable map, inside `Fn::Base64` and as a direct `Outputs` value,
+  which the reference page lists as not supported yet. An output that cannot be read fails the
+  operation once the resources exist, and the stack rolls back. Anywhere in `Conditions`, and inside
+  `Fn::ImportValue`, the stack operation is refused when it is requested, with `ValidationError`,
+  `AWS::Include` fragments included.
+
 ## Template Parameters
 
 Parameters passed to `CreateStack` / `UpdateStack` (and echoed back by `DescribeStacks`) are resolved

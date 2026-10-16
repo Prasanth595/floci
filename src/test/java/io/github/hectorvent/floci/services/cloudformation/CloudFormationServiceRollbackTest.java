@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynami
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
@@ -84,6 +85,7 @@ class CloudFormationServiceRollbackTest {
                 provisioner,
                 mock(S3Service.class),
                 mock(SsmService.class),
+                mock(IamService.class),
                 mock(CfnDynamicReferences.class),
                 new ObjectMapper(),
                 config,
@@ -462,8 +464,8 @@ class CloudFormationServiceRollbackTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.defaultAccountId()).thenReturn(ACCOUNT);
         CloudFormationService deleteService = new CloudFormationService(cleanupDispatcher, mock(S3Service.class),
-                mock(SsmService.class), mock(CfnDynamicReferences.class), new ObjectMapper(), config,
-                mock(RegionResolver.class), Clock.systemUTC(), new InMemoryStorageFactory());
+                mock(SsmService.class), mock(IamService.class), mock(CfnDynamicReferences.class), new ObjectMapper(),
+                config, mock(RegionResolver.class), Clock.systemUTC(), new InMemoryStorageFactory());
 
         assertThrows(IllegalStateException.class, () -> deleteService.deleteStackResources(stack, REGION, ACCOUNT));
         assertEquals("DELETE_FAILED", stack.getStatus());
@@ -796,8 +798,8 @@ class CloudFormationServiceRollbackTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.defaultAccountId()).thenReturn(ACCOUNT);
         return new CloudFormationService(provisioner, mock(S3Service.class), mock(SsmService.class),
-                mock(CfnDynamicReferences.class), new ObjectMapper(), config, regionResolver, clock,
-                new InMemoryStorageFactory());
+                mock(IamService.class), mock(CfnDynamicReferences.class), new ObjectMapper(), config,
+                regionResolver, clock, new InMemoryStorageFactory());
     }
 
     /** The stack as {@code PersistentStorage} writes it and reads it back. */
