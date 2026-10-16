@@ -65,6 +65,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -1823,7 +1824,7 @@ public class SnsService implements Resettable, ResourceProvider {
             return matchesAnythingButForNode(anythingBut, actual, stringValue, present);
         }
         if (rule.has("numeric") && present && actual.isNumber()) {
-            return evaluateNumericCondition(actual.decimalValue(), rule.get("numeric"));
+            return evaluateNumericCondition(actual.decimalValue(), rule.get("numeric")).orElse(false);
         }
         return false;
     }
@@ -2061,7 +2062,7 @@ public class SnsService implements Resettable, ResourceProvider {
         }
         if (rule.has("numeric") && actualValue != null) {
             try {
-                return evaluateNumericCondition(new BigDecimal(actualValue), rule.get("numeric"));
+                return evaluateNumericCondition(new BigDecimal(actualValue), rule.get("numeric")).orElse(false);
             } catch (NumberFormatException ignored) {
             }
         }
@@ -2110,40 +2111,22 @@ public class SnsService implements Resettable, ResourceProvider {
             }
             return !matchesStringOperator(name, operand, stringValue);
         }
-        if (!"numeric".equals(name) || !isWellFormedNumericCondition(operand)) {
+        if (!"numeric".equals(name)) {
             return false;
         }
-        boolean matched;
+        BigDecimal number = null;
         try {
             if (attributeValue) {
-                matched = stringValue != null
-                        && evaluateNumericCondition(new BigDecimal(stringValue), operand);
-            } else {
-                matched = actual != null && actual.isNumber()
-                        && evaluateNumericCondition(actual.decimalValue(), operand);
+                if (stringValue != null) {
+                    number = new BigDecimal(stringValue);
+                }
+            } else if (actual != null && actual.isNumber()) {
+                number = actual.decimalValue();
             }
         } catch (NumberFormatException ignored) {
-            matched = false;
         }
-        return !matched;
-    }
-
-    /** Comparator/number pairs only. Any other numeric operand is malformed and must not be negated. */
-    private static boolean isWellFormedNumericCondition(JsonNode conditions) {
-        if (conditions == null || !conditions.isArray() || conditions.size() % 2 != 0) {
-            return false;
-        }
-        for (int i = 0; i < conditions.size(); i += 2) {
-            JsonNode op = conditions.get(i);
-            if (!op.isTextual() || !conditions.get(i + 1).isNumber()
-                    || !switch (op.asText()) {
-                        case "=", ">", ">=", "<", "<=" -> true;
-                        default -> false;
-                    }) {
-                return false;
-            }
-        }
-        return true;
+        Optional<Boolean> matched = evaluateNumericCondition(number, operand);
+        return matched.isPresent() && !matched.get();
     }
 
     /**
@@ -2362,27 +2345,38 @@ public class SnsService implements Resettable, ResourceProvider {
     /**
      * Evaluates a numeric condition array against a value.
      * The conditions array contains alternating operator-target pairs (e.g. [">=", 100, "<", 200]).
-     * All pairs must match for the condition to pass (AND logic).
+     * All pairs must match for the condition to pass (AND logic). Empty when the operand is not
+     * comparator/number pairs, so a caller does not negate a malformed condition. A null value
+     * misses a well-formed condition.
      */
-    private boolean evaluateNumericCondition(BigDecimal value, JsonNode conditions) {
-        if (!conditions.isArray() || conditions.size() % 2 != 0) {
-            return false;
+    private Optional<Boolean> evaluateNumericCondition(BigDecimal value, JsonNode conditions) {
+        if (conditions == null || !conditions.isArray() || conditions.size() % 2 != 0) {
+            return Optional.empty();
         }
+        boolean missed = value == null;
         for (int i = 0; i < conditions.size(); i += 2) {
-            String op = conditions.get(i).asText();
-            BigDecimal target = conditions.get(i + 1).decimalValue();
-            int cmp = value.compareTo(target);
-            boolean matches = switch (op) {
+            JsonNode op = conditions.get(i);
+            JsonNode target = conditions.get(i + 1);
+            if (!op.isTextual() || !target.isNumber()) {
+                return Optional.empty();
+            }
+            int cmp = value == null ? 0 : value.compareTo(target.decimalValue());
+            Boolean matches = switch (op.asText()) {
                 case "=" -> cmp == 0;
                 case ">" -> cmp > 0;
                 case ">=" -> cmp >= 0;
                 case "<" -> cmp < 0;
                 case "<=" -> cmp <= 0;
-                default -> false;
+                default -> null;
             };
-            if (!matches) return false;
+            if (matches == null) {
+                return Optional.empty();
+            }
+            if (!matches) {
+                missed = true;
+            }
         }
-        return true;
+        return Optional.of(!missed);
     }
 
     /**
