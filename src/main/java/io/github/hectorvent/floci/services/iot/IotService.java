@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.CertificateMaterialException;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -80,6 +81,9 @@ import java.util.regex.Pattern;
 public class IotService {
 
     private static final Logger LOG = Logger.getLogger(IotService.class);
+
+    public static final String NON_EXCLUSIVE_THING = "NON_EXCLUSIVE_THING";
+    private static final String EXCLUSIVE_THING = "EXCLUSIVE_THING";
 
     static final String DEFAULT_ENDPOINT_TYPE = "iot:Data-ATS";
 
@@ -350,6 +354,34 @@ public class IotService {
         return certificate;
     }
 
+    /** As on AWS, the certificate is trusted because it is registered: no CA is checked, and its mode is {@code SNI_ONLY}. */
+    public IotCertificate registerCertificateWithoutCa(String certificatePem, String status, String region) {
+        startMqttIfEnabled();
+        if (certificatePem == null || certificatePem.isBlank()) {
+            throw new AwsException("InvalidRequestException", "certificatePem is required", 400);
+        }
+        String effectiveStatus = status == null ? "INACTIVE" : status;
+        validateCertificateStatus(effectiveStatus);
+        IotCertificate certificate = new IotCertificate();
+        try {
+            fill(certificate, Pem.parseCertificate(certificatePem));
+        } catch (CertificateMaterialException e) {
+            throw new AwsException("CertificateValidationException", e.getMessage(), 400);
+        } catch (Exception e) {
+            throw new AwsException("InternalFailureException", "Could not read device certificate: " + e.getMessage(), 500);
+        }
+        String key = certificateKey(region, certificate.getCertificateId());
+        if (certificateStore.get(key).isPresent()) {
+            throw new AwsException("ResourceAlreadyExistsException", "Certificate already exists: " + certificate.getCertificateId(), 409);
+        }
+        certificate.setCertificateArn(regionResolver.buildArn("iot", region, "cert/" + certificate.getCertificateId()));
+        certificate.setStatus(effectiveStatus);
+        certificate.setCertificateMode("SNI_ONLY");
+        certificate.setCreationDate(Instant.now());
+        certificateStore.put(key, certificate);
+        return certificate;
+    }
+
     /** As on AWS, the private key is returned once and never kept: the stored record has none. */
     private static IotCertificate withoutPrivateKey(IotCertificate certificate) {
         IotCertificate stored = new IotCertificate();
@@ -358,6 +390,7 @@ public class IotService {
         stored.setCertificatePem(certificate.getCertificatePem());
         stored.setPublicKey(certificate.getPublicKey());
         stored.setStatus(certificate.getStatus());
+        stored.setCertificateMode(certificate.getCertificateMode());
         stored.setCreationDate(certificate.getCreationDate());
         stored.setNotBefore(certificate.getNotBefore());
         stored.setNotAfter(certificate.getNotAfter());
@@ -468,6 +501,7 @@ public class IotService {
             certificateLocations.remove(certificateId, known);
         }
         String suffix = ":" + certificateId;
+        // shortcut: one certificate registered in several accounts or regions resolves to the first; upgrade when SNI selects the account.
         Optional<AccountAwareStorageBackend.AccountEntry<IotCertificate>> found =
                 registeredCertificates(key -> key.startsWith("cert:") && key.endsWith(suffix)).stream()
                         .sorted(Comparator.comparing((AccountAwareStorageBackend.AccountEntry<IotCertificate> entry) -> entry.accountId())
@@ -835,6 +869,27 @@ public class IotService {
             }
         }
         return things;
+    }
+
+    public Page<String> listThingPrincipalsV2(String thingName, String thingPrincipalType, String region,
+                                              Integer maxResults, String nextToken) {
+        return paginate(ofThingPrincipalType(thingPrincipalType, listThingPrincipals(thingName, region)), maxResults, nextToken);
+    }
+
+    public Page<String> listPrincipalThingsV2(String principal, String thingPrincipalType, String region,
+                                              Integer maxResults, String nextToken) {
+        return paginate(ofThingPrincipalType(thingPrincipalType, listPrincipalThings(principal, region)), maxResults, nextToken);
+    }
+
+    /** Exclusive attachment is not modelled, so every attachment is {@code NON_EXCLUSIVE_THING}. */
+    private static List<String> ofThingPrincipalType(String thingPrincipalType, Set<String> attachments) {
+        if (thingPrincipalType == null || NON_EXCLUSIVE_THING.equals(thingPrincipalType)) {
+            return List.copyOf(attachments);
+        }
+        if (EXCLUSIVE_THING.equals(thingPrincipalType)) {
+            return List.of();
+        }
+        throw new AwsException("InvalidRequestException", "Unsupported thingPrincipalType: " + thingPrincipalType, 400);
     }
 
     public List<IotPolicy> listAttachedPolicies(String target, String region) {
