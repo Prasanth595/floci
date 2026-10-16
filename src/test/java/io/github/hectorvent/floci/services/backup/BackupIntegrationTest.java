@@ -523,6 +523,83 @@ class BackupIntegrationTest {
             .body("Tags.env", equalTo("test"));
     }
 
+    // ── ResourceNotFoundException is HTTP 400 on every lookup ──────────────────
+
+    @Test
+    @Order(63)
+    void missingSelectionReturns400() {
+        given().header("Authorization", AUTH)
+        .when().get("/backup/plans/" + planId + "/selections/no-such-selection")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup/plans/" + planId + "/selections/no-such-selection")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(64)
+    void selectionLookedUpUnderAnotherPlanReturns400() {
+        String otherPlanId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "BackupPlan": {
+                    "BackupPlanName": "other-plan",
+                    "Rules": [{
+                      "RuleName": "daily",
+                      "TargetBackupVaultName": "%s",
+                      "ScheduleExpression": "cron(0 12 * * ? *)"
+                    }]
+                  }
+                }
+                """.formatted(VAULT_NAME))
+        .when().put("/backup/plans/")
+        .then().statusCode(200).extract().path("BackupPlanId");
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup/plans/" + otherPlanId + "/selections/" + selectionId)
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup/plans/" + otherPlanId)
+        .then().statusCode(204);
+    }
+
+    @Test
+    @Order(65)
+    void missingRecoveryPointReturns400() {
+        // The vault exists; the recovery point was deleted at Order(54).
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + VAULT_NAME + "/recovery-points/" + recoveryPointArn)
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + VAULT_NAME + "/recovery-points/" + recoveryPointArn)
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(66)
+    void tagOperationsOnAMissingResourceReturn400() {
+        String missingArn = "arn:aws:backup:us-east-1:000000000000:backup-vault:no-such-vault";
+
+        given().header("Authorization", AUTH)
+        .when().get("/tags/" + missingArn)
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"Tags\":{\"team\":\"platform\"}}")
+        .when().post("/tags/" + missingArn)
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"TagKeyList\":[\"team\"]}")
+        .when().post("/untag/" + missingArn)
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
     // ── Supported Resource Types ───────────────────────────────────────────────
 
     @Test
