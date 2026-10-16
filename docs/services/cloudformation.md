@@ -443,16 +443,18 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
 `PutBucketOwnershipControls`, on create and in place on update.
 
 - A malformed rule fails the resource before the bucket is created or changed, and the stack
-  rolls back. The resource's status reason gives the cause.
-- What the resource schema refuses is reported first, as
+  rolls back. The resource's status reason gives the first fault found: `OwnershipControls` is
+  checked first, then each rule in turn, then whether a rule repeats another, then S3's own check.
+- A fault the resource schema defines is reported as
   `Model validation failed (#/OwnershipControls...: <reason>)`: a value of the wrong type
   (`OwnershipControls` or a rule that is not an object, `Rules` that is not a list, an
   `ObjectOwnership` that is a list or an object), a key other than `Rules` on `OwnershipControls`
-  or other than `ObjectOwnership` on a rule (`extraneous key [<key>] is not permitted`), and a
-  rule listed twice (`array items are not unique`). The repeat is checked once every rule passes
-  its own checks, comparing the rules after intrinsic functions such as `Ref` are resolved.
-- A rule without `ObjectOwnership`, which S3 requires and the schema does not, fails in the same
-  form with `required key [ObjectOwnership] not found`.
+  or other than `ObjectOwnership` on a rule (`extraneous key [<key>] is not permitted`), or a
+  rule listed twice (`array items are not unique`), comparing the rules after intrinsic
+  functions such as `Ref` are resolved.
+- A rule without `ObjectOwnership`, which S3 requires, fails among that rule's own checks in the
+  same form, with `required key [ObjectOwnership] not found`. The schema accepts such a rule, so
+  CloudFormation's reason for a template with one can differ.
 - What S3 refuses then fails with the message of the `MalformedXML` error that
   `PutBucketOwnershipControls` returns, `The XML you provided was not well-formed or did not
   validate against our published schema.`: no rule, more than one rule, or a mode other than
