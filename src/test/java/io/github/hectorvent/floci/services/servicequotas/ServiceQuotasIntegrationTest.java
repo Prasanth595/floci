@@ -220,6 +220,46 @@ class ServiceQuotasIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"us-east-1,aws", "cn-north-1,aws-cn"})
+    void ec2IncreaseRequestsRemainIsolatedByAccount(String region, String partition) {
+        String firstAccount = "111111111111";
+        String secondAccount = "333333333333";
+        String requestBody = "{\"ServiceCode\":\"ec2\",\"QuotaCode\":\"L-1216C47A\",\"DesiredValue\":10}";
+        String firstId = quotaRequest("RequestServiceQuotaIncrease", requestBody, region, firstAccount)
+                .then().statusCode(200)
+                .body("RequestedQuota.QuotaArn", equalTo("arn:" + partition + ":servicequotas:" + region
+                        + ":" + firstAccount + ":ec2/L-1216C47A"))
+                .extract().path("RequestedQuota.Id");
+        String secondId = quotaRequest("RequestServiceQuotaIncrease", requestBody, region, secondAccount)
+                .then().statusCode(200)
+                .body("RequestedQuota.QuotaArn", equalTo("arn:" + partition + ":servicequotas:" + region
+                        + ":" + secondAccount + ":ec2/L-1216C47A"))
+                .extract().path("RequestedQuota.Id");
+        assertNotEquals(firstId, secondId);
+        for (String account : List.of(firstAccount, secondAccount)) {
+            String ownId = account.equals(firstAccount) ? firstId : secondId;
+            String otherId = account.equals(firstAccount) ? secondId : firstId;
+            quotaRequest("RequestServiceQuotaIncrease", requestBody, region, account)
+                    .then().statusCode(400).body("__type", equalTo("ResourceAlreadyExistsException"));
+            quotaRequest("ListRequestedServiceQuotaChangeHistoryByQuota",
+                    "{\"ServiceCode\":\"ec2\",\"QuotaCode\":\"L-1216C47A\"}", region, account)
+                    .then().statusCode(200).body("RequestedQuotas.Id", equalTo(List.of(ownId)));
+            quotaRequest("GetRequestedServiceQuotaChange", "{\"RequestId\":\"" + ownId + "\"}", region, account)
+                    .then().statusCode(200).body("RequestedQuota.Id", equalTo(ownId));
+            quotaRequest("GetRequestedServiceQuotaChange", "{\"RequestId\":\"" + otherId + "\"}", region, account)
+                    .then().statusCode(400).body("__type", equalTo("NoSuchResourceException"));
+        }
+    }
+
+    private Response quotaRequest(String action, String body, String region, String account) {
+        return given().contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "ServiceQuotasV20190624." + action)
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + account
+                        + "/20261016/" + region + "/servicequotas/aws4_request")
+                .body(body).when().post("/");
+    }
+
     @Test
     void vpcQuotasUseAwsQuotaCodesAsDefaultAndApplied() {
         for (String target : new String[] {"GetAWSDefaultServiceQuota", "GetServiceQuota"}) {
