@@ -334,7 +334,7 @@ class SesBulkV2IntegrationTest {
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("wrongTypeSendBulkEmailBodies")
-    @Order(11)
+    @Order(12)
     void sendBulkEmail_wrongMemberType_returnsSerializationException(String label, String body) {
         given()
             .contentType("application/json")

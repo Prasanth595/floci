@@ -686,7 +686,7 @@ class SesTemplateV2IntegrationTest {
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("wrongTypeSendEmailBodies")
-    @Order(50)
+    @Order(51)
     void sendEmail_wrongMemberType_returnsSerializationException(String label, String body) {
         given()
             .contentType("application/json")

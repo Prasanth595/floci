@@ -139,6 +139,7 @@ public class SesSendController {
                     throw new AwsException("BadRequestException",
                             "Content.Raw.Data is required.", 400);
                 }
+                requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                 SendEmailRequest rawRequest = sendRequest.content(new EmailContent.Raw(rawData, true)).build();
                 sesService.checkTenantRawSendAccess(tenantName, fromEmailAddress, rawData,
                         rawRequest.hasRecipients(), configurationSetName, regionResolver.getAccountId(), region);
@@ -156,6 +157,7 @@ public class SesSendController {
                         parseHeadersArray(simple.path("Headers"), "content.simple.headers");
                 List<MessageAttachment> attachments =
                         parseAttachmentsArray(simple.path("Attachments"), "content.simple.attachments");
+                requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                 sesService.checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName,
                         null, regionResolver.getAccountId(), region);
                 messageId = sesService.sendEmail(sendRequest
@@ -189,6 +191,7 @@ public class SesSendController {
                     String resolvedName = hasName
                             ? templateName
                             : SesTemplateService.templateNameFromArn(templateArn);
+                    requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                     sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
                             configurationSetName, resolvedName, regionResolver.getAccountId(), region);
                     messageId = sesService.sendEmail(sendRequest
@@ -203,6 +206,7 @@ public class SesSendController {
                     // inline content is not a stored template resource, so only the identity and
                     // configuration set pass through the gate.
                     SesService.requireInlineTemplateContent(subject, text, html);
+                    requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                     sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
                             configurationSetName, null, regionResolver.getAccountId(), region);
                     messageId = sesService.sendEmail(sendRequest
@@ -409,17 +413,25 @@ public class SesSendController {
 
     // ──────────────────────────── Helpers ────────────────────────────
 
-    // A null element passes deserialization on AWS and fails as an invalid address
-    // (probe-confirmed for ReplyToAddresses).
+    // A null element passes deserialization on AWS and is kept: it fails later as an invalid
+    // address, after the content and sender checks (probe-confirmed).
     private static List<String> addressList(JsonNode parent, String field) {
         List<String> addresses = new ArrayList<>();
         for (JsonNode item : parent.path(field)) {
-            if (item.isNull()) {
-                throw new AwsException("BadRequestException", "Invalid email address null.", 400);
-            }
-            addresses.add(item.textValue());
+            addresses.add(item.isNull() ? null : item.textValue());
         }
         return addresses;
+    }
+
+    // On SendEmail a null address is reported after the content and sender checks and before the
+    // tenant lookup (probe-confirmed).
+    @SafeVarargs
+    private static void requireNoNullAddress(List<String>... lists) {
+        for (List<String> addresses : lists) {
+            if (addresses.contains(null)) {
+                throw new AwsException("BadRequestException", "Invalid email address null.", 400);
+            }
+        }
     }
 
     private JsonNode parseTemplateData(JsonNode parent, String fieldName) {
