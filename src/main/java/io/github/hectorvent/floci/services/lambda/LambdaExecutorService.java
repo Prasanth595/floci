@@ -18,6 +18,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.SocketException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
@@ -324,6 +325,20 @@ public class LambdaExecutorService implements Resettable {
                 event.invokedQualifier());
     }
 
+    /**
+     * A container that could not start because Docker is unreachable says so, rather than surfacing
+     * the raw socket error ("No such file or directory") a native binary without Docker would get.
+     */
+    static String initFailureMessage(Exception e) {
+        for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+            if (cause instanceof SocketException) {
+                return "Failed to start Lambda container: Docker is not reachable (" + cause.getMessage()
+                        + "). Lambda functions run in Docker containers.";
+            }
+        }
+        return "Failed to start Lambda container: " + e.getMessage();
+    }
+
     private InvokeResult executeSync(LambdaFunction fn, byte[] payload, String requestId,
                                      String clientContext) {
         ContainerHandle handle;
@@ -332,7 +347,7 @@ public class LambdaExecutorService implements Resettable {
         } catch (Exception e) {
             LOG.warnv("Failed to acquire container for function {0}: {1}", fn.getFunctionName(), e.getMessage());
             return new InvokeResult(200, "Unhandled",
-                    buildErrorPayload("Failed to start Lambda container: " + e.getMessage(), "Lambda.InitError"),
+                    buildErrorPayload(initFailureMessage(e), "Lambda.InitError"),
                     null, requestId);
         }
         try {
