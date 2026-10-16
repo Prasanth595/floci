@@ -36,13 +36,24 @@ class S3OwnershipControlsIntegrationTest {
 
     @Test
     @Order(2)
-    void getOwnershipControlsBeforePutReturns404() {
+    void newBucketDefaultsToEnforcedOwnershipAndRejectsAclWrites() {
+        String bucket = BUCKET + "-default";
+        given().when().put("/" + bucket).then().statusCode(200);
+
         given()
         .when()
-            .get("/" + BUCKET + "?ownershipControls")
+            .get("/" + bucket + "?ownershipControls")
         .then()
-            .statusCode(404)
-            .body(containsString("OwnershipControlsNotFoundError"));
+            .statusCode(200)
+            .body(containsString("<ObjectOwnership>BucketOwnerEnforced</ObjectOwnership>"));
+
+        given()
+            .header("x-amz-acl", "public-read")
+        .when()
+            .put("/" + bucket + "?acl")
+        .then()
+            .statusCode(400)
+            .body(containsString("AccessControlListNotSupported"));
     }
 
     @Test
@@ -219,11 +230,14 @@ class S3OwnershipControlsIntegrationTest {
         String enforced = OWNERSHIP_CONTROLS_XML.replace("BucketOwnerPreferred", "BucketOwnerEnforced");
 
         given().when().put("/" + bucket).then().statusCode(200);
+        given().body(OWNERSHIP_CONTROLS_XML.replace("BucketOwnerPreferred", "ObjectWriter"))
+                .when().put("/" + bucket + "?ownershipControls").then().statusCode(200);
         given().body(acl).when().put("/" + bucket + "?acl").then().statusCode(200);
         given().body(enforced).when().put("/" + bucket + "?ownershipControls")
                 .then().statusCode(400).body(containsString("InvalidBucketAclWithObjectOwnership"));
         given().when().get("/" + bucket + "?ownershipControls")
-                .then().statusCode(404);
+                .then().statusCode(200)
+                .body(containsString("<ObjectOwnership>ObjectWriter</ObjectOwnership>"));
 
         given().header("x-amz-acl", "private").when().put("/" + bucket + "?acl")
                 .then().statusCode(200);

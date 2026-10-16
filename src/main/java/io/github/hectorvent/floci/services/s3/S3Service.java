@@ -120,6 +120,13 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final String S3_XML_SCHEMA_ERROR =
             "The XML you provided was not well-formed or did not validate against our published schema.";
+    private static final String DEFAULT_OWNERSHIP_CONTROLS_XML = new XmlBuilder()
+            .start("OwnershipControls", AwsNamespaces.S3)
+            .start("Rule")
+            .elem("ObjectOwnership", "BucketOwnerEnforced")
+            .end("Rule")
+            .end("OwnershipControls")
+            .build();
     private static final Set<String> SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES = Set.of("AES256", "aws:kms", "aws:kms:dsse", "aws:fsx");
     private static final String SSE_C_ALGORITHM = "AES256";
     private static final int SSE_C_KEY_BYTES = 32;
@@ -479,6 +486,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
         Bucket bucket = new Bucket(bucketName);
         bucket.setRegion(region);
+        bucket.setOwnershipControlsConfiguration(DEFAULT_OWNERSHIP_CONTROLS_XML);
         bucketStore.put(bucketName, bucket);
         LOG.infov("Created bucket: {0} in region: {1}", bucketName, region);
         return bucket;

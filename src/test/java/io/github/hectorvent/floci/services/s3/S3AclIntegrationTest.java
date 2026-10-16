@@ -28,6 +28,13 @@ class S3AclIntegrationTest {
             .put("/" + BUCKET)
         .then()
             .statusCode(200);
+
+        given()
+            .body("<OwnershipControls><Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>")
+        .when()
+            .put("/" + BUCKET + "?ownershipControls")
+        .then()
+            .statusCode(200);
     }
 
     @Test
