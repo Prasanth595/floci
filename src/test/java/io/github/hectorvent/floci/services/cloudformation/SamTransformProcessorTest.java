@@ -212,11 +212,16 @@ class SamTransformProcessorTest {
             assertEquals("MyFuncVersion102360dfc3", publishedVersionId(template.formatted(off)), off);
         }
         String allProperties = ", \"AutoPublishAliasAllProperties\": true";
-        assertNotEquals(publishedVersionId(template.formatted(allProperties)),
-                publishedVersionId(template.formatted(allProperties + ", \"SnapStart\": {\"ApplyOn\": \"None\"}")));
-        assertNotEquals(publishedVersionId(template.formatted(allProperties)),
+        // The SHA-1 of the properties the transform gives the function, as sorted compact JSON:
+        // {"Code":{"ZipFile":"..."},"Handler":"index.handler","Role":{"Fn::GetAtt":["MyFuncRole","Arn"]},
+        // "Runtime":"java21"}
+        assertEquals("MyFuncVersionef5795a086", publishedVersionId(template.formatted(allProperties)));
+        assertEquals("MyFuncVersion60f02511cd",
                 publishedVersionId(template.formatted(allProperties + ", \"Timeout\": 9")),
                 "every property is hashed, Timeout included");
+        assertNotEquals("MyFuncVersionef5795a086",
+                publishedVersionId(template.formatted(allProperties + ", \"SnapStart\": {\"ApplyOn\": \"None\"}")),
+                "SnapStart is hashed whatever its ApplyOn");
         assertEquals("MyFuncVersion102360dfc3",
                 publishedVersionId(template.formatted(", \"AutoPublishAliasAllProperties\": false")),
                 "false hashes as if the property were absent");
@@ -389,7 +394,54 @@ class SamTransformProcessorTest {
         assertEquals("{\"Ref\":\"Policy\"}", processor.expandSamTemplate(objectMapper.readTree(
                         template.formatted(alias + ", \"VersionDeletionPolicy\": {\"Ref\": \"Policy\"}")))
                 .path("Resources").path("MyFuncVersion102360dfc3").path("DeletionPolicy").toString(),
-                "an intrinsic function is passed on for CloudFormation to resolve");
+                "an intrinsic function is copied unresolved, as SAM copies it");
+    }
+
+    /** As in SAM, a given AutoPublishCodeSha256 names the version under AutoPublishAliasAllProperties too. */
+    @Test
+    void expandSamTemplate_autoPublishCodeSha256OutranksAutoPublishAliasAllProperties() throws Exception {
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler", "Runtime": "nodejs20.x", "AutoPublishAlias": "live",
+                    "AutoPublishAliasAllProperties": true, "AutoPublishCodeSha256": "abc123",
+                    "InlineCode": "exports.handler = async () => ({});", "Timeout": %d
+                  }
+                }
+              }
+            }
+            """;
+
+        assertEquals("MyFuncVersionabc123", publishedVersionId(template.formatted(3)));
+        assertEquals("MyFuncVersionabc123", publishedVersionId(template.formatted(9)));
+    }
+
+    /** Globals.Function carries AutoPublishAliasAllProperties and VersionDeletionPolicy, as SAM's do. */
+    @Test
+    void expandSamTemplate_versionPropertiesComeFromGlobals() throws Exception {
+        JsonNode resources = processor.expandSamTemplate(objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {"Function": {"AutoPublishAlias": "live", "AutoPublishAliasAllProperties": true,
+                "VersionDeletionPolicy": "Delete"}},
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {"Handler": "index.handler", "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({});"}
+                }
+              }
+            }
+            """)).path("Resources");
+
+        // Without AutoPublishAliasAllProperties the id is MyFuncVersion102360dfc3.
+        assertEquals("[\"MyFuncVersionb6788accf2\",\"Version\"]", resources.path("MyFuncAliasLive")
+                .path("Properties").path("FunctionVersion").path("Fn::GetAtt").toString());
+        assertEquals("Delete", resources.path("MyFuncVersionb6788accf2").path("DeletionPolicy").asText());
     }
 
     /** SAM's Globals do not take AutoPublishCodeSha256, which would name every function's version. */
