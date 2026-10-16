@@ -503,7 +503,7 @@ S/MIME certificate associations are stored per region and never used: Floci does
 
 ### Request member types
 
-The operations whose body nests a structure in a structure, or holds a list of structures, check the request body against the SES v2 service model before anything else is validated, as AWS's restJson1 deserializer does: the send operations (`SendEmail`, `SendBulkEmail`, `SendCustomVerificationEmail`), `CreateConfigurationSet`, `UpdateConfigurationSet`, `PutConfigurationSetSuppressionOptions`, `PutConfigurationSetVdmOptions`, `CreateConfigurationSetEventDestination` and `UpdateConfigurationSetEventDestination`. In those operations, the first body member of the wrong JSON type, in body order, is a `SerializationException` with AWS's deserializer message:
+The operations whose body nests a structure in a structure, or holds a list of structures, check the request body against the SES v2 service model before anything else is validated, as AWS's restJson1 deserializer does: the send operations (`SendEmail`, `SendBulkEmail`, `SendCustomVerificationEmail`), `CreateConfigurationSet`, `UpdateConfigurationSet`, `PutConfigurationSetSuppressionOptions`, `PutConfigurationSetVdmOptions`, `CreateConfigurationSetEventDestination`, `UpdateConfigurationSetEventDestination`, `CreateContactList`, `UpdateContactList`, `CreateContact`, `UpdateContact` and `ListContacts`. In those operations, the first body member of the wrong JSON type, in body order, is a `SerializationException` with AWS's deserializer message:
 
 | Member type | Value sent | Message |
 |---|---|---|
