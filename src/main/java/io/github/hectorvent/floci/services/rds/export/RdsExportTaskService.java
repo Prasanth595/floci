@@ -149,13 +149,14 @@ public class RdsExportTaskService implements Resettable {
                         "The export task with the ID " + exportTaskIdentifier + " already exists.", 400);
             }
             tasks.put(key(effectiveRegion, exportTaskIdentifier), task);
+            ExportTask started = new ExportTask(task);
             int startedIn = generation.get();
             // The worker runs on a fresh thread, where account-aware storage would otherwise fall
             // back to the default account and never find this task again.
             workers.execute(() -> RequestScopes.runAs(accountId, effectiveRegion,
                     () -> run(effectiveRegion, exportTaskIdentifier, source, startedIn)));
+            return started;
         }
-        return task;
     }
 
     public List<ExportTask> describeExportTasks(String exportTaskIdentifier, String sourceArn, String sourceType,
@@ -164,7 +165,13 @@ public class RdsExportTaskService implements Resettable {
         if (exportTaskIdentifier != null && !exportTaskIdentifier.isBlank()) {
             requireTask(effectiveRegion, exportTaskIdentifier);
         }
-        return tasks.scan(key -> key.startsWith(KEY_PREFIX + effectiveRegion + "::")).stream()
+        List<ExportTask> found;
+        synchronized (lock) {
+            found = tasks.scan(key -> key.startsWith(KEY_PREFIX + effectiveRegion + "::")).stream()
+                    .map(ExportTask::new)
+                    .toList();
+        }
+        return found.stream()
                 .filter(task -> matches(exportTaskIdentifier, task.getExportTaskIdentifier()))
                 .filter(task -> matches(sourceArn, task.getSourceArn()))
                 .filter(task -> matches(sourceType, task.getSourceType()))
@@ -184,7 +191,7 @@ public class RdsExportTaskService implements Resettable {
             }
             task.setStatus(ExportTask.STATUS_CANCELING);
             tasks.put(key(effectiveRegion, exportTaskIdentifier), task);
-            return task;
+            return new ExportTask(task);
         }
     }
 

@@ -93,6 +93,29 @@ public class ExportTask {
 
     public ExportTask() {}
 
+    public ExportTask(ExportTask other) {
+        this.exportTaskIdentifier = other.exportTaskIdentifier;
+        this.sourceArn = other.sourceArn;
+        this.sourceType = other.sourceType;
+        this.exportOnly = new ArrayList<>(other.exportOnly);
+        this.snapshotTime = other.snapshotTime;
+        this.taskStartTime = other.taskStartTime;
+        this.taskEndTime = other.taskEndTime;
+        this.s3Bucket = other.s3Bucket;
+        this.s3Prefix = other.s3Prefix;
+        this.iamRoleArn = other.iamRoleArn;
+        this.kmsKeyId = other.kmsKeyId;
+        this.status = other.status;
+        this.percentProgress = other.percentProgress;
+        this.totalExtractedDataInGb = other.totalExtractedDataInGb;
+        this.failureCause = other.failureCause;
+        this.warningMessage = other.warningMessage;
+        this.region = other.region;
+        this.accountId = other.accountId;
+        this.runtimeArn = other.runtimeArn;
+        this.runtimeVolumeId = other.runtimeVolumeId;
+    }
+
     @JsonIgnore
     public boolean isTerminal() {
         return STATUS_COMPLETE.equals(status)

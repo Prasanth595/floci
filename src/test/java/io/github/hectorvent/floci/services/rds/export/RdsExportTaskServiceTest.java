@@ -310,6 +310,42 @@ class RdsExportTaskServiceTest {
     }
 
     @Test
+    void theResponsesKeepTheStatusTheirCallSetWhenTheWorkerFinishesFirst() {
+        RdsExportTaskService service = new RdsExportTaskService(new InMemoryStorage<>(), rdsService, s3Service,
+                (task, source, progress) -> outcome(0, List.of()), regionResolver, true, CLOCK, Runnable::run);
+
+        ExportTask started = start(service, "appdb-export", List.of());
+        ExportTask described = describe(service, "appdb-export");
+
+        assertThat(started.getStatus(), equalTo("STARTING"));
+        assertThat(described.getStatus(), equalTo("COMPLETE"));
+    }
+
+    @Test
+    void aDescribedTaskDoesNotChangeWhenItsWorkerDoes() {
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
+        start(service, "appdb-export", List.of());
+        ExportTask described = describe(service, "appdb-export");
+
+        runWorkers();
+
+        assertThat(described.getStatus(), equalTo("STARTING"));
+        assertThat(describe(service, "appdb-export").getStatus(), equalTo("COMPLETE"));
+    }
+
+    @Test
+    void theCancelResponseIsCancelingEvenOnceTheTaskIsCanceled() {
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
+        start(service, "appdb-export", List.of());
+
+        ExportTask canceling = service.cancelExportTask("appdb-export", REGION);
+        runWorkers();
+
+        assertThat(canceling.getStatus(), equalTo("CANCELING"));
+        assertThat(describe(service, "appdb-export").getStatus(), equalTo("CANCELED"));
+    }
+
+    @Test
     void aTaskARestartInterruptedIsFailed() {
         AccountAwareStorageBackend<ExportTask> persisted =
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT);
