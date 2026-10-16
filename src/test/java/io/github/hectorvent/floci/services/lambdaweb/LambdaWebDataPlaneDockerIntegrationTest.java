@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambdaweb;
 
 import com.github.dockerjava.api.DockerClient;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
@@ -74,6 +75,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 res.writeHead(Number(req.url.split('/')[2]), {'x-app': 'yes'}); res.end('status body'); return;
               }
               if (req.url.startsWith('/crash')) { setTimeout(() => process.exit(1), 50); return; }
+              if (req.url.startsWith('/exit')) { res.end('bye', () => process.exit(0)); return; }
               let body = '';
               req.on('data', (chunk) => { body += chunk; });
               req.on('end', () => {
@@ -193,6 +195,19 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     }
 
     @Test
+    @Timeout(180)
+    void anEnvironmentThatExitsBetweenRequestsIsReplacedUnseen() throws Exception {
+        String domain = createFunction(30);
+
+        Response exit = given().header("Host", domain).when().get("/exit");
+        exit.then().statusCode(200).body(equalTo("bye"));
+        awaitContainersRemoved();
+
+        given().header("Host", domain).when().get("/status/200")
+                .then().statusCode(200).header("lambda-web-logstream", not(equalTo(exit.header("lambda-web-logstream"))));
+    }
+
+    @Test
     @Timeout(240)
     void environmentsScaleUpToMaxEnvironmentsAndTheRateLimitThrottles() throws Exception {
         String domain = createFunction(30, 1);
@@ -258,6 +273,16 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         assertFalse(limited.isEmpty(), "a burst well past the rate is throttled");
         for (String response : limited) {
             assertTrue(response.contains("\r\nlambda-web-error-type: Platform.EndpointRequestThrottle\r\n"), response);
+        }
+    }
+
+    /** Floci removes the container of an environment once it has seen the process exit. */
+    private void awaitContainersRemoved() throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (!dockerClient.listContainersCmd().withShowAll(true)
+                .withLabelFilter(Map.of(ContainerStorageHelper.RESOURCE_ID_LABEL, functionName)).exec().isEmpty()) {
+            assertTrue(System.nanoTime() < deadline, "Floci did not see the environment exit");
+            Thread.sleep(100);
         }
     }
 
