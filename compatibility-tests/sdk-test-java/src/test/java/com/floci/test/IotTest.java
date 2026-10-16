@@ -115,6 +115,7 @@ import software.amazon.awssdk.services.iot.model.UpdateThingRequest;
 import software.amazon.awssdk.services.iot.model.UpdateThingTypeRequest;
 import software.amazon.awssdk.services.iot.model.VersionConflictException;
 import software.amazon.awssdk.services.iotdataplane.IotDataPlaneClient;
+import software.amazon.awssdk.services.iotdataplane.model.ConflictException;
 import software.amazon.awssdk.services.iotdataplane.model.DeleteConnectionRequest;
 import software.amazon.awssdk.services.iotdataplane.model.DeleteThingShadowRequest;
 import software.amazon.awssdk.services.iotdataplane.model.GetThingShadowRequest;
@@ -774,6 +775,30 @@ class IotTest {
                 .build());
         iotData.deleteThingShadow(DeleteThingShadowRequest.builder().thingName(thingName).shadowName("settings").build());
         iotData.deleteThingShadow(DeleteThingShadowRequest.builder().thingName(thingName).build());
+    }
+
+    @Test
+    void updateThingShadowWithStaleVersionThrowsConflictException() {
+        String thingName = "java-iot-shadow-conflict-" + Long.toString(System.currentTimeMillis(), 36);
+        try {
+            iotData.updateThingShadow(UpdateThingShadowRequest.builder()
+                    .thingName(thingName)
+                    .payload(SdkBytes.fromUtf8String("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"))
+                    .build());
+            iotData.updateThingShadow(UpdateThingShadowRequest.builder()
+                    .thingName(thingName)
+                    .payload(SdkBytes.fromUtf8String("{\"version\":1,\"state\":{\"desired\":{\"color\":\"green\"}}}"))
+                    .build());
+
+            assertThatThrownBy(() -> iotData.updateThingShadow(UpdateThingShadowRequest.builder()
+                    .thingName(thingName)
+                    .payload(SdkBytes.fromUtf8String("{\"version\":1,\"state\":{\"desired\":{\"color\":\"red\"}}}"))
+                    .build()))
+                    .isInstanceOf(ConflictException.class)
+                    .hasMessageContaining("Version conflict");
+        } finally {
+            iotData.deleteThingShadow(DeleteThingShadowRequest.builder().thingName(thingName).build());
+        }
     }
 
     @Test

@@ -193,7 +193,8 @@ class IotDataIntegrationTest {
             .post("/things/mvp1-shadow/shadow")
         .then()
             .statusCode(409)
-            .body("__type", equalTo("VersionConflictException"));
+            .body("__type", equalTo("ConflictException"))
+            .body("message", equalTo("Version conflict"));
 
         given()
             .contentType("application/json")

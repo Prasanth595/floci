@@ -865,7 +865,7 @@ public class IotService {
         ObjectNode document = existing == null ? objectMapper.createObjectNode() : (ObjectNode) readJson(existing.getDocument()).deepCopy();
         long currentVersion = existing == null ? 0 : existing.getVersion();
         if (request.hasNonNull("version") && request.path("version").asLong() != currentVersion) {
-            throw new AwsException("VersionConflictException", "Shadow version does not match requested version", 409);
+            throw new AwsException("ConflictException", "Version conflict", 409);
         }
         ObjectNode state = document.withObject("/state");
         JsonNode requestState = request.path("state");

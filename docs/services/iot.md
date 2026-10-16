@@ -14,7 +14,7 @@ Supported MVP 1 behavior:
 - Thing principal basics: `AttachThingPrincipal`, `DetachThingPrincipal`, `ListThingPrincipals`, and `ListPrincipalThings`.
 - Tags for things, certificates, policies, and topic rules.
 - IoT Data retained messages: retained `Publish`, `GetRetainedMessage`, and paginated `ListRetainedMessages`.
-- Shadow null-delete and version-conflict behavior for HTTP and shared service paths.
+- Shadow null-delete and version-conflict behavior (`ConflictException`, 409) for HTTP and shared service paths.
 - Topic rule duplicate/delete/replace semantics, plus `republish`, `sqs`, `sns`, `s3`, `dynamoDBv2`, `kinesis`, `lambda`, `firehose`, and `cloudwatchLogs` action dispatch.
 
 Current MVP 1 limitations:
