@@ -650,8 +650,9 @@ public class SqsService implements Resettable, ResourceProvider {
                     String storedValue = effective.get(entry.getKey());
                     String requested = entry.getValue();
                     // The effective MaximumMessageSize is canonical ("1024"); canonicalise the
-                    // already-validated request too so "01024" is not a conflict with itself.
-                    if ("MaximumMessageSize".equals(entry.getKey()) && requested != null && !requested.isEmpty()) {
+                    // already-validated request too so "01024" is not a conflict with itself,
+                    // and an empty value maps to the same default the effective map reports.
+                    if ("MaximumMessageSize".equals(entry.getKey())) {
                         requested = String.valueOf(parseMaxMessageSize(requested));
                     }
                     if (storedValue != null && !storedValue.equals(requested)) {
