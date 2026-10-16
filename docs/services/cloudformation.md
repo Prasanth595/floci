@@ -415,9 +415,10 @@ parameter holding one, replaces the hash with its first ten characters, under
 `AutoPublishAliasAllProperties` too; an empty value leaves the hash in place. `Globals` can set
 `AutoPublishAliasAllProperties` and `VersionDeletionPolicy`, but as in SAM not
 `AutoPublishCodeSha256`, which fails the transform there. floci does not honour a resource's
-`IgnoreGlobals`, so no function can opt out of a `VersionDeletionPolicy` in `Globals`: one without
-`AutoPublishAlias` fails the transform with `'VersionDeletionPolicy' requires 'AutoPublishAlias'.`,
-as it does in SAM when it does not ignore that global.
+`IgnoreGlobals`, so no function can opt out of a `VersionDeletionPolicy` in `Globals` with it: one
+without `AutoPublishAlias` fails the transform with
+`'VersionDeletionPolicy' requires 'AutoPublishAlias'.`, as it does in SAM when it does not ignore
+that global.
 
 A new id publishes a version, and moves the alias to it, only when the function's code or
 configuration changed since its last version. Otherwise the new version resource takes the last
@@ -427,8 +428,9 @@ version and the alias stays where it is, as when an update changes only one of t
 - A new `AutoPublishCodeSha256` alone: on AWS this publishes, because SAM appends it to the
   function's `Description`, but floci's transform sets no `Description` on the function.
 - Under `AutoPublishAliasAllProperties`, a change to `Tags` or `ReservedConcurrentExecutions`
-  only: AWS fails that update with `A version for this Lambda function exists ( N ). Modify the
-  function to create a new version.`, where floci completes it.
+  only: AWS fails that update with
+  `A version for this Lambda function exists ( N ). Modify the function to create a new version.`,
+  where floci completes it.
 
 A function whose code is hot-reloaded publishes a version for every new id.
 
