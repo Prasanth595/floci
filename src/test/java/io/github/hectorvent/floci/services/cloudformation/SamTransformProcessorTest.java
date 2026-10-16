@@ -219,7 +219,7 @@ class SamTransformProcessorTest {
         assertEquals("MyFuncVersion60f02511cd",
                 publishedVersionId(template.formatted(allProperties + ", \"Timeout\": 9")),
                 "every property is hashed, Timeout included");
-        assertNotEquals("MyFuncVersionef5795a086",
+        assertEquals("MyFuncVersion6c94e3ab8d",
                 publishedVersionId(template.formatted(allProperties + ", \"SnapStart\": {\"ApplyOn\": \"None\"}")),
                 "SnapStart is hashed whatever its ApplyOn");
         assertEquals("MyFuncVersion102360dfc3",
