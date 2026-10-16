@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -56,6 +57,8 @@ public class RdsExportTaskService implements Resettable {
     // Letters, digits and single hyphens, starting with a letter and not ending with a hyphen.
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z](?:-?[A-Za-z0-9])*");
     private static final int IDENTIFIER_MAX_LENGTH = 60;
+    private static final Set<String> FILTER_NAMES =
+            Set.of("export-task-identifier", "s3-bucket", "source-arn", "status");
 
     private final StorageBackend<String, ExportTask> tasks;
     private final RdsService rdsService;
@@ -162,6 +165,11 @@ public class RdsExportTaskService implements Resettable {
     public List<ExportTask> describeExportTasks(String exportTaskIdentifier, String sourceArn, String sourceType,
                                                 Map<String, List<String>> filters, String region) {
         String effectiveRegion = effectiveRegion(region);
+        for (String name : filters.keySet()) {
+            if (!FILTER_NAMES.contains(name)) {
+                throw new AwsException("InvalidParameterValue", "Unrecognized filter name: " + name, 400);
+            }
+        }
         if (exportTaskIdentifier != null && !exportTaskIdentifier.isBlank()) {
             requireTask(effectiveRegion, exportTaskIdentifier);
         }
@@ -341,8 +349,7 @@ public class RdsExportTaskService implements Resettable {
                 case "source-arn" -> values.contains(task.getSourceArn());
                 case "status" -> values.stream()
                         .anyMatch(value -> value.toUpperCase(Locale.ROOT).equals(task.getStatus()));
-                default -> throw new AwsException("InvalidParameterValue",
-                        "Unrecognized filter name: " + filter.getKey(), 400);
+                default -> throw new IllegalStateException("Unvalidated filter name: " + filter.getKey());
             };
             if (!matched) {
                 return false;

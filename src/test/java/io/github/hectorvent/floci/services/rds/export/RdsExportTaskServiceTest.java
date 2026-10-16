@@ -297,6 +297,16 @@ class RdsExportTaskServiceTest {
     }
 
     @Test
+    void anUnknownFilterNameIsRefusedEvenWithNoTasks() {
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
+
+        AwsException unknown = assertThrows(AwsException.class, () ->
+                service.describeExportTasks(null, null, null, Map.of("staus", List.of("COMPLETE")), REGION));
+
+        assertThat(unknown.getErrorCode(), equalTo("InvalidParameterValue"));
+    }
+
+    @Test
     void mockModeCompletesWithoutExporting() {
         SnapshotExporter exporter = mock(SnapshotExporter.class);
         RdsExportTaskService service = new RdsExportTaskService(new InMemoryStorage<>(), rdsService, s3Service,
