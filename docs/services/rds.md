@@ -739,7 +739,7 @@ canceled. A `StartExportTask` that arrives while Floci is resetting waits for th
 and is refused with `Throttling` if it lasts more than 30 seconds.
 
 Floci does not write snapshot data to S3 yet. In [mock mode](#mock-mode-ci-tests) a task completes
-without writing anything. Outside mock mode a task is accepted and then ends `FAILED` with the
+without writing anything, unless its bucket is in another region (see below). Outside mock mode a task is accepted and then ends `FAILED` with the
 `FailureCause` `Floci does not write snapshot data to S3 yet: export tasks complete only in mock
 mode (FLOCI_SERVICES_RDS_MOCK=true)`.
 
