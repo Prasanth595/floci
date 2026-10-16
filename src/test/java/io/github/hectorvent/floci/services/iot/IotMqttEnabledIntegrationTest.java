@@ -24,7 +24,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -565,7 +564,7 @@ class IotMqttEnabledIntegrationTest {
                 .body("version", equalTo(1));
 
             Map<String, JsonNode> byTopic = new HashMap<>();
-            for (String body : awaitMessages(queueUrl)) {
+            for (String body : receiveMessages(queueUrl)) {
                 JsonNode message = OBJECT_MAPPER.readTree(body);
                 byTopic.put(message.path("topic").asText(), message);
             }
@@ -626,19 +625,17 @@ class IotMqttEnabledIntegrationTest {
             .extract().xmlPath().getList("ReceiveMessageResponse.ReceiveMessageResult.Message.Body", String.class);
     }
 
-    /** Every message that arrives within a bounded wait, which ends once a receive comes back empty after the first. */
+    /** The first non-empty receive on the queue within two seconds. */
     private List<String> awaitMessages(String queueUrl) throws InterruptedException {
-        List<String> bodies = new ArrayList<>();
-        Instant deadline = Instant.now().plus(Duration.ofSeconds(5));
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(2));
         while (Instant.now().isBefore(deadline)) {
             List<String> received = receiveMessages(queueUrl);
-            if (received.isEmpty() && !bodies.isEmpty()) {
-                return bodies;
+            if (!received.isEmpty()) {
+                return received;
             }
-            bodies.addAll(received);
-            Thread.sleep(50);
+            Thread.sleep(25);
         }
-        return bodies;
+        throw new AssertionError("No message arrived on " + queueUrl);
     }
 
     private void createSqsRule(String ruleName, String sql, String queueUrl) {
