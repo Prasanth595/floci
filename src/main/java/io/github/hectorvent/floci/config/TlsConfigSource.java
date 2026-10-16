@@ -111,7 +111,7 @@ public class TlsConfigSource implements ConfigSource {
         String certPath = resolveProperty("floci.tls.cert-path", "");
         String keyPath = resolveProperty("floci.tls.key-path", "");
         String selfSigned = resolveProperty("floci.tls.self-signed", "true");
-        String persistentPath = resolveProperty("floci.storage.persistent-path", "./data");
+        String persistentPath = resolveProperty("floci.storage.persistent-path", HostDataDir.persistentPathDefault());
         Path tlsDir = Path.of(persistentPath, TLS_DIR);
         resolvedTlsDir = tlsDir;
 
