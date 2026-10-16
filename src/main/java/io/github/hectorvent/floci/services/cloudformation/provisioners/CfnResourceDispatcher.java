@@ -72,13 +72,18 @@ public class CfnResourceDispatcher {
                                    String stackName, String existingPhysicalId,
                                    Map<String, String> existingAttributes) {
         return provision(logicalId, resourceType, properties, engine, region, accountId, stackName,
-                existingPhysicalId, existingAttributes, event -> {});
+                existingPhysicalId, existingAttributes, event -> {}, null);
     }
 
+    /**
+     * {@code priorProperties} are the resource's properties in the previous template, unresolved,
+     * or null when there is none; see {@link ProvisionContext#previouslyDeclared(String)}.
+     */
     public StackResource provision(String logicalId, String resourceType, JsonNode properties,
                                    CloudFormationTemplateEngine engine, String region, String accountId,
                                    String stackName, String existingPhysicalId,
-                                   Map<String, String> existingAttributes, Consumer<StackEvent> progress) {
+                                   Map<String, String> existingAttributes, Consumer<StackEvent> progress,
+                                   JsonNode priorProperties) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
         resource.setResourceType(resourceType);
@@ -89,7 +94,8 @@ public class CfnResourceDispatcher {
             CfnResourceProvisioner owner = registry.forType(resourceType).orElse(null);
             if (owner != null) {
                 owner.provision(resource, properties,
-                        new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress));
+                        new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress,
+                                priorProperties));
                 // A provisioner that migrated a stub without writing its own Arn would leave the
                 // stub's, and the real resource would read as a stub on its next update.
                 String arn = resource.getAttributes().get("Arn");
@@ -238,6 +244,19 @@ public class CfnResourceDispatcher {
                 .orElseGet(UpdateCleanupResult::notApplicable);
     }
 
+    /** Cleanup owed by an unfinished update while deleting the enclosing stack. */
+    public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
+        return registry.forType(resource.getResourceType())
+                .map(owner -> owner.completeDeleteCleanup(resource))
+                .filter(UpdateCleanupResult::applicable)
+                .orElseGet(UpdateCleanupResult::notApplicable);
+    }
+
+    /** Clears completed replacement cleanup without assuming a stack update committed. */
+    public void clearDeleteCleanup(StackResource resource) {
+        registry.forType(resource.getResourceType()).ifPresent(owner -> owner.clearDeleteCleanup(resource));
+    }
+
     /**
      * The physical id this update displaced, announced as DELETE_IN_PROGRESS before the stack
      * update closes. A type whose {@code UpdateReplacePolicy} is {@code Retain} owes no cleanup.
@@ -255,6 +274,12 @@ public class CfnResourceDispatcher {
     public boolean retainsFailedUpdateState(StackResource resource) {
         return registry.forType(resource.getResourceType())
                 .map(owner -> owner.retainsFailedUpdateState(resource))
+                .orElse(false);
+    }
+
+    public boolean requiresUpdateRecovery(StackResource resource) {
+        return registry.forType(resource.getResourceType())
+                .map(owner -> owner.requiresUpdateRecovery(resource))
                 .orElse(false);
     }
 

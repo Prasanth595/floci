@@ -53,7 +53,8 @@ class RedshiftSpectrumIntegrationTest {
     public static class SpectrumProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
-            return Map.of("quarkus.http.test-port", "17866", "floci.base-url", "http://localhost:17866",
+            return Map.of("quarkus.http.test-port", "17866", "quarkus.http.port", "17866",
+                    "floci.base-url", "http://localhost:17866",
                     "floci.docker.resource-namespace", "spectrum-relational-tests");
         }
     }
@@ -255,7 +256,7 @@ class RedshiftSpectrumIntegrationTest {
             RestAssuredJsonUtils.configureAwsContentTypes();
             String queryId = RestAssuredJsonUtils.awsAction("RedshiftData", "ExecuteStatement", """
                     {"ClusterIdentifier":"%s","DbUser":"admin","Database":"dev",
-                     "Sql":"SELECT SUM(amount) AS total FROM lake.events"}
+                     "Sql":"SELECT SUM(amount) AS total FROM lake.events","WaitTimeSeconds":30}
                     """.formatted(clusterId)).then().statusCode(200).extract().path("Id");
             assertEquals("FINISHED", RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
                     "{\"Id\":\"" + queryId + "\"}").then().statusCode(200).extract().path("Status"));

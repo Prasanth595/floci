@@ -85,6 +85,7 @@ import java.util.concurrent.Future;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -226,6 +227,52 @@ class EksClusterManagerTest {
     }
 
     @Test
+    void registriesYamlForACommercialClusterInTheDefaultAccountIsUnchanged() {
+        String yaml = EksClusterManager.buildRegistriesYaml(
+                EksClusterManager.mirrorAccounts("000000000000", "000000000000"),
+                EksClusterManager.mirrorRegions("us-east-1"), 4566, "http://floci:4566", false);
+
+        assertEquals(EksClusterManager.buildRegistriesYaml(
+                "000000000000", AwsRegions.advertised("aws"), 4566, "http://floci:4566"), yaml);
+    }
+
+    @Test
+    void registriesYamlForAChinaClusterMirrorsTheChinaRegions() {
+        String yaml = EksClusterManager.buildRegistriesYaml(
+                EksClusterManager.mirrorAccounts("000000000000", "000000000000"),
+                EksClusterManager.mirrorRegions("cn-north-1"), 4566, "http://floci:4566", false);
+
+        for (String region : AwsRegions.advertised("aws-cn")) {
+            assertTrue(yaml.contains("\"000000000000.dkr.ecr." + region + ".localhost:4566\":"), region);
+        }
+        assertTrue(yaml.contains("\"000000000000.dkr.ecr.cn-north-1.localhost:4566\":"));
+        assertFalse(yaml.contains(".us-east-1."));
+        assertFalse(yaml.contains("amazonaws"), "repository URIs are Floci's localhost hosts in every partition");
+        assertEquals(AwsRegions.advertised("aws-cn").size() + 1,
+                yaml.lines().filter(line -> line.contains("- \"http://floci:4566\"")).count());
+    }
+
+    @Test
+    void registriesYamlForANonDefaultAccountMirrorsBothAccounts() {
+        String yaml = EksClusterManager.buildRegistriesYaml(
+                EksClusterManager.mirrorAccounts("111122223333", "000000000000"),
+                List.of("eu-central-1"), 4566, "http://floci:4566", false);
+
+        assertEquals("""
+                mirrors:
+                  "111122223333.dkr.ecr.eu-central-1.localhost:4566":
+                    endpoint:
+                      - "http://floci:4566"
+                  "000000000000.dkr.ecr.eu-central-1.localhost:4566":
+                    endpoint:
+                      - "http://floci:4566"
+                  "localhost:4566":
+                    endpoint:
+                      - "http://floci:4566"
+                """, yaml);
+    }
+
+    @Test
     void registriesYamlKeepsTheExistingOutputWhenTlsUrisAreDisabled() {
         String yaml = EksClusterManager.buildRegistriesYaml(
                 "111122223333", List.of("eu-central-1"), 4566, "http://floci:4566", false);
@@ -336,7 +383,7 @@ class EksClusterManagerTest {
         ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
         RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
@@ -377,7 +424,7 @@ class EksClusterManagerTest {
         ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
         EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
@@ -409,7 +456,7 @@ class EksClusterManagerTest {
         ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
         EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
@@ -466,7 +513,7 @@ class EksClusterManagerTest {
             ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
             ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
             portAllocator = Mockito.mock(PortAllocator.class);
             dockerClient = Mockito.mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
@@ -1082,9 +1129,53 @@ class EksClusterManagerTest {
                     Mockito.mock(RegionResolver.class));
         }
 
+        private Cluster demoCluster() {
+            Cluster cluster = new Cluster();
+            cluster.setName("demo");
+            return cluster;
+        }
+
+        private Cluster clusterWithArn(String arn) {
+            Cluster cluster = demoCluster();
+            cluster.setArn(arn);
+            return cluster;
+        }
+
+        @Test
+        void aDefaultCommercialClusterKeepsTheDeploymentWideMirror() throws Exception {
+            manager.injectEcrRegistryMirror("container-1",
+                    clusterWithArn("arn:aws:eks:us-east-1:000000000000:cluster/demo"));
+
+            assertEquals(EksClusterManager.buildRegistriesYaml("000000000000", AwsRegions.advertised("aws"),
+                    4566, "http://floci:4566"), Files.readString(tempDir.resolve("registries/demo/registries.yaml")));
+        }
+
+        @Test
+        void aChinaClusterInACommercialDeploymentMirrorsItsOwnPartitionsRegions() throws Exception {
+            manager.injectEcrRegistryMirror("container-1",
+                    clusterWithArn("arn:aws-cn:eks:cn-north-1:000000000000:cluster/demo"));
+
+            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            assertTrue(yaml.contains("\"000000000000.dkr.ecr.cn-north-1.localhost:4566\":"));
+            assertTrue(yaml.contains("\"000000000000.dkr.ecr.cn-northwest-1.localhost:4566\":"));
+            assertFalse(yaml.contains(".us-east-1."), "a China cluster pulls from China regions only");
+        }
+
+        @Test
+        void aClusterInAnotherAccountMirrorsItsOwnAccountAndTheDefaultOne() throws Exception {
+            Cluster cluster = clusterWithArn("arn:aws:eks:eu-west-1:111122223333:cluster/demo");
+            cluster.setAccountId("111122223333");
+
+            manager.injectEcrRegistryMirror("container-1", cluster);
+
+            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            assertTrue(yaml.contains("\"111122223333.dkr.ecr.eu-west-1.localhost:4566\":"));
+            assertTrue(yaml.contains("\"000000000000.dkr.ecr.eu-west-1.localhost:4566\":"));
+        }
+
         @Test
         void injectsTheMirrorIntoTheContainer() throws Exception {
-            manager.injectEcrRegistryMirror("container-1", "demo");
+            manager.injectEcrRegistryMirror("container-1", demoCluster());
 
             verify(registryManager).ensureStarted();
             verify(copyCmd).withRemotePath("/etc");
@@ -1100,7 +1191,7 @@ class EksClusterManagerTest {
             // k3s still reaches Floci on its own port inside the Docker network.
             when(registryManager.advertisedPort()).thenReturn(54321);
 
-            manager.injectEcrRegistryMirror("container-1", "demo");
+            manager.injectEcrRegistryMirror("container-1", demoCluster());
 
             String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.us-east-1.localhost:54321\":"));
@@ -1117,7 +1208,7 @@ class EksClusterManagerTest {
             when(tls.enabled()).thenReturn(true);
             when(ecr.tlsUri()).thenReturn(true);
 
-            manager.injectEcrRegistryMirror("container-1", "demo");
+            manager.injectEcrRegistryMirror("container-1", demoCluster());
 
             String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566\":"));
@@ -1133,7 +1224,7 @@ class EksClusterManagerTest {
             when(config.tls()).thenReturn(tls);
             when(ecr.tlsUri()).thenReturn(true);
 
-            manager.injectEcrRegistryMirror("container-1", "demo");
+            manager.injectEcrRegistryMirror("container-1", demoCluster());
 
             String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
             assertFalse(yaml.contains("localhost.floci.io"));
@@ -1145,7 +1236,7 @@ class EksClusterManagerTest {
         void skipsWhenTheKnobIsOff() {
             when(eks.ecrRegistryMirror()).thenReturn(false);
 
-            manager.injectEcrRegistryMirror("container-1", "demo");
+            manager.injectEcrRegistryMirror("container-1", demoCluster());
 
             verifyNoInteractions(registryManager);
             verify(lifecycleManager, never()).getDockerClient();
@@ -1155,7 +1246,7 @@ class EksClusterManagerTest {
         void skipsWhenEcrIsDisabled() {
             when(ecr.enabled()).thenReturn(false);
 
-            manager.injectEcrRegistryMirror("container-1", "demo");
+            manager.injectEcrRegistryMirror("container-1", demoCluster());
 
             verifyNoInteractions(registryManager);
             verify(lifecycleManager, never()).getDockerClient();
@@ -1165,7 +1256,7 @@ class EksClusterManagerTest {
         void registryStartupFailureSkipsTheMirrorWithoutAborting() {
             Mockito.doThrow(new RuntimeException("no docker")).when(registryManager).ensureStarted();
 
-            manager.injectEcrRegistryMirror("container-1", "demo");
+            manager.injectEcrRegistryMirror("container-1", demoCluster());
 
             verify(lifecycleManager, never()).getDockerClient();
         }
@@ -1174,7 +1265,7 @@ class EksClusterManagerTest {
         void copyFailureDoesNotAbortClusterCreation() {
             when(copyCmd.exec()).thenThrow(new RuntimeException("copy failed"));
 
-            manager.injectEcrRegistryMirror("container-1", "demo");
+            manager.injectEcrRegistryMirror("container-1", demoCluster());
 
             verify(copyCmd).exec();
         }
@@ -1960,7 +2051,7 @@ class EksClusterManagerTest {
             ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
             builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
             regionResolver = Mockito.mock(RegionResolver.class);
             when(regionResolver.getAccountId()).thenReturn("000000000000");
@@ -2789,7 +2880,7 @@ class EksClusterManagerTest {
             containerBuilder = Mockito.mock(ContainerBuilder.class);
             builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
             portAllocator = Mockito.mock(PortAllocator.class);
             when(portAllocator.allocate(6500, 6599)).thenReturn(6500);
@@ -3059,7 +3150,7 @@ class EksClusterManagerTest {
             ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
             ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
             DockerHostResolver dockerHostResolver = Mockito.mock(DockerHostResolver.class);
             when(dockerHostResolver.resolve()).thenReturn("host.docker.internal");
@@ -3070,7 +3161,7 @@ class EksClusterManagerTest {
             when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
                     "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
-            FlociCertificateAuthority certificateAuthority = Mockito.mock(FlociCertificateAuthority.class);
+            FlociCertificateAuthority certificateAuthority = inlineMock(FlociCertificateAuthority.class);
             when(certificateAuthority.caPem()).thenReturn(CA_PEM);
 
             manager = new EksClusterManager(
@@ -3192,7 +3283,7 @@ class EksClusterManagerTest {
             ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
             builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
             PortAllocator portAllocator = Mockito.mock(PortAllocator.class);
             when(portAllocator.allocate(6440, 6499)).thenReturn(6443);
@@ -3622,7 +3713,7 @@ class EksClusterManagerTest {
             containerBuilder = Mockito.mock(ContainerBuilder.class);
             builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
             RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
             when(regionResolver.getAccountId()).thenReturn("000000000000");
@@ -3747,7 +3838,7 @@ class EksClusterManagerTest {
                     Mockito.mock(PortAllocator.class), Mockito.mock(DockerHostResolver.class),
                     Mockito.mock(EcrRegistryManager.class), config, new RegionResolver("us-east-1", "000000000000"),
                     Mockito.mock(Ec2MetadataServer.class), Mockito.mock(EksOidcService.class),
-                    Mockito.mock(FlociCertificateAuthority.class), Mockito.mock(ContainerLogStreamer.class),
+                    inlineMock(FlociCertificateAuthority.class), Mockito.mock(ContainerLogStreamer.class),
                     new InMemoryStorage<>()));
         }
 

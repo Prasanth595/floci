@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -38,10 +39,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 @ApplicationScoped
 public class CloudControlService {
@@ -77,12 +83,38 @@ public class CloudControlService {
      * Entries are dropped when the resource is deleted.
      */
     private final Map<String, CreatedResource> created = new ConcurrentHashMap<>();
-    private final ExecutorService executor =
-            Executors.newFixedThreadPool(4);
+    /** For the constructors that take no {@link EmulatorConfig}; match its cloudcontrol defaults. */
+    private static final int DEFAULT_WORKER_COUNT = 4;
+    private static final int DEFAULT_QUEUE_CAPACITY = 64;
+
+    /**
+     * Bounded so a burst of CreateResource calls cannot grow the backlog without limit; a new create
+     * that finds the queue full is refused with {@code ThrottlingException}, the async contract's
+     * backpressure signal. Startup replay is exempt, see {@link #deferredReplay}.
+     */
+    private final ThreadPoolExecutor executor;
+
+    /**
+     * Replayed creates that did not fit {@link #executor}'s bounded queue during startup recovery.
+     * Drained by {@link #drainDeferredReplay()} on a daemon thread: the request that constructs
+     * Cloud Control must not wait on a provisioning task to free a slot, since provisioning can take
+     * far longer than that request is willing to wait.
+     */
+    private final ConcurrentLinkedQueue<Runnable> deferredReplay = new ConcurrentLinkedQueue<>();
+    /** Ensures only one drainer thread is handing {@link #deferredReplay} to the executor at a time. */
+    private final AtomicBoolean replayDrainerRunning = new AtomicBoolean(false);
+    /** The drainer thread, so {@link #shutdown()} can interrupt a blocked {@code put}. */
+    private volatile Thread replayDrainer;
+    /** How many replayed creates were parked because the worker queue was full at recovery time. */
+    private final AtomicLong replayOverflowCount = new AtomicLong();
 
     @PreDestroy
     void shutdown() {
         executor.shutdownNow();
+        Thread drainer = replayDrainer;
+        if (drainer != null) {
+            drainer.interrupt();
+        }
     }
 
     private void restorePersistedState() {
@@ -117,8 +149,9 @@ public class CloudControlService {
                 String identifier = created.entrySet().stream()
                         .filter(resource -> resource.getValue() == recovered)
                         .map(Map.Entry::getKey)
-                        .map(key -> key.substring((accountId + "|").length()))
-                        .map(key -> key.substring(key.lastIndexOf('|') + 1))
+                        // account|region|type|identifier: the identifier is everything after the
+                        // third separator, since a compound one holds separators of its own.
+                        .map(key -> key.split("\\|", 4)[3])
                         .findFirst().orElse(normalized.identifier());
                 normalized = new ProgressEvent(normalized.typeName(), identifier, normalized.requestToken(),
                         normalized.operation(), "SUCCESS", null, recovered.model(), accountId);
@@ -130,13 +163,15 @@ public class CloudControlService {
             if ("IN_PROGRESS".equals(normalized.operationStatus())
                     && "CREATE".equals(normalized.operation())
                     && persisted.desiredStateJson() != null) {
+                JsonNode props;
                 try {
-                    JsonNode props = mapper.readTree(persisted.desiredStateJson());
-                    submitCreate(persisted.region(), accountId, normalized.typeName(),
-                            persisted.desiredStateJson(), normalized.requestToken(), normalized, props);
-                } catch (Exception e) {
+                    props = mapper.readTree(persisted.desiredStateJson());
+                } catch (JsonProcessingException e) {
                     record(normalized.failed("Persisted DesiredState is not valid JSON."));
+                    continue;
                 }
+                submitCreate(persisted.region(), accountId, normalized.typeName(),
+                        persisted.desiredStateJson(), normalized.requestToken(), normalized, props, true);
             }
         }
         trimPersistedRequests();
@@ -182,12 +217,14 @@ public class CloudControlService {
     @Inject
     public CloudControlService(S3Service s3Service, Ec2Service ec2Service,
                                IamService iamService, CfnResourceDispatcher provisioner,
-                               ObjectMapper mapper, StorageFactory storageFactory) {
+                               ObjectMapper mapper, StorageFactory storageFactory, EmulatorConfig config) {
         this(s3Service, ec2Service, iamService, provisioner, mapper,
                 storageFactory.create("cloudcontrol", "cloudcontrol-requests.json",
                         new TypeReference<Map<String, PersistedRequest>>() {}),
                 storageFactory.create("cloudcontrol", "cloudcontrol-created.json",
-                        new TypeReference<Map<String, PersistedCreatedResource>>() {}));
+                        new TypeReference<Map<String, PersistedCreatedResource>>() {}),
+                config.services().cloudcontrol().createWorkerThreads(),
+                config.services().cloudcontrol().createQueueCapacity());
     }
 
     public CloudControlService(S3Service s3Service, Ec2Service ec2Service,
@@ -203,6 +240,16 @@ public class CloudControlService {
                                 ObjectMapper mapper,
                                 AccountAwareStorageBackend<PersistedRequest> requestStore,
                                 AccountAwareStorageBackend<PersistedCreatedResource> createdStore) {
+        this(s3Service, ec2Service, iamService, provisioner, mapper, requestStore, createdStore,
+                DEFAULT_WORKER_COUNT, DEFAULT_QUEUE_CAPACITY);
+    }
+
+    CloudControlService(S3Service s3Service, Ec2Service ec2Service,
+                                IamService iamService, CfnResourceDispatcher provisioner,
+                                ObjectMapper mapper,
+                                AccountAwareStorageBackend<PersistedRequest> requestStore,
+                                AccountAwareStorageBackend<PersistedCreatedResource> createdStore,
+                                int workerCount, int queueCapacity) {
         this.s3Service = s3Service;
         this.ec2Service = ec2Service;
         this.iamService = iamService;
@@ -210,6 +257,15 @@ public class CloudControlService {
         this.mapper = mapper;
         this.requestStore = requestStore;
         this.createdStore = createdStore;
+        AtomicInteger workerNumber = new AtomicInteger();
+        this.executor = new ThreadPoolExecutor(workerCount, workerCount, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(queueCapacity),
+                r -> {
+                    Thread t = new Thread(r, "cloudcontrol-worker-" + workerNumber.incrementAndGet());
+                    t.setDaemon(true);
+                    return t;
+                },
+                new ThreadPoolExecutor.AbortPolicy());
         restorePersistedState();
     }
 
@@ -254,25 +310,125 @@ public class CloudControlService {
 
     private void submitCreate(String region, String accountId, String typeName, String desiredStateJson,
                               String token, ProgressEvent pending, JsonNode props) {
+        submitCreate(region, accountId, typeName, desiredStateJson, token, pending, props, false);
+    }
+
+    private void submitCreate(String region, String accountId, String typeName, String desiredStateJson,
+                              String token, ProgressEvent pending, JsonNode props, boolean replay) {
         persistRequest(new PersistedRequest(pending, region, desiredStateJson, System.currentTimeMillis()));
-        executor.submit(() -> RequestScopes.runAs(accountId, () -> {
+        Runnable task = () -> RequestScopes.runAs(accountId, () -> {
             try {
                 StackResource resource = provisioner.provisionStandalone(typeName, props, region, accountId);
                 if (resource == null || resource.getPhysicalId() == null) {
-                    record(pending.failed("CreateResource is not supported for " + typeName + "."));
+                    recordCreateFailure(pending, "CreateResource is not supported for " + typeName + ".");
                 } else {
+                    String identifier = identifierOf(typeName, resource.getPhysicalId(), props);
                     String model = resourceModel(region, typeName, resource.getPhysicalId(), props);
                     CreatedResource createdResource = new CreatedResource(token, accountId,
                             resource.getAttributes() == null ? Map.of() : Map.copyOf(resource.getAttributes()), model);
-                    created.put(createdKey(accountId, region, typeName, resource.getPhysicalId()), createdResource);
-                    persistCreated(accountId, region, typeName, resource.getPhysicalId(), createdResource);
-                    record(new ProgressEvent(typeName, resource.getPhysicalId(),
+                    created.put(createdKey(accountId, region, typeName, identifier), createdResource);
+                    persistCreated(accountId, region, typeName, identifier, createdResource);
+                    record(new ProgressEvent(typeName, identifier,
                             token, "CREATE", "SUCCESS", null, model, accountId));
                 }
             } catch (Exception e) {
-                record(pending.failed(e.getMessage() == null ? e.toString() : e.getMessage()));
+                recordCreateFailure(pending, e.getMessage() == null ? e.toString() : e.getMessage());
             }
-        }));
+        });
+        try {
+            executor.submit(task);
+        } catch (RejectedExecutionException e) {
+            if (replay) {
+                // Startup replay is already-accepted, already-persisted work, so it must never be
+                // dropped or failed for being unable to reach the queue. Park it and let the drainer
+                // hand it to the executor once a slot frees; a blocking put here would block the
+                // request that constructs Cloud Control for as long as provisioning takes.
+                replayOverflowCount.incrementAndGet();
+                deferredReplay.add(task);
+                startReplayDrainer();
+                return;
+            }
+            // The queue is full. Drop the pending token so it is not left unfulfillable and report
+            // the async API's backpressure error rather than leaking a raw 500.
+            requests.remove(token);
+            requestOrder.remove(token);
+            requestStore.deleteForAccount(accountId == null ? DEFAULT_ACCOUNT : accountId, token);
+            throw new AwsException("ThrottlingException",
+                    "Cloud Control is at capacity; retry the request.", 400);
+        }
+    }
+
+    /**
+     * Records a create as FAILED, unless Cloud Control is shutting down. Shutdown interrupts in-flight
+     * provisioning, so a failure then is the shutdown's, not the request's: the request stays
+     * persisted as IN_PROGRESS and replays on the next start, like a create still in the queue.
+     */
+    private void recordCreateFailure(ProgressEvent pending, String message) {
+        if (executor.isShutdown()) {
+            return;
+        }
+        record(pending.failed(message));
+    }
+
+    /**
+     * Starts the single replay drainer if one is not already running. Concurrent parks are safe:
+     * only the thread that flips {@link #replayDrainerRunning} from false to true spawns a drainer.
+     */
+    private void startReplayDrainer() {
+        if (replayDrainerRunning.compareAndSet(false, true)) {
+            Thread drainer = new Thread(this::drainDeferredReplay, "cloudcontrol-replay-drainer");
+            drainer.setDaemon(true);
+            replayDrainer = drainer;
+            drainer.start();
+        }
+    }
+
+    /**
+     * Hands parked replay tasks to {@link #executor} as slots free. {@code put} blocks only this
+     * daemon thread, so the constructing thread has already returned. The drainer exits once the
+     * backlog is empty, but re-checks after clearing the running flag so a task parked in that window
+     * is not stranded. It also exits on shutdown: an interrupted {@code put} re-parks its task, and
+     * every parked task stays persisted and replays on the next start.
+     *
+     * <p>Putting straight into the queue skips {@code execute}'s worker start, which is safe here: a
+     * task is only parked after a rejection, and with core size equal to max size a rejection means
+     * every worker thread is already running.
+     */
+    private void drainDeferredReplay() {
+        while (!executor.isShutdown()) {
+            Runnable next = deferredReplay.poll();
+            if (next == null) {
+                replayDrainerRunning.set(false);
+                if (deferredReplay.isEmpty() || !replayDrainerRunning.compareAndSet(false, true)) {
+                    return;
+                }
+                continue;
+            }
+            try {
+                executor.getQueue().put(next);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                deferredReplay.add(next);
+                replayDrainerRunning.set(false);
+                return;
+            }
+        }
+        replayDrainerRunning.set(false);
+    }
+
+    /** Number of replayed creates parked because the worker queue was full at recovery time. */
+    long replayOverflowCount() {
+        return replayOverflowCount.get();
+    }
+
+    /** The replay drainer thread, or null if recovery never overflowed the worker queue. */
+    Thread replayDrainer() {
+        return replayDrainer;
+    }
+
+    /** Waits for the workers to finish after {@link #shutdown()}; true once they all have. */
+    boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+        return executor.awaitTermination(timeout, unit);
     }
 
     /**
@@ -300,6 +456,20 @@ public class CloudControlService {
         return propertiesString(model);
     }
 
+    /**
+     * The identifier Cloud Control hands out for a created resource: the type's primary identifier,
+     * which for most types is the physical id. A compound one joins its parts with {@code |}, as
+     * Cloud Control does; an {@code AWS::ApiGatewayV2::ApiMapping} is {@code <ApiMappingId>|<DomainName>},
+     * where CloudFormation's {@code Ref} is the bare id.
+     */
+    private static String identifierOf(String typeName, String physicalId, JsonNode desiredState) {
+        if ("AWS::ApiGatewayV2::ApiMapping".equals(typeName) && desiredState != null
+                && desiredState.path("DomainName").isTextual()) {
+            return physicalId + "|" + desiredState.path("DomainName").asText();
+        }
+        return physicalId;
+    }
+
     /** The read-only primary identifier property name for the common EC2/IAM types. */
     private static String primaryIdentifierField(String typeName) {
         return switch (typeName) {
@@ -310,6 +480,7 @@ public class CloudControlService {
             case "AWS::EC2::InternetGateway" -> "InternetGatewayId";
             case "AWS::EC2::RouteTable" -> "RouteTableId";
             case "AWS::EC2::LaunchTemplate" -> "LaunchTemplateId";
+            case "AWS::ApiGatewayV2::ApiMapping" -> "ApiMappingId";
             default -> "Id";
         };
     }

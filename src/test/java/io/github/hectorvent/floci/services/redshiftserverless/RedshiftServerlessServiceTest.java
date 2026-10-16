@@ -368,8 +368,10 @@ class RedshiftServerlessServiceTest {
 
     @Test
     void createWorkgroupRequiresAnExistingNamespace() {
-        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
-                () -> createWorkgroup("wg-orphan", "absent-ns")).getErrorCode());
+        AwsException ex = assertThrows(AwsException.class,
+                () -> createWorkgroup("wg-orphan", "absent-ns"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
     }
 
     @Test
@@ -378,10 +380,15 @@ class RedshiftServerlessServiceTest {
         create("two-ns");
         createWorkgroup("wg-first", "one-ns");
 
-        assertEquals("ConflictException", assertThrows(AwsException.class,
-                () -> createWorkgroup("wg-second", "one-ns")).getErrorCode());
-        assertEquals("ConflictException", assertThrows(AwsException.class,
-                () -> createWorkgroup("wg-first", "two-ns")).getErrorCode());
+        AwsException conflict1 = assertThrows(AwsException.class,
+                () -> createWorkgroup("wg-second", "one-ns"));
+        assertEquals("ConflictException", conflict1.getErrorCode());
+        assertEquals(400, conflict1.getHttpStatus());
+
+        AwsException conflict2 = assertThrows(AwsException.class,
+                () -> createWorkgroup("wg-first", "two-ns"));
+        assertEquals("ConflictException", conflict2.getErrorCode());
+        assertEquals(400, conflict2.getHttpStatus());
     }
 
     @Test
@@ -863,6 +870,7 @@ class RedshiftServerlessServiceTest {
         RedshiftServerlessSnapshot snapshot = service.createSnapshot("arn-snap", "arn-ns", null, null, REGION);
 
         assertEquals("arn-snap", service.snapshotNameFromArn(snapshot.getSnapshotArn(), REGION));
+        assertEquals("arn-snap", service.snapshotNameFromArn(snapshot.getSnapshotArn(), REGION, "resourceArn"));
         for (String foreign : List.of(
                 "arn:aws:redshift-serverless:eu-west-1:" + ACCOUNT_ID + ":snapshot/arn-snap",
                 "arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/arn-snap",
@@ -870,6 +878,12 @@ class RedshiftServerlessServiceTest {
             AwsException rejected = assertThrows(AwsException.class,
                     () -> service.snapshotNameFromArn(foreign, REGION));
             assertEquals("ValidationException", rejected.getErrorCode());
+            assertEquals("snapshotArn does not identify a snapshot in this account and Region.", rejected.getMessage());
+
+            AwsException rejectedResource = assertThrows(AwsException.class,
+                    () -> service.snapshotNameFromArn(foreign, REGION, "resourceArn"));
+            assertEquals("ValidationException", rejectedResource.getErrorCode());
+            assertEquals("resourceArn does not identify a snapshot in this account and Region.", rejectedResource.getMessage());
         }
     }
 
@@ -1017,6 +1031,66 @@ class RedshiftServerlessServiceTest {
 
         AwsException missing = assertThrows(AwsException.class, () -> service.getSnapshot("snapdel", REGION));
         assertEquals("ResourceNotFoundException", missing.getErrorCode());
+    }
+
+    @Test
+    void updateSnapshotChangesOnlyTheRetentionPeriod() {
+        create("upd-snap-ns");
+        service.createSnapshot("upd-snap", "upd-snap-ns", 30, Map.of("env", "dev"), REGION);
+
+        RedshiftServerlessSnapshot updated = service.updateSnapshot("upd-snap", 90, REGION);
+
+        assertEquals(90, updated.getRetentionPeriod());
+        assertEquals(90, service.getSnapshot("upd-snap", REGION).getRetentionPeriod());
+        assertEquals("upd-snap-ns", updated.getNamespaceName());
+        assertEquals(Map.of("env", "dev"), service.listTagsForResource(updated.getSnapshotArn(), REGION));
+    }
+
+    @Test
+    void updateSnapshotAcceptsIndefiniteRetentionAndLeavesAnOmittedPeriodAlone() {
+        create("upd-indef-ns");
+        service.createSnapshot("upd-indef", "upd-indef-ns", 30, null, REGION);
+
+        assertEquals(30, service.updateSnapshot("upd-indef", null, REGION).getRetentionPeriod());
+        assertNull(service.updateSnapshot("upd-indef", -1, REGION).getRetentionPeriod());
+        assertNull(service.getSnapshot("upd-indef", REGION).getRetentionPeriod());
+    }
+
+    @Test
+    void updateSnapshotRejectsAnInvalidRetentionWithoutChangingTheSnapshot() {
+        create("upd-bad-ns");
+        service.createSnapshot("upd-bad", "upd-bad-ns", 30, null, REGION);
+
+        for (int bad : new int[] {0, 3654, -2}) {
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> service.updateSnapshot("upd-bad", bad, REGION));
+            assertEquals("ValidationException", rejected.getErrorCode());
+        }
+        assertEquals(30, service.getSnapshot("upd-bad", REGION).getRetentionPeriod());
+    }
+
+    @Test
+    void updateSnapshotOfAnUnknownSnapshotIsNotFound() {
+        AwsException missing = assertThrows(AwsException.class, () -> service.updateSnapshot("nope-snap", 5, REGION));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+        assertThrows(AwsException.class, () -> service.updateSnapshot(null, 5, REGION));
+    }
+
+    @Test
+    void creatingWorkgroupWithUnknownTrackNameIsRejected() {
+        create("tr-ns");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createWorkgroup("tr-wg", "tr-ns", settings(null, null, null, "nightly"), null, REGION));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void updatingWorkgroupWithUnknownTrackNameIsRejected() {
+        create("upd-tr-ns");
+        createWorkgroup("upd-tr-wg", "upd-tr-ns");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateWorkgroup("upd-tr-wg", settings(null, null, null, "preview"), REGION));
+        assertEquals("ValidationException", ex.getErrorCode());
     }
 
     private Namespace create(String namespaceName) {

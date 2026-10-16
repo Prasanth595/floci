@@ -5433,7 +5433,7 @@ class CloudFormationIntegrationTest {
                     "FunctionName": { "Ref": "MyFunction" },
                     "Enabled": true,
                     "BatchSize": 100,
-                    "Topics": ["orders-topic", "events-topic"],
+                    "Topics": ["orders-topic"],
                     "SelfManagedEventSource": {
                       "Endpoints": {
                         "KAFKA_BOOTSTRAP_SERVERS": ["kafka-broker-1:9092", "kafka-broker-2:9092"]
@@ -5511,9 +5511,8 @@ class CloudFormationIntegrationTest {
 
         // Verify Topics
         JsonNode topics = esmNode.path("Topics");
-        assertTrue(topics.isArray() && topics.size() == 2);
+        assertTrue(topics.isArray() && topics.size() == 1);
         assertEquals("orders-topic", topics.get(0).asText());
-        assertEquals("events-topic", topics.get(1).asText());
 
         // Verify SelfManagedEventSource
         JsonNode smes = esmNode.path("SelfManagedEventSource");
@@ -10003,10 +10002,10 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
-    void updateStack_unsupportedResourceRollbackRemainsExplicitlyFailed() {
+    void updateStack_ssmRollbackRestoresTheValueAndTemplate() {
         String suffix = Long.toString(System.nanoTime(), 36);
-        String stackName = "unsupported-update-rollback-" + suffix;
-        String parameterName = "/cfn/unsupported-update-rollback/" + suffix;
+        String stackName = "ssm-update-rollback-" + suffix;
+        String parameterName = "/cfn/ssm-update-rollback/" + suffix;
         String template = """
             {
               "Resources": {
@@ -10032,7 +10031,7 @@ class CloudFormationIntegrationTest {
                   "Type": "AWS::SecretsManager::Secret",
                   "DependsOn": "Parameter",
                   "Properties": {
-                    "Name": "unsupported-update-rollback-secret-%s",
+                    "Name": "ssm-update-rollback-secret-%s",
                     "SecretString": "explicit",
                     "GenerateSecretString": {"PasswordLength": 32}
                   }
@@ -10067,8 +10066,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<StackStatus>UPDATE_ROLLBACK_FAILED</StackStatus>"))
-            .body(containsString("Parameter"));
+            .body(containsString("<StackStatus>UPDATE_ROLLBACK_COMPLETE</StackStatus>"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10079,7 +10077,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<LogicalResourceId>Parameter</LogicalResourceId>"))
-            .body(containsString("<ResourceStatus>UPDATE_FAILED</ResourceStatus>"))
+            .body(not(containsString("<ResourceStatus>UPDATE_FAILED</ResourceStatus>")))
             .body(not(containsString("<LogicalResourceId>BadSecret</LogicalResourceId>")));
 
         given()
@@ -10090,7 +10088,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Parameter.Value", equalTo("updated"));
+            .body("Parameter.Value", equalTo("initial"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10100,7 +10098,8 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("updated"));
+            .body(containsString("initial"))
+            .body(not(containsString("BadSecret")));
 
         given()
             .contentType("application/x-www-form-urlencoded")

@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -115,7 +116,7 @@ class RedshiftServerlessIntegrationTest {
                 .body("namespace.status", equalTo("DELETING"));
 
         call("GetNamespace", "{\"namespaceName\":\"lifecycle-ns\"}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 
@@ -124,7 +125,7 @@ class RedshiftServerlessIntegrationTest {
         call("CreateNamespace", "{\"namespaceName\":\"conflict-ns\",\"adminUsername\":\"admin\"}")
                 .statusCode(200);
         call("CreateNamespace", "{\"namespaceName\":\"conflict-ns\",\"adminUsername\":\"admin\"}")
-                .statusCode(409)
+                .statusCode(400)
                 .body("__type", equalTo("ConflictException"));
         call("DeleteNamespace", "{\"namespaceName\":\"conflict-ns\"}").statusCode(200);
     }
@@ -132,7 +133,7 @@ class RedshiftServerlessIntegrationTest {
     @Test
     void deletingAnUnknownNamespaceReturnsResourceNotFound() {
         call("DeleteNamespace", "{\"namespaceName\":\"absent-ns\"}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 
@@ -188,7 +189,7 @@ class RedshiftServerlessIntegrationTest {
         String absent = "arn:aws:redshift-serverless:us-east-1:000000000000:"
                 + "namespace/00000000-0000-0000-0000-000000000000";
         call("ListTagsForResource", "{\"resourceArn\":\"" + absent + "\"}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 
@@ -217,7 +218,7 @@ class RedshiftServerlessIntegrationTest {
                 .extract().path("snapshot.snapshotArn");
 
         call("CreateSnapshot", "{\"snapshotName\":\"snap-life\",\"namespaceName\":\"snap-life-ns\"}")
-                .statusCode(409)
+                .statusCode(400)
                 .body("__type", equalTo("ConflictException"));
 
         call("GetSnapshot", "{\"snapshotName\":\"snap-life\"}")
@@ -227,6 +228,14 @@ class RedshiftServerlessIntegrationTest {
                 .statusCode(200)
                 .body("snapshot.snapshotName", equalTo("snap-life"));
         call("GetSnapshot", "{\"snapshotArn\":\"arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/snap-life\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+
+        call("UpdateSnapshot", "{\"snapshotName\":\"snap-life\",\"retentionPeriod\":30}")
+                .statusCode(200)
+                .body("snapshot.snapshotRetentionPeriod", equalTo(30))
+                .body("snapshot.snapshotRemainingDays", equalTo(30));
+        call("UpdateSnapshot", "{\"snapshotName\":\"snap-life\",\"retentionPeriod\":0}")
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"));
 
@@ -265,7 +274,7 @@ class RedshiftServerlessIntegrationTest {
                 .statusCode(200)
                 .body("snapshot.snapshotName", equalTo("snap-life"));
         call("GetSnapshot", "{\"snapshotName\":\"snap-life\"}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 
@@ -308,14 +317,14 @@ class RedshiftServerlessIntegrationTest {
                 .body("workgroup.pendingTrackName", equalTo("trailing"));
 
         call("DeleteNamespace", "{\"namespaceName\":\"wg-life-ns\"}")
-                .statusCode(409)
+                .statusCode(400)
                 .body("__type", equalTo("ConflictException"));
 
         call("DeleteWorkgroup", "{\"workgroupName\":\"wg-life\"}")
                 .statusCode(200)
                 .body("workgroup.status", equalTo("DELETING"));
         call("GetWorkgroup", "{\"workgroupName\":\"wg-life\"}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
         call("DeleteNamespace", "{\"namespaceName\":\"wg-life-ns\"}").statusCode(200);
     }
@@ -347,7 +356,7 @@ class RedshiftServerlessIntegrationTest {
     @Test
     void workgroupCreateRejectsAnUnknownNamespaceADuplicateAndABadPort() {
         call("CreateWorkgroup", "{\"workgroupName\":\"wg-orphan\",\"namespaceName\":\"absent-ns\"}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
 
         call("CreateNamespace", "{\"namespaceName\":\"wg-err-ns\",\"adminUsername\":\"admin\"}").statusCode(200);
@@ -356,11 +365,232 @@ class RedshiftServerlessIntegrationTest {
                 .body("__type", equalTo("ValidationException"));
         call("CreateWorkgroup", "{\"workgroupName\":\"wg-err\",\"namespaceName\":\"wg-err-ns\"}").statusCode(200);
         call("CreateWorkgroup", "{\"workgroupName\":\"wg-err\",\"namespaceName\":\"wg-err-ns\"}")
-                .statusCode(409)
+                .statusCode(400)
                 .body("__type", equalTo("ConflictException"));
 
         call("DeleteWorkgroup", "{\"workgroupName\":\"wg-err\"}").statusCode(200);
         call("DeleteNamespace", "{\"namespaceName\":\"wg-err-ns\"}").statusCode(200);
+    }
+
+    @Test
+    void usageLimitLifecycleFollowsTheApiModel() {
+        call("CreateNamespace", "{\"namespaceName\":\"limit-ns\",\"adminUserPassword\":\"Secret123!\"}")
+                .statusCode(200);
+        String workgroupArn = call("CreateWorkgroup", "{\"workgroupName\":\"limit-wg\",\"namespaceName\":\"limit-ns\"}")
+                .statusCode(200)
+                .extract().path("workgroup.workgroupArn");
+
+        String limitId = call("CreateUsageLimit", "{\"resourceArn\":\"" + workgroupArn
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":120,\"period\":\"daily\"}")
+                .statusCode(200)
+                .body("usageLimit.amount", equalTo(120))
+                .body("usageLimit.period", equalTo("daily"))
+                .body("usageLimit.breachAction", equalTo("log"))
+                .body("usageLimit.usageLimitArn", matchesPattern(
+                        "arn:aws:redshift-serverless:us-east-1:\\d{12}:usagelimit/.+"))
+                .extract().path("usageLimit.usageLimitId");
+
+        String secondLimitId = call("CreateUsageLimit", "{\"resourceArn\":\"" + workgroupArn
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":200,\"period\":\"monthly\"}")
+                .statusCode(200)
+                .extract().path("usageLimit.usageLimitId");
+
+        call("UpdateUsageLimit", "{\"usageLimitId\":\"" + limitId + "\",\"amount\":240,\"breachAction\":\"deactivate\"}")
+                .statusCode(200)
+                .body("usageLimit.amount", equalTo(240))
+                .body("usageLimit.breachAction", equalTo("deactivate"))
+                .body("usageLimit.period", equalTo("daily"));
+
+        call("ListUsageLimits", "{\"resourceArn\":\"" + workgroupArn + "\"}")
+                .statusCode(200)
+                .body("usageLimits", hasSize(2));
+
+        call("DeleteUsageLimit", "{\"usageLimitId\":\"" + secondLimitId + "\"}").statusCode(200);
+
+        call("ListUsageLimits", "{\"resourceArn\":\"" + workgroupArn + "\"}")
+                .statusCode(200)
+                .body("usageLimits", hasSize(1))
+                .body("usageLimits[0].usageLimitId", equalTo(limitId));
+
+        call("DeleteWorkgroup", "{\"workgroupName\":\"limit-wg\"}").statusCode(200);
+        call("GetUsageLimit", "{\"usageLimitId\":\"" + limitId + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void listUsageLimitsPaginatesAndRejectsAnOutOfRangePageSize() {
+        call("CreateNamespace", "{\"namespaceName\":\"page-limit-ns\",\"adminUserPassword\":\"Secret123!\"}")
+                .statusCode(200);
+        String workgroupArn = call("CreateWorkgroup",
+                "{\"workgroupName\":\"page-limit-wg\",\"namespaceName\":\"page-limit-ns\"}")
+                .statusCode(200)
+                .extract().path("workgroup.workgroupArn");
+        call("CreateUsageLimit", "{\"resourceArn\":\"" + workgroupArn
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":1}").statusCode(200);
+        call("CreateUsageLimit", "{\"resourceArn\":\"" + workgroupArn
+                + "\",\"usageType\":\"cross-region-datasharing\",\"amount\":2}").statusCode(200);
+
+        String nextToken = call("ListUsageLimits", "{\"resourceArn\":\"" + workgroupArn + "\",\"maxResults\":1}")
+                .statusCode(200)
+                .body("usageLimits", hasSize(1))
+                .body("nextToken", notNullValue())
+                .extract().path("nextToken");
+        call("ListUsageLimits", "{\"resourceArn\":\"" + workgroupArn + "\",\"maxResults\":1,\"nextToken\":\""
+                + nextToken + "\"}")
+                .statusCode(200)
+                .body("usageLimits", hasSize(1))
+                .body("nextToken", nullValue());
+
+        call("ListUsageLimits", "{\"maxResults\":0}")
+                .statusCode(400)
+                .body("__type", equalTo("InvalidPaginationException"));
+    }
+
+    @Test
+    void aWorkgroupRecreatedUnderTheSameNameDoesNotInheritUsageLimits() {
+        call("CreateNamespace", "{\"namespaceName\":\"again-limit-ns\",\"adminUserPassword\":\"Secret123!\"}")
+                .statusCode(200);
+        String firstArn = call("CreateWorkgroup",
+                "{\"workgroupName\":\"again-limit-wg\",\"namespaceName\":\"again-limit-ns\"}")
+                .statusCode(200)
+                .extract().path("workgroup.workgroupArn");
+        String oldLimitId = call("CreateUsageLimit", "{\"resourceArn\":\"" + firstArn
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":1}")
+                .statusCode(200)
+                .extract().path("usageLimit.usageLimitId");
+
+        call("DeleteWorkgroup", "{\"workgroupName\":\"again-limit-wg\"}").statusCode(200);
+        String secondArn = call("CreateWorkgroup",
+                "{\"workgroupName\":\"again-limit-wg\",\"namespaceName\":\"again-limit-ns\"}")
+                .statusCode(200)
+                .extract().path("workgroup.workgroupArn");
+
+        call("GetUsageLimit", "{\"usageLimitId\":\"" + oldLimitId + "\"}").statusCode(400);
+        call("ListUsageLimits", "{\"resourceArn\":\"" + secondArn + "\"}")
+                .statusCode(200)
+                .body("usageLimits", hasSize(0));
+        call("CreateUsageLimit", "{\"resourceArn\":\"" + secondArn
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":1}").statusCode(200);
+    }
+
+    @Test
+    void createUsageLimitRejectsAnUnknownWorkgroup() {
+        call("CreateUsageLimit", "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:000000000000:workgroup/none"
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":1}")
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void releaseTracksAndEmptyListsRoundTripOverTheWire() {
+        call("ListTracks", "{}")
+                .statusCode(200)
+                .body("tracks.trackName", equalTo(List.of("current", "trailing")));
+        call("GetTrack", "{\"trackName\":\"trailing\"}")
+                .statusCode(200)
+                .body("track.trackName", equalTo("trailing"));
+        call("GetTrack", "{\"trackName\":\"preview\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        call("GetTrack", "{}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+
+        call("ListManagedWorkgroups", "{}").statusCode(200).body("managedWorkgroups", hasSize(0));
+        call("ListReservations", "{}").statusCode(200).body("reservationsList", hasSize(0));
+        call("ListReservationOfferings", "{}").statusCode(200).body("reservationOfferingsList", hasSize(0));
+        call("GetReservation", "{\"reservationId\":\"r-1\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        call("CreateReservation", "{\"offeringId\":\"o-1\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void resourcePolicyRoundTripsOverTheWire() {
+        call("CreateNamespace", "{\"namespaceName\":\"policy-ns\",\"adminUsername\":\"admin\"}").statusCode(200);
+        String snapshotArn = call("CreateSnapshot", "{\"snapshotName\":\"policy-snap\",\"namespaceName\":\"policy-ns\"}")
+                .statusCode(200).extract().path("snapshot.snapshotArn");
+
+        call("PutResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\",\"policy\":\"{\\\"Version\\\":\\\"2012-10-17\\\"}\"}")
+                .statusCode(200)
+                .body("resourcePolicy.resourceArn", equalTo(snapshotArn));
+        call("GetResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}")
+                .statusCode(200)
+                .body("resourcePolicy.policy", equalTo("{\"Version\":\"2012-10-17\"}"));
+        call("DeleteResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}").statusCode(200);
+        call("GetResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        call("PutResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        call("PutResourcePolicy", "{\"policy\":\"{\\\"Version\\\":\\\"2012-10-17\\\"}\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        call("GetResourcePolicy", "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/x\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("resourceArn does not identify a snapshot in this account and Region."));
+        call("DeleteResourcePolicy", "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/x\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("resourceArn does not identify a snapshot in this account and Region."));
+    }
+
+    @Test
+    void resourcePolicyIsIsolatedPerAccount() {
+        String accountA = "111122223333";
+        String accountB = "444455556666";
+        String policyJson = "{\"Version\":\"2012-10-17\"}";
+        String escapedPolicy = "{\\\"Version\\\":\\\"2012-10-17\\\"}";
+
+        callAs(accountA, "CreateNamespace", "{\"namespaceName\":\"acct-ns\",\"adminUsername\":\"admin\"}").statusCode(200);
+        String snapArnA = callAs(accountA, "CreateSnapshot", "{\"snapshotName\":\"acct-snap\",\"namespaceName\":\"acct-ns\"}")
+                .statusCode(200).extract().path("snapshot.snapshotArn");
+
+        callAs(accountA, "PutResourcePolicy", "{\"resourceArn\":\"" + snapArnA + "\",\"policy\":\"" + escapedPolicy + "\"}")
+                .statusCode(200)
+                .body("resourcePolicy.resourceArn", equalTo(snapArnA));
+
+        callAs(accountB, "GetResourcePolicy", "{\"resourceArn\":\"" + snapArnA + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("resourceArn does not identify a snapshot in this account and Region."));
+        callAs(accountB, "DeleteResourcePolicy", "{\"resourceArn\":\"" + snapArnA + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("resourceArn does not identify a snapshot in this account and Region."));
+        callAs(accountB, "PutResourcePolicy", "{\"resourceArn\":\"" + snapArnA + "\",\"policy\":\"" + escapedPolicy + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("resourceArn does not identify a snapshot in this account and Region."));
+
+        callAs(accountB, "CreateNamespace", "{\"namespaceName\":\"acct-ns\",\"adminUsername\":\"admin\"}").statusCode(200);
+        String snapArnB = callAs(accountB, "CreateSnapshot", "{\"snapshotName\":\"acct-snap\",\"namespaceName\":\"acct-ns\"}")
+                .statusCode(200).extract().path("snapshot.snapshotArn");
+
+        callAs(accountB, "GetResourcePolicy", "{\"resourceArn\":\"" + snapArnB + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+
+        callAs(accountA, "GetResourcePolicy", "{\"resourceArn\":\"" + snapArnA + "\"}")
+                .statusCode(200)
+                .body("resourcePolicy.policy", equalTo(policyJson));
+    }
+
+    private static io.restassured.response.ValidatableResponse callAs(String accountId, String action, String body) {
+        return given()
+                .header("X-Amz-Target", TARGET_PREFIX + action)
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + accountId
+                        + "/20260904/us-east-1/redshift-serverless/aws4_request")
+                .contentType(CONTENT_TYPE)
+                .body(body)
+                .when()
+                .post("/")
+                .then();
     }
 
     private static io.restassured.response.ValidatableResponse call(String action, String body) {

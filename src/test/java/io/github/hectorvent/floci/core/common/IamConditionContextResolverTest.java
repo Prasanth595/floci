@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.dynamodb.backend.NativeDynamoDbBackend;
@@ -26,17 +27,22 @@ import org.mockito.ArgumentCaptor;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -48,6 +54,7 @@ class IamConditionContextResolverTest {
     private Instance<DynamoDbFacade> dynamoDbFacadeInstance;
     private Ec2Service ec2Service;
     private S3Service s3Service;
+    private CloudWatchLogsService logsService;
     private RequestContext requestContext;
     private EmulatorConfig config;
     private IamConditionContextResolver resolver;
@@ -69,12 +76,55 @@ class IamConditionContextResolverTest {
         Instance<S3Service> s3ServiceInstance = mock(Instance.class);
         when(s3ServiceInstance.isResolvable()).thenReturn(true);
         when(s3ServiceInstance.get()).thenReturn(s3Service);
+        logsService = mock(CloudWatchLogsService.class);
+        Instance<CloudWatchLogsService> logsServiceInstance = mock(Instance.class);
+        when(logsServiceInstance.isResolvable()).thenReturn(true);
+        when(logsServiceInstance.get()).thenReturn(logsService);
         requestContext = new RequestContext();
         requestContext.setRegion("us-east-1");
         config = mock(EmulatorConfig.class);
         when(config.defaultRegion()).thenReturn("us-east-1");
         resolver = new IamConditionContextResolver(
-                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, requestContext, config);
+                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, requestContext, config);
+    }
+
+    @Test
+    void logStreamTagsUseRawParentNameAndRequestRegion() throws Exception {
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        when(request.getProperty("floci.bufferedJsonBody"))
+                .thenReturn(mapper.readTree("{\"logGroupName\":\" group \",\"logStreamName\":42}"));
+        when(logsService.listTagsLogGroup(" group ", "eu-west-1")).thenReturn(Map.of("team", "blue"));
+        requestContext.setRegion("eu-west-1");
+        for (String action : List.of("logs:CreateLogStream", "logs:DeleteLogStream")) {
+            assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.resolve("logs", action, request));
+        }
+        requestContext.setRegion(null);
+        when(logsService.listTagsLogGroup(" group ", "us-east-1")).thenReturn(Map.of("team", "red"));
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("red")),
+                resolver.resolve("logs", "logs:CreateLogStream", request));
+    }
+
+    @Test
+    void missingLogGroupTagsDoNotReplaceTheHandlersMissingResourceError() throws Exception {
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(mapper.readTree("{\"logGroupName\":42}"));
+        when(logsService.listTagsLogGroup("42", "us-east-1"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "missing", 400));
+        assertNull(resolver.resolve("logs", "logs:DeleteLogStream", request));
+    }
+
+    @Test
+    void unexpectedLogGroupLookupFailuresCannotEraseTagDenies() throws Exception {
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(mapper.readTree("{\"logGroupName\":\"group\"}"));
+        AwsException failure = new AwsException("InternalFailure", "storage unavailable", 500);
+        when(logsService.listTagsLogGroup("group", "us-east-1")).thenThrow(failure);
+        assertSame(failure, assertThrows(AwsException.class,
+                () -> resolver.resolve("logs", "logs:CreateLogStream", request)));
+        IllegalStateException unexpected = new IllegalStateException("unavailable");
+        doThrow(unexpected).when(logsService).listTagsLogGroup("group", "us-east-1");
+        assertSame(unexpected, assertThrows(IllegalStateException.class,
+                () -> resolver.resolve("logs", "logs:DeleteLogStream", request)));
     }
 
     /** A form request whose body can be read again, as a real request's restored stream can. */
@@ -92,6 +142,7 @@ class IamConditionContextResolverTest {
         UriInfo uriInfo = mock(UriInfo.class);
         when(containerRequest.getUriInfo()).thenReturn(uriInfo);
         when(uriInfo.getPath()).thenReturn(path);
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
         when(containerRequest.getEntityStream())
                 .thenReturn(new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
         return containerRequest;
@@ -110,6 +161,30 @@ class IamConditionContextResolverTest {
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    @Test
+    void iamPolicyContextKeepsEmptyValuesAndOmitsMissingValues() {
+        assertNull(resolver.resolve("iam", "iam:AttachRolePolicy", formRequest("RoleName=role")));
+        assertEquals(Map.of("iam:PolicyARN", List.of("")),
+                resolver.resolve("iam", "iam:AttachRolePolicy", formRequest("PolicyArn=")));
+        assertEquals(Map.of("iam:PolicyARN", List.of("")),
+                resolver.resolve("iam", "iam:AttachRolePolicy", formRequest("PolicyArn")));
+    }
+
+    @Test
+    void iamPolicyContextIsNotLeakedToOtherActions() {
+        for (String action : List.of("iam:GetPolicy", "iam:DeletePolicy", "iam:PutRolePolicy",
+                "iam:PutRolePermissionsBoundary")) {
+            assertNull(resolver.resolve("iam", action, formRequest("PolicyArn=example")));
+        }
+    }
+
+    @Test
+    void iamPolicyContextDecodesOnceAndPreservesCase() {
+        assertEquals(Map.of("iam:PolicyARN", List.of("arn:aws:iam::123456789012:policy/Team/A+B%2F")),
+                resolver.resolve("iam", "iam:AttachGroupPolicy",
+                        formRequest("PolicyArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FTeam%2FA%2BB%252F")));
     }
 
     @Test
@@ -147,6 +222,97 @@ class IamConditionContextResolverTest {
         assertNull(resolver.resolve("s3", "s3:DeleteObject", containerRequest));
         // A supported object action with nothing to read tags from offers no keys either.
         assertNull(resolver.resolve("s3", "s3:GetObject", containerRequest));
+    }
+
+    @Test
+    void objectTagKeysDecodeHeadersAndRetainCaseWithoutDuplicates() {
+        ContainerRequestContext request = s3Request("/bucket/object", "");
+        when(request.getHeaderString("x-amz-tagging"))
+                .thenReturn("%54eam=one&Team=two&team=three&Cost%20Center=four&bad=%zz");
+        Map<String, List<String>> conditions = resolver.resolve("s3", "s3:PutObject", request);
+        assertEquals(List.of("Team", "team", "Cost Center"), conditions.get("s3:RequestObjectTagKeys"));
+        assertEquals(List.of("two"), conditions.get("s3:RequestObjectTag/Team"));
+        assertFalse(conditions.containsKey("s3:RequestObjectTag/bad"));
+    }
+
+    @Test
+    void queryObjectTagKeysUseHeaderPrecedenceIncludingAnEmptyHeader() {
+        ContainerRequestContext request = s3Request("/bucket/object", "");
+        request.getUriInfo().getQueryParameters().putSingle("x-amz-tagging", "%54eam=payments");
+        Map<String, List<String>> query = resolver.resolve("s3", "s3:PutObject", request);
+        assertEquals(List.of("Team"), query.get("s3:RequestObjectTagKeys"));
+        assertEquals(List.of("payments"), query.get("s3:RequestObjectTag/Team"));
+        when(request.getHeaderString("x-amz-tagging")).thenReturn("Other=value");
+        assertEquals(List.of("Other"), resolver.resolve("s3", "s3:PutObject", request)
+                .get("s3:RequestObjectTagKeys"));
+        when(request.getHeaderString("x-amz-tagging")).thenReturn("");
+        assertNull(resolver.resolve("s3", "s3:PutObject", request));
+    }
+
+    @Test
+    void objectTagKeysComeOnlyFromTheRequestedXmlTags() {
+        ContainerRequestContext request = s3Request("/bucket/object",
+                "<Tagging><TagSet><Tag><Key>Team</Key><Value>payments</Value></Tag>"
+                        + "<Tag><Key>Cost&amp;Center</Key><Value>42</Value></Tag></TagSet></Tagging>");
+        when(request.getUriInfo().getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+        when(s3Service.getObjectTagging("bucket", "object", null)).thenReturn(Map.of("Previous", "old"));
+        Map<String, List<String>> conditions = resolver.resolve("s3", "s3:PutObjectTagging", request);
+        assertEquals(Set.of("Team", "Cost&Center"), new HashSet<>(conditions.get("s3:RequestObjectTagKeys")));
+        assertEquals(List.of("old"), conditions.get("s3:ExistingObjectTag/Previous"));
+        assertEquals(List.of("42"), conditions.get("s3:RequestObjectTag/Cost&Center"));
+    }
+
+    @Test
+    void emptyObjectTagRequestsDoNotExposeRequestedKeys() {
+        assertNull(resolver.resolve("s3", "s3:PutObject", s3Request("/bucket/object", "")));
+        ContainerRequestContext empty = s3Request("/bucket/object", "<Tagging><TagSet/></Tagging>");
+        when(empty.getUriInfo().getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+        when(s3Service.getObjectTagging("bucket", "object", null)).thenReturn(Map.of("Previous", "old"));
+        Map<String, List<String>> conditions = resolver.resolve("s3", "s3:PutObjectTagging", empty);
+        assertEquals(List.of("old"), conditions.get("s3:ExistingObjectTag/Previous"));
+        assertFalse(conditions.containsKey("s3:RequestObjectTagKeys"));
+    }
+
+    @Test
+    void versionActionsCarryTheVersionTheyName() {
+        ContainerRequestContext request = s3Request("/bucket/object", "");
+        request.getUriInfo().getQueryParameters().putSingle("versionId", "v1");
+        when(s3Service.getObjectTagging("bucket", "object", "v1")).thenReturn(Map.of("env", "a"));
+        Map<String, List<String>> read = resolver.resolve("s3", "s3:GetObjectVersion", request);
+        assertEquals(List.of("v1"), read.get("s3:versionid"));
+        assertEquals(List.of("a"), read.get("s3:ExistingObjectTag/env"));
+        // DeleteObjectVersion carries the id but, as DeleteObject, not the object's tags.
+        assertEquals(Map.of("s3:versionid", List.of("v1")),
+                resolver.resolve("s3", "s3:DeleteObjectVersion", request));
+        // A base action never carries it.
+        assertFalse(resolver.resolve("s3", "s3:GetObject", request).containsKey("s3:versionid"));
+    }
+
+    @Test
+    void versionTaggingActionsCarryTheVersionAndItsTags() {
+        ContainerRequestContext request = s3Request("/bucket/object",
+                "<Tagging><TagSet><Tag><Key>Team</Key><Value>payments</Value></Tag></TagSet></Tagging>");
+        request.getUriInfo().getQueryParameters().putSingle("versionId", "v1");
+        when(s3Service.getObjectTagging("bucket", "object", "v1")).thenReturn(Map.of("env", "a"));
+        for (String action : List.of("s3:GetObjectVersionTagging", "s3:DeleteObjectVersionTagging")) {
+            Map<String, List<String>> conditions = resolver.resolve("s3", action, request);
+            assertEquals(List.of("v1"), conditions.get("s3:versionid"), action);
+            assertEquals(List.of("a"), conditions.get("s3:ExistingObjectTag/env"), action);
+        }
+        Map<String, List<String>> put = resolver.resolve("s3", "s3:PutObjectVersionTagging", request);
+        assertEquals(List.of("v1"), put.get("s3:versionid"));
+        assertEquals(List.of("a"), put.get("s3:ExistingObjectTag/env"));
+        assertEquals(List.of("payments"), put.get("s3:RequestObjectTag/Team"));
+    }
+
+    @Test
+    void annotationActionsCarryTheObjectsTags() {
+        when(s3Service.getObjectTagging("bucket", "object", null)).thenReturn(Map.of("env", "a"));
+        for (String action : List.of("s3:GetObjectAnnotation", "s3:ListObjectAnnotations",
+                "s3:PutObjectAnnotation", "s3:DeleteObjectAnnotation")) {
+            assertEquals(List.of("a"), resolver.resolve("s3", action, s3Request("/bucket/object", ""))
+                    .get("s3:ExistingObjectTag/env"), action);
+        }
     }
 
     @Test
@@ -198,6 +364,66 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void singleItemWritesUseTheirReturnValuesAndExecutionDefault() {
+        for (String action : List.of("PutItem", "UpdateItem", "DeleteItem")) {
+            for (String value : List.of("NONE", "ALL_OLD", "UPDATED_OLD", "ALL_NEW", "UPDATED_NEW", "")) {
+                ContainerRequestContext request = mock(ContainerRequestContext.class);
+                when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json(
+                        "{\"ReturnValues\":\"" + value + "\"}"));
+                assertEquals(List.of(value), resolver.resolve("dynamodb", "dynamodb:" + action, request)
+                        .get("dynamodb:ReturnValues"));
+            }
+            for (String body : List.of("{}", "{\"ReturnValues\":null}")) {
+                ContainerRequestContext request = mock(ContainerRequestContext.class);
+                when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json(body));
+                assertEquals(List.of("NONE"), resolver.resolve("dynamodb", "dynamodb:" + action, request)
+                        .get("dynamodb:ReturnValues"));
+            }
+        }
+    }
+
+    @Test
+    void unrelatedActionsDoNotAcquireSpoofedReturnValues() {
+        for (String action : List.of("GetItem", "Query", "Scan", "BatchGetItem", "BatchWriteItem",
+                "TransactGetItems", "TransactWriteItems")) {
+            ContainerRequestContext request = mock(ContainerRequestContext.class);
+            when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json("{\"ReturnValues\":\"ALL_OLD\"}"));
+            Map<String, List<String>> context = resolver.resolve("dynamodb", "dynamodb:" + action, request);
+            assertFalse(context != null && context.containsKey("dynamodb:ReturnValues"));
+        }
+    }
+
+    @Test
+    void requestedReturnModesUseSeparateCompleteContextsWithoutNoneOrDuplicates() {
+        when(dynamoDbService.findTable("FgacTable", "us-east-1")).thenReturn(Optional.of(fgacTable()));
+        Map<String, List<String>> cases = Map.of(
+                "", List.of("NONE"),
+                ",\"ReturnValues\":null,\"ReturnValuesOnConditionCheckFailure\":null", List.of("NONE"),
+                ",\"ReturnValues\":\"NONE\",\"ReturnValuesOnConditionCheckFailure\":\"ALL_OLD\"", List.of("ALL_OLD"),
+                ",\"ReturnValues\":\"ALL_OLD\",\"ReturnValuesOnConditionCheckFailure\":\"NONE\"", List.of("ALL_OLD"),
+                ",\"ReturnValues\":\"ALL_OLD\",\"ReturnValuesOnConditionCheckFailure\":\"ALL_OLD\"", List.of("ALL_OLD"),
+                ",\"ReturnValues\":\"UPDATED_NEW\",\"ReturnValuesOnConditionCheckFailure\":\"ALL_OLD\"",
+                List.of("UPDATED_NEW", "ALL_OLD"));
+        for (Map.Entry<String, List<String>> entry : cases.entrySet()) {
+            ContainerRequestContext request = mock(ContainerRequestContext.class);
+            when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json(
+                    "{\"TableName\":\"FgacTable\",\"Key\":{\"PK\":{\"S\":\"USER_alice\"}}"
+                            + entry.getKey() + "}"));
+            Map<String, List<String>> primary = resolver.resolve("dynamodb", "dynamodb:UpdateItem", request);
+            List<Map<String, List<String>>> remaining =
+                    resolver.resolveRemainingTargets("dynamodb", "dynamodb:UpdateItem", request);
+            assertEquals(List.of(entry.getValue().getFirst()), primary.get("dynamodb:ReturnValues"));
+            assertEquals(entry.getValue().size() - 1, remaining.size());
+            assertEquals(List.of("USER_alice"), primary.get("dynamodb:LeadingKeys"));
+            for (int i = 0; i < remaining.size(); i++) {
+                assertEquals(List.of(entry.getValue().get(i + 1)), remaining.get(i).get("dynamodb:ReturnValues"));
+                assertEquals(primary.get("dynamodb:LeadingKeys"), remaining.get(i).get("dynamodb:LeadingKeys"));
+                assertEquals(primary.get("dynamodb:Attributes"), remaining.get(i).get("dynamodb:Attributes"));
+            }
+        }
+    }
+
+    @Test
     void returnsNullWhenNoBodyWasBuffered() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         when(containerRequest.getProperty("floci.bufferedJsonBody")).thenReturn(null);
@@ -220,19 +446,25 @@ class IamConditionContextResolverTest {
     }
 
     @Test
-    void omitsLeadingKeysForAMultiTableBatch() {
-        // A batch spanning two tables has no single key schema: applying table A's partition
-        // key name to table B's items would be wrong, so no leading keys are produced.
+    void resolvesEachBatchTableWithItsOwnSchema() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         when(containerRequest.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
                 {"RequestItems":{
                    "FgacTable":{"Keys":[{"PK":{"S":"USER_alice"}}]},
-                   "OtherTable":{"Keys":[{"PK":{"S":"USER_bob"}}]}}}"""));
+                   "OtherTable":{"Keys":[{"Tenant":{"S":"USER_bob"}}]}}}"""));
 
+        TableDefinition other = new TableDefinition();
+        other.setTableName("OtherTable");
+        other.setKeySchema(List.of(new KeySchemaElement("Tenant", "HASH")));
+        when(dynamoDbService.findTable("FgacTable", "us-east-1")).thenReturn(Optional.of(fgacTable()));
+        when(dynamoDbService.findTable("OtherTable", "us-east-1")).thenReturn(Optional.of(other));
         Map<String, List<String>> conditions =
                 resolver.resolve("dynamodb", "dynamodb:BatchGetItem", containerRequest);
 
-        assertFalse(conditions.containsKey("dynamodb:LeadingKeys"));
+        assertEquals(List.of("USER_alice", "USER_bob"), conditions.get("dynamodb:LeadingKeys"));
+        assertEquals(List.of("USER_bob"), resolver.dynamoDbBatchConditionContext(
+                "dynamodb:BatchGetItem", containerRequest,
+                "arn:aws:dynamodb:us-east-1:000000000000:table/OtherTable").get("dynamodb:LeadingKeys"));
     }
 
     // ── aws:RequestTag and aws:ResourceTag ─────────────────────────────────────
@@ -249,6 +481,7 @@ class IamConditionContextResolverTest {
 
         assertEquals(List.of("payments"), conditions.get("aws:RequestTag/Team"));
         assertEquals(List.of("prod"), conditions.get("aws:RequestTag/Env"));
+        assertEquals(Set.of("Team", "Env"), new HashSet<>(conditions.get("aws:TagKeys")));
     }
 
     @Test
@@ -267,11 +500,16 @@ class IamConditionContextResolverTest {
     void bucketActionsResolveResourceTagsFromTheBucketsCurrentTags() {
         when(s3Service.getBucketTagging("my-bucket")).thenReturn(Map.of("Owner", "alice"));
 
-        for (String action : List.of("s3:GetBucketTagging", "s3:DeleteBucketTagging", "s3:DeleteBucket")) {
+        for (String action : List.of("s3:GetBucketTagging", "s3:DeleteBucket")) {
             Map<String, List<String>> conditions =
                     resolver.resolve("s3", action, s3Request("/my-bucket", ""));
             assertEquals(List.of("alice"), conditions.get("aws:ResourceTag/Owner"), action);
         }
+        // DeleteBucketTagging, which AWS checks as s3:PutBucketTagging.
+        ContainerRequestContext deleteTagging = s3Request("/my-bucket", "");
+        when(deleteTagging.getMethod()).thenReturn("DELETE");
+        assertEquals(List.of("alice"), resolver.resolve("s3", "s3:PutBucketTagging", deleteTagging)
+                .get("aws:ResourceTag/Owner"));
     }
 
     @Test
@@ -295,6 +533,7 @@ class IamConditionContextResolverTest {
 
         assertEquals(List.of("payments"), conditions.get("aws:RequestTag/Team"));
         assertEquals(List.of("prod"), conditions.get("aws:RequestTag/Env"));
+        assertEquals(List.of("Team", "Env"), conditions.get("aws:TagKeys"));
         assertFalse(conditions.containsKey("aws:ResourceTag/Team"));
     }
 
@@ -542,6 +781,47 @@ class IamConditionContextResolverTest {
         assertFalse(conditions.containsKey("aws:ResourceAccount"),
                 "guessing the owner would authorize cross-account access a Condition meant to refuse");
         assertEquals(List.of("000000000000"), conditions.get("aws:PrincipalAccount"));
+    }
+
+    @Test
+    void aServiceCallCarriesTheServiceAndItsSourceButNoIamPrincipal() {
+        Map<String, List<String>> conditions = IamConditionContextResolver.serviceCallContext(
+                "ses.amazonaws.com", "arn:aws:sns:eu-west-2:111122223333:events", "111122223333",
+                "arn:aws:ses:eu-west-2:444455556666:configuration-set/my-set", "444455556666");
+
+        assertEquals(Map.of(
+                "aws:PrincipalIsAWSService", List.of("true"),
+                "aws:PrincipalServiceName", List.of("ses.amazonaws.com"),
+                "aws:PrincipalServiceNamesList", List.of("ses.amazonaws.com"),
+                "aws:SourceArn", List.of("arn:aws:ses:eu-west-2:444455556666:configuration-set/my-set"),
+                "aws:SourceAccount", List.of("444455556666"),
+                "aws:SourceOwner", List.of("444455556666"),
+                "aws:ResourceAccount", List.of("111122223333"),
+                "aws:RequestedRegion", List.of("eu-west-2")), conditions);
+    }
+
+    @Test
+    void onlyACallToATopicFromAServiceSnsListsCarriesSourceOwner() {
+        Map<String, List<String>> fromS3 = IamConditionContextResolver.serviceCallContext(
+                "s3.amazonaws.com", "arn:aws:sns:eu-west-2:111122223333:events", "111122223333",
+                "arn:aws:s3:::bucket", "111122223333");
+        Map<String, List<String>> toQueue = IamConditionContextResolver.serviceCallContext(
+                "ses.amazonaws.com", "arn:aws:sqs:eu-west-2:111122223333:events", "111122223333",
+                "arn:aws:ses:eu-west-2:111122223333:configuration-set/my-set", "111122223333");
+
+        assertFalse(fromS3.containsKey("aws:SourceOwner"));
+        assertEquals(List.of("111122223333"), fromS3.get("aws:SourceAccount"));
+        assertFalse(toQueue.containsKey("aws:SourceOwner"));
+    }
+
+    @Test
+    void aServiceCallWithNoSourceLeavesTheSourceKeysOut() {
+        Map<String, List<String>> conditions = IamConditionContextResolver.serviceCallContext(
+                "ses.amazonaws.com", "arn:aws:s3:::bucket", "111122223333", null, null);
+
+        assertFalse(conditions.containsKey("aws:SourceArn"));
+        assertFalse(conditions.containsKey("aws:SourceAccount"));
+        assertEquals(List.of("111122223333"), conditions.get("aws:ResourceAccount"));
     }
 
     private Decision decisionForEveryTarget(String policy, String action, ContainerRequestContext request) {
