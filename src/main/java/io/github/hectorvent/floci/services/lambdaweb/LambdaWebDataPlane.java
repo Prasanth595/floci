@@ -36,6 +36,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 
 /**
  * Serves the endpoint domains of Web Functions. A request whose Host is a {@code lambda-web} domain
@@ -53,6 +54,8 @@ public class LambdaWebDataPlane {
     static final Set<String> DROPPED_RESPONSE_HEADERS = Set.of("connection", "keep-alive", "transfer-encoding",
             "upgrade", "te", "trailer", "trailers", "proxy-authenticate", "proxy-authorization");
     static final String REQUEST_ID_HEADER = "lambda-web-request-id";
+    private static final Pattern ENDPOINT_DOMAIN = Pattern.compile(
+            "[a-z0-9]{16}\\.(?:[0-9]{3}\\.lambda-web\\.[a-z0-9-]+|lambda-web\\.global)\\..+", Pattern.CASE_INSENSITIVE);
     private static final Logger LOG = Logger.getLogger(LambdaWebDataPlane.class);
     private static final String BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     private static final int REQUEST_ID_LENGTH = 26;
@@ -234,8 +237,9 @@ public class LambdaWebDataPlane {
         }
     }
 
+    /** The shapes Floci mints, in any case and with any port, so a near miss gets the AWS 404 and not another service. */
     static boolean isLambdaWebHost(String host) {
-        return host.toLowerCase(Locale.ROOT).contains(".lambda-web.");
+        return ENDPOINT_DOMAIN.matcher(host).matches();
     }
 
     static boolean hasBody(HttpMethod method, int status) {
