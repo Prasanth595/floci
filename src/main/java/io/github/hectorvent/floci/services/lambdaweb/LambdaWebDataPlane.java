@@ -116,8 +116,7 @@ public class LambdaWebDataPlane {
             page(request, LambdaWebErrorPages.ENDPOINT_DISABLED, requestId, false);
             return;
         }
-        if (rateLimit != null && !rateLimiter.tryAcquire(String.join("|", target.accountId(), target.region(),
-                target.function().functionName, target.endpoint().endpointName), rateLimit)) {
+        if (rateLimit != null && !rateLimiter.tryAcquire(endpointKey(target), rateLimit)) {
             page(request, LambdaWebErrorPages.ENDPOINT_REQUEST_THROTTLE, requestId, false);
             return;
         }
@@ -133,6 +132,11 @@ public class LambdaWebDataPlane {
         acquire(request, host, target, revision, requestId, null);
     }
 
+    /** The domain is minted for each creation, so a recreated endpoint shares no state with the deleted one. */
+    private static String endpointKey(WebFunctionTarget target) {
+        return String.join("|", target.accountId(), target.region(), target.endpoint().domainName);
+    }
+
     /** Starts or reuses the revision's environment off the event loop, then forwards. */
     private void acquire(HttpServerRequest request, String host, WebFunctionTarget target,
                          WebFunctionRevision revision, String requestId, Environment dead) {
@@ -143,7 +147,7 @@ public class LambdaWebDataPlane {
             Integer maxEnvironments = target.endpoint().scalingConfig == null
                     ? null : target.endpoint().scalingConfig.maxEnvironments;
             return environments.acquire(target.accountId(), target.region(), target.function(),
-                    target.endpoint().endpointName, maxEnvironments, revision);
+                    endpointKey(target), maxEnvironments, revision);
         }, false)
                 .onSuccess(environment -> forward(request, host, target, revision, environment, requestId, dead == null))
                 .onFailure(error -> {

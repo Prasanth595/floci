@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -219,11 +220,40 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         }
         assertEquals(2, logStreams.size(), logStreams.toString());
 
-        given().contentType("application/json").body("{\"scalingConfig\": {}, \"throttleConfig\": {\"rateLimit\": 100}}")
-                .when().patch(BASE + "/web-functions/" + functionName + "/endpoints/dev")
-                .then().statusCode(202);
-        List<String> burst = parallel(250, () -> raw("GET /status/200 HTTP/1.1\r\nHost: " + domain
-                + "\r\nConnection: close\r\n\r\n"));
+        // A new revision takes the place of an idle environment of the old one.
+        String revisionId = given().contentType("application/json")
+                .body("""
+                        {"buildConfig": {"codeConfig": {"s3Object": {"bucket": "%s", "key": "%s.zip"}},
+                                         "runtimeConfig": {"runtime": "nodejs24.x"}},
+                         "serviceConfig": {"executionRoleArn": "%s", "timeoutSeconds": 30}}
+                        """.formatted(BUCKET, functionName, ROLE))
+                .when().post(BASE + "/web-functions/" + functionName + "/revisions")
+                .then().statusCode(202)
+                .extract().path("revisionId");
+        String moved = given().header("Host", domain).when().get("/status/200")
+                .then().statusCode(200).extract().header("lambda-web-logstream");
+        assertTrue(moved.contains("[" + revisionId + "]"), moved);
+        logStreams.add(moved);
+
+        // A recreated endpoint shares no environment or rate with the deleted one.
+        String endpoints = BASE + "/web-functions/" + functionName + "/endpoints";
+        given().when().delete(endpoints + "/dev").then().statusCode(204);
+        String recreated = given().contentType("application/json")
+                .body("{\"endpointName\": \"dev\", \"endpointType\": \"HomeRegion\","
+                        + " \"authType\": \"ApplicationManaged\", \"autoDeploymentMode\": \"LatestRevision\","
+                        + " \"throttleConfig\": {\"rateLimit\": 100}}")
+                .when().put(endpoints)
+                .then().statusCode(202)
+                .extract().path("domainName");
+        String fresh = given().header("Host", recreated).when().get("/status/200")
+                .then().statusCode(200).extract().header("lambda-web-logstream");
+        assertFalse(logStreams.contains(fresh), fresh + " " + logStreams);
+
+        // Requests that all arrive at once are only admitted up to the rate.
+        int count = 200;
+        CyclicBarrier together = new CyclicBarrier(count);
+        List<String> burst = parallel(count, () -> raw("GET /status/200 HTTP/1.1\r\nHost: " + recreated
+                + "\r\nConnection: close\r\n\r\n", together));
         List<String> limited = burst.stream().filter(response -> response.startsWith("HTTP/1.1 429 ")).toList();
         assertFalse(limited.isEmpty(), "a burst well past the rate is throttled");
         for (String response : limited) {
@@ -232,7 +262,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     }
 
     private static List<String> parallel(int count, Callable<String> call) throws Exception {
-        ExecutorService pool = Executors.newFixedThreadPool(Math.min(count, 50));
+        ExecutorService pool = Executors.newFixedThreadPool(count);
         try {
             List<Future<String>> futures = new ArrayList<>();
             for (int i = 0; i < count; i++) {
@@ -275,9 +305,17 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     }
 
     /** Sends one raw HTTP/1.1 request with {@code Connection: close} and reads until the server closes. */
-    private static String raw(String request) throws IOException {
+    private static String raw(String request) throws Exception {
+        return raw(request, null);
+    }
+
+    /** As {@link #raw(String)}, sent once every party of {@code together} has connected. */
+    private static String raw(String request, CyclicBarrier together) throws Exception {
         try (Socket socket = new Socket("localhost", RestAssured.port)) {
             socket.setSoTimeout(30_000);
+            if (together != null) {
+                together.await(30, TimeUnit.SECONDS);
+            }
             OutputStream out = socket.getOutputStream();
             out.write(request.getBytes(StandardCharsets.US_ASCII));
             out.flush();
