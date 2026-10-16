@@ -37,6 +37,26 @@ class LambdaWebRateLimiterTest {
         assertEquals(200, admitted("a", 200, 250));
     }
 
+    @Test
+    void aClockReadOutOfOrderTakesNoTokensBack() {
+        now.set(1_000);
+        assertTrue(limiter.tryAcquire("ep", 2));
+        now.set(0);
+        assertTrue(limiter.tryAcquire("ep", 2));
+        assertFalse(limiter.tryAcquire("ep", 2));
+    }
+
+    @Test
+    void bucketsThatRefilledAreDropped() {
+        assertEquals(100, admitted("a", 100, 100));
+        assertTrue(limiter.tryAcquire("b", 100));
+        assertEquals(2, limiter.size());
+        now.addAndGet(TimeUnit.SECONDS.toNanos(1));
+        assertTrue(limiter.tryAcquire("c", 100));
+        assertEquals(1, limiter.size());
+        assertEquals(100, admitted("a", 100, 150));
+    }
+
     private int admitted(String endpoint, int rate, int requests) {
         int admitted = 0;
         for (int i = 0; i < requests; i++) {

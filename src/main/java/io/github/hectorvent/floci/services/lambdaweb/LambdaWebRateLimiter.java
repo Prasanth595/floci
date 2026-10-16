@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambdaweb;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
 /**
@@ -11,11 +12,14 @@ import java.util.function.LongSupplier;
  */
 final class LambdaWebRateLimiter {
 
+    private static final long SECOND = TimeUnit.SECONDS.toNanos(1);
+
     private record Bucket(int rate, double tokens, long at) {
     }
 
     private final ConcurrentHashMap<String, Bucket> buckets = new ConcurrentHashMap<>();
     private final LongSupplier nanoClock;
+    private final AtomicLong sweptAt;
 
     LambdaWebRateLimiter() {
         this(System::nanoTime);
@@ -23,18 +27,21 @@ final class LambdaWebRateLimiter {
 
     LambdaWebRateLimiter(LongSupplier nanoClock) {
         this.nanoClock = nanoClock;
+        this.sweptAt = new AtomicLong(nanoClock.getAsLong());
     }
 
     /** Whether one more request to {@code endpointKey} fits under {@code rate} requests per second. */
     boolean tryAcquire(String endpointKey, int rate) {
+        sweep();
         AtomicBoolean admitted = new AtomicBoolean();
-        long now = nanoClock.getAsLong();
         buckets.compute(endpointKey, (key, bucket) -> {
             double tokens;
+            long now = nanoClock.getAsLong();
             if (bucket == null || bucket.rate() != rate) {
                 tokens = rate;
             } else {
-                double refill = rate * (double) (now - bucket.at()) / TimeUnit.SECONDS.toNanos(1);
+                now = Math.max(now, bucket.at());
+                double refill = rate * (double) (now - bucket.at()) / SECOND;
                 tokens = Math.min(rate, bucket.tokens() + refill);
             }
             if (tokens >= 1) {
@@ -44,5 +51,18 @@ final class LambdaWebRateLimiter {
             return new Bucket(rate, tokens, now);
         });
         return admitted.get();
+    }
+
+    int size() {
+        return buckets.size();
+    }
+
+    /** A bucket untouched for a second is full again, the same as no bucket. */
+    private void sweep() {
+        long now = nanoClock.getAsLong();
+        long last = sweptAt.get();
+        if (now - last >= SECOND && sweptAt.compareAndSet(last, now)) {
+            buckets.values().removeIf(bucket -> now - bucket.at() >= SECOND);
+        }
     }
 }
