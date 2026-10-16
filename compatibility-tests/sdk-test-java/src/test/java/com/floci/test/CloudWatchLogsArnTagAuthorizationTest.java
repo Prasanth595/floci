@@ -29,6 +29,7 @@ class CloudWatchLogsArnTagAuthorizationTest {
     private AccessKey key;
     private String protectedGroup;
     private String otherGroup;
+    private String literalGroup;
     private boolean policyCreated;
 
     @BeforeEach
@@ -68,6 +69,11 @@ class CloudWatchLogsArnTagAuthorizationTest {
                 () -> {
                     if (otherGroup != null) {
                         root.deleteLogGroup(r -> r.logGroupName(otherGroup));
+                    }
+                },
+                () -> {
+                    if (literalGroup != null) {
+                        root.deleteLogGroup(r -> r.logGroupName(literalGroup));
                     }
                 },
                 () -> {
@@ -124,6 +130,36 @@ class CloudWatchLogsArnTagAuthorizationTest {
         assertResult(action, otherGroup, "false", response);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"TagResource", "UntagResource", "ListTagsForResource"})
+    void incompleteArnPrefixIsALiteralName(String action) {
+        String name = "arn:" + TestFixtures.uniqueName("archive");
+        root.createLogGroup(r -> r.logGroupName(name).tags(Map.of("protected", "true")));
+        literalGroup = name;
+        policy(statement("Allow", action, arn(name)));
+        Map<String, String> response = invokeResource(caller, action, name);
+        assertResult(action, name, "true", response);
+        assertTags(protectedGroup, Map.of("protected", "true"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"TagResource", "UntagResource", "ListTagsForResource"})
+    void rootCannotResolveNoncanonicalMarkersIntoLocalNames(String action) {
+        String foreign = TestFixtures.arn("logs", "999999999999", "log-group:" + protectedGroup);
+        for (String input : new String[]{"ARN:" + foreign.substring(4), " " + foreign,
+                "x:log-group:" + protectedGroup}) {
+            assertThatThrownBy(() -> invokeResource(root, action, input))
+                    .isInstanceOfSatisfying(CloudWatchLogsException.class, error -> {
+                        assertThat(error.statusCode()).isEqualTo(400);
+                        assertThat(error.awsErrorDetails().errorCode()).isEqualTo("ResourceNotFoundException");
+                    });
+            assertTags(protectedGroup, Map.of("protected", "true"));
+        }
+        Map<String, String> response = invokeResource(root, action, arn(protectedGroup));
+        assertResult(action, protectedGroup, "true", response);
+        assertTags(otherGroup, Map.of("protected", "false"));
+    }
+
     private void assertResult(String action, String group, String original, Map<String, String> response) {
         Map<String, String> expected = switch (action) {
             case "TagResource" -> Map.of("protected", original, "team", "red");
@@ -138,11 +174,15 @@ class CloudWatchLogsArnTagAuthorizationTest {
     }
 
     private Map<String, String> invoke(String action, String group) {
+        return invokeResource(caller, action, arn(group));
+    }
+
+    private Map<String, String> invokeResource(CloudWatchLogsClient client, String action, String resource) {
         switch (action) {
-            case "TagResource" -> caller.tagResource(r -> r.resourceArn(arn(group)).tags(Map.of("team", "red")));
-            case "UntagResource" -> caller.untagResource(r -> r.resourceArn(arn(group)).tagKeys("protected"));
+            case "TagResource" -> client.tagResource(r -> r.resourceArn(resource).tags(Map.of("team", "red")));
+            case "UntagResource" -> client.untagResource(r -> r.resourceArn(resource).tagKeys("protected"));
             case "ListTagsForResource" -> {
-                return caller.listTagsForResource(r -> r.resourceArn(arn(group))).tags();
+                return client.listTagsForResource(r -> r.resourceArn(resource)).tags();
             }
             default -> throw new IllegalArgumentException(action);
         }

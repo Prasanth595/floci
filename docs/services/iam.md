@@ -1281,9 +1281,11 @@ when IAM enforcement is disabled. Shared tag mutations reject storage aliases wh
 name differs from the requested name, without migrating historical records.
 
 This support covers log groups. Tagging destinations and other CloudWatch Logs resource types
-remains unsupported. Existing plain-name and `:*` input compatibility is retained; it is not a
-claim that AWS accepts those forms for these APIs. Other Logs actions retain their existing
-wildcard resource evaluation.
+remains unsupported. Plain-name inputs are used literally, including incomplete prefixes such as
+`arn:archive`; arbitrary `:log-group:` substrings never select a different group. Structurally complete
+ARNs take precedence over plain-name interpretation and must identify a local group. A trailing `:*`
+is accepted on a canonical local group ARN. These compatibility forms are not a claim that AWS accepts
+them for these APIs. Other Logs actions retain their existing wildcard resource evaluation.
 
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
 from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets

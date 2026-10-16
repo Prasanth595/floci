@@ -111,6 +111,46 @@ class LogsArnTagAuthorizationIntegrationTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"TagResource", "UntagResource", "ListTagsForResource"})
+    void incompleteArnPrefixRemainsALiteralLegacyName(String action) {
+        String name = groupNamed("arn:archive-" + UUID.randomUUID(), Map.of("team", "blue"));
+        String caller = user(statement("Allow", action, arn(name)));
+        assertSuccess(invoke(caller, action, name), action);
+        assertTags(name, expectedTags(action));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"TagResource,uppercase,false", "TagResource,uppercase,true",
+            "TagResource,space,false", "TagResource,space,true",
+            "TagResource,marker,false", "TagResource,marker,true",
+            "UntagResource,uppercase,false", "UntagResource,uppercase,true",
+            "UntagResource,space,false", "UntagResource,space,true",
+            "UntagResource,marker,false", "UntagResource,marker,true",
+            "ListTagsForResource,uppercase,false", "ListTagsForResource,uppercase,true",
+            "ListTagsForResource,space,false", "ListTagsForResource,space,true",
+            "ListTagsForResource,marker,false", "ListTagsForResource,marker,true"})
+    void noncanonicalMarkerInputCannotBorrowAnotherGroup(String action, String shape, boolean root) {
+        String local = group();
+        String input = switch (shape) {
+            case "uppercase" -> "ARN:aws:logs:eu-west-1:999999999999:log-group:" + local;
+            case "space" -> " arn:aws:logs:eu-west-1:999999999999:log-group:" + local;
+            case "marker" -> "x:log-group:" + local;
+            default -> throw new IllegalArgumentException(shape);
+        };
+        String caller = root ? ACCOUNT : user(statement("Allow", action, "*"));
+        ValidatableResponse response = invoke(caller, action, input);
+        assertAll("noncanonical input cannot access the shortened local name",
+                () -> response.statusCode(400).body(containsString("ResourceNotFoundException")),
+                () -> assertTags(local, Map.of("team", "blue")));
+        String literal = groupNamed(input, Map.of("team", "blue"));
+        assertSuccess(invoke(caller, action, input), action);
+        assertTags(literal, expectedTags(action));
+        assertTags(local, Map.of("team", "blue"));
+        assertSuccess(invoke(caller, action, arn(local)), action);
+        assertTags(local, expectedTags(action));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"TagResource", "UntagResource", "ListTagsForResource"})
     void storedTagDenyUsesTheOwningGroup(String action) {
         String selected = group();
         String other = group(Map.of("team", "green"));
@@ -169,7 +209,10 @@ class LogsArnTagAuthorizationIntegrationTest {
     }
 
     private String group(Map<String, String> tags) {
-        String name = "logs-arn-tag-" + UUID.randomUUID();
+        return groupNamed("logs-arn-tag-" + UUID.randomUUID(), tags);
+    }
+
+    private String groupNamed(String name, Map<String, String> tags) {
         int port = endpoint.getPort();
         cleanup.register(() -> call(port, ACCOUNT, "DeleteLogGroup", Map.of("logGroupName", name)).statusCode(200));
         call(port, ACCOUNT, "CreateLogGroup", Map.of("logGroupName", name, "tags", tags))

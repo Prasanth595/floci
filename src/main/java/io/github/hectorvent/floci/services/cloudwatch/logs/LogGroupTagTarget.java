@@ -13,12 +13,11 @@ public record LogGroupTagTarget(String name, String arn) {
 
     public static LogGroupTagTarget resolve(String input, String region, String account, String partition) {
         String prefix = new AwsArnUtils.Arn(partition, "logs", region, account, "log-group:").toString();
-        if (input.startsWith("arn:") && !input.startsWith(prefix)) {
+        if (AwsArnUtils.isArn(input) && !input.startsWith(prefix)) {
             throw new AwsException("ResourceNotFoundException", "The specified log group does not exist.", 400);
         }
-        // Retain the handler's existing name/suffix coercion; do not add unrelated input restrictions.
-        String name = input.startsWith(prefix) ? input.substring(prefix.length())
-                : CloudWatchLogsHandler.extractLogGroupNameFromArn(input);
+        // Plain names remain literal; a marker inside a name must not select another group.
+        String name = input.startsWith(prefix) ? input.substring(prefix.length()) : input;
         if (input.startsWith(prefix) && name.endsWith(":*")) {
             name = name.substring(0, name.length() - 2);
         }
