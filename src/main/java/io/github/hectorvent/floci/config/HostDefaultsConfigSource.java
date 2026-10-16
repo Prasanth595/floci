@@ -20,6 +20,7 @@ public class HostDefaultsConfigSource implements ConfigSource {
     static final int ORDINAL = 260;
     static final String PERSISTENT_PATH = "floci.storage.persistent-path";
     static final String HOST_PERSISTENT_PATH = "floci.storage.host-persistent-path";
+    static final String FOLLOW_PERSISTENT_PATH = "${" + PERSISTENT_PATH + "}";
 
     private final Map<String, String> properties;
 
@@ -30,8 +31,9 @@ public class HostDefaultsConfigSource implements ConfigSource {
     HostDefaultsConfigSource(boolean nativeOnHost) {
         if (nativeOnHost) {
             String dir = HostDataDir.persistentPathDefault();
-            // The binary and Docker share the host filesystem, so child containers bind the same path.
-            this.properties = Map.of(PERSISTENT_PATH, dir, HOST_PERSISTENT_PATH, dir);
+            // The binary and Docker share the host filesystem, so child containers bind the same path,
+            // including one the user sets in config/application.yml.
+            this.properties = Map.of(PERSISTENT_PATH, dir, HOST_PERSISTENT_PATH, FOLLOW_PERSISTENT_PATH);
         } else {
             this.properties = Map.of();
         }
