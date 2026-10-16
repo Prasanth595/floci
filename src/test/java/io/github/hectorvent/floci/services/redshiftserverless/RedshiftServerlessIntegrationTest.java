@@ -707,6 +707,29 @@ class RedshiftServerlessIntegrationTest {
                 .body("workgroup.customDomainName", nullValue());
     }
 
+    @Test
+    void snapshotCopyConfigurationRoundTripsOverTheWire() {
+        call("CreateNamespace", "{\"namespaceName\":\"copy-ns\",\"adminUsername\":\"admin\"}").statusCode(200);
+
+        String copyId = call("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"us-west-2\",\"snapshotRetentionPeriod\":10}")
+                .statusCode(200)
+                .body("snapshotCopyConfiguration.destinationRegion", equalTo("us-west-2"))
+                .extract().path("snapshotCopyConfiguration.snapshotCopyConfigurationId");
+        call("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"eu-west-1\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ConflictException"));
+        call("DeleteSnapshotCopyConfiguration", "{\"snapshotCopyConfigurationId\":\"" + copyId + "\"}").statusCode(200);
+        String replacementCopyId = call("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"eu-west-1\"}")
+                .statusCode(200)
+                .body("snapshotCopyConfiguration.destinationRegion", equalTo("eu-west-1"))
+                .extract().path("snapshotCopyConfiguration.snapshotCopyConfigurationId");
+        call("DeleteSnapshotCopyConfiguration", "{\"snapshotCopyConfigurationId\":\"" + replacementCopyId + "\"}")
+                .statusCode(200);
+    }
+
     private static io.restassured.response.ValidatableResponse call(String action, String body) {
         return given()
                 .header("X-Amz-Target", TARGET_PREFIX + action)

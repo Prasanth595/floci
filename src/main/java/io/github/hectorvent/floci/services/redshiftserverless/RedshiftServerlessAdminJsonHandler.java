@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.redshiftserverless.model.CustomDomainAssociation;
 import io.github.hectorvent.floci.services.redshiftserverless.model.EndpointAccess;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ResourcePolicy;
+import io.github.hectorvent.floci.services.redshiftserverless.model.SnapshotCopyConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -31,16 +32,18 @@ public class RedshiftServerlessAdminJsonHandler {
     private final RedshiftServerlessCustomDomainService customDomains;
     private final RedshiftServerlessEndpointAccessService endpointAccess;
     private final RedshiftServerlessResourcePolicyService resourcePolicies;
+    private final RedshiftServerlessSnapshotCopyService snapshotCopies;
 
     @Inject
     public RedshiftServerlessAdminJsonHandler(ObjectMapper objectMapper,
                                               RedshiftServerlessResourcePolicyService resourcePolicies,
-                                              RedshiftServerlessEndpointAccessService endpointAccess,
-                                              RedshiftServerlessCustomDomainService customDomains) {
+                                              RedshiftServerlessCustomDomainService customDomains,
+                                              RedshiftServerlessSnapshotCopyService snapshotCopies) {
         this.objectMapper = objectMapper;
         this.resourcePolicies = resourcePolicies;
         this.endpointAccess = endpointAccess;
         this.customDomains = customDomains;
+        this.snapshotCopies = snapshotCopies;
     }
 
     Supplier<Response> operation(String action, JsonNode request, String region) {
@@ -94,6 +97,20 @@ public class RedshiftServerlessAdminJsonHandler {
                         ServerlessSupport.text(request, "customDomainName"), region);
                 return emptyResponse();
             };
+            case "CreateSnapshotCopyConfiguration" -> () -> snapshotCopyResponse(
+                    snapshotCopies.createSnapshotCopyConfiguration(
+                            ServerlessSupport.text(request, "namespaceName"),
+                            ServerlessSupport.text(request, "destinationRegion"),
+                            ServerlessSupport.text(request, "destinationKmsKeyId"),
+                            ServerlessSupport.integer(request, "snapshotRetentionPeriod"), region));
+            case "ListSnapshotCopyConfigurations" -> () -> listSnapshotCopies(request, region);
+            case "UpdateSnapshotCopyConfiguration" -> () -> snapshotCopyResponse(
+                    snapshotCopies.updateSnapshotCopyConfiguration(
+                            ServerlessSupport.text(request, "snapshotCopyConfigurationId"),
+                            ServerlessSupport.integer(request, "snapshotRetentionPeriod"), region));
+            case "DeleteSnapshotCopyConfiguration" -> () -> snapshotCopyResponse(
+                    snapshotCopies.deleteSnapshotCopyConfiguration(
+                            ServerlessSupport.text(request, "snapshotCopyConfigurationId"), region));
             default -> null;
         };
     }
@@ -202,6 +219,39 @@ public class RedshiftServerlessAdminJsonHandler {
         return node;
     }
 
+    // ── Snapshot copy configuration ────────────────────────────────────────
+
+    private Response listSnapshotCopies(JsonNode request, String region) {
+        PaginatedResult<SnapshotCopyConfiguration> page = snapshotCopies.listSnapshotCopyConfigurations(
+                ServerlessSupport.text(request, "namespaceName"), region, ServerlessSupport.maxResults(request),
+                ServerlessSupport.text(request, "nextToken"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("snapshotCopyConfigurations");
+        page.items().forEach(configuration -> items.add(snapshotCopyNode(configuration)));
+        putNextToken(response, page);
+        return Response.ok(response).build();
+    }
+
+    private Response snapshotCopyResponse(SnapshotCopyConfiguration configuration) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("snapshotCopyConfiguration", snapshotCopyNode(configuration));
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode snapshotCopyNode(SnapshotCopyConfiguration configuration) {
+        ObjectNode node = objectMapper.createObjectNode();
+        if (configuration.getDestinationKmsKeyId() != null) {
+            node.put("destinationKmsKeyId", configuration.getDestinationKmsKeyId());
+        }
+        node.put("destinationRegion", configuration.getDestinationRegion());
+        node.put("namespaceName", configuration.getNamespaceName());
+        node.put("snapshotCopyConfigurationArn", configuration.getSnapshotCopyConfigurationArn());
+        node.put("snapshotCopyConfigurationId", configuration.getSnapshotCopyConfigurationId());
+        if (configuration.getSnapshotRetentionPeriod() != null) {
+            node.put("snapshotRetentionPeriod", configuration.getSnapshotRetentionPeriod());
+        }
+        return node;
+    }
     // ── Tracks, managed workgroups and reservations ────────────────────────
 
     /**

@@ -58,6 +58,10 @@ For the upstream API shape, see the [Amazon Redshift Serverless API Reference](h
 | `ListCustomDomainAssociations` | Page through the associations, filtered by `customDomainName` and `customDomainCertificateArn` |
 | `UpdateCustomDomainAssociation` | Point an association at another certificate ARN |
 | `DeleteCustomDomainAssociation` | Remove a custom domain association |
+| `CreateSnapshotCopyConfiguration` | Record a snapshot copy configuration to another Region; nothing is copied |
+| `ListSnapshotCopyConfigurations` | Page through the snapshot copy configurations, filtered by `namespaceName` |
+| `UpdateSnapshotCopyConfiguration` | Change the `snapshotRetentionPeriod` of a snapshot copy configuration |
+| `DeleteSnapshotCopyConfiguration` | Remove a snapshot copy configuration and return it |
 <!-- floci:actions:end -->
 
 Namespace and workgroup state is account and Region scoped and persisted through `StorageFactory`.
@@ -135,3 +139,4 @@ aws redshift-serverless delete-namespace --namespace-name analytics
 - **Resource policies are recorded, not acted on.** A policy is stored per account and Region, echoed in the shape of the API model, and dropped on read once the snapshot it belongs to is gone. A snapshot recreated under the same name is a different snapshot: the record keeps the snapshot's creation time, so the policy is not inherited. `PutResourcePolicy` accepts a JSON object for a snapshot ARN of this account and Region; no principal in it gains access. A foreign or non-snapshot ARN is a `ValidationException`.
 - **Endpoint access is recorded, not acted on.** An endpoint is stored per account and Region, echoed in the shape of the API model, and dropped on read once its workgroup is gone; a workgroup recreated under the same name is a different workgroup and does not inherit it. `CreateEndpointAccess` creates no VPC endpoint. `address` and `port` are the workgroup's own, so a client can connect; `vpcEndpoint` carries a generated id and one network interface per subnet, without a `vpcId`, and `ListEndpointAccess` with a `vpcId` returns nothing. `vpcSecurityGroupIds` is optional. Endpoint names are 1 to 30 letters, digits or hyphens, start with a letter, and contain no consecutive or trailing hyphens. Security groups are the only member `UpdateEndpointAccess` changes.
 - **Custom domain associations are recorded, not acted on.** An association is stored per account and Region and dropped on read once its workgroup is gone; a workgroup recreated under the same name does not inherit it. A workgroup has at most one custom domain association. The certificate expiry time comes from ACM when the certificate exists in the emulator.
+- **Snapshot copy configurations are recorded, not acted on.** `CreateSnapshotCopyConfiguration` copies no snapshot. A configuration is stored per account and Region and dropped on read once its namespace is gone; a namespace recreated under the same name does not inherit it. The destination Region must differ from the namespace's, and a namespace has only one configuration at a time (`ConflictException`). Delete the existing configuration before choosing another destination Region.

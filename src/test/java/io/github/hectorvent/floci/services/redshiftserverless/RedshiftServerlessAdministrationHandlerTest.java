@@ -51,7 +51,7 @@ class RedshiftServerlessAdministrationHandlerTest {
     void setUp() {
         StorageFactory storageFactory = mock(StorageFactory.class);
         for (String file : List.of("namespaces", "workgroups", "snapshots", "usagelimits", "resourcepolicies",
-                "endpointaccess", "customdomains")) {
+                "endpointaccess", "customdomains", "snapshotcopyconfigurations")) {
             when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-" + file + ".json"),
                 any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
@@ -91,7 +91,8 @@ class RedshiftServerlessAdministrationHandlerTest {
                 new RedshiftServerlessAdminJsonHandler(mapper,
                         new RedshiftServerlessResourcePolicyService(storageFactory, serverlessService, mapper),
                         new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, serverlessService),
-                        customDomains),
+                        customDomains,
+                        new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, serverlessService)),
                 customDomains);
     }
 
@@ -456,6 +457,49 @@ class RedshiftServerlessAdministrationHandlerTest {
     }
 
     @Test
+    void snapshotCopyConfigurationHasOneDestinationPerNamespace() {
+        namespace("copy-ns");
+
+        JsonNode created = ok("CreateSnapshotCopyConfiguration", "{\"namespaceName\":\"copy-ns\","
+                + "\"destinationRegion\":\"us-west-2\",\"snapshotRetentionPeriod\":14,"
+                + "\"destinationKmsKeyId\":\"key-1\"}").get("snapshotCopyConfiguration");
+        String id = created.get("snapshotCopyConfigurationId").textValue();
+        assertEquals("copy-ns", created.get("namespaceName").textValue());
+        assertEquals("us-west-2", created.get("destinationRegion").textValue());
+        assertEquals("key-1", created.get("destinationKmsKeyId").textValue());
+        assertEquals(14, created.get("snapshotRetentionPeriod").intValue());
+        assertTrue(created.get("snapshotCopyConfigurationArn").textValue().contains(":snapshotcopyconfiguration/"));
+
+        assertEquals("ConflictException", errorType("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"us-west-2\"}"));
+        assertEquals("ConflictException", errorType("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"eu-west-1\"}"));
+        assertEquals("ValidationException", errorType("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"us-east-1\"}"));
+        assertEquals("ValidationException", errorType("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"US-WEST-2\"}"));
+        assertEquals("ValidationException", errorType("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"invalid_region!\"}"));
+        assertEquals("ResourceNotFoundException", errorType("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"nope-ns\",\"destinationRegion\":\"us-west-2\"}"));
+
+        assertEquals(30, ok("UpdateSnapshotCopyConfiguration", "{\"snapshotCopyConfigurationId\":\"" + id
+                + "\",\"snapshotRetentionPeriod\":30}").get("snapshotCopyConfiguration")
+                .get("snapshotRetentionPeriod").intValue());
+        assertEquals("ValidationException", errorType("UpdateSnapshotCopyConfiguration",
+                "{\"snapshotCopyConfigurationId\":\"" + id + "\",\"snapshotRetentionPeriod\":0}"));
+        assertEquals(1, ok("ListSnapshotCopyConfigurations", "{\"namespaceName\":\"copy-ns\"}")
+                .get("snapshotCopyConfigurations").size());
+
+        assertEquals(id, ok("DeleteSnapshotCopyConfiguration", "{\"snapshotCopyConfigurationId\":\"" + id + "\"}")
+                .get("snapshotCopyConfiguration").get("snapshotCopyConfigurationId").textValue());
+        assertEquals(0, ok("ListSnapshotCopyConfigurations", "{}").get("snapshotCopyConfigurations").size());
+        assertEquals("eu-west-1", ok("CreateSnapshotCopyConfiguration",
+                "{\"namespaceName\":\"copy-ns\",\"destinationRegion\":\"eu-west-1\"}")
+                .get("snapshotCopyConfiguration").get("destinationRegion").textValue());
+    }
+
+    @Test
     void tracksAreTheTwoAwsReleaseTracks() {
         JsonNode track = ok("GetTrack", "{\"trackName\":\"trailing\"}").get("track");
         assertEquals("trailing", track.get("trackName").textValue());
@@ -536,6 +580,19 @@ class RedshiftServerlessAdministrationHandlerTest {
                 + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}");
         ok("CreateCustomDomainAssociation", "{\"workgroupName\":\"recreate-wg\",\"customDomainName\":\"old.example.com\","
                 + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}");
+    }
+
+    @Test
+    void aNamespaceRecreatedUnderTheSameNameDoesNotInheritCopyConfigurations() {
+        namespace("recreate-ns");
+        ok("CreateSnapshotCopyConfiguration", "{\"namespaceName\":\"recreate-ns\",\"destinationRegion\":\"us-west-2\"}");
+
+        ok("DeleteNamespace", "{\"namespaceName\":\"recreate-ns\"}");
+        namespace("recreate-ns");
+
+        assertEquals(0, ok("ListSnapshotCopyConfigurations", "{\"namespaceName\":\"recreate-ns\"}")
+                .get("snapshotCopyConfigurations").size());
+        ok("CreateSnapshotCopyConfiguration", "{\"namespaceName\":\"recreate-ns\",\"destinationRegion\":\"us-west-2\"}");
     }
 
     @Test

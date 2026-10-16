@@ -95,13 +95,14 @@ class RedshiftServerlessJsonHandlerTest {
                 new RedshiftServerlessAdminJsonHandler(mapper,
                         new RedshiftServerlessResourcePolicyService(storageFactory, service, mapper),
                         new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, service),
-                        customDomains),
+                        customDomains,
+                        new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, service)),
                 customDomains);
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     private static void stubAdministrationStores(StorageFactory storageFactory) {
-        for (String file : List.of("resourcepolicies", "endpointaccess", "customdomains")) {
+        for (String file : List.of("resourcepolicies", "endpointaccess", "customdomains", "snapshotcopyconfigurations")) {
             when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-" + file + ".json"),
                     any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
                     AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
