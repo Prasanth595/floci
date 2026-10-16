@@ -118,20 +118,11 @@ CloudFormation `AWS::EC2::VPCEndpoint` resolves `IpAddressType` on create and up
 
 Floci runs an IMDS-compatible HTTP server on port `9169` of the host. Each launched container receives the environment variable `AWS_EC2_METADATA_SERVICE_ENDPOINT` pointing to this server.
 
-The proxy installation and startup helper shells clear `LD_LIBRARY_PATH`,
-`PYTHONPATH` and `PYTHONHOME` before running system tools. This prevents an
-application's bundled libraries or Python installation from replacing the
-system dependencies used by the package manager, proxy and HTTP probe. The
-container configuration and application process environment remain unchanged.
-The readiness probe requests an IMDSv2 token with a 60-second lifetime, then
-uses it to read the instance ID. A failed or empty token response does not
-fall back to a tokenless request.
 
-When `HttpTokens=required`, metadata reads without a valid IMDSv2 token return 401
-before resolving the requested data. `iam/info` returns the ARN and ID that IAM holds
-for the attached profile, and 404 when that profile is missing, has no role or does not
-match the attached ARN. An EKS cluster node, whose profile Floci synthesizes, reports
-the synthesized ARN and a stable ID instead while IAM holds no such profile.
+`iam/info` returns the ARN and ID that IAM holds for the attached profile, and 404 when that
+profile is missing, has no role or does not match the attached ARN. An EKS cluster node, whose
+profile Floci synthesizes, reports the synthesized ARN and a stable ID instead while IAM holds no
+such profile.
 
 Both IMDSv1 (no token) and IMDSv2 (token-based) flows are supported:
 
@@ -145,7 +136,7 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
   http://169.254.169.254/latest/meta-data/instance-id
 ```
 
-As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A token is valid only on the instance that requested it: presenting it from another instance returns `401`. A request without a token header uses IMDSv1 unless the instance's `HttpTokens` is `required`, in which case it returns `401`.
+As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A token is valid only on the instance that requested it: presenting it from another instance returns `401`. A request without a token header still uses IMDSv1; Floci does not enforce `HttpTokens=required`.
 
 User data is returned as the original base64-decoded bytes, without decompressing gzip content or converting binary data to text. Older records without the original encoding, or records with malformed saved encoding, use their saved UTF-8 text. The response uses `application/octet-stream`, matching the [AWS user-data retrieval contract](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html). Missing or empty data returns `404`; whitespace is preserved. Script execution retains its separate bounded gzip decoding.
 
