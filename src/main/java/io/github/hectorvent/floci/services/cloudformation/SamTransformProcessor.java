@@ -996,7 +996,8 @@ class SamTransformProcessor {
      * dependencies, so the alias selects the immutable version published by this stack. The
      * version's logical id carries a hash of what a new version publishes (see
      * {@link #versionLogicalId}), so an update that changes the code names a new version resource,
-     * which publishes, and the alias follows it.
+     * which publishes, and the alias follows it; a given {@code AutoPublishCodeSha256} fixes the id
+     * instead.
      */
     private String expandAutoPublishAlias(String functionLogicalId, JsonNode properties, JsonNode functionProperties,
                                           ObjectNode passthrough, JsonNode template,
@@ -1089,16 +1090,17 @@ class SamTransformProcessor {
     }
 
     /**
-     * The logical id SAM gives the version it publishes: {@code <Function>Version} and the first ten
+     * The logical id of the version the alias points at: {@code <Function>Version} and the first ten
      * hex digits of the SHA-1 of the function's {@code Code}, with references to template parameters
      * resolved, merged with its {@code Environment}, its {@code MemorySize} and a {@code SnapStart}
-     * that applies, or of all its properties under {@code AutoPublishAliasAllProperties}, as sorted
-     * compact JSON with characters outside printable ASCII as lowercase hex escapes, apart from
-     * JSON's short escapes such as a newline's. A string
+     * that applies, as sorted compact JSON with characters outside printable ASCII as lowercase hex
+     * escapes, apart from JSON's short escapes such as a newline's; that is the id SAM gives. Under
+     * {@code AutoPublishAliasAllProperties} the hash covers all the properties this transform gives
+     * the function, plus its {@code SnapStart}, which makes the id floci's own. A string
      * {@code AutoPublishCodeSha256} names the version itself, by its first ten characters. A change
-     * to the hashed input is a new logical id: the update publishes a new version and the alias moves
-     * to it. Unchanged, the id and the version it published stay, since the version provisioner never
-     * republishes under the same id.
+     * to the hashed input is a new logical id, so a new version resource, which publishes when the
+     * function's code or configuration changed since its last version. Unchanged, the id and the
+     * version it published stay, since the version provisioner never republishes under the same id.
      */
     private String versionLogicalId(String functionLogicalId, JsonNode samProperties, JsonNode functionProperties,
                                     JsonNode template, Map<String, String> parameterValues) {
