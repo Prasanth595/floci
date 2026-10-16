@@ -14,8 +14,10 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -53,6 +55,45 @@ class LogsUnknownRegionAuthorizationIntegrationTest {
     @BeforeAll
     static void configureContentTypes() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"TagResource", "UntagResource", "ListTagsForResource"})
+    void directTagArnRejectsColonRegionAndAcceptsUnambiguousUnknownRegion(String action) {
+        String region = "custom-region-1";
+        String group = "logs-tag-marker-" + UUID.randomUUID();
+        int port = endpoint.getPort();
+        cleanup.register(() -> call(port, ACCOUNT, region, "DeleteLogGroup", Map.of("logGroupName", group))
+                .then().statusCode(200));
+        logsService.createLogGroupForAccount(ACCOUNT, group, null, Map.of("team", "blue"), region);
+        String root = EnforcementFixtures.auth(ACCOUNT, "iam");
+        String user = "logs-tag-marker-" + UUID.randomUUID();
+        String caller = EnforcementFixtures.createUser(cleanup, port, root, user).accessKeyId();
+        given().port(port).header("Authorization", root).formParam("Action", "PutUserPolicy")
+                .formParam("UserName", user).formParam("PolicyName", "marker-tags")
+                .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                        + "\"Action\":\"logs:" + action + "\",\"Resource\":\"*\"}]}")
+                .when().post("/").then().statusCode(200);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("resourceArn", "arn:aws:logs:" + region + ":" + ACCOUNT + ":log-group:" + group);
+        if (action.equals("TagResource")) {
+            body.put("tags", Map.of("team", "red"));
+        } else if (action.equals("UntagResource")) {
+            body.put("tagKeys", List.of("team"));
+        }
+        call(port, caller, "custom:log-group:zone", action, body)
+                .then().statusCode(400).body(containsString("InvalidSignatureException"));
+        call(port, ACCOUNT, region, "ListTagsLogGroup", Map.of("logGroupName", group))
+                .then().statusCode(200).body("tags", equalTo(Map.of("team", "blue")));
+        Response result = call(port, caller, region, action, body);
+        result.then().statusCode(200);
+        Map<String, String> expected = action.equals("TagResource") ? Map.of("team", "red")
+                : action.equals("UntagResource") ? Map.of() : Map.of("team", "blue");
+        if (action.equals("ListTagsForResource")) {
+            result.then().body("tags", equalTo(expected));
+        }
+        call(port, ACCOUNT, region, "ListTagsLogGroup", Map.of("logGroupName", group))
+                .then().statusCode(200).body("tags", equalTo(expected));
     }
 
     @ParameterizedTest

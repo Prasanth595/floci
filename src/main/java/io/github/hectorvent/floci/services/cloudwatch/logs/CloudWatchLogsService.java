@@ -373,9 +373,14 @@ public class CloudWatchLogsService implements ResourceProvider {
         groupStore.put(key, group);
     }
 
+    public LogGroupTagTarget resolveTagTarget(String resourceArn, String region) {
+        return LogGroupTagTarget.resolve(resourceArn, region, regionResolver.getAccountId(), regionResolver.getPartition());
+    }
+
     public void tagLogGroup(String groupName, Map<String, String> tags, String region) {
         String key = groupKey(region, groupName);
         LogGroup group = groupStore.get(key)
+                .filter(stored -> groupName.equals(stored.getLogGroupName()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + groupName, 400));
         group.getTags().putAll(tags);
@@ -385,6 +390,7 @@ public class CloudWatchLogsService implements ResourceProvider {
     public void untagLogGroup(String groupName, List<String> tagKeys, String region) {
         String key = groupKey(region, groupName);
         LogGroup group = groupStore.get(key)
+                .filter(stored -> groupName.equals(stored.getLogGroupName()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + groupName, 400));
         tagKeys.forEach(group.getTags()::remove);

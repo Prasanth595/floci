@@ -661,9 +661,22 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void directLogTagTargetsUseBareArnAndServingAction() {
+        for (String action : List.of("logs:TagResource", "logs:UntagResource", "logs:ListTagsForResource")) {
+            for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1", "custom-region-1")) {
+                String partition = AwsRegions.partitionFor(region);
+                String arn = "arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":log-group:group";
+                setJsonBody("{\"resourceArn\":\"" + arn + "\"}");
+                when(ctx.getHeaderString("X-Amz-Target")).thenReturn("Logs_20140328.DeleteLogGroup");
+                assertEquals(List.of(arn), builder.buildLogStreamResources(action, ctx, region, ACCOUNT, partition));
+            }
+        }
+    }
+
+    @Test
     void excludedLogsActionsKeepWildcardResources() {
         for (String action : List.of("logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy",
-                "logs:TagResource", "logs:UntagResource", "logs:ListTagsForResource", "logs:PutLogEvents")) {
+                "logs:DeleteRetentionPolicy", "logs:PutLogEvents")) {
             setJsonBody("{\"logGroupName\":\"group\",\"logStreamName\":\"stream\"}");
             assertEquals(List.of("*"), builder.buildLogStreamResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
         }

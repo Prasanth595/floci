@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
+import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -100,12 +101,16 @@ public class ResourceArnBuilder {
     /** Uses the serving operation, not an independently parsed target header. */
     public List<String> buildLogStreamResources(String action, ContainerRequestContext ctx,
                                                  String region, String accountId, String partition) {
-        if (!("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action))) {
+        if (!("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action)
+                || LogGroupTagTarget.supports(action))) {
             return List.of("*");
         }
         JsonNode body = readJsonBody(ctx);
         if (body == null) {
             return List.of("*");
+        }
+        if (LogGroupTagTarget.supports(action)) {
+            return List.of(LogGroupTagTarget.resolve(body.path("resourceArn").asText(), region, accountId, partition).arn());
         }
         // Match the handler's coercion and raw names, including whitespace and numeric values.
         String group = body.path("logGroupName").asText();

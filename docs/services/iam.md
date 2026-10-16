@@ -1266,10 +1266,24 @@ These identities always bypass enforcement (backward-compatible defaults):
 specific log-stream ARN, so policies can allow or deny one stream within a group. Their
 `aws:ResourceTag/<key>` conditions read the owning log group's current tags in the request's
 account and region. Both stream operations check the documented group and stream name constraints
-before changing storage, preventing delimiter aliases from targeting another stream. Other Logs
-actions retain their existing wildcard resource evaluation.
+before changing storage, preventing delimiter aliases from targeting another stream.
 These checks also apply to deletion: legacy streams with names containing `:` or `*` cannot be
 deleted through `DeleteLogStream`. Existing stored names are not automatically migrated.
+
+**CloudWatch Logs ARN tagging.** For log groups, `logs:TagResource`, `logs:UntagResource`
+and `logs:ListTagsForResource` evaluate the group's ARN without a trailing `:*`. The ARN must
+identify a group in the request's account, region and partition; a different owner or resource
+kind returns `ResourceNotFoundException` without reading or changing a local group's tags.
+All three actions use the group's existing `aws:ResourceTag/<key>` conditions. `TagResource`
+also provides `aws:RequestTag/<key>` and `aws:TagKeys`; `UntagResource` provides `aws:TagKeys`.
+An unauthorized request cannot partially add or remove tags. These ownership checks also apply
+when IAM enforcement is disabled. Shared tag mutations reject storage aliases whose stored group
+name differs from the requested name, without migrating historical records.
+
+This support covers log groups. Tagging destinations and other CloudWatch Logs resource types
+remains unsupported. Existing plain-name and `:*` input compatibility is retained; it is not a
+claim that AWS accepts those forms for these APIs. Other Logs actions retain their existing
+wildcard resource evaluation.
 
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
 from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets
@@ -1449,7 +1463,8 @@ floci populates:
   `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucket` and the
   `s3:PutBucketTagging` that `DeleteBucketTagging` is checked as (the bucket). A request naming several EC2 resources is evaluated
   once per resource and denied when any of them fails the condition, as on AWS.
-  `logs:CreateLogStream` and `logs:DeleteLogStream` use the owning log group's tags.
+  `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:TagResource`, `logs:UntagResource`
+  and `logs:ListTagsForResource` use the owning log group's tags.
 - `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
   `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
   `s3:DeleteObjectTagging`, `s3:PutObjectTagging` and the annotation actions, and for their
