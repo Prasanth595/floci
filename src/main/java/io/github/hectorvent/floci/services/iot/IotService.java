@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -86,8 +85,6 @@ public class IotService {
     private static final Pattern THING_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]{1,128}");
     /** The {@code FirehoseSeparator} shape of the IoT API model. */
     private static final Pattern FIREHOSE_SEPARATOR = Pattern.compile("([\\n\\t])|(\\r\\n)|(,)");
-    /** An AWS policy variable such as {@code ${iot:ClientId}}. */
-    private static final Pattern POLICY_VARIABLE = Pattern.compile("\\$\\{[^}]*\\}");
     public static final int MAX_POLICY_VERSIONS = 5;
 
     /** One lock for every policy version write and the policy delete, so a cap check, an append and a delete cannot interleave. */
@@ -484,8 +481,8 @@ public class IotService {
     /**
      * Decides {@code iot:Connect} for a client id the way AWS IoT does on a CONNECT: the certificate
      * must be ACTIVE and within its validity dates, the policies are the default versions attached
-     * to the certificate in its own account and region, and the connection's policy variables are
-     * substituted and offered as condition keys. No policy means deny; an explicit deny wins.
+     * to the certificate in its own account and region, and the connection's policy variables go in
+     * as condition keys. No policy means deny; an explicit deny wins.
      */
     public boolean isConnectAllowed(RegisteredDevice device, String clientId, String sourceIp, String domainName) {
         IotCertificate certificate = device.certificate();
@@ -508,16 +505,24 @@ public class IotService {
                 regionResolver.getDefaultRegion(), regionResolver.getDefaultAccountId(), clientId);
     }
 
+    /**
+     * Decides {@code iot:Connect} for the client ARN against the documents as they are written,
+     * with the connection's variables offered as condition keys. The {@code ${...}} placeholders
+     * are the evaluator's to resolve, from that same context, because the developer guide gives
+     * IoT no policy language of its own: its policies "follow the same conventions as IAM
+     * policies" and "the same policy evaluation logic", and a variable is one "that can be used
+     * in AWS IoT Core policies in the Resource or Condition block", which is where that resolver
+     * substitutes and the only place AWS says a variable has meaning.
+     */
     private boolean isConnectAllowed(List<String> documents, Map<String, String> variables, String region, String accountId,
                                      String clientId) {
         if (documents.isEmpty()) {
             return false;
         }
-        List<String> resolved = documents.stream().map(document -> resolvePolicyVariables(document, variables)).toList();
         Map<String, List<String>> conditionContext = new LinkedHashMap<>();
         variables.forEach((key, value) -> conditionContext.put(key, List.of(value)));
         String clientArn = AwsArnUtils.Arn.of("iot", region, accountId, "client/" + clientId).toString();
-        return policyEvaluator.evaluate(CallerContext.of(resolved), null, "iot:Connect", clientArn, conditionContext)
+        return policyEvaluator.evaluate(CallerContext.of(documents), null, "iot:Connect", clientArn, conditionContext)
                 == IamPolicyEvaluator.Decision.ALLOW;
     }
 
@@ -573,67 +578,6 @@ public class IotService {
             variables.put("iot:DomainName", domainName);
         }
         return variables;
-    }
-
-    /**
-     * Substitutes the connection's variables into every string of the document on the parsed tree,
-     * so a client id is never read as JSON. A statement still holding a variable Floci cannot
-     * resolve matches nothing, as an unresolvable variable does on AWS, and is dropped. A document
-     * that does not parse is returned as is: the evaluator logs it and skips it.
-     */
-    private String resolvePolicyVariables(String document, Map<String, String> variables) {
-        JsonNode root;
-        try {
-            root = objectMapper.readTree(document);
-        } catch (JsonProcessingException e) {
-            return document;
-        }
-        if (!(root instanceof ObjectNode policy)) {
-            return document;
-        }
-        JsonNode statements = policy.get("Statement");
-        Iterable<JsonNode> each = statements == null ? List.of() : statements.isArray() ? statements : List.of(statements);
-        ArrayNode resolved = objectMapper.createArrayNode();
-        for (JsonNode statement : each) {
-            JsonNode substituted = substituteVariables(statement.deepCopy(), variables);
-            if (!hasUnresolvedVariable(substituted)) {
-                resolved.add(substituted);
-            }
-        }
-        policy.set("Statement", resolved);
-        return policy.toString();
-    }
-
-    private static JsonNode substituteVariables(JsonNode node, Map<String, String> variables) {
-        if (node.isTextual()) {
-            String text = node.asText();
-            for (Map.Entry<String, String> variable : variables.entrySet()) {
-                text = text.replace("${" + variable.getKey() + "}", variable.getValue());
-            }
-            return TextNode.valueOf(text);
-        }
-        if (node instanceof ObjectNode object) {
-            for (Map.Entry<String, JsonNode> property : object.properties()) {
-                property.setValue(substituteVariables(property.getValue(), variables));
-            }
-        } else if (node instanceof ArrayNode array) {
-            for (int i = 0; i < array.size(); i++) {
-                array.set(i, substituteVariables(array.get(i), variables));
-            }
-        }
-        return node;
-    }
-
-    private static boolean hasUnresolvedVariable(JsonNode node) {
-        if (node.isTextual()) {
-            return POLICY_VARIABLE.matcher(node.asText()).find();
-        }
-        for (JsonNode child : node) {
-            if (hasUnresolvedVariable(child)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private List<AccountAwareStorageBackend.AccountEntry<IotCertificate>> registeredCertificates(Predicate<String> keyFilter) {
