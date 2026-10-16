@@ -244,6 +244,10 @@ public class CloudFormationService implements ResourceProvider {
         return stack != null ? stack.getStatus() : null;
     }
 
+    private static boolean isBeingDeleted(String status) {
+        return "DELETE_IN_PROGRESS".equals(status) || "DELETE_COMPLETE".equals(status);
+    }
+
     /**
      * Whether a stack in this status refuses an update, on the two grounds AWS refuses one.
      *
@@ -975,6 +979,10 @@ public class CloudFormationService implements ResourceProvider {
                         "Stack with id " + stackNameOrArn + " does not exist", 400);
             }
             ChangeSet cs = getChangeSetOrThrow(existing, changeSetName, region, accountId);
+            if (isBeingDeleted(existing.getStatus())) {
+                throw new AwsException("InvalidChangeSetStatus", "ChangeSet [" + cs.getChangeSetId()
+                        + "] cannot be executed while its stack is in status [" + existing.getStatus() + "]", 400);
+            }
             String executionStatus = cs.getExecutionStatus();
             boolean eligible = requireAvailable
                     ? "AVAILABLE".equals(executionStatus)
@@ -1083,29 +1091,37 @@ public class CloudFormationService implements ResourceProvider {
             }
             return CompletableFuture.completedFuture(null); // Already gone — no-op
         }
-        if (stack.isEnableTerminationProtection()) {
-            // Real AWS rejects deletion of a protected stack and leaves it unchanged.
-            throw new AwsException("ValidationError",
-                    "Stack [" + stack.getStackId()
-                            + "] cannot be deleted while TerminationProtection is enabled", 400);
-        }
-        StackMutationSnapshot snapshot = snapshot(stack);
-        stack.setStatus("DELETE_IN_PROGRESS");
-        addEvent(stack, stack.getStackName(), stack.getStackId(),
-                "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
-
-        try {
-            return submitOperation(() -> RequestScopes.runAs(accountId, region,
-                    () -> deleteStackResources(stack, region, accountId)));
-        } catch (AwsException e) {
-            if ("LimitExceededException".equals(e.getErrorCode())) {
-                Stack restored = restoreStack(accountId, stack.getStackName(), region, snapshot);
-                if (restored != null) {
-                    persistStack(restored);
-                }
+        // The check, the move to DELETE_IN_PROGRESS and the submission are one step under the
+        // stack's lock. A retried or racing delete therefore finds either the stack as it was or a
+        // deletion already running, and starts no second one; a stack that took this name since it
+        // was resolved is a different stack, and is left alone.
+        String stackId = stack.getStackId();
+        Future<?>[] submitted = new Future<?>[1];
+        stacks.compute(stackKey(accountId, stack.getStackName(), region), (k, existing) -> {
+            if (existing == null || !existing.getStackId().equals(stackId)
+                    || isBeingDeleted(existing.getStatus())) {
+                return existing;
             }
-            throw e;
-        }
+            if (existing.isEnableTerminationProtection()) {
+                // Real AWS rejects deletion of a protected stack and leaves it unchanged.
+                throw new AwsException("ValidationError",
+                        "Stack [" + existing.getStackId()
+                                + "] cannot be deleted while TerminationProtection is enabled", 400);
+            }
+            StackMutationSnapshot snapshot = snapshot(existing);
+            existing.setStatus("DELETE_IN_PROGRESS");
+            addEvent(existing, existing.getStackName(), existing.getStackId(),
+                    "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
+            try {
+                submitted[0] = submitOperation(() -> RequestScopes.runAs(accountId, region,
+                        () -> deleteStackResources(existing, region, accountId)));
+            } catch (AwsException e) {
+                restore(existing, snapshot);
+                throw e;
+            }
+            return existing;
+        });
+        return submitted[0] != null ? submitted[0] : CompletableFuture.completedFuture(null);
     }
 
     // ── ContinueUpdateRollback ────────────────────────────────────────────────
