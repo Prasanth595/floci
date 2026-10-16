@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ssm;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
@@ -19,7 +20,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -190,6 +193,160 @@ class SsmDirectCommandAccountIntegrationTest {
                         }
                     });
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"333333333333,us-west-2", "222222222222,cn-north-1"})
+    void foreignScopeCannotPollDirectFallback(String foreignAccount, String foreignRegion) throws Exception {
+        String instance = "i-fallback-" + UUID.randomUUID();
+        String command = directFallback(instance);
+        try {
+            assertTrue(call(foreignAccount, foreignRegion, "AmazonSSMMessageDeliveryService.GetMessages",
+                    Map.of("Destination", instance)).jsonPath().getList("Messages").isEmpty());
+            Response own = call("222222222222", "us-west-2", "AmazonSSMMessageDeliveryService.GetMessages",
+                    Map.of("Destination", instance));
+            assertEquals(1, own.jsonPath().getList("Messages").size());
+            assertEquals(command, new ObjectMapper().readTree(Base64.getDecoder()
+                    .decode(own.jsonPath().getString("Messages[0].Payload"))).path("CommandId").asText());
+        } finally {
+            deleteCommand("222222222222", "us-west-2", command, instance);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"333333333333,us-west-2,AcknowledgeMessage", "333333333333,us-west-2,SendReply",
+            "333333333333,us-west-2,FailMessage", "333333333333,us-west-2,DeleteMessage",
+            "222222222222,cn-north-1,AcknowledgeMessage", "222222222222,cn-north-1,SendReply",
+            "222222222222,cn-north-1,FailMessage", "222222222222,cn-north-1,DeleteMessage"})
+    void foreignScopeCannotConsumeFallbackCorrelation(String foreignAccount, String foreignRegion, String operation)
+            throws Exception {
+        String instance = "i-fallback-" + UUID.randomUUID();
+        String command = directFallback(instance);
+        try {
+            String message = call("222222222222", "us-west-2", "AmazonSSMMessageDeliveryService.GetMessages",
+                    Map.of("Destination", instance)).jsonPath().getString("Messages[0].MessageId");
+            assertNotNull(message);
+            Map<String, Object> body = Map.of("MessageId", message, "Payload", replyPayload(),
+                    "FailureType", "foreign-failure");
+            call(foreignAccount, foreignRegion, "AmazonSSMMessageDeliveryService." + operation, body);
+            assertEquals("Pending", call("222222222222", "us-west-2", "AmazonSSM.GetCommandInvocation",
+                    Map.of("CommandId", command, "InstanceId", instance)).jsonPath().getString("Status"));
+            call("222222222222", "us-west-2", "AmazonSSMMessageDeliveryService.AcknowledgeMessage", body);
+            assertEquals("InProgress", call("222222222222", "us-west-2", "AmazonSSM.GetCommandInvocation",
+                    Map.of("CommandId", command, "InstanceId", instance)).jsonPath().getString("Status"));
+            call("222222222222", "us-west-2", "AmazonSSMMessageDeliveryService.SendReply", body);
+            Response result = call("222222222222", "us-west-2", "AmazonSSM.GetCommandInvocation",
+                    Map.of("CommandId", command, "InstanceId", instance));
+            assertEquals("Success", result.jsonPath().getString("Status"));
+            assertEquals("owned agent output", result.jsonPath().getString("StandardOutputContent"));
+        } finally {
+            deleteCommand("222222222222", "us-west-2", command, instance);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"333333333333,us-west-2,false,false", "333333333333,us-west-2,false,true",
+            "333333333333,us-west-2,true,false", "333333333333,us-west-2,true,true",
+            "222222222222,cn-north-1,false,false", "222222222222,cn-north-1,false,true",
+            "222222222222,cn-north-1,true,false", "222222222222,cn-north-1,true,true"})
+    void peerCleanupPreservesOwnerQueueAndCorrelation(String peerAccount, String peerRegion,
+                                                       boolean polled, boolean cancel) throws Exception {
+        String instance = "i-fallback-" + UUID.randomUUID();
+        String command = directFallback(instance);
+        String peerCommand = null;
+        try {
+            peerCommand = directFallback(peerAccount, peerRegion, instance);
+            String message = polled ? call("222222222222", "us-west-2",
+                    "AmazonSSMMessageDeliveryService.GetMessages", Map.of("Destination", instance))
+                    .jsonPath().getString("Messages[0].MessageId") : null;
+            if (polled) {
+                assertNotNull(message);
+            }
+            if (cancel) {
+                call(peerAccount, peerRegion, "AmazonSSM.CancelCommand", Map.of("CommandId", peerCommand));
+            } else {
+                RequestScopes.runAs(peerAccount, peerRegion, () -> assertEquals(1,
+                        commandService.failActiveInvocationsForInstance(peerRegion, instance, "peer stopped")));
+            }
+            assertTrue(call(peerAccount, peerRegion, "AmazonSSMMessageDeliveryService.GetMessages",
+                    Map.of("Destination", instance)).jsonPath().getList("Messages").isEmpty());
+            if (!polled) {
+                message = call("222222222222", "us-west-2", "AmazonSSMMessageDeliveryService.GetMessages",
+                        Map.of("Destination", instance)).jsonPath().getString("Messages[0].MessageId");
+                assertNotNull(message);
+            }
+            call("222222222222", "us-west-2", "AmazonSSMMessageDeliveryService.SendReply",
+                    Map.of("MessageId", message, "Payload", replyPayload()));
+            assertEquals("Success", call("222222222222", "us-west-2", "AmazonSSM.GetCommandInvocation",
+                    Map.of("CommandId", command, "InstanceId", instance)).jsonPath().getString("Status"));
+        } finally {
+            String peer = peerCommand;
+            assertAll(() -> deleteCommand("222222222222", "us-west-2", command, instance),
+                    () -> { if (peer != null) { deleteCommand(peerAccount, peerRegion, peer, instance); } });
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"FailMessage,Failed", "DeleteMessage,Pending"})
+    void ownerCanFailOrDeleteFallbackCorrelation(String operation, String expected) throws Exception {
+        String instance = "i-fallback-" + UUID.randomUUID();
+        String command = directFallback(instance);
+        try {
+            String message = call("222222222222", "us-west-2", "AmazonSSMMessageDeliveryService.GetMessages",
+                    Map.of("Destination", instance)).jsonPath().getString("Messages[0].MessageId");
+            assertNotNull(message);
+            Map<String, Object> body = Map.of("MessageId", message, "FailureType", "owner failure",
+                    "Payload", replyPayload());
+            call("222222222222", "us-west-2", "AmazonSSMMessageDeliveryService." + operation, body);
+            call("222222222222", "us-west-2", "AmazonSSMMessageDeliveryService.AcknowledgeMessage", body);
+            call("222222222222", "us-west-2", "AmazonSSMMessageDeliveryService.SendReply", body);
+            Response result = call("222222222222", "us-west-2", "AmazonSSM.GetCommandInvocation",
+                    Map.of("CommandId", command, "InstanceId", instance));
+            assertEquals(expected, result.jsonPath().getString("Status"));
+            if (operation.equals("FailMessage")) {
+                assertEquals("Failed: owner failure", result.jsonPath().getString("StatusDetails"));
+            }
+        } finally {
+            deleteCommand("222222222222", "us-west-2", command, instance);
+        }
+    }
+
+    private String directFallback(String instance) throws Exception {
+        return directFallback("222222222222", "us-west-2", instance);
+    }
+
+    private String directFallback(String account, String region, String instance) throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        AtomicReference<Thread> worker = new AtomicReference<>();
+        when(executor.supports(account, instance, "AWS-RunShellScript")).thenReturn(true);
+        when(executor.executeIfSupported(eq(account), eq(instance), eq("AWS-RunShellScript"), any(), eq(60)))
+                .thenAnswer(invocation -> {
+                    worker.set(Thread.currentThread());
+                    entered.countDown();
+                    return Optional.empty();
+                });
+        String command = call(account, region, "AmazonSSM.SendCommand", Map.of("DocumentName", "AWS-RunShellScript",
+                "InstanceIds", List.of(instance), "Parameters", Map.of("commands", List.of("echo owned")),
+                "TimeoutSeconds", 60)).jsonPath().getString("Command.CommandId");
+        try {
+            assertNotNull(command);
+            assertOwnedInvocation(account, region, command, instance);
+            assertTrue(entered.await(3, TimeUnit.SECONDS));
+            joinWorker(worker);
+            assertEquals("Pending", call(account, region, "AmazonSSM.GetCommandInvocation",
+                    Map.of("CommandId", command, "InstanceId", instance)).jsonPath().getString("Status"));
+            return command;
+        } catch (Throwable failure) {
+            assertAll(() -> { throw failure; }, () -> joinWorker(worker),
+                    () -> deleteCommand(account, region, command, instance));
+            throw new AssertionError("unreachable");
+        }
+    }
+
+    private static String replyPayload() {
+        return Base64.getEncoder().encodeToString(("{\"runtimeStatus\":{\"aws:runShellScript\":{"
+                + "\"status\":\"Success\",\"code\":0,\"output\":\"owned agent output\"}}}")
+                .getBytes(StandardCharsets.UTF_8));
     }
 
     private void assertOwnedInvocation(String account, String region, String commandId, String instance) {
