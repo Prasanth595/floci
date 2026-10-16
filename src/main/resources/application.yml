@@ -86,14 +86,21 @@ quarkus:
         # OpenAPIParser discovers the Swagger 2.0 converter through ServiceLoader.
         - META-INF/services/io.swagger.v3.parser.core.extensions.SwaggerParserExtension
         - com/mysql/cj/util/TimeZoneMapping.properties
+        # JNA's dispatch library, which docker-java's named-pipe transport (Docker Desktop on
+        # Windows) loads. Only the Windows build includes it, with -Dfloci.native.windows-jni-include=*.
+        - com/sun/jna/win32-x86-64/${floci.native.windows-jni-include:none}
       # snappy-java registers 27 JNI libraries, one per platform. Only the one
-      # for the running platform loads, so 23 are dropped. Linux x86_64 and
-      # aarch64 cover the published images, Mac covers a local native build.
+      # for the running platform loads, so the others are dropped. Linux x86_64 and
+      # aarch64 cover the published images, Mac covers the macOS binaries. The
+      # Windows x86_64 library is kept only by the Windows build, which passes
+      # -Dfloci.native.windows-jni-exclude=none; every other build still excludes it.
       excludes:
         - org/xerial/snappy/native/AIX/**
         - org/xerial/snappy/native/FreeBSD/**
         - org/xerial/snappy/native/SunOS/**
-        - org/xerial/snappy/native/Windows/**
+        - org/xerial/snappy/native/Windows/aarch64/**
+        - org/xerial/snappy/native/Windows/x86/**
+        - org/xerial/snappy/native/Windows/x86_64/${floci.native.windows-jni-exclude:**}
         - org/xerial/snappy/native/Linux/android-aarch64/**
         - org/xerial/snappy/native/Linux/android-arm/**
         - org/xerial/snappy/native/Linux/arm/**
