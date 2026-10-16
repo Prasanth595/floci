@@ -8,8 +8,13 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.stream.Stream;
 
-import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.equalTo;
+import static io.github.hectorvent.floci.services.ses.SesV2SerializationErrors.EXPECTED_LIST;
+import static io.github.hectorvent.floci.services.ses.SesV2SerializationErrors.EXPECTED_NULL;
+import static io.github.hectorvent.floci.services.ses.SesV2SerializationErrors.LIST;
+import static io.github.hectorvent.floci.services.ses.SesV2SerializationErrors.NUMBER;
+import static io.github.hectorvent.floci.services.ses.SesV2SerializationErrors.STRUCTURE;
+import static io.github.hectorvent.floci.services.ses.SesV2SerializationErrors.assertError;
+import static io.github.hectorvent.floci.services.ses.SesV2SerializationErrors.assertSerializationException;
 
 /**
  * The configuration set operations whose body nests a structure check it against the SES v2
@@ -20,18 +25,11 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class SesConfigurationSetMemberTypeIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String MISSING_CS = "v2-cs-member-type-missing";
     private static final String CREATE = "/v2/email/configuration-sets";
     private static final String MISSING_CS_PATH = CREATE + "/" + MISSING_CS;
     private static final String DESTINATIONS = MISSING_CS_PATH + "/event-destinations";
     private static final String UPDATE = "/v2/email/update-configuration-sets";
-    private static final String STRUCTURE = "Start of structure or map found where not expected.";
-    private static final String LIST = "Start of list found where not expected";
-    private static final String NUMBER = "NUMBER_VALUE can not be converted to a String";
-    private static final String EXPECTED_NULL = "Expected null";
-    private static final String EXPECTED_LIST = "Expected list or null";
     private static final String NOT_AN_OBJECT = "Request body must be a JSON object.";
 
     static Stream<Arguments> createConfigurationSetCases() {
@@ -128,34 +126,21 @@ class SesConfigurationSetMemberTypeIntegrationTest {
         return "\"EventDestination\": {" + members + "}";
     }
 
-    private static void assertError(String method, String path, String body, String type, String message) {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
-            .body(body)
-        .when()
-            .request(method, path)
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo(type))
-            .body("message", equalTo(message));
-    }
-
-    private static void assertSerializationException(String method, String path, String members, String message) {
-        assertError(method, path, "{" + members + "}", "SerializationException", message);
+    private static void assertMembersRejected(String method, String path, String members, String message) {
+        assertSerializationException(method, path, "{" + members + "}", message);
     }
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("createConfigurationSetCases")
     void createConfigurationSet_wrongMemberType(String caseName, String members, String message) {
-        assertSerializationException("POST", CREATE, members, message);
+        assertMembersRejected("POST", CREATE, members, message);
     }
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("eventDestinationCases")
     void createConfigurationSetEventDestination_wrongMemberTypeBeforeLookup(String caseName, String members,
                                                                             String message) {
-        assertSerializationException("POST", DESTINATIONS,
+        assertMembersRejected("POST", DESTINATIONS,
                 "\"EventDestinationName\": \"ed-" + caseName + "\", " + members, message);
     }
 
@@ -163,12 +148,12 @@ class SesConfigurationSetMemberTypeIntegrationTest {
     @MethodSource("eventDestinationCases")
     void updateConfigurationSetEventDestination_wrongMemberTypeBeforeLookup(String caseName, String members,
                                                                             String message) {
-        assertSerializationException("PUT", DESTINATIONS + "/ed-missing", members, message);
+        assertMembersRejected("PUT", DESTINATIONS + "/ed-missing", members, message);
     }
 
     @Test
     void createConfigurationSetEventDestination_numericNameBeforeLookup() {
-        assertSerializationException("POST", DESTINATIONS,
+        assertMembersRejected("POST", DESTINATIONS,
                 "\"EventDestinationName\": 123, " + destination("\"Enabled\": true"), NUMBER);
     }
 
@@ -176,20 +161,20 @@ class SesConfigurationSetMemberTypeIntegrationTest {
     @MethodSource("putSuppressionOptionsCases")
     void putConfigurationSetSuppressionOptions_wrongMemberTypeBeforeLookup(String caseName, String members,
                                                                            String message) {
-        assertSerializationException("PUT", MISSING_CS_PATH + "/suppression-options", members, message);
+        assertMembersRejected("PUT", MISSING_CS_PATH + "/suppression-options", members, message);
     }
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("putVdmOptionsCases")
     void putConfigurationSetVdmOptions_wrongMemberTypeBeforeLookup(String caseName, String members,
                                                                    String message) {
-        assertSerializationException("PUT", MISSING_CS_PATH + "/vdm-options", members, message);
+        assertMembersRejected("PUT", MISSING_CS_PATH + "/vdm-options", members, message);
     }
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("updateConfigurationSetCases")
     void updateConfigurationSet_wrongMemberTypeBeforeLookup(String caseName, String members, String message) {
-        assertSerializationException("POST", UPDATE, members, message);
+        assertMembersRejected("POST", UPDATE, members, message);
     }
 
     @ParameterizedTest(name = "{0} {1}")
@@ -206,16 +191,8 @@ class SesConfigurationSetMemberTypeIntegrationTest {
 
     @Test
     void createConfigurationSet_nullTagElement_isLeftToTheTagParser() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH)
-            .body("{\"ConfigurationSetName\": \"v2-cs-member-type-null-tag\", \"Tags\": [null]}")
-        .when()
-            .post(CREATE)
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo("SerializationException"))
-            .body("message", equalTo(null));
+        assertError("POST", CREATE, "{\"ConfigurationSetName\": \"v2-cs-member-type-null-tag\", \"Tags\": [null]}",
+                "SerializationException", null);
     }
 
     @Test
