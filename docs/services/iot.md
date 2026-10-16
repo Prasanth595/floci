@@ -199,7 +199,7 @@ mosquitto_sub -h localhost -p 8883 --cafile ca.pem --cert device.crt --key devic
 
 The connection is admitted when all of these hold, otherwise the broker answers `CONNACK` not authorized (return code `5`, reason code `0x87` on MQTT 5) and closes the connection:
 
-1. A certificate was presented and the SHA-256 of its DER encoding is a registered `certificateId` (`CreateKeysAndCertificate`, `CreateCertificateFromCsr` or `RegisterCertificateWithoutCA`), in any account and region. Who signed it does not matter, registration does, as on AWS. When one certificate is registered in several accounts or regions, Floci uses the first registration by account and region; AWS selects the account from the server name.
+1. A certificate was presented and the SHA-256 of its DER encoding is a registered `certificateId` (`CreateKeysAndCertificate`, `CreateCertificateFromCsr` or `RegisterCertificateWithoutCA`), in any account and region. Who signed it does not matter, registration does, as on AWS. AWS selects the account from the server name, which Floci does not yet do, so a certificate registered in more than one account is refused. Within one account, the registration in the alphabetically first region is used.
 2. The certificate is `ACTIVE` and inside its validity dates.
 3. The default versions of the policies attached to the certificate (`AttachPolicy` with the certificate ARN as target, in the certificate's own account and region) allow `iot:Connect` on `arn:aws:iot:<region>:<account>:client/<clientId>`. No attached policy means deny, and an explicit `Deny` wins.
 

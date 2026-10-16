@@ -379,6 +379,8 @@ public class IotService {
         certificate.setCertificateMode("SNI_ONLY");
         certificate.setCreationDate(Instant.now());
         certificateStore.put(key, certificate);
+        // A device that connected before may now be registered in a second account.
+        certificateLocations.remove(certificate.getCertificateId());
         return certificate;
     }
 
@@ -482,7 +484,8 @@ public class IotService {
      * across every account partition: a connecting device carries no request context. The
      * partition and key a certificate was found under are remembered, so a device's next connect
      * is one keyed read; a remembered location that no longer resolves is dropped and the scan
-     * runs again.
+     * runs again. AWS picks the account from the server name; Floci cannot yet, so a certificate
+     * registered in more than one account is refused rather than admitted under one of them.
      */
     public Optional<RegisteredDevice> findRegisteredCertificate(X509Certificate presented) {
         String certificateId;
@@ -500,15 +503,28 @@ public class IotService {
             }
             certificateLocations.remove(certificateId, known);
         }
+        // compute serializes this scan with the remove in registerCertificateWithoutCa, so a
+        // registration in a second account cannot leave a stale location cached.
+        CertificateLocation location = certificateLocations.compute(certificateId, (id, stale) -> locateRegistration(id));
+        if (location == null) {
+            return Optional.empty();
+        }
+        return getForAccount(certificateStore, location.accountId(), location.key())
+                .map(certificate -> new RegisteredDevice(location.accountId(), regionOfCertificateKey(location.key()), certificate));
+    }
+
+    private CertificateLocation locateRegistration(String certificateId) {
         String suffix = ":" + certificateId;
-        // shortcut: one certificate registered in several accounts or regions resolves to the first; upgrade when SNI selects the account.
-        Optional<AccountAwareStorageBackend.AccountEntry<IotCertificate>> found =
-                registeredCertificates(key -> key.startsWith("cert:") && key.endsWith(suffix)).stream()
-                        .sorted(Comparator.comparing((AccountAwareStorageBackend.AccountEntry<IotCertificate> entry) -> entry.accountId())
-                                .thenComparing(AccountAwareStorageBackend.AccountEntry::key))
-                        .findFirst();
-        found.ifPresent(entry -> certificateLocations.put(certificateId, new CertificateLocation(entry.accountId(), entry.key())));
-        return found.map(entry -> new RegisteredDevice(entry.accountId(), regionOfCertificateKey(entry.key()), entry.value()));
+        List<AccountAwareStorageBackend.AccountEntry<IotCertificate>> registrations =
+                registeredCertificates(key -> key.startsWith("cert:") && key.endsWith(suffix));
+        if (registrations.stream().map(AccountAwareStorageBackend.AccountEntry::accountId).distinct().count() > 1) {
+            LOG.debugv("Refusing device certificate {0}: it is registered in more than one account", certificateId);
+            return null;
+        }
+        return registrations.stream()
+                .min(Comparator.comparing(AccountAwareStorageBackend.AccountEntry::key))
+                .map(entry -> new CertificateLocation(entry.accountId(), entry.key()))
+                .orElse(null);
     }
 
     private static String regionOfCertificateKey(String key) {
