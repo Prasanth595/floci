@@ -17,6 +17,7 @@ import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.startsWith;
 
 @QuarkusTest
 class MskControllerIntegrationTest {
@@ -457,6 +458,55 @@ class MskControllerIntegrationTest {
             .statusCode(400)
             .header("X-Amzn-Errortype", equalTo("BadRequestException"))
             .body("message", containsString("Configuration ARN does not exist"));
+    }
+
+    // A configuration ARN names the region the CreateConfiguration request was signed for, not
+    // the emulator's default region, and DescribeConfiguration/ListConfigurations return that
+    // same stored ARN. Terraform keeps it as the aws_msk_configuration id.
+    @Test
+    void configurationArnUsesTheRequestRegionAcrossCreateDescribeAndList() {
+        String requestRegion = "eu-west-2";
+        String authorization = "AWS4-HMAC-SHA256 Credential=AKID/20260215/" + requestRegion
+                + "/kafka/aws4_request, SignedHeaders=host, Signature=abc";
+        String name = "region-arn-config-" + UUID.randomUUID().toString().substring(0, 8);
+        String properties = Base64.getEncoder()
+                .encodeToString("auto.create.topics.enable=true".getBytes(StandardCharsets.UTF_8));
+
+        String arn = given()
+            .header("Authorization", authorization)
+            .contentType("application/json")
+            .body("""
+                {"name": "%s", "kafkaVersions": ["3.6.0"], "serverProperties": "%s"}
+                """.formatted(name, properties))
+        .when()
+            .post("/v1/configurations")
+        .then()
+            .statusCode(200)
+            .body("arn", startsWith("arn:aws:kafka:" + requestRegion + ":000000000000:configuration/" + name + "/"))
+            .extract().path("arn");
+
+        given()
+            .header("Authorization", authorization)
+        .when()
+            .get("/v1/configurations/{arn}", arn)
+        .then()
+            .statusCode(200)
+            .body("arn", equalTo(arn));
+
+        given()
+            .header("Authorization", authorization)
+        .when()
+            .get("/v1/configurations")
+        .then()
+            .statusCode(200)
+            .body("configurations.find { it.arn == '" + arn + "' }.arn", equalTo(arn));
+
+        given()
+            .header("Authorization", authorization)
+        .when()
+            .delete("/v1/configurations/{arn}", arn)
+        .then()
+            .statusCode(200);
     }
 
     // An empty base64 blob decodes to "" and means "no property overrides". Absent and
