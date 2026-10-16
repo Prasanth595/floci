@@ -15,7 +15,6 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
-
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;

@@ -120,13 +120,6 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final String S3_XML_SCHEMA_ERROR =
             "The XML you provided was not well-formed or did not validate against our published schema.";
-    private static final String DEFAULT_OWNERSHIP_CONTROLS_XML = new XmlBuilder()
-            .start("OwnershipControls", AwsNamespaces.S3)
-            .start("Rule")
-            .elem("ObjectOwnership", "BucketOwnerEnforced")
-            .end("Rule")
-            .end("OwnershipControls")
-            .build();
     private static final Set<String> OBJECT_OWNERSHIP_VALUES = Set.of(
             "BucketOwnerEnforced", "BucketOwnerPreferred", "ObjectWriter");
     private static final Set<String> SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES = Set.of("AES256", "aws:kms", "aws:kms:dsse", "aws:fsx");
@@ -517,18 +510,21 @@ public class S3Service implements Resettable, ResourceProvider {
 
         Bucket bucket = new Bucket(bucketName);
         bucket.setRegion(region);
-        bucket.setOwnershipControlsConfiguration("BucketOwnerEnforced".equals(ownership)
-                ? DEFAULT_OWNERSHIP_CONTROLS_XML : new XmlBuilder()
-                        .start("OwnershipControls", AwsNamespaces.S3)
-                        .start("Rule")
-                        .elem("ObjectOwnership", ownership)
-                        .end("Rule")
-                        .end("OwnershipControls")
-                        .build());
+        bucket.setOwnershipControlsConfiguration(ownershipControlsXml(ownership));
         bucket.setAcl(requestedAcl);
         bucketStore.put(bucketName, bucket);
         LOG.infov("Created bucket: {0} in region: {1}", bucketName, region);
         return bucket;
+    }
+
+    private static String ownershipControlsXml(String ownership) {
+        return new XmlBuilder()
+                .start("OwnershipControls", AwsNamespaces.S3)
+                .start("Rule")
+                .elem("ObjectOwnership", ownership)
+                .end("Rule")
+                .end("OwnershipControls")
+                .build();
     }
 
     private static boolean isDefaultS3Region(String region) {
