@@ -2925,16 +2925,41 @@ public class LambdaService implements ResourceProvider {
             return;
         }
         validateLoggingConfig(value, fn.isDurable());
-        String defaultFormat = fn.isDurable() ? "JSON" : "Text";
-        String format = logging.get("LogFormat") instanceof String f && !f.isBlank() ? f : defaultFormat;
+        LoggingSettings settings = loggingSettings(logging, fn.isDurable());
+        fn.setLogFormat(settings.logFormat());
+        fn.setApplicationLogLevel(settings.applicationLogLevel());
+        fn.setSystemLogLevel(settings.systemLogLevel());
+        fn.setLogGroup(settings.logGroup());
+    }
+
+    /** A function's logging settings as Lambda stores them; see {@link #loggingSettings(Map, boolean)}. */
+    public record LoggingSettings(String logFormat, String applicationLogLevel, String systemLogLevel,
+                                  String logGroup) {
+    }
+
+    /**
+     * What Lambda stores for a LoggingConfig: an omitted LogFormat is the function's default, JSON
+     * for a durable function and Text otherwise, the two log levels count only in JSON, and a blank
+     * value is an omitted one, an omitted LogGroup meaning {@code /aws/lambda/<name>}.
+     */
+    public static LoggingSettings loggingSettings(Map<?, ?> logging, boolean durable) {
+        String format = logging.get("LogFormat") instanceof String f && !f.isBlank() ? f : durable ? "JSON" : "Text";
         boolean json = "JSON".equals(format);
-        fn.setLogFormat(format);
-        fn.setApplicationLogLevel(json && logging.get("ApplicationLogLevel") instanceof String level
-                && !level.isBlank() ? level : null);
-        fn.setSystemLogLevel(json && logging.get("SystemLogLevel") instanceof String level
-                && !level.isBlank() ? level : null);
-        fn.setLogGroup(logging.get("LogGroup") instanceof String group && !group.isBlank()
-                ? group : null);
+        return new LoggingSettings(format,
+                json ? nonBlank(logging.get("ApplicationLogLevel")) : null,
+                json ? nonBlank(logging.get("SystemLogLevel")) : null,
+                nonBlank(logging.get("LogGroup")));
+    }
+
+    /** The function's stored logging settings, its default LogFormat when it has none stored. */
+    public static LoggingSettings loggingSettings(LambdaFunction fn) {
+        return new LoggingSettings(
+                fn.getLogFormat() != null ? fn.getLogFormat() : loggingSettings(Map.of(), fn.isDurable()).logFormat(),
+                fn.getApplicationLogLevel(), fn.getSystemLogLevel(), fn.getLogGroup());
+    }
+
+    private static String nonBlank(Object value) {
+        return value instanceof String s && !s.isBlank() ? s : null;
     }
 
     private static boolean hasValues(Map<String, Object> config, String key) {

@@ -261,6 +261,9 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         configRequest.put("DeadLetterConfig", resolveMapOrDefault(props, "DeadLetterConfig", engine,
                 mapWithNullValue("TargetArn")));
         configRequest.put("VpcConfig", resolveMapOrDefault(props, "VpcConfig", engine, Map.of()));
+        // Empty when the template has none, so that removing it puts the function back on its
+        // defaults (Text, or JSON for a durable function, and /aws/lambda/<name>), as on AWS.
+        configRequest.put("LoggingConfig", resolveMapOrDefault(props, "LoggingConfig", engine, Map.of()));
         configRequest.put("FileSystemConfigs",
                 resolveObjectListOrEmpty(props, "FileSystemConfigs", engine));
         putResolvedMapIfPresent(configRequest, props, "ImageConfig", "ImageConfig", engine);
@@ -573,6 +576,11 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
                         return true;
                     }
                 }
+                case "LoggingConfig" -> {
+                    if (loggingConfigurationChanged(fn, desired)) {
+                        return true;
+                    }
+                }
                 case "FileSystemConfigs" -> {
                     if (!Objects.equals(normalizeForCompare(fileSystemConfigs(fn)),
                             normalizeForCompare(desired))) {
@@ -599,6 +607,12 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         return false;
+    }
+
+    /** Compares what Lambda would store for {@code desired} with what the function has. */
+    private static boolean loggingConfigurationChanged(LambdaFunction fn, Object desired) {
+        Map<?, ?> logging = desired instanceof Map<?, ?> map ? map : Map.of();
+        return !LambdaService.loggingSettings(fn).equals(LambdaService.loggingSettings(logging, fn.isDurable()));
     }
 
     private boolean imageConfigurationChanged(
