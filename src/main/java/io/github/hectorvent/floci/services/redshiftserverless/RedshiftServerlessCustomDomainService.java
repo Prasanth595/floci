@@ -15,6 +15,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * Redshift Serverless custom domain associations. An association is recorded and echoed: Floci
@@ -27,6 +29,10 @@ import java.util.Objects;
 @ApplicationScoped
 public class RedshiftServerlessCustomDomainService implements Resettable {
 
+    private static final Pattern CUSTOM_DOMAIN_NAME = Pattern.compile(
+            "^(((?!-)[A-Za-z0-9-]{0,62}[A-Za-z0-9])\\.)+((?!-)[A-Za-z0-9-]{1,62}[A-Za-z0-9])$");
+    private static final Pattern CERTIFICATE_ARN = Pattern.compile(
+            "^arn:[\\w+=/,.@-]+:acm:[\\w+=/,.@-]*:[0-9]+:[\\w+=,.@-]+(/[\\w+=,.@-]+)*$");
     private static final int PAGE_SIZE = 100;
 
     private final AccountAwareStorageBackend<CustomDomainAssociation> associations;
@@ -43,20 +49,15 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
 
     public synchronized CustomDomainAssociation createCustomDomainAssociation(
             String workgroupName, String customDomainName, String certificateArn, String region) {
-        if (workgroupName == null || workgroupName.isBlank()) {
-            throw ServerlessSupport.validation("workgroupName must not be blank.");
-        }
-        if (customDomainName == null || customDomainName.isBlank()) {
-            throw ServerlessSupport.validation("customDomainName must not be blank.");
-        }
-        if (certificateArn == null || certificateArn.isBlank()) {
-            throw ServerlessSupport.validation("customDomainCertificateArn must not be blank.");
-        }
+        validateWorkgroupName(workgroupName);
+        validateCustomDomainName(customDomainName);
+        validateCertificateArn(certificateArn);
         Workgroup workgroup = serverless.findWorkgroup(workgroupName, region)
                 .orElseThrow(() -> ServerlessSupport.notFound("The workgroup " + workgroupName + " was not found."));
-        if (find(workgroupName, customDomainName, region) != null) {
+        CustomDomainAssociation existing = findByDomain(customDomainName, region);
+        if (existing != null) {
             throw ServerlessSupport.conflict("The custom domain " + customDomainName
-                    + " is already associated with the workgroup " + workgroupName + ".");
+                    + " is already associated with the workgroup " + existing.getWorkgroupName() + ".");
         }
         CustomDomainAssociation association = new CustomDomainAssociation();
         association.setWorkgroupName(workgroupName);
@@ -69,7 +70,16 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
 
     public synchronized CustomDomainAssociation getCustomDomainAssociation(
             String workgroupName, String customDomainName, String region) {
+        validateWorkgroupName(workgroupName);
+        validateCustomDomainName(customDomainName);
         return new CustomDomainAssociation(require(workgroupName, customDomainName, region));
+    }
+
+    public synchronized Optional<CustomDomainAssociation> findForWorkgroup(String workgroupName, String region) {
+        return live(region).stream()
+                .filter(association -> association.getWorkgroupName().equals(workgroupName))
+                .findFirst()
+                .map(CustomDomainAssociation::new);
     }
 
     public synchronized PaginatedResult<CustomDomainAssociation> listCustomDomainAssociations(
@@ -91,9 +101,9 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
     /** Points the association at another certificate, the only member AWS lets an update change. */
     public synchronized CustomDomainAssociation updateCustomDomainAssociation(
             String workgroupName, String customDomainName, String certificateArn, String region) {
-        if (certificateArn == null || certificateArn.isBlank()) {
-            throw ServerlessSupport.validation("customDomainCertificateArn must not be blank.");
-        }
+        validateWorkgroupName(workgroupName);
+        validateCustomDomainName(customDomainName);
+        validateCertificateArn(certificateArn);
         CustomDomainAssociation updated = new CustomDomainAssociation(require(workgroupName, customDomainName, region));
         updated.setCustomDomainCertificateArn(certificateArn);
         associations.put(storageKey(region, workgroupName, customDomainName), updated);
@@ -102,6 +112,8 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
 
     public synchronized void deleteCustomDomainAssociation(String workgroupName, String customDomainName,
                                                            String region) {
+        validateWorkgroupName(workgroupName);
+        validateCustomDomainName(customDomainName);
         require(workgroupName, customDomainName, region);
         associations.delete(storageKey(region, workgroupName, customDomainName));
     }
@@ -143,6 +155,39 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
         return serverless.findWorkgroup(association.getWorkgroupName(), region)
                 .map(workgroup -> Objects.equals(workgroup.getWorkgroupId(), association.getOwnerId()))
                 .orElse(false);
+    }
+
+    private static void validateWorkgroupName(String workgroupName) {
+        if (workgroupName == null || workgroupName.isBlank()) {
+            throw ServerlessSupport.validation("workgroupName must not be blank.");
+        }
+    }
+
+    private static void validateCustomDomainName(String customDomainName) {
+        if (customDomainName == null || customDomainName.isBlank()) {
+            throw ServerlessSupport.validation("customDomainName must not be blank.");
+        }
+        if (customDomainName.length() > 253 || !CUSTOM_DOMAIN_NAME.matcher(customDomainName).matches()) {
+            throw ServerlessSupport.validation("customDomainName must be 1 to 253 characters and match the domain pattern.");
+        }
+    }
+
+    private static void validateCertificateArn(String certificateArn) {
+        if (certificateArn == null || certificateArn.isBlank()) {
+            throw ServerlessSupport.validation("customDomainCertificateArn must not be blank.");
+        }
+        if (certificateArn.length() < 20 || certificateArn.length() > 2048
+                || !CERTIFICATE_ARN.matcher(certificateArn).matches()) {
+            throw ServerlessSupport.validation("customDomainCertificateArn must be a valid ACM certificate ARN.");
+        }
+    }
+
+    /** The live association claiming this custom domain in the region, or null when none does. */
+    private CustomDomainAssociation findByDomain(String customDomainName, String region) {
+        return live(region).stream()
+                .filter(association -> customDomainName.equals(association.getCustomDomainName()))
+                .findFirst()
+                .orElse(null);
     }
 
     private static String storageKey(String region, String workgroupName, String customDomainName) {

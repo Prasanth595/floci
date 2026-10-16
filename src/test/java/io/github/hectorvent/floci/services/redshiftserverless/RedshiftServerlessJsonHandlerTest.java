@@ -86,12 +86,15 @@ class RedshiftServerlessJsonHandlerTest {
         stubAdministrationStores(storageFactory);
         RedshiftServerlessService service =
                 new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config);
+        RedshiftServerlessCustomDomainService customDomains =
+                new RedshiftServerlessCustomDomainService(storageFactory, service);
         handler = new RedshiftServerlessJsonHandler(service, mapper, iamDbUserResolver,
                 new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, service),
                 new RedshiftServerlessAdminJsonHandler(mapper,
                         new RedshiftServerlessResourcePolicyService(storageFactory, service, mapper),
                         new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, service),
-                        new RedshiftServerlessCustomDomainService(storageFactory, service)));
+                        customDomains),
+                customDomains);
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

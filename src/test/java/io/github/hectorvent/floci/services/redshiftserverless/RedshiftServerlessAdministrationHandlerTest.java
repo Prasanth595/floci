@@ -67,12 +67,15 @@ class RedshiftServerlessAdministrationHandlerTest {
         when(config.storage().persistentPath()).thenReturn(System.getProperty("java.io.tmpdir"));
         serverlessService =
                 new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config);
+        RedshiftServerlessCustomDomainService customDomains =
+                new RedshiftServerlessCustomDomainService(storageFactory, serverlessService);
         handler = new RedshiftServerlessJsonHandler(serverlessService, mapper, mock(RedshiftIamDbUserResolver.class),
                 new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, serverlessService),
                 new RedshiftServerlessAdminJsonHandler(mapper,
                         new RedshiftServerlessResourcePolicyService(storageFactory, serverlessService, mapper),
                         new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, serverlessService),
-                        new RedshiftServerlessCustomDomainService(storageFactory, serverlessService)));
+                        customDomains),
+                customDomains);
     }
 
     @Test
@@ -271,6 +274,11 @@ class RedshiftServerlessAdministrationHandlerTest {
     @Test
     void customDomainAssociationIsKeyedByWorkgroupAndDomain() {
         workgroup("domain-ns", "domain-wg");
+
+        JsonNode wgBefore = ok("GetWorkgroup", "{\"workgroupName\":\"domain-wg\"}").get("workgroup");
+        assertFalse(wgBefore.has("customDomainName"));
+        assertFalse(wgBefore.has("customDomainCertificateArn"));
+
         String request = "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\","
                 + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}";
 
@@ -278,6 +286,21 @@ class RedshiftServerlessAdministrationHandlerTest {
         assertEquals("db.example.com", created.get("customDomainName").textValue());
         assertEquals("domain-wg", created.get("workgroupName").textValue());
         assertEquals(CERTIFICATE_ARN, created.get("customDomainCertificateArn").textValue());
+
+        JsonNode wgWithDomain = ok("GetWorkgroup", "{\"workgroupName\":\"domain-wg\"}").get("workgroup");
+        assertEquals("db.example.com", wgWithDomain.get("customDomainName").textValue());
+        assertEquals(CERTIFICATE_ARN, wgWithDomain.get("customDomainCertificateArn").textValue());
+
+        JsonNode listWg = ok("ListWorkgroups", "{}").get("workgroups");
+        boolean foundInList = false;
+        for (JsonNode wg : listWg) {
+            if ("domain-wg".equals(wg.get("workgroupName").textValue())) {
+                assertEquals("db.example.com", wg.get("customDomainName").textValue());
+                assertEquals(CERTIFICATE_ARN, wg.get("customDomainCertificateArn").textValue());
+                foundInList = true;
+            }
+        }
+        assertTrue(foundInList);
 
         assertEquals("ConflictException", errorType("CreateCustomDomainAssociation", request));
         assertEquals("ValidationException", errorType("CreateCustomDomainAssociation",
@@ -297,6 +320,11 @@ class RedshiftServerlessAdministrationHandlerTest {
         assertEquals(replacement, ok("GetCustomDomainAssociation",
                 "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\"}")
                 .get("customDomainCertificateArn").textValue());
+
+        JsonNode wgUpdated = ok("GetWorkgroup", "{\"workgroupName\":\"domain-wg\"}").get("workgroup");
+        assertEquals("db.example.com", wgUpdated.get("customDomainName").textValue());
+        assertEquals(replacement, wgUpdated.get("customDomainCertificateArn").textValue());
+
         assertEquals(1, ok("ListCustomDomainAssociations", "{\"customDomainName\":\"db.example.com\"}")
                 .get("associations").size());
         assertEquals(0, ok("ListCustomDomainAssociations", "{\"customDomainName\":\"x.example.com\"}")
@@ -314,6 +342,75 @@ class RedshiftServerlessAdministrationHandlerTest {
                 "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\"}").size());
         assertEquals("ResourceNotFoundException", errorType("GetCustomDomainAssociation",
                 "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\"}"));
+
+        JsonNode wgAfterDelete = ok("GetWorkgroup", "{\"workgroupName\":\"domain-wg\"}").get("workgroup");
+        assertFalse(wgAfterDelete.has("customDomainName"));
+        assertFalse(wgAfterDelete.has("customDomainCertificateArn"));
+    }
+
+    @Test
+    void customDomainNameCannotBeClaimedByMultipleWorkgroups() {
+        workgroup("domain-ns-a", "domain-wg-a");
+        workgroup("domain-ns-b", "domain-wg-b");
+        ok("CreateCustomDomainAssociation", "{\"workgroupName\":\"domain-wg-a\",\"customDomainName\":\"shared.example.com\","
+                + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}");
+
+        assertEquals("ConflictException", errorType("CreateCustomDomainAssociation",
+                "{\"workgroupName\":\"domain-wg-b\",\"customDomainName\":\"shared.example.com\","
+                        + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}"));
+        assertTrue(errorMessage("CreateCustomDomainAssociation",
+                "{\"workgroupName\":\"domain-wg-b\",\"customDomainName\":\"shared.example.com\","
+                        + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}")
+                .contains("domain-wg-a"));
+    }
+
+    @Test
+    void customDomainOperationsValidateInputs() {
+        workgroup("val-ns", "val-wg");
+        assertEquals("ValidationException", errorType("GetCustomDomainAssociation",
+                "{\"workgroupName\":\"\",\"customDomainName\":\"db.example.com\"}"));
+        assertEquals("ValidationException", errorType("GetCustomDomainAssociation",
+                "{\"workgroupName\":\"val-wg\",\"customDomainName\":\"\"}"));
+        assertEquals("ValidationException", errorType("GetCustomDomainAssociation",
+                "{\"workgroupName\":\"val-wg\"}"));
+        assertEquals("ValidationException", errorType("GetCustomDomainAssociation",
+                "{\"customDomainName\":\"db.example.com\"}"));
+
+        assertEquals("ValidationException", errorType("DeleteCustomDomainAssociation",
+                "{\"workgroupName\":\"\",\"customDomainName\":\"db.example.com\"}"));
+        assertEquals("ValidationException", errorType("DeleteCustomDomainAssociation",
+                "{\"workgroupName\":\"val-wg\",\"customDomainName\":\"\"}"));
+        assertEquals("ValidationException", errorType("DeleteCustomDomainAssociation",
+                "{\"workgroupName\":\"val-wg\"}"));
+        assertEquals("ValidationException", errorType("DeleteCustomDomainAssociation",
+                "{\"customDomainName\":\"db.example.com\"}"));
+
+        assertEquals("ValidationException", errorType("UpdateCustomDomainAssociation",
+                "{\"workgroupName\":\"\",\"customDomainName\":\"db.example.com\",\"customDomainCertificateArn\":\""
+                        + CERTIFICATE_ARN + "\"}"));
+        assertEquals("ValidationException", errorType("UpdateCustomDomainAssociation",
+                "{\"workgroupName\":\"val-wg\",\"customDomainName\":\"\",\"customDomainCertificateArn\":\""
+                        + CERTIFICATE_ARN + "\"}"));
+        assertEquals("ValidationException", errorType("UpdateCustomDomainAssociation",
+                "{\"workgroupName\":\"val-wg\",\"customDomainName\":\"db.example.com\"}"));
+        assertEquals("ValidationException", errorType("UpdateCustomDomainAssociation",
+                "{\"workgroupName\":\"val-wg\",\"customDomainName\":\"db.example.com\",\"customDomainCertificateArn\":\"\"}"));
+        assertEquals("ValidationException", errorType("UpdateCustomDomainAssociation",
+                "{\"workgroupName\":\"val-wg\",\"customDomainName\":\"-bad\",\"customDomainCertificateArn\":\""
+                        + CERTIFICATE_ARN + "\"}"));
+        assertEquals("ValidationException", errorType("UpdateCustomDomainAssociation",
+                "{\"workgroupName\":\"val-wg\",\"customDomainName\":\"db.example.com\",\"customDomainCertificateArn\":\"not-an-arn\"}"));
+
+        for (String badDomain : List.of("", "-bad.com", "bad-.com", "bad_domain.com", "a".repeat(254) + ".com")) {
+            assertEquals("ValidationException", errorType("CreateCustomDomainAssociation",
+                    "{\"workgroupName\":\"val-wg\",\"customDomainName\":\"" + badDomain
+                            + "\",\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}"), badDomain);
+        }
+        for (String badArn : List.of("", "short", "arn:aws:s3:::mybucket", "arn:aws:acm:bad")) {
+            assertEquals("ValidationException", errorType("CreateCustomDomainAssociation",
+                    "{\"workgroupName\":\"val-wg\",\"customDomainName\":\"db.example.com\","
+                            + "\"customDomainCertificateArn\":\"" + badArn + "\"}"), badArn);
+        }
     }
 
     @Test
