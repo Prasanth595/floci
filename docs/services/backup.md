@@ -204,12 +204,13 @@ Actual backup is simulated — no data is read from or written to the referenced
 
 - **Notification delivery, beyond `BACKUP_JOB_COMPLETED`.** When a backup job completes in a
   vault whose `BackupVaultEvents` include `BACKUP_JOB_COMPLETED`, Floci publishes one message to
-  the configured `SNSTopicArn` (subject `Notification from AWS Backup`, body naming the recovery
-  point, resource, job ID and vault). That is the only event delivered. Every other event --
+  the configured `SNSTopicArn` with AWS's documented subject (`Notification from AWS Backup`), body
+  (recovery point, resource and job ID) and message attributes (`EventType`, `State`, `AccountId`,
+  `Id`, `StartTime`), so subscription filter policies on those attributes match. That is the only
+  event delivered. Every other event --
   including `BACKUP_JOB_STARTED`, `BACKUP_JOB_SUCCESSFUL`, `BACKUP_JOB_FAILED` and all
   `RESTORE_JOB_*` and `COPY_JOB_*` events -- is stored and reported by
-  `GetBackupVaultNotifications` but never published. The message body approximates AWS's text
-  rather than reproducing it exactly, and a failed publish (for example, a topic that does not
+  `GetBackupVaultNotifications` but never published. A failed publish (for example, a topic that does not
   exist) is logged and dropped without affecting the job.
 - **Access policy enforcement.** `PutBackupVaultAccessPolicy` stores a resource policy and
   `GetBackupVaultAccessPolicy` reports it, but no authorization path consults it: a policy

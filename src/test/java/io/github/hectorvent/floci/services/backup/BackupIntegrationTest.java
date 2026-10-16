@@ -1443,14 +1443,23 @@ class BackupIntegrationTest {
 
     /** A topic with {@code queueUrl} subscribed, so what SNS delivers can be read back from SQS. */
     private static String topicDeliveringTo(String name, String queueUrl) {
+        return topicDeliveringTo(name, queueUrl, null);
+    }
+
+    /** As above, with the subscription filtered by {@code filterPolicy} when it is non-null. */
+    private static String topicDeliveringTo(String name, String queueUrl, String filterPolicy) {
         String topicArn = given().contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateTopic").formParam("Name", name)
         .when().post("/").then().statusCode(200)
             .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
-        given().contentType("application/x-www-form-urlencoded")
+        var subscribe = given().contentType("application/x-www-form-urlencoded")
             .formParam("Action", "Subscribe").formParam("TopicArn", topicArn)
-            .formParam("Protocol", "sqs").formParam("Endpoint", queueUrl)
-        .when().post("/").then().statusCode(200);
+            .formParam("Protocol", "sqs").formParam("Endpoint", queueUrl);
+        if (filterPolicy != null) {
+            subscribe = subscribe.formParam("Attributes.entry.1.key", "FilterPolicy")
+                .formParam("Attributes.entry.1.value", filterPolicy);
+        }
+        subscribe.when().post("/").then().statusCode(200);
         return topicArn;
     }
 
@@ -1485,7 +1494,10 @@ class BackupIntegrationTest {
         String quietQueue = createQueue("backup-notify-quiet-queue");
         String quietTopic = topicDeliveringTo("backup-notify-quiet-topic", quietQueue);
         String notifiedQueue = createQueue("backup-notify-queue");
-        String notifiedTopic = topicDeliveringTo("backup-notify-topic", notifiedQueue);
+        // Filtered on the attributes AWS's "Backup job completed" example carries: a publish
+        // without them is dropped by SNS and never reaches the queue.
+        String notifiedTopic = topicDeliveringTo("backup-notify-topic", notifiedQueue,
+            "{\"EventType\":[\"BACKUP_JOB\"],\"State\":[\"COMPLETED\"]}");
 
         // The quiet vault's job is started first. Completions run on one scheduler thread in
         // start order, so by the time the notified vault's message has arrived, any publish
@@ -1505,12 +1517,19 @@ class BackupIntegrationTest {
         JsonPath envelope = new JsonPath(body[0]);
         assertEquals(notifiedTopic, envelope.getString("TopicArn"));
         assertEquals("Notification from AWS Backup", envelope.getString("Subject"));
-        assertThat(envelope.getString("Message"), allOf(
-            startsWith("An AWS Backup job was completed successfully."),
-            containsString("Recovery point ARN: " + rpArn),
-            containsString("Resource ARN : " + RESOURCE_ARN),
-            containsString("BackupJob ID : " + jid),
-            containsString("Backup Vault Name : notify-vault")));
+        // AWS's documented body, which ends at the job ID and does not name the vault.
+        assertEquals("An AWS Backup job was completed successfully. Recovery point ARN: " + rpArn
+            + ". Resource ARN : " + RESOURCE_ARN + ". BackupJob ID : " + jid, envelope.getString("Message"));
+        long created = given().header("Authorization", AUTH)
+        .when().get("/backup-jobs/" + jid).then().statusCode(200)
+            .extract().jsonPath().getLong("CreationDate");
+        assertEquals(Map.of(
+            "EventType", Map.of("Type", "String", "Value", "BACKUP_JOB"),
+            "State", Map.of("Type", "String", "Value", "COMPLETED"),
+            "AccountId", Map.of("Type", "String", "Value", "000000000000"),
+            "Id", Map.of("Type", "String", "Value", jid),
+            "StartTime", Map.of("Type", "String", "Value", Instant.ofEpochSecond(created).toString())),
+            envelope.getMap("MessageAttributes"));
 
         awaitJobCompleted(quietJob);
         assertThat(receiveBody(quietQueue), anyOf(nullValue(), emptyString()));
@@ -1551,15 +1570,17 @@ class BackupIntegrationTest {
         String sentinelTopic = topicDeliveringTo("backup-notify-sentinel-topic", sentinelQueue);
         String vault = "notify-replaced-vault";
 
-        // Vault incarnations are told apart by creation second, so the replacement must be
-        // created in a later second than the original, and before the 1s job completes.
+        // No waiting for the clock: the original and its replacement are normally created in
+        // the same second, and must still be told apart.
         given().header("Authorization", AUTH).contentType("application/json").body("{}")
         .when().put("/backup-vaults/" + vault).then().statusCode(200);
-        long created = given().header("Authorization", AUTH)
+        // The incarnation id is Floci-internal and must not leak into the AWS response.
+        given().header("Authorization", AUTH)
         .when().get("/backup-vaults/" + vault).then().statusCode(200)
-            .extract().jsonPath().getLong("CreationDate");
-        await().atMost(Duration.ofSeconds(3)).pollInterval(Duration.ofMillis(5))
-            .until(() -> Instant.now().getEpochSecond() > created);
+            .body("$", not(hasKey("FlociVaultId")));
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/").then().statusCode(200)
+            .body(not(containsString("FlociVaultId")));
 
         String oldJob = given().header("Authorization", AUTH).contentType("application/json")
             .body("""

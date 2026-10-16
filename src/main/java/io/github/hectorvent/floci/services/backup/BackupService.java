@@ -12,12 +12,14 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.backup.model.*;
 import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -111,6 +113,7 @@ public class BackupService {
             vault.setBackupVaultArn(regionResolver.buildArn("backup", region, "backup-vault:" + vaultName));
             vault.setEncryptionKeyArn(encryptionKeyArn);
             vault.setCreationDate(Instant.now().getEpochSecond());
+            vault.setVaultId(UUID.randomUUID().toString());
             vault.setCreatorRequestId(creatorRequestId);
             vault.setNumberOfRecoveryPoints(0);
             vault.setTags(tags);
@@ -153,7 +156,7 @@ public class BackupService {
         // Dependents first, the vault record last. There is no transaction across three
         // stores, so whatever sits between the first delete and the last is observable, and
         // this order keeps the observable state a vault with no configuration rather than a
-        // configuration with no vault. The sub-resource keys carry this vault's creation date,
+        // configuration with no vault. The sub-resource keys carry this vault's FlociVaultId,
         // so these two deletes cannot reach a configuration belonging to a later vault that
         // has taken the same name -- which is what made the previous order lose data.
         accessPolicyStore.delete(subResourceKey(region, vault));
@@ -782,12 +785,19 @@ public class BackupService {
             notificationStore.get(notificationKey)
                     .filter(n -> n.getBackupVaultEvents() != null
                             && n.getBackupVaultEvents().contains("BACKUP_JOB_COMPLETED"))
-                    .ifPresent(n -> snsService.publish(n.getSnsTopicArn(), null,
+                    .ifPresent(n -> snsService.publish(n.getSnsTopicArn(), null, null,
                             "An AWS Backup job was completed successfully. Recovery point ARN: "
                                     + job.getRecoveryPointArn() + ". Resource ARN : " + job.getResourceArn()
-                                    + ". BackupJob ID : " + job.getBackupJobId()
-                                    + ". Backup Vault Name : " + vaultName,
+                                    + ". BackupJob ID : " + job.getBackupJobId(),
                             "Notification from AWS Backup",
+                            // AWS's documented "Backup job completed" example; subscription
+                            // filter policies match on these.
+                            Map.of("EventType", new MessageAttributeValue("BACKUP_JOB", "String"),
+                                    "State", new MessageAttributeValue("COMPLETED", "String"),
+                                    "AccountId", new MessageAttributeValue(job.getAccountId(), "String"),
+                                    "Id", new MessageAttributeValue(job.getBackupJobId(), "String"),
+                                    "StartTime", new MessageAttributeValue(DateTimeFormatter.ISO_INSTANT
+                                            .format(Instant.ofEpochSecond(job.getCreationDate())), "String")),
                             AwsArnUtils.regionOrDefault(n.getSnsTopicArn(), region)));
         } catch (Exception e) {
             LOG.warnv(e, "Failed to publish BACKUP_JOB_COMPLETED for job {0} in vault {1}",
@@ -909,20 +919,19 @@ public class BackupService {
      * the second worse, because two creates racing the existence check would both sweep, and the
      * later sweep would delete a configuration applied against the earlier vault.
      *
-     * <p>Including the creation date removes the shared key instead of policing it. A new vault
-     * cannot read, and cleanup for an old vault cannot touch, a record belonging to a different
-     * incarnation of the name -- no sweep, and no dependence on the order two stores are written
-     * in. Deleting a vault still removes its own records, now because they are its own rather
-     * than because nothing else has claimed them yet.
-     *
-     * <p>The creation date is only unique per name because {@code createBackupVault} holds a
-     * per-name monitor across its check and its write, so two vaults of one name cannot exist
-     * and cannot be created in the same second. Without that lock this key would still collide
-     * and the two vaults could read each other's configuration. The delete path also removes its
-     * own sub-resources, which covers a record surviving for any other reason.
+     * <p>Including the vault's {@code FlociVaultId}, a random id minted at creation, removes the
+     * shared key instead of policing it. A new vault cannot read, and cleanup for an old vault
+     * cannot touch, a record belonging to a different incarnation of the name -- no sweep, and
+     * no dependence on the order two stores are written in, and no dependence on the clock: a
+     * vault deleted and recreated within the same second still gets a different key. Deleting a
+     * vault still removes its own records, now because they are its own rather than because
+     * nothing else has claimed them yet.
      */
     private static String subResourceKey(String region, BackupVault vault) {
-        return vaultKey(region, vault.getBackupVaultName()) + ":" + vault.getCreationDate();
+        // Vaults stored before FlociVaultId existed keep their creation-date key, so their
+        // stored policy and notification configuration are still found.
+        String incarnation = vault.getVaultId() != null ? vault.getVaultId() : String.valueOf(vault.getCreationDate());
+        return vaultKey(region, vault.getBackupVaultName()) + ":" + incarnation;
     }
 
     private static String vaultKey(BackupVault vault) {
