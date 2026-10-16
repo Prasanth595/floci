@@ -2260,6 +2260,33 @@ class CognitoLambdaTriggersTest {
     }
 
     @Test
+    void customMessageSignUpTriggerCarriesClientMetadata() throws Exception {
+        VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
+                .thenReturn("246962");
+        CognitoService svc = createServiceWithMessaging(mock(SesService.class), mock(SnsService.class),
+                verificationCodeService);
+
+        UserPool pool = svc.createUserPool(Map.of(
+                "PoolName", "trigger-pool",
+                "AutoVerifiedAttributes", List.of("email"),
+                "LambdaConfig", Map.of("CustomMessage", "arn:aws:lambda:::custom-message")), "us-east-1");
+        UserPoolClient client = svc.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::custom-message"),
+                payloadCaptor.capture(), eq(InvocationType.RequestResponse)))
+                .thenReturn(ok(Map.of()));
+
+        svc.signUp(client.getClientId(), "spike", "Spike@Test1", Map.of("email", "spike@example.com"),
+                Map.of(), Map.of("source", "signup-form"));
+
+        JsonNode event = MAPPER.readTree(payloadCaptor.getValue());
+        assertEquals("CustomMessage_SignUp", event.path("triggerSource").asText());
+        assertEquals("signup-form", event.path("request").path("clientMetadata").path("source").asText());
+    }
+
+    @Test
     void customMessageLambdaErrorFallsBackToDefaultSignUpMessage() {
         SesService ses = mock(SesService.class);
         VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);

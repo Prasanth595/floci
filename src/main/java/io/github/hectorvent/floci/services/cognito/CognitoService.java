@@ -3377,7 +3377,7 @@ public class CognitoService implements ResourceProvider {
                 String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                         VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
                 Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
-                        pool, client, triggerUser, "CustomMessage_SignUp");
+                        pool, client, triggerUser, "CustomMessage_SignUp", clientMetadata);
                 messageDispatcher.dispatch(pool, triggerUser, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
                         code, List.of(deliveryTarget.deliveryMedium()), customMessage);
             } catch (VerificationCodeException e) {
@@ -3504,7 +3504,7 @@ public class CognitoService implements ResourceProvider {
             String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                     VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
             Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
-                    pool, client, user, "CustomMessage_ResendCode");
+                    pool, client, user, "CustomMessage_ResendCode", Map.of());
             messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
                     code, List.of(deliveryTarget.deliveryMedium()), customMessage);
         } catch (VerificationCodeException e) {
@@ -3905,7 +3905,7 @@ public class CognitoService implements ResourceProvider {
             String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                     VerificationCode.Purpose.PASSWORD_RESET, Duration.ofHours(1));
             Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
-                    pool, client, user, "CustomMessage_ForgotPassword");
+                    pool, client, user, "CustomMessage_ForgotPassword", Map.of());
             messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.PASSWORD_RESET, code,
                     List.of(deliveryTarget.deliveryMedium()), customMessage);
         } catch (VerificationCodeException e) {
