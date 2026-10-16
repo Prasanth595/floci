@@ -82,7 +82,7 @@ public class IotService {
     static final String DEFAULT_ENDPOINT_TYPE = "iot:Data-ATS";
 
     private static final Pattern THING_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]{1,128}");
-    private static final Pattern SHADOW_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]{1,64}");
+    private static final Pattern SHADOW_NAME_PATTERN = Pattern.compile("[$a-zA-Z0-9:_-]{1,64}");
     /** The {@code FirehoseSeparator} shape of the IoT API model. */
     private static final Pattern FIREHOSE_SEPARATOR = Pattern.compile("([\\n\\t])|(\\r\\n)|(,)");
     public static final int MAX_POLICY_VERSIONS = 5;
@@ -972,11 +972,22 @@ public class IotService {
                 if (!nested.isEmpty()) {
                     delta.set(entry.getKey(), nested);
                 }
-            } else if (reportedValue.isMissingNode() || !reportedValue.equals(desiredValue)) {
+            } else if (reportedValue.isMissingNode() || !sameShadowValue(desiredValue, reportedValue)) {
                 delta.set(entry.getKey(), desiredValue);
             }
         });
         return delta;
+    }
+
+    /**
+     * As on AWS, two numbers are equal when both their double and long values are; integers beyond long and
+     * anything else, arrays included, compare exactly.
+     */
+    private static boolean sameShadowValue(JsonNode desired, JsonNode reported) {
+        if (desired.isNumber() && reported.isNumber() && !desired.isBigInteger() && !reported.isBigInteger()) {
+            return desired.doubleValue() == reported.doubleValue() && desired.longValue() == reported.longValue();
+        }
+        return desired.equals(reported);
     }
 
     /** The stored desired metadata of exactly the values in {@code delta}, following nested objects. */
@@ -1602,7 +1613,10 @@ public class IotService {
             return "shadow:" + region + ":" + thingName + ":";
         }
         if (!SHADOW_NAME_PATTERN.matcher(shadowName).matches()) {
-            throw new AwsException("InvalidRequestException", "Invalid shadow name: " + shadowName, 400);
+            throw new AwsException("InvalidRequestException", "Bad Request", 400);
+        }
+        if (shadowName.contains("$") && !"$package".equals(shadowName)) {
+            throw new AwsException("InvalidRequestException", "Invalid shadow name : " + shadowName, 400);
         }
         return "shadow:" + region + ":" + thingName + ":" + shadowName;
     }
@@ -1952,7 +1966,7 @@ public class IotService {
 
     private ObjectNode withClientToken(JsonNode document, String clientToken) {
         ObjectNode node = document instanceof ObjectNode objectNode ? objectNode : objectMapper.createObjectNode();
-        if (clientToken != null && !clientToken.isBlank()) {
+        if (clientToken != null && !clientToken.isEmpty()) {
             node.put("clientToken", clientToken);
         }
         return node;

@@ -797,6 +797,14 @@ class IotServiceTest {
     }
 
     @Test
+    void aBlankClientTokenIsEchoedInTheUpdateResponse() throws Exception {
+        JsonNode accepted = service.updateThingShadow("sensor-15", null,
+                json("{\"state\":{\"desired\":{\"c\":\"x\"}},\"clientToken\":\" \"}"), REGION);
+
+        assertEquals(" ", accepted.path("clientToken").asText());
+    }
+
+    @Test
     void shadowUpdatePublishesAcceptedDocumentsAndDeltaInThatOrderOnceEach() throws Exception {
         JsonNode accepted = service.updateThingShadow("sensor-1", "building",
                 json("{\"state\":{\"desired\":{\"color\":\"blue\"}},\"clientToken\":\"tok-1\"}"), REGION);
@@ -947,11 +955,35 @@ class IotServiceTest {
             AwsException e = assertThrows(AwsException.class, call);
             assertEquals("InvalidRequestException", e.getErrorCode());
             assertEquals(400, e.getHttpStatus());
+            assertEquals("Bad Request", e.getMessage());
         }
 
         JsonNode classic = service.getThingShadow("sensor-6", null, REGION);
         assertEquals("blue", classic.at("/state/desired/color").asText());
         assertEquals(1, classic.get("version").asLong());
+    }
+
+    @Test
+    void aShadowNameWithADollarOtherThanPackageIsAnInvalidShadowName() throws Exception {
+        JsonNode update = json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}");
+        for (String name : List.of("$", "$PACKAGE", "$package2", "a$b")) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> service.updateThingShadow("sensor-14", name, update, REGION));
+            assertEquals("InvalidRequestException", e.getErrorCode());
+            assertEquals(400, e.getHttpStatus());
+            assertEquals("Invalid shadow name : " + name, e.getMessage());
+        }
+    }
+
+    @Test
+    void theReservedPackageShadowIsUpdatedReadAndDeleted() throws Exception {
+        service.updateThingShadow("sensor-14", "$package",
+                json("{\"state\":{\"reported\":{\"samplePackage\":{\"version\":\"1.0.0\"}}}}"), REGION);
+
+        assertEquals("1.0.0", service.getThingShadow("sensor-14", "$package", REGION)
+                .at("/state/reported/samplePackage/version").asText());
+        assertEquals(1, service.deleteThingShadow("sensor-14", "$package", REGION).get("version").asLong());
+        assertThrows(AwsException.class, () -> service.getThingShadow("sensor-14", "$package", REGION));
     }
 
     @Test
@@ -1074,6 +1106,30 @@ class IotServiceTest {
                 json("{\"state\":{\"desired\":{\"color\":\"blue\"},\"reported\":{\"color\":\"blue\"}}}"), REGION);
 
         assertFalse(service.getThingShadow("sensor-5", null, REGION).get("state").has("delta"));
+    }
+
+    @Test
+    void getComparesNumbersAsAwsDoesThroughNestedObjectsAndArraysExactly() throws Exception {
+        service.updateThingShadow("sensor-15", null, json("{\"state\":{"
+                + "\"desired\":{\"n\":1.0,\"nested\":{\"n\":1.0},\"arr\":[1],\"objs\":[{\"n\":1}],"
+                + "\"max\":9223372036854775807,\"big\":10000000000000000000000,\"long\":9007199254740993,"
+                + "\"mixed\":9007199254740993,\"over\":9223372036854775807},"
+                + "\"reported\":{\"n\":1,\"nested\":{\"n\":1},\"arr\":[1.0],\"objs\":[{\"n\":1.0}],"
+                + "\"max\":9.223372036854776e18,\"big\":1e22,\"long\":9007199254740992,"
+                + "\"mixed\":9007199254740992.0,\"over\":1e19}}}"), REGION);
+
+        JsonNode shadow = service.getThingShadow("sensor-15", null, REGION);
+
+        assertEquals(json("{\"arr\":[1],\"objs\":[{\"n\":1}],\"big\":10000000000000000000000,"
+                + "\"long\":9007199254740993,\"mixed\":9007199254740993,\"over\":9223372036854775807}"),
+                reparse(shadow.at("/state/delta")));
+    }
+
+    @Test
+    void anUpdateWithANumberBeyondTheDoubleRangeDoesNotThrow() throws Exception {
+        JsonNode update = json("{\"state\":{\"desired\":{\"n\":1e309},\"reported\":{\"n\":0}}}");
+
+        assertDoesNotThrow(() -> service.updateThingShadow("sensor-16", null, update, REGION));
     }
 
     @Test
@@ -1297,5 +1353,28 @@ class IotServiceTest {
         JsonNode classic = service.getThingShadow("sensor-12", null, REGION);
         assertEquals("blue", classic.at("/state/desired/color").asText());
         assertEquals(1, classic.get("version").asLong());
+    }
+
+    @Test
+    void anMqttUpdateOnTheReservedPackageShadowIsApplied() throws Exception {
+        String update = "$aws/things/sensor-14/shadow/name/$package/update";
+
+        mqttShadowRequest(update, "{\"state\":{\"reported\":{\"samplePackage\":{\"version\":\"1.0.0\"}}}}");
+
+        assertEquals(1, fannedOut(update + "/accepted").get("version").asLong());
+        assertEquals("1.0.0", service.getThingShadow("sensor-14", "$package", REGION)
+                .at("/state/reported/samplePackage/version").asText());
+    }
+
+    @Test
+    void anMqttUpdateOnADollarShadowNameOtherThanPackagePublishesRejected400() throws Exception {
+        String update = "$aws/things/sensor-14/shadow/name/a$b/update";
+
+        mqttShadowRequest(update, "{\"state\":{\"desired\":{\"color\":\"blue\"}},\"clientToken\":\"c-14\"}");
+
+        assertEquals(json("{\"code\":400,\"message\":\"Invalid shadow name : a$b\",\"clientToken\":\"c-14\"}"),
+                fannedOut(update + "/rejected"));
+        assertEquals(List.of(update + "/rejected"), recordedTopics());
+        assertEquals(List.of(), service.listNamedShadowsForThing("sensor-14", REGION));
     }
 }
