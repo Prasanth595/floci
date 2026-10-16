@@ -216,6 +216,47 @@ class AwsConfigServiceAggregationAuthorizationTest {
                 "tags of a deleted conformance pack must not outlive it");
     }
 
+    /**
+     * Put on an existing pack is a get-then-put. Unlocked, a Delete landing between the get and
+     * the put removes the pack and its tags, then the Put re-inserts the pack under its old ARN:
+     * Delete reported success, yet the pack survives with its tags silently gone. Under the lock
+     * the two serialize, so the only legal outcomes are "deleted" or "re-created under a new ARN".
+     */
+    @Test
+    void concurrentPackUpdateAndDeleteNeverResurrectTheDeletedPack() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            int resurrected = 0;
+            for (int round = 0; round < 100_000; round++) {
+                AwsConfigService service = service();
+                String arn = service.putConformancePack(REGION, "pack", "s3://bucket/v1.yaml", null)
+                        .conformancePackArn();
+                CyclicBarrier gate = new CyclicBarrier(2);
+                Future<?> put = pool.submit(() -> {
+                    gate.await(10, TimeUnit.SECONDS);
+                    return service.putConformancePack(REGION, "pack", "s3://bucket/v2.yaml", null);
+                });
+                Future<?> delete = pool.submit(() -> {
+                    gate.await(10, TimeUnit.SECONDS);
+                    service.deleteConformancePack(REGION, "pack");
+                    return null;
+                });
+                put.get(10, TimeUnit.SECONDS);
+                delete.get(10, TimeUnit.SECONDS);
+
+                boolean oldPackSurvived = service.describeConformancePacks(REGION, null).stream()
+                        .anyMatch(p -> p.conformancePackArn().equals(arn));
+                if (oldPackSurvived) {
+                    resurrected++;
+                }
+            }
+            assertEquals(0, resurrected, "a Delete that succeeded left the pack it deleted in the store");
+        } finally {
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
     @Test
     void rejectsAnAccountIdThatIsNotTwelveDigits() {
         AwsConfigService service = service();
