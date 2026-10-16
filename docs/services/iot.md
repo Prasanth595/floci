@@ -263,7 +263,7 @@ Reserved request topics are handled by Floci before normal MQTT fan-out. The ori
 
 ### Shadow Events
 
-A successful classic or named shadow change reaches MQTT subscribers and the topic rules on the AWS response topics, whether it came from an MQTT request or from the REST `UpdateThingShadow` and `DeleteThingShadow` APIs. A rule such as `SELECT * FROM '$aws/things/+/shadow/name/building/update/accepted'` therefore fires for both. The events are published in the order accepted, documents, delta, and carry one timestamp (epoch seconds) per operation:
+A successful classic or named shadow change reaches MQTT subscribers and the topic rules on the AWS response topics, whether it came from an MQTT request or from the REST `UpdateThingShadow` and `DeleteThingShadow` APIs. A rule such as `SELECT * FROM '$aws/things/+/shadow/name/building/update/accepted'` therefore fires for both. As on AWS, a rule whose filter starts with a wildcard, such as `'#'` or `'+/things/+/shadow/#'`, receives them too. The events are published in the order accepted, documents, delta, and carry one timestamp (epoch seconds) per operation:
 
 - `update/accepted`, which is also the `UpdateThingShadow` response: `state` exactly as sent, null leaves kept, `metadata` mirroring it with `{"timestamp": ...}` per leaf (an array gets one entry per element), the new `version`, `timestamp`, and `clientToken` when the request had one.
 - `update/documents`: `previous` (JSON `null` on the first update) and `current`, each `{state, metadata, version}` as stored, plus `timestamp` and `clientToken`.

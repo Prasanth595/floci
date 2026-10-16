@@ -974,6 +974,24 @@ class IotServiceTest {
     }
 
     @Test
+    void aRuleWhoseFilterStartsWithAWildcardReceivesShadowEvents() throws Exception {
+        createRule("everythingRule", sqsRule("SELECT topic() AS topic FROM '#'", SHADOW_QUEUE_URL));
+        createRule("anyPrefixRule", sqsRule("SELECT topic() AS topic FROM '+/things/sensor-13/shadow/#'", SHADOW_QUEUE_URL));
+
+        service.updateThingShadow("sensor-13", null, json("{\"state\":{\"desired\":{\"temp\":21}}}"), REGION);
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqs, times(6)).sendMessage(eq(SHADOW_QUEUE_URL), body.capture(), eq(0), eq(REGION));
+        List<String> topics = new ArrayList<>();
+        for (String message : body.getAllValues()) {
+            topics.add(mapper.readTree(message).get("topic").asText());
+        }
+        String update = "$aws/things/sensor-13/shadow/update";
+        assertEquals(List.of(update + "/accepted", update + "/accepted", update + "/delta", update + "/delta",
+                update + "/documents", update + "/documents"), topics.stream().sorted().toList());
+    }
+
+    @Test
     void theNamedShadowRuleSkipsAnotherTokenTheClassicShadowAndAnotherShadowName() throws Exception {
         createRule("buildingRule", sqsRule(BUILDING_RULE_SQL, SHADOW_QUEUE_URL));
         String inbound = "{\"state\":{\"desired\":{\"temp\":21}},\"clientToken\":\"job:inbound\"}";
