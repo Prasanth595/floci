@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.services.ses.address.SesAddressSyntax;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDestination;
@@ -271,6 +272,8 @@ public class SesQueryHandler {
                 .bccAddresses(bccAddresses)
                 .replyToAddresses(replyToAddresses)
                 .returnPath(returnPath)
+                .sourceArn(getParam(params, "SourceArn"))
+                .returnPathArn(getParam(params, "ReturnPathArn"))
                 .configurationSetName(configurationSetName)
                 .emailTags(emailTags)
                 .region(region)
@@ -295,6 +298,9 @@ public class SesQueryHandler {
         String messageId = sesService.sendEmail(SendEmailRequest.builder()
                 .source(source)
                 .toAddresses(destinations)
+                .sourceArn(getParam(params, "SourceArn"))
+                .fromArn(getParam(params, "FromArn"))
+                .returnPathArn(getParam(params, "ReturnPathArn"))
                 .configurationSetName(configurationSetName)
                 .emailTags(emailTags)
                 .region(region)
@@ -642,6 +648,8 @@ public class SesQueryHandler {
                 .bccAddresses(bccAddresses)
                 .replyToAddresses(replyToAddresses)
                 .returnPath(returnPath)
+                .sourceArn(getParam(params, "SourceArn"))
+                .returnPathArn(getParam(params, "ReturnPathArn"))
                 .configurationSetName(configurationSetName)
                 .emailTags(emailTags)
                 .region(region)
@@ -756,6 +764,8 @@ public class SesQueryHandler {
                     "Account sending is disabled.", 400);
         }
         String source = getParam(params, "Source");
+        SesAddressSyntax.requireBulkAddress(source);
+        SesAddressSyntax.requireBulkAddress(getParam(params, "ReturnPath"));
         List<String> replyToAddresses = extractMembers(params, "ReplyToAddresses");
         String templateName = getParam(params, "Template");
         String templateArn = getParam(params, "TemplateArn");

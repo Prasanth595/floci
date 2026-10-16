@@ -1,9 +1,10 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -22,7 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * Covers the connection bounds (handshake timeout, backend-connect deferral, permit pool) added
@@ -55,7 +55,7 @@ class RdsAuthProxyBoundsTest {
         fakeBackend = new ServerSocket(0);
         fakeBackend.setSoTimeout(500);
 
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy = newProxy(5000, 5000, 100);
         proxy.start(proxyPort);
 
@@ -68,7 +68,7 @@ class RdsAuthProxyBoundsTest {
     @Test
     void idleClientIsDroppedAfterTheConfiguredHandshakeTimeout() throws Exception {
         fakeBackend = new ServerSocket(0);
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy = newProxy(200, 5000, 100);
         proxy.start(proxyPort);
 
@@ -84,7 +84,7 @@ class RdsAuthProxyBoundsTest {
     @Test
     void refusesAConnectionBeyondTheConfiguredLimit() throws Exception {
         fakeBackend = new ServerSocket(0);
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy = newProxy(5000, 5000, 1);
         proxy.start(proxyPort);
 
@@ -113,7 +113,7 @@ class RdsAuthProxyBoundsTest {
             admit.await();
             return released::countDown;
         };
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy = new RdsAuthProxy("db-1", "localhost", fakeBackend.getLocalPort(),
                 DatabaseEngine.SQLSERVER, false, "sa", "Secret123", null,
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true,
@@ -144,17 +144,7 @@ class RdsAuthProxyBoundsTest {
     }
 
     private RdsProxyTlsCertificates realTls() {
-        // The real bean generates a self-signed cert on demand; no Docker or network needed.
-        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
-        when(storage.persistentPath()).thenReturn(tempDir.toString());
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        when(config.storage()).thenReturn(storage);
-        return new RdsProxyTlsCertificates(config, new CertificateGenerator());
-    }
-
-    private static int freePort() throws IOException {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
-        }
+        return new RdsProxyTlsCertificates(FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls")),
+                new CertificateGenerator());
     }
 }

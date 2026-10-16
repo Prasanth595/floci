@@ -63,6 +63,7 @@ public class SqsService implements Resettable, ResourceProvider {
     private static final int DEDUP_WINDOW_SECONDS = 300; // 5 minutes
     private static final int DEDUP_LOCK_STRIPES = 256;
     private static final int MAX_RECEIVE_WAIT_TIME_SECONDS = 20;
+    private static final int MAX_BATCH_ENTRIES = 10;
     private static final int MAX_TERMINAL_MOVE_TASKS = 10;
     private static final Duration TERMINAL_MOVE_TASK_TTL = Duration.ofHours(1);
     /** AWS accepts MaximumMessageSize between 1 KiB and 1 MiB; 1 MiB is also the default.
@@ -638,12 +639,24 @@ public class SqsService implements Resettable, ResourceProvider {
                 Set<String> readOnlyAttrs = Set.of("QueueArn", "CreatedTimestamp", "LastModifiedTimestamp",
                         "ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible",
                         "ApproximateNumberOfMessagesDelayed");
+                Map<String, String> effective = new LinkedHashMap<>(existing.getAttributes());
+                applyDerivedAttributes(effective);
                 for (Map.Entry<String, String> entry : attributes.entrySet()) {
                     if (readOnlyAttrs.contains(entry.getKey())) {
                         continue;
                     }
-                    String storedValue = existing.getAttributes().get(entry.getKey());
-                    if (storedValue != null && !storedValue.equals(entry.getValue())) {
+                    // Compare against what GetQueueAttributes reports, not the raw stored map:
+                    // SqsManagedSseEnabled is derived on read and never stored, so the stored map
+                    // alone would let a differing value through.
+                    String storedValue = effective.get(entry.getKey());
+                    String requested = entry.getValue();
+                    // The effective MaximumMessageSize is canonical ("1024"); canonicalise the
+                    // already-validated request too so "01024" is not a conflict with itself,
+                    // and an empty value maps to the same default the effective map reports.
+                    if ("MaximumMessageSize".equals(entry.getKey())) {
+                        requested = String.valueOf(parseMaxMessageSize(requested));
+                    }
+                    if (storedValue != null && !storedValue.equals(requested)) {
                         throw new AwsException("QueueAlreadyExists",
                                 "A queue already exists with the same name but different attributes.", 400);
                     }
@@ -759,6 +772,25 @@ public class SqsService implements Resettable, ResourceProvider {
         attrs.put("ApproximateNumberOfMessagesNotVisible", String.valueOf(counts.inFlight()));
         attrs.put("ApproximateNumberOfMessagesDelayed", String.valueOf(counts.delayed()));
 
+        applyDerivedAttributes(attrs);
+
+        if (attributeNames == null || attributeNames.contains("All")) {
+            return attrs;
+        }
+        Map<String, String> filtered = new LinkedHashMap<>();
+        for (String name : attributeNames) {
+            if (attrs.containsKey(name)) {
+                filtered.put(name, attrs.get(name));
+            }
+        }
+        return filtered;
+    }
+
+    /**
+     * Fills in the attributes reported on read but not necessarily stored. Shared by
+     * GetQueueAttributes and the CreateQueue conflict check so the two cannot drift.
+     */
+    private void applyDerivedAttributes(Map<String, String> attrs) {
         // Derived at read time and never stored, so it cannot go stale behind a
         // KmsMasterKeyId that was later cleared. A KMS key always wins; otherwise an
         // explicit SqsManagedSseEnabled stands, and a queue with neither reports the AWS
@@ -778,17 +810,6 @@ public class SqsService implements Resettable, ResourceProvider {
         attrs.putIfAbsent("DelaySeconds", "0");
         attrs.putIfAbsent("ReceiveMessageWaitTimeSeconds", "0");
         attrs.putIfAbsent("MessageRetentionPeriod", "345600");
-
-        if (attributeNames == null || attributeNames.contains("All")) {
-            return attrs;
-        }
-        Map<String, String> filtered = new LinkedHashMap<>();
-        for (String name : attributeNames) {
-            if (attrs.containsKey(name)) {
-                filtered.put(name, attrs.get(name));
-            }
-        }
-        return filtered;
     }
 
     /**
@@ -1084,6 +1105,23 @@ public class SqsService implements Resettable, ResourceProvider {
     private static boolean hasKmsMasterKey(Map<String, String> attributes) {
         String keyId = attributes.get("KmsMasterKeyId");
         return keyId != null && !keyId.isEmpty();
+    }
+
+    /**
+     * Reject a batch call carrying no entries or more than {@value #MAX_BATCH_ENTRIES}. AWS applies
+     * both checks to {@code SendMessageBatch}, {@code DeleteMessageBatch} and
+     * {@code ChangeMessageVisibilityBatch} alike, fails the whole request and processes no entry.
+     */
+    public void validateBatchEntryCount(String entryTypeName, int entryCount) {
+        if (entryCount == 0) {
+            throw new AwsException("AWS.SimpleQueueService.EmptyBatchRequest",
+                    "There should be at least one " + entryTypeName + " in the request.", 400);
+        }
+        if (entryCount > MAX_BATCH_ENTRIES) {
+            throw new AwsException("AWS.SimpleQueueService.TooManyEntriesInBatchRequest",
+                    "Maximum number of entries per request are " + MAX_BATCH_ENTRIES
+                            + ". You have sent " + entryCount + ".", 400);
+        }
     }
 
     /**

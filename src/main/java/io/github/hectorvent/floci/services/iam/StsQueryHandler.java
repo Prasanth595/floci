@@ -26,8 +26,10 @@ import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
 import java.security.interfaces.RSAPublicKey;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -55,6 +57,7 @@ public class StsQueryHandler {
     private final OidcIssuerKeyLookup oidcIssuerKeys;
     private final SAMLProviderService samlProviderService;
     private final SAMLTrustPolicyEvaluator samlTrustEvaluator;
+    private final Clock clock;
 
     /** CSPRNG for session secret keys and session tokens; ordinary IDs keep using {@link ThreadLocalRandom}. */
     private final SecureRandom secureRandom = new SecureRandom();
@@ -73,6 +76,18 @@ public class StsQueryHandler {
                            OidcIssuerKeyLookup oidcIssuerKeys,
                            SAMLProviderService samlProviderService,
                            SAMLTrustPolicyEvaluator samlTrustEvaluator) {
+        this(iamService, accountResolver, regionResolver, config, trustPolicyEvaluator, webIdentityTrustEvaluator,
+                tokenVerifier, oidcIssuerKeys, samlProviderService, samlTrustEvaluator, Clock.systemUTC());
+    }
+
+    StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
+                    EmulatorConfig config, AssumeRolePolicyEvaluator trustPolicyEvaluator,
+                    WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator,
+                    WebIdentityTokenVerifier tokenVerifier,
+                    OidcIssuerKeyLookup oidcIssuerKeys,
+                    SAMLProviderService samlProviderService,
+                    SAMLTrustPolicyEvaluator samlTrustEvaluator,
+                    Clock clock) {
         this.iamService = iamService;
         this.accountResolver = accountResolver;
         this.regionResolver = regionResolver;
@@ -83,6 +98,7 @@ public class StsQueryHandler {
         this.oidcIssuerKeys = oidcIssuerKeys;
         this.samlProviderService = samlProviderService;
         this.samlTrustEvaluator = samlTrustEvaluator;
+        this.clock = clock;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -117,7 +133,7 @@ public class StsQueryHandler {
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
-        Instant expiration = Instant.now().plusSeconds(durationSeconds);
+        Instant expiration = clock.instant().plusSeconds(durationSeconds);
 
         String roleName = roleArn != null && roleArn.contains("/")
                 ? roleArn.substring(roleArn.lastIndexOf('/') + 1)
@@ -166,18 +182,22 @@ public class StsQueryHandler {
      * in the header or presigned in the query, which for an IAM user or a session is the account
      * that owns the key rather than the default one. A role session is matched as the role that
      * issued it, whose ARN keeps the path the session ARN drops. The trust policy's conditions see
-     * the request's keys: the global keys, {@code aws:PrincipalArn}, {@code sts:RoleSessionName},
-     * and {@code sts:ExternalId} when the caller sends one.
+     * the request's keys: the global keys, {@code sts:RoleSessionName}, {@code sts:ExternalId}
+     * when the caller sends one, and the keys that say who is calling, which the resolved caller
+     * writes itself so that a trust policy reads the same principal as any other policy. A
+     * credential that resolves to no identity is the account root stand-in, carrying the account
+     * id as its {@code aws:userid} and {@code Account} as its {@code aws:PrincipalType}, as that
+     * principal does wherever else Floci builds it.
      */
     private Response enforceTrustPolicy(String roleArn, IamRole role, String roleAccountId,
                                         MultivaluedMap<String, String> params) {
         String callerAccount = regionResolver.getAccountId();
-        Optional<IamService.CallerArns> callerArns = iamService.resolveCallerArns(callerAccessKeyId());
-        String callerArn = callerArns.map(IamService.CallerArns::callerArn)
-                .orElse(regionResolver.buildGlobalArn("iam", callerAccount, "root"));
-        String principalArn = callerArns.map(IamService.CallerArns::principalArn).orElse(callerArn);
+        IamService.CallerArns caller = iamService.resolveCallerArns(callerAccessKeyId())
+                .orElseGet(() -> IamService.CallerArns.accountRoot(
+                        regionResolver.buildGlobalArn("iam", callerAccount, "root"), callerAccount));
+        String callerArn = caller.callerArn();
 
-        if (role == null || !roleArnMatches(roleArn, role)) {
+        if (role == null || !IamService.roleArnMatches(roleArn, role)) {
             return AwsQueryResponse.error("AccessDenied",
                     "User: " + callerArn + " is not authorized to perform: sts:AssumeRole on resource: " + roleArn,
                     AwsNamespaces.STS, 403);
@@ -193,8 +213,8 @@ public class StsQueryHandler {
         if (externalId != null) {
             requestContext.put("sts:ExternalId", List.of(externalId));
         }
-        if (trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), callerArn, principalArn,
-                callerAccount, requestContext)) {
+        if (trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), caller, callerAccount,
+                requestContext)) {
             return null;
         }
         return AwsQueryResponse.error("AccessDenied",
@@ -210,33 +230,15 @@ public class StsQueryHandler {
                 "role" + IamService.normalizePath(role.getPath()) + roleName);
     }
 
-    static boolean roleArnMatches(String requestedRoleArn, IamRole role) {
-        if (requestedRoleArn == null || role == null || !AwsArnUtils.isArn(requestedRoleArn)) {
-            return false;
-        }
-        AwsArnUtils.Arn requested = AwsArnUtils.parse(requestedRoleArn);
-        if (!"iam".equals(requested.service())
-                || !requested.partition().matches(AwsArnUtils.PARTITION_REGEX)) {
-            return false;
-        }
-        String storedArn = role.getArn();
-        if (storedArn != null && AwsArnUtils.isArn(storedArn)) {
-            AwsArnUtils.Arn stored = AwsArnUtils.parse(storedArn);
-            return requested.accountId().equals(stored.accountId())
-                    && requested.region().equals(stored.region())
-                    && requested.resource().equals(stored.resource());
-        }
-        String expectedResource = "role" + IamService.normalizePath(role.getPath()) + role.getRoleName();
-        return requested.region().isEmpty() && requested.resource().equals(expectedResource);
-    }
-
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
         String accountId = regionResolver.getAccountId();
-        String authorization = headers == null ? null : headers.getHeaderString("Authorization");
-        String accessKeyId = authorization == null ? null : accountResolver.extractAccessKeyId(authorization);
+        String accessKeyId = callerAccessKeyId();
         String sessionToken = headers == null ? null : headers.getHeaderString("X-Amz-Security-Token");
         if (sessionToken == null && params != null) {
             sessionToken = getParam(params, "X-Amz-Security-Token");
+        }
+        if (sessionToken == null && uriInfo != null) {
+            sessionToken = uriInfo.getQueryParameters().getFirst("X-Amz-Security-Token");
         }
         String arn = iamService.resolveCallerArn(accessKeyId)
                 .orElse(regionResolver.buildGlobalArn("iam", accountId, "root"));
@@ -250,6 +252,10 @@ public class StsQueryHandler {
     }
 
     private Response handleGetSessionToken(MultivaluedMap<String, String> params) {
+        if (IamService.isTemporaryAccessKey(callerAccessKeyId())) {
+            return AwsQueryResponse.error("AccessDenied", "Cannot call GetSessionToken with session credentials",
+                    AwsNamespaces.STS, 403);
+        }
         Response durationValidation = validateDurationSeconds(params, 900, 129600);
         if (durationValidation != null) {
             return durationValidation;
@@ -258,7 +264,7 @@ public class StsQueryHandler {
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
-        Instant expiration = Instant.now().plusSeconds(durationSeconds);
+        Instant expiration = clock.instant().plusSeconds(durationSeconds);
 
         String result = credentialsXml(accessKeyId, secretKey, sessionToken, expiration);
         // No role ARN: the credentials route back to the caller's account and act as the caller.
@@ -298,7 +304,7 @@ public class StsQueryHandler {
         IamRole role = outcome.role();
         if (role == null) {
             role = iamService.findRole(accountId, roleName).orElse(null);
-            if (role == null || !roleArnMatches(roleArn, role)) {
+            if (role == null || !IamService.roleArnMatches(roleArn, role)) {
                 return accessDenied(roleArn);
             }
         }
@@ -306,7 +312,7 @@ public class StsQueryHandler {
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
-        Instant expiration = Instant.now().plusSeconds(durationSeconds);
+        Instant expiration = clock.instant().plusSeconds(durationSeconds);
 
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
@@ -406,7 +412,7 @@ public class StsQueryHandler {
         }
 
         Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
-        if (role.isEmpty() || !roleArnMatches(roleArn, role.get())) {
+        if (role.isEmpty() || !IamService.roleArnMatches(roleArn, role.get())) {
             return WebIdentityOutcome.deny(accessDenied(roleArn));
         }
 
@@ -474,7 +480,7 @@ public class StsQueryHandler {
                 new AwsException("InvalidIdentityToken", "The SAML provider is not trusted.", 400));
         SAMLAssertionVerifier.Verified verified;
         try {
-            verified = SAMLAssertionVerifier.verify(getParam(params, "SAMLAssertion"), provider, Instant.now());
+            verified = SAMLAssertionVerifier.verify(getParam(params, "SAMLAssertion"), provider, clock.instant());
         } catch (SAMLAssertionVerifier.InvalidAssertionException e) {
             throw new AwsException("InvalidIdentityToken", e.awsMessage(), 400);
         }
@@ -502,8 +508,8 @@ public class StsQueryHandler {
         if (sessionName.length() > 64) {
             sessionName = sessionName.substring(0, 64);
         }
-        Instant requestedExpiration = Instant.now().plusSeconds(durationSeconds);
-        Instant roleExpiration = Instant.now().plusSeconds(role.getMaxSessionDuration());
+        Instant requestedExpiration = clock.instant().plusSeconds(durationSeconds);
+        Instant roleExpiration = clock.instant().plusSeconds(role.getMaxSessionDuration());
         Instant expiration = verified.expiration().isBefore(requestedExpiration) ? verified.expiration() : requestedExpiration;
         if (roleExpiration.isBefore(expiration)) {
             expiration = roleExpiration;
@@ -527,13 +533,18 @@ public class StsQueryHandler {
 
     /** The access key that signed this request, in the header or presigned in the query. */
     private String callerAccessKeyId() {
+        String authorization = headers == null ? null : headers.getHeaderString("Authorization");
         String auth = IamEnforcementFilter.requestAuthorization(
-                headers == null ? null : headers.getHeaderString("Authorization"),
+                authorization == null || authorization.isBlank() ? null : authorization,
                 uriInfo == null ? null : uriInfo.getQueryParameters());
         return auth == null ? null : accountResolver.extractAccessKeyId(auth);
     }
 
     private Response handleGetFederationToken(MultivaluedMap<String, String> params) {
+        if (IamService.isTemporaryAccessKey(callerAccessKeyId())) {
+            return AwsQueryResponse.error("AccessDenied", IamService.FEDERATION_TOKEN_SESSION_MESSAGE,
+                    AwsNamespaces.STS, 403);
+        }
         Response validation = validateRequired(params, "Name");
         if (validation != null) {
             return validation;
@@ -548,7 +559,7 @@ public class StsQueryHandler {
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
-        Instant expiration = Instant.now().plusSeconds(durationSeconds);
+        Instant expiration = clock.instant().plusSeconds(durationSeconds);
         String accountId = regionResolver.getAccountId();
         String federatedUserId = accountId + ":" + name;
         String federatedUserArn = regionResolver.buildGlobalArn("sts", accountId, "federated-user/" + name);
@@ -652,7 +663,7 @@ public class StsQueryHandler {
     }
 
     private String isoDate(Instant instant) {
-        return DateTimeFormatter.ISO_INSTANT.format(instant);
+        return DateTimeFormatter.ISO_INSTANT.format(instant.truncatedTo(ChronoUnit.MILLIS));
     }
 
     private static String randomId(int length) {

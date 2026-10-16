@@ -27,9 +27,12 @@ public class CognitoUser {
     private String srpVerifier;
     private EmailMfaSettings emailMfaSettings;
     private SoftwareTokenMfaSettings softwareTokenMfaSettings;
+    private SmsMfaSettings smsMfaSettings;
     private String softwareTokenMfaSecret;
     private String pendingSoftwareTokenMfaSecret;
     private Integer pendingSoftwareTokenMfaAttemptsRemaining;
+    private List<WebAuthnCredential> webAuthnCredentials = new ArrayList<>();
+    private boolean webAuthnMfaEnabled;
     private String federatedProviderName;
     private String federatedSubject;
 
@@ -96,6 +99,9 @@ public class CognitoUser {
         this.emailMfaSettings = emailMfaSettings;
     }
 
+    public SmsMfaSettings getSmsMfaSettings() { return smsMfaSettings; }
+    public void setSmsMfaSettings(SmsMfaSettings smsMfaSettings) { this.smsMfaSettings = smsMfaSettings; }
+
     public SoftwareTokenMfaSettings getSoftwareTokenMfaSettings() { return softwareTokenMfaSettings; }
     public void setSoftwareTokenMfaSettings(SoftwareTokenMfaSettings settings) {
         this.softwareTokenMfaSettings = settings;
@@ -111,6 +117,15 @@ public class CognitoUser {
     public void setPendingSoftwareTokenMfaAttemptsRemaining(Integer attempts) {
         this.pendingSoftwareTokenMfaAttemptsRemaining = attempts;
     }
+
+    public List<WebAuthnCredential> getWebAuthnCredentials() { return webAuthnCredentials; }
+    public void setWebAuthnCredentials(List<WebAuthnCredential> webAuthnCredentials) {
+        this.webAuthnCredentials = webAuthnCredentials == null ? new ArrayList<>() : new ArrayList<>(webAuthnCredentials);
+    }
+
+    /** {@code WebAuthnMfaSettings.Enabled}: whether a user-verified passkey sign-in stands in for MFA. */
+    public boolean isWebAuthnMfaEnabled() { return webAuthnMfaEnabled; }
+    public void setWebAuthnMfaEnabled(boolean webAuthnMfaEnabled) { this.webAuthnMfaEnabled = webAuthnMfaEnabled; }
 
     public String getFederatedProviderName() {
         return federatedProviderName;

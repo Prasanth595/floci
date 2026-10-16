@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testing.S3EnforceAuthProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
@@ -20,7 +21,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -585,7 +585,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(22)
     void presignedRequestWithExplicitContentSha256IsAccepted() throws Exception {
         String path = "/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY;
-        String contentHash = sha256Hex("private body");
+        String contentHash = Digests.sha256Hex("private body");
         String sig = presignedSignature("GET", path, "test", "test", "3600", contentHash);
         given()
             .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
@@ -629,8 +629,8 @@ class S3AuthEnforcementIntegrationTest {
     @Order(24)
     void presignedRequestWithMismatchedContentSha256IsRejected() throws Exception {
         String path = "/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY;
-        String contentHash = sha256Hex("private body");
-        String wrongHash = sha256Hex("wrong body");
+        String contentHash = Digests.sha256Hex("private body");
+        String wrongHash = Digests.sha256Hex("wrong body");
         String sig = presignedSignature("GET", path, "test", "test", "3600", contentHash);
         given()
             .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
@@ -952,6 +952,14 @@ class S3AuthEnforcementIntegrationTest {
             .body("part data")
         .when()
             .put("/" + WRITE_BUCKET + "/multipart.txt?uploadId=" + uploadId + "&partNumber=1")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+            .body("part data")
+        .when()
+            .put("/" + WRITE_BUCKET + "/multipart.txt?uploadId=" + uploadId + "&partNumber=0")
         .then()
             .statusCode(403)
             .body(containsString("AccessDenied"));
@@ -1873,7 +1881,7 @@ class S3AuthEnforcementIntegrationTest {
             .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/" + SIGNING_DATE
                     + "/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef")
             .header("x-amz-date", SIGNING_TIMESTAMP)
-            .header("x-amz-content-sha256", sha256Hex("forged"))
+            .header("x-amz-content-sha256", Digests.sha256Hex("forged"))
             .body("forged")
         .when()
             .put("/" + WRITE_BUCKET + "/" + key)
@@ -1904,7 +1912,7 @@ class S3AuthEnforcementIntegrationTest {
             .body(containsString("SignatureDoesNotMatch"));
 
         given()
-            .filter(LOCAL_SIGNER.withContentSha256(sha256Hex("the body that was signed")))
+            .filter(LOCAL_SIGNER.withContentSha256(Digests.sha256Hex("the body that was signed")))
             .body("a different body")
         .when()
             .put("/" + WRITE_BUCKET + "/" + key)
@@ -1935,7 +1943,7 @@ class S3AuthEnforcementIntegrationTest {
         assertThat(putWithoutContentType(WRITE_BUCKET + "?versioning", suspend, LOCAL_SIGNER).statusCode(),
                 equalTo(200));
         HttpResponse<String> mismatch = putWithoutContentType(WRITE_BUCKET + "?versioning", suspend,
-                LOCAL_SIGNER.withContentSha256(sha256Hex("something else")));
+                LOCAL_SIGNER.withContentSha256(Digests.sha256Hex("something else")));
         assertThat(mismatch.statusCode(), equalTo(400));
         assertThat(mismatch.body(), containsString("XAmzContentSHA256Mismatch"));
 
@@ -1975,7 +1983,7 @@ class S3AuthEnforcementIntegrationTest {
         given()
             .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/" + SIGNING_DATE
                     + "/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc")
-            .header("x-amz-content-sha256", sha256Hex(""))
+            .header("x-amz-content-sha256", Digests.sha256Hex(""))
         .when()
             .get(path)
         .then()
@@ -1987,7 +1995,7 @@ class S3AuthEnforcementIntegrationTest {
             .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/" + SIGNING_DATE
                     + "/us-east-1/s3/aws4_request")
             .header("x-amz-date", SIGNING_TIMESTAMP)
-            .header("x-amz-content-sha256", sha256Hex(""))
+            .header("x-amz-content-sha256", Digests.sha256Hex(""))
         .when()
             .get(path)
         .then()
@@ -1998,7 +2006,7 @@ class S3AuthEnforcementIntegrationTest {
             .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/" + SIGNING_DATE
                     + "/us-east-1/sqs/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc")
             .header("x-amz-date", SIGNING_TIMESTAMP)
-            .header("x-amz-content-sha256", sha256Hex(""))
+            .header("x-amz-content-sha256", Digests.sha256Hex(""))
         .when()
             .get(path)
         .then()
@@ -2214,7 +2222,7 @@ class S3AuthEnforcementIntegrationTest {
             String stringToSign = "AWS4-HMAC-SHA256\n"
                     + SIGNING_TIMESTAMP + "\n"
                     + credentialScope + "\n"
-                    + sha256Hex(canonicalRequest);
+                    + Digests.sha256Hex(canonicalRequest);
 
             byte[] signingKey = deriveSigningKey(secretKey, SIGNING_DATE, "us-east-1", "s3");
             return hexEncode(hmacSha256(signingKey, stringToSign));
@@ -2236,11 +2244,6 @@ class S3AuthEnforcementIntegrationTest {
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(key, "HmacSHA256"));
         return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static String sha256Hex(String input) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        return hexEncode(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
     }
 
     private static String hexEncode(byte[] bytes) {
@@ -2398,6 +2401,54 @@ class S3AuthEnforcementIntegrationTest {
             .when().get("/" + bucket + "/data.txt")
             .then().statusCode(200)
             .body(equalTo("private data"));
+    }
+
+    @Test
+    @Order(58)
+    void enforcedOwnershipIgnoresExistingPublicAclsUntilReenabled() {
+        String bucket = "auth-enforced-acl-bucket";
+        String controls = """
+                <OwnershipControls xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <Rule><ObjectOwnership>BucketOwnerEnforced</ObjectOwnership></Rule>
+                </OwnershipControls>
+                """;
+        given().filter(LOCAL_SIGNER).when().put("/" + bucket).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).header("x-amz-acl", "public-read").body("public data")
+            .when().put("/" + bucket + "/data.txt")
+            .then().statusCode(200);
+        given().filter(LOCAL_SIGNER).header("x-amz-acl", "public-read")
+            .when().put("/" + bucket + "?acl")
+            .then().statusCode(200);
+        given().when().get("/" + bucket + "/data.txt").then().statusCode(200);
+        given().when().get("/" + bucket + "?list-type=2").then().statusCode(200);
+
+        given().filter(LOCAL_SIGNER).body(controls)
+            .when().put("/" + bucket + "?ownershipControls")
+            .then().statusCode(400).body(containsString("InvalidBucketAclWithObjectOwnership"));
+        given().filter(LOCAL_SIGNER).when().get("/" + bucket + "?ownershipControls")
+            .then().statusCode(404);
+        given().filter(LOCAL_SIGNER).header("x-amz-acl", "private")
+            .when().put("/" + bucket + "?acl")
+            .then().statusCode(200);
+        given().filter(LOCAL_SIGNER).body(controls)
+            .when().put("/" + bucket + "?ownershipControls")
+            .then().statusCode(200);
+
+        given().when().get("/" + bucket + "/data.txt").then().statusCode(403);
+        given().when().get("/" + bucket + "?list-type=2").then().statusCode(403);
+        given().filter(LOCAL_SIGNER).when().get("/" + bucket + "?acl")
+            .then().statusCode(200).body(not(containsString("AllUsers")));
+        given().filter(LOCAL_SIGNER).when().get("/" + bucket + "/data.txt?acl")
+            .then().statusCode(200).body(not(containsString("AllUsers")));
+
+        given().filter(LOCAL_SIGNER).when().delete("/" + bucket + "?ownershipControls")
+            .then().statusCode(204);
+        given().when().get("/" + bucket + "/data.txt").then().statusCode(200);
+        given().when().get("/" + bucket + "?list-type=2").then().statusCode(403);
+        given().filter(LOCAL_SIGNER).header("x-amz-acl", "public-read")
+            .when().put("/" + bucket + "?acl")
+            .then().statusCode(200);
+        given().when().get("/" + bucket + "?list-type=2").then().statusCode(200);
     }
 
     private static String publicObjectActionPolicy(String bucket, String action) {

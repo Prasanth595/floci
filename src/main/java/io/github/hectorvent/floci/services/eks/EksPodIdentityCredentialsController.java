@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.WebIdentityToken;
 import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier;
 import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier.ExpiredTokenException;
@@ -117,8 +118,9 @@ public class EksPodIdentityCredentialsController {
         String namespace = rest.substring(0, colon);
         String serviceAccount = rest.substring(colon + 1);
 
-        Optional<PodIdentityAssociation> maybeAssociation = associationService.findAssociation(
-                cluster, namespace, serviceAccount);
+        String callerAccountId = AwsArnUtils.accountOrDefault(cluster.getArn(), cluster.getAccountId());
+        Optional<PodIdentityAssociation> maybeAssociation = RequestScopes.callAs(callerAccountId,
+                () -> associationService.findAssociation(cluster, namespace, serviceAccount));
         if (maybeAssociation.isEmpty()) {
             return error(404, "ResourceNotFoundException: No association found for service account: "
                     + serviceAccount + "\n");
@@ -126,7 +128,6 @@ public class EksPodIdentityCredentialsController {
 
         PodIdentityAssociation association = maybeAssociation.get();
         String roleArn = association.roleArn();
-        String callerAccountId = cluster.getAccountId();
         String roleAccountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
 
         String accessKeyId = "ASIA" + randomId(16);
@@ -136,13 +137,26 @@ public class EksPodIdentityCredentialsController {
 
         String sessionName = podIdentitySessionName(cluster.getName(), association.serviceAccount());
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
-        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
+        // EKS Auth assumes the association's role through STS, so a role that is gone gets no
+        // credentials. The lookup is by name only, and enforcement loads a session's policies the
+        // same way, so a role recreated under another path is refused too: it is not the role the
+        // association names.
+        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName)
+                .filter(found -> IamService.roleArnMatches(roleArn, found));
+        if (role.isEmpty()) {
+            return error(400, "AccessDeniedException: The role of the association cannot be assumed: "
+                    + roleArn + "\n");
+        }
         String assumedRoleId = role.map(IamRole::getRoleId).filter(id -> !id.isBlank())
                 .map(id -> id + ":" + sessionName)
                 .orElse(null);
 
-        iamService.registerSession(accessKeyId, secretAccessKey, sessionToken, roleArn,
-                expiration, association.policy(), callerAccountId, sessionName, assumedRoleId);
+        // Like STS AssumeRole, store the session in the minting account while its role ARN names
+        // the assumed role, including the role's AWS partition when that differs.
+        String sessionRoleArn = role.map(IamRole::getArn).filter(AwsArnUtils::isArn).orElse(roleArn);
+        RequestScopes.runAs(callerAccountId, () -> iamService.registerSession(
+                accessKeyId, secretAccessKey, sessionToken, sessionRoleArn,
+                expiration, association.policy(), callerAccountId, sessionName, assumedRoleId));
 
         EksPodIdentityCredentialsResponse response = new EksPodIdentityCredentialsResponse(
                 accessKeyId,

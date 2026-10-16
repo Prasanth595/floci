@@ -2,9 +2,9 @@ package io.github.hectorvent.floci.services.codeartifact;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.AuthorizationToken;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.Reso
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactDomain;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactRepository;
+import io.github.hectorvent.floci.services.codeartifact.model.PackageOriginConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -53,6 +54,7 @@ class CodeArtifactServiceTest {
     private CodeArtifactService service;
     private RegionResolver regionResolver;
     private AccountAwareStorageBackend<CodeArtifactRepository> repoStore;
+    private AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigStore;
     private VerdaccioSidecarClient verdaccioClient;
     private ReposiliteSidecarClient reposiliteClient;
     private PypiserverSidecarClient pypiserverClient;
@@ -63,6 +65,7 @@ class CodeArtifactServiceTest {
         repoStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersionStore =
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+        packageOriginConfigStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
 
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
@@ -79,8 +82,8 @@ class CodeArtifactServiceTest {
         when(reposiliteClient.format()).thenReturn("maven");
         pypiserverClient = mock(PypiserverSidecarClient.class);
         when(pypiserverClient.format()).thenReturn("pypi");
-        service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, regionResolver, config,
-                true, null, new CodeArtifactSidecarRegistry(
+        service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, packageOriginConfigStore,
+                regionResolver, config, true, null, new CodeArtifactSidecarRegistry(
                         List.of(verdaccioClient, reposiliteClient, pypiserverClient)));
     }
 
@@ -205,6 +208,345 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "counted", null, "repo-a", null, null, Map.of());
         service.createRepository(REGION, "counted", null, "repo-b", null, null, Map.of());
         assertEquals(2, service.describeDomain(REGION, "counted", null).repositoryCount());
+    }
+
+    @Test
+    void createAndDeleteDomainReportZeroAssetSizeBytes() {
+        DomainView created = service.createDomain(REGION, "fresh", null, Map.of());
+        assertEquals(0L, created.assetSizeBytes());
+        DomainView deleted = service.deleteDomain(REGION, "fresh", null);
+        assertEquals(0L, deleted.assetSizeBytes());
+    }
+
+    @Test
+    void describeDomainAssetSizeBytesSumsGenericAssetsAcrossRepositoriesAndVersions() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, null, Map.of());
+        byte[] first = "first-package".getBytes(StandardCharsets.UTF_8);
+        byte[] second = "second-package-longer".getBytes(StandardCharsets.UTF_8);
+        byte[] third = "third".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo-a", "generic", "ns", "pkg-a", "1.0.0", "a.txt",
+                Digests.sha256Hex(first), "false", first);
+        service.publishPackageVersion(REGION, "dom", null, "repo-a", "generic", "ns", "pkg-a", "2.0.0", "a.txt",
+                Digests.sha256Hex(second), "false", second);
+        service.publishPackageVersion(REGION, "dom", null, "repo-b", "generic", "ns", "pkg-b", "1.0.0", "a.txt",
+                Digests.sha256Hex(third), "false", third);
+
+        long expected = first.length + second.length + third.length;
+        assertEquals(expected, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    @Test
+    void describeDomainAssetSizeBytesDropsByExactlyWhatDeletePackageRemoves() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] kept = "kept-package".getBytes(StandardCharsets.UTF_8);
+        byte[] removed = "removed-package-content".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "kept", "1.0.0", "a.txt",
+                Digests.sha256Hex(kept), "false", kept);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "removed", "1.0.0", "a.txt",
+                Digests.sha256Hex(removed), "false", removed);
+        assertEquals(kept.length + removed.length, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+
+        service.deletePackage(REGION, "dom", null, "repo", "generic", "ns", "removed");
+
+        assertEquals(kept.length, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    /**
+     * {@code deleteRepository} does not clean up a generic package's {@code packageVersions}
+     * records or asset bytes today, so they are only unreachable through the normal API, not
+     * actually gone. Without scoping the sum to each still-live repository's own key prefix, the
+     * domain total would keep counting a deleted repository's orphaned bytes forever.
+     */
+    @Test
+    void describeDomainAssetSizeBytesExcludesADeletedRepositorysOrphanedBytes() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, null, Map.of());
+        byte[] inDeletedRepo = "goes-away-with-repo-a".getBytes(StandardCharsets.UTF_8);
+        byte[] inLiveRepo = "stays-in-repo-b".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo-a", "generic", "ns", "pkg-a", "1.0.0", "a.txt",
+                Digests.sha256Hex(inDeletedRepo), "false", inDeletedRepo);
+        service.publishPackageVersion(REGION, "dom", null, "repo-b", "generic", "ns", "pkg-b", "1.0.0", "a.txt",
+                Digests.sha256Hex(inLiveRepo), "false", inLiveRepo);
+
+        service.deleteRepository(REGION, "dom", null, "repo-a");
+
+        assertEquals(inLiveRepo.length, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    /**
+     * A Maven/npm/pypi package merely existing on its sidecar (confirmed here via a stubbed
+     * {@code packageExists}) contributes nothing on its own: {@code CodeArtifactService} never
+     * queries a sidecar for size, only the running total each format's own proxy explicitly
+     * reports through {@link CodeArtifactService#recordContainerBackedAssetBytes}, which nothing
+     * in this test ever calls. The next tests below exercise that path directly.
+     */
+    @Test
+    void aContainerBackedPackageExistingWithNoRecordedBytesContributesNothing() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] generic = "generic-package".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "generic-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(generic), "false", generic);
+        when(reposiliteClient.packageExists(anyString(), eq("dom"), eq("repo"), eq("com.example"), eq("maven-pkg")))
+                .thenReturn(true);
+
+        assertEquals(generic.length, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    /**
+     * Mirrors exactly what each real proxy does: snapshot {@code currentContainerBackedPackageFence}
+     * before the (here, simulated) real write, then report it alongside the byte count, the way
+     * {@code CodeArtifactMavenController}/the npm data plane/{@code CodeArtifactPypiController}
+     * all do for real.
+     */
+    private void recordBytes(String domain, String repository, String format, String namespace, String packageName,
+            long bytes) {
+        long fence = service.currentContainerBackedPackageFence(REGION, domain, null, repository, format, namespace,
+                packageName);
+        service.recordContainerBackedAssetBytes(REGION, domain, null, repository, format, namespace, packageName,
+                bytes, fence);
+    }
+
+    /** Same snapshot-then-report shape as {@link #recordBytes}, for readme capture instead. */
+    private void recordReadme(String domain, String repository, String format, String namespace, String packageName,
+            String version, String readme) {
+        long fence = service.currentContainerBackedPackageFence(REGION, domain, null, repository, format, namespace,
+                packageName);
+        service.recordPublishedPackageVersionReadme(REGION, domain, null, repository, format, namespace, packageName,
+                version, readme, fence);
+    }
+
+    /**
+     * {@code recordContainerBackedAssetBytes} is what each of the three sidecar-backed proxies
+     * calls after a real (non-idempotent, non-rejected) write; this is the unit-level proof that
+     * it feeds {@code assetSizeBytes} correctly across all three formats plus generic at once,
+     * accumulating repeated calls for the same package the way a multi-file Maven deploy
+     * (jar + pom as separate PUTs) needs.
+     */
+    @Test
+    void describeDomainAssetSizeBytesSumsContainerBackedBytesAcrossEveryFormat() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] generic = "generic".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "generic-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(generic), "false", generic);
+        recordBytes("dom", "repo", "maven", "com.example", "maven-pkg", 100L);
+        recordBytes("dom", "repo", "maven", "com.example", "maven-pkg", 50L);
+        recordBytes("dom", "repo", "npm", null, "npm-pkg", 200L);
+        recordBytes("dom", "repo", "pypi", null, "pypi-pkg", 300L);
+
+        long expected = generic.length + 100L + 50L + 200L + 300L;
+        assertEquals(expected, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    /**
+     * Unlike every JSON-API package operation's own namespace/packageName, the wire-protocol
+     * proxies (Maven's GAV path, npm's scope/name, twine's form field) never validate theirs
+     * before calling this: a crafted namespace spelling out another namespace's already-escaped
+     * form (here, raw {@code "a#cb"} vs. legitimate {@code "a:b"}, see
+     * {@code newEscapedKeysNeverCollideWithAPreExistingRawKeyThatHappenedToContainABackslash} for
+     * the same invariant proven on the JSON API side) must not be allowed to land in
+     * {@code containerBackedAssetBytes} under the legitimate package's own key at all.
+     */
+    @Test
+    void recordContainerBackedAssetBytesIgnoresANamespaceContainingTheEscapeCharacter() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordBytes("dom", "repo", "maven", "a:b", "legit", 10L);
+
+        recordBytes("dom", "repo", "maven", "a#cb", "legit", 999L);
+
+        assertEquals(10L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    @Test
+    void recordContainerBackedAssetBytesIgnoresAPackageNameContainingTheEscapeCharacter() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        recordBytes("dom", "repo", "pypi", null, "bad#name", 999L);
+
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    @Test
+    void describeDomainAssetSizeBytesDropsWhenDeletePackageRemovesAContainerBackedPackage() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(reposiliteClient.packageExists(anyString(), eq("dom"), eq("repo"), eq("com.example"), eq("removed")))
+                .thenReturn(true);
+        recordBytes("dom", "repo", "maven", "com.example", "kept", 40L);
+        recordBytes("dom", "repo", "maven", "com.example", "removed", 60L);
+        assertEquals(100L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+
+        service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "removed");
+
+        assertEquals(40L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    /**
+     * Same orphan-exclusion property as generic (see the backslash/collision test above), proven
+     * here for the sidecar ledger: {@code deleteRepository} actually does clean this one up (unlike
+     * {@code packageVersions}), but the sum is scoped per live repository regardless, so this holds
+     * either way.
+     */
+    @Test
+    void describeDomainAssetSizeBytesExcludesADeletedRepositorysContainerBackedBytes() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, null, Map.of());
+        recordBytes("dom", "repo-a", "npm", null, "pkg-a", 70L);
+        recordBytes("dom", "repo-b", "npm", null, "pkg-b", 30L);
+
+        service.deleteRepository(REGION, "dom", null, "repo-a");
+
+        assertEquals(30L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    /**
+     * {@code assetSizeBytesForDomain} scans generic {@code packageVersions} by each live
+     * repository's name-based prefix, not by a freshly minted id, so a repository recreated under
+     * this same name would otherwise sum right back into any orphaned record
+     * {@code deleteRepository} failed to clean up: unlike {@code containerBackedAssetBytes}, there
+     * was never any cleanup of {@code packageVersions} on {@code deleteRepository} before this,
+     * since nothing before {@code assetSizeBytes} existed ever looked an old repository's
+     * generic-format records up by name alone the way this domain-wide sum does.
+     */
+    @Test
+    void describeDomainAssetSizeBytesDoesNotResurrectAGenericPackagesBytesAfterRepositoryRecreation() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "generic content".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "generic-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+        assertEquals(content.length, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    /**
+     * Reproduces the one window where a real publish and a real {@code DeleteRepository} could
+     * interleave: the sidecar-backed proxies check the repository exists in one {@code
+     * synchronized} call ({@code ensureFormatContainerId}), then do the real HTTP write to the
+     * sidecar with no lock held at all, and only then call this method in a second, separate
+     * {@code synchronized} call. A {@code DeleteRepository} landing in that gap would otherwise
+     * resurrect a key it just cleaned up. Calling {@code recordContainerBackedAssetBytes} after
+     * {@code deleteRepository} reproduces exactly that interleaving deterministically (both methods
+     * are themselves {@code synchronized}, so there is no actual race to simulate, only the order
+     * the two calls land in): the resurrected entry must not survive, and in particular must not
+     * be inherited by a same-named repository created afterward, the same invariant
+     * {@code deleteRepository}'s own cleanup already protects against for every ordering but this
+     * one.
+     */
+    @Test
+    void recordContainerBackedAssetBytesAfterTheRepositoryIsAlreadyDeletedIsIgnored() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
+                "late");
+        service.deleteRepository(REGION, "dom", null, "repo");
+
+        service.recordContainerBackedAssetBytes(REGION, "dom", null, "repo", "maven", "com.example", "late", 999L,
+                fence);
+
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    /**
+     * The same window, but for {@code DeletePackage} instead of {@code DeleteRepository}: the
+     * repository stays alive, only the package underneath it is gone, so a resurrected entry
+     * would be counted by {@code DescribeDomain} immediately rather than only after a repository
+     * is recreated. Snapshotting the fence before the delete, exactly like a real proxy snapshots
+     * it before its real write, reproduces exactly the interleaving a delayed accounting callback
+     * racing a concurrent {@code DeletePackage} would see.
+     */
+    @Test
+    void recordContainerBackedAssetBytesAfterAConcurrentDeletePackageIsIgnored() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
+                "late");
+        when(reposiliteClient.packageExists(anyString(), eq("dom"), eq("repo"), eq("com.example"), eq("late")))
+                .thenReturn(true);
+        service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "late");
+
+        service.recordContainerBackedAssetBytes(REGION, "dom", null, "repo", "maven", "com.example", "late", 999L,
+                fence);
+
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    /**
+     * The harder version of the same race: the package is deleted {@code and} a different publish
+     * recreates it under the same name, both completing before the first publish's own delayed
+     * accounting call runs. A sidecar existence check alone could not tell these two packages
+     * apart (the name exists either way); the fence can, since only an actual deletion bumps it.
+     */
+    @Test
+    void recordContainerBackedAssetBytesAfterDeleteAndRepublishUnderTheSameNameIsIgnored() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
+                "late");
+        when(reposiliteClient.packageExists(anyString(), eq("dom"), eq("repo"), eq("com.example"), eq("late")))
+                .thenReturn(true);
+        service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "late");
+        // The republish: a different publish, same coordinates, after the first one's snapshot.
+        recordBytes("dom", "repo", "maven", "com.example", "late", 10L);
+
+        service.recordContainerBackedAssetBytes(REGION, "dom", null, "repo", "maven", "com.example", "late", 999L,
+                fence);
+
+        assertEquals(10L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    /**
+     * {@code currentContainerBackedPackageFence}/{@code recordContainerBackedAssetBytes} never
+     * touch a sidecar at all, so there is no failure mode left to fail open on: the fence
+     * comparison is a plain in-memory read, always available, closing the same race the sidecar
+     * round trip this replaced used to close, at the cost of a thrown exception whenever it
+     * couldn't reach the sidecar.
+     */
+    @Test
+    void recordContainerBackedAssetBytesNeverNeedsTheSidecarAtAll() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(reposiliteClient.packageExists(any(), any(), any(), any(), any()))
+                .thenThrow(new IllegalStateException("sidecar unreachable"));
+
+        recordBytes("dom", "repo", "maven", "com.example", "never-asked", 55L);
+
+        assertEquals(55L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+        verify(reposiliteClient, never()).packageExists(any(), any(), any(), any(), any());
+    }
+
+    /**
+     * {@code packageOriginConfigs} keeps the caller's raw spelling (pre-existing, unrelated to byte
+     * accounting); {@code containerBackedAssetBytes}/the fence use pypiserver's own PEP 503
+     * normalization instead, so an upload spelled one way and a {@code DeletePackage} spelled a
+     * case/punctuation-equivalent way still address the one byte count pypiserver itself would
+     * treat as a single package.
+     */
+    @Test
+    void pypiAccountingNormalizesThePackageNameLikePypiserverItself() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordBytes("dom", "repo", "pypi", null, "My.Package", 42L);
+        assertEquals(42L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+        when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my_package")))
+                .thenReturn(true);
+
+        service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my_package");
+
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
     }
 
     @Test
@@ -419,6 +761,34 @@ class CodeArtifactServiceTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.describeRepository(REGION, "dom", null, "repo"));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    /**
+     * createRepository already guarantees this for container-backed sidecar content, by design
+     * (a fresh sidecarContainerIds id on every creation, never derived from the repository's
+     * name). packageOriginConfigs is keyed by name instead, so deleteRepository has to clean it
+     * up explicitly, or a repository recreated under the same name would inherit a prior
+     * package's restrictions, including a publish:BLOCK the new repository's owner never set and
+     * has no way to discover.
+     */
+    @Test
+    void deleteRepositoryRemovesOriginConfigsSoARecreatedRepositoryDoesNotInheritThem() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "BLOCK",
+                "BLOCK");
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException gone = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg"));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        PublishPackageVersionResult published = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                "ns", "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content);
+        assertEquals("Published", published.packageVersion().getStatus());
     }
 
     @Test
@@ -660,11 +1030,22 @@ class CodeArtifactServiceTest {
     void clearRemovesAllPersistedState() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        // An origin-config-only package (no versions, see putPackageOriginConfiguration) is its
+        // own persisted record distinct from a domain, repository, or package version; clear()
+        // missing it would leave describePackage still finding a package that should be gone.
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "never-published",
+                "BLOCK", "BLOCK");
         service.clear();
         assertTrue(service.listDomains(REGION, null, null).items().isEmpty());
         AwsException e = assertThrows(AwsException.class,
                 () -> service.describeRepository(REGION, "dom", null, "repo"));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
+
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        AwsException packageGone = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "generic", "ns", "never-published"));
+        assertEquals("ResourceNotFoundException", packageGone.getErrorCode());
     }
 
     // ---------------------------------------------------- authorization tokens
@@ -727,7 +1108,7 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
-        String sha256 = sha256Hex(content);
+        String sha256 = Digests.sha256Hex(content);
 
         PublishPackageVersionResult result = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
                 "my-ns", "my-pkg", "1.0.0", "asset.txt", sha256, "false", content);
@@ -772,7 +1153,7 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
-        String sha256 = sha256Hex(content);
+        String sha256 = Digests.sha256Hex(content);
 
         // A newline here would land verbatim in the X-AssetName response header on GetPackageVersionAsset.
         AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
@@ -788,11 +1169,11 @@ class CodeArtifactServiceTest {
         byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
 
         AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
-                "repo", "generic", null, "my-pkg", "1.0.0", "asset.txt", sha256Hex(content), "yes", content));
+                "repo", "generic", null, "my-pkg", "1.0.0", "asset.txt", Digests.sha256Hex(content), "yes", content));
         assertEquals("ValidationException", e.getErrorCode());
 
         PublishPackageVersionResult omitted = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
-                null, "my-pkg", "1.0.0", "asset.txt", sha256Hex(content), null, content);
+                null, "my-pkg", "1.0.0", "asset.txt", Digests.sha256Hex(content), null, content);
         assertEquals("Published", omitted.packageVersion().getStatus());
     }
 
@@ -803,7 +1184,7 @@ class CodeArtifactServiceTest {
         byte[] content = "x".getBytes(StandardCharsets.UTF_8);
 
         AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
-                "repo", "npm", null, "my-pkg", "1.0.0", "asset.txt", sha256Hex(content), "false", content));
+                "repo", "npm", null, "my-pkg", "1.0.0", "asset.txt", Digests.sha256Hex(content), "false", content));
         assertEquals("ValidationException", e.getErrorCode());
     }
 
@@ -813,7 +1194,7 @@ class CodeArtifactServiceTest {
         byte[] content = "x".getBytes(StandardCharsets.UTF_8);
 
         AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
-                "no-such-repo", "generic", null, "my-pkg", "1.0.0", "asset.txt", sha256Hex(content), "false", content));
+                "no-such-repo", "generic", null, "my-pkg", "1.0.0", "asset.txt", Digests.sha256Hex(content), "false", content));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
     }
 
@@ -824,7 +1205,7 @@ class CodeArtifactServiceTest {
         byte[] content = "x".getBytes(StandardCharsets.UTF_8);
 
         AwsException publishMissingDomain = assertThrows(AwsException.class, () -> service.publishPackageVersion(
-                REGION, null, null, "repo", "generic", null, "my-pkg", "1.0.0", "asset.txt", sha256Hex(content),
+                REGION, null, null, "repo", "generic", null, "my-pkg", "1.0.0", "asset.txt", Digests.sha256Hex(content),
                 "false", content));
         assertEquals("ValidationException", publishMissingDomain.getErrorCode());
         assertEquals("domain is required.", publishMissingDomain.getMessage());
@@ -849,11 +1230,11 @@ class CodeArtifactServiceTest {
         byte[] second = "second".getBytes(StandardCharsets.UTF_8);
 
         PublishPackageVersionResult r1 = service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null,
-                "my-pkg", "1.0.0", "a.txt", sha256Hex(first), "true", first);
+                "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(first), "true", first);
         assertEquals("Unfinished", r1.packageVersion().getStatus());
 
         PublishPackageVersionResult r2 = service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null,
-                "my-pkg", "1.0.0", "b.txt", sha256Hex(second), "false", second);
+                "my-pkg", "1.0.0", "b.txt", Digests.sha256Hex(second), "false", second);
         assertEquals("Published", r2.packageVersion().getStatus());
         assertEquals(2, r2.packageVersion().getAssets().size());
         assertTrue(r2.packageVersion().getAssets().containsKey("a.txt"));
@@ -866,13 +1247,13 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "same-bytes".getBytes(StandardCharsets.UTF_8);
         PublishPackageVersionResult first = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
-                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "true", content);
+                null, "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "true", content);
         // pv is the same mutable object across calls in this storage backend, so the revision has
         // to be captured now, before the retry below has a chance to change it in place.
         String firstRevision = first.packageVersion().getRevision();
 
         PublishPackageVersionResult retry = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
-                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "true", content);
+                null, "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "true", content);
 
         assertEquals("Unfinished", retry.packageVersion().getStatus());
         assertEquals(1, retry.packageVersion().getAssets().size());
@@ -891,13 +1272,13 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "same-bytes".getBytes(StandardCharsets.UTF_8);
         PublishPackageVersionResult unfinished = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
-                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "true", content);
+                null, "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "true", content);
         // pv is the same mutable object across calls in this storage backend, so this must be
         // checked before the second call mutates it, not read back afterward.
         assertEquals("Unfinished", unfinished.packageVersion().getStatus());
 
         PublishPackageVersionResult finalized = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
-                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "false", content);
+                null, "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content);
 
         assertEquals("Published", finalized.packageVersion().getStatus());
         assertTrue(finalized.packageVersion().getPublishedTime() != null);
@@ -910,10 +1291,10 @@ class CodeArtifactServiceTest {
         byte[] first = "first-bytes".getBytes(StandardCharsets.UTF_8);
         byte[] different = "different-bytes".getBytes(StandardCharsets.UTF_8);
         service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
-                sha256Hex(first), "true", first);
+                Digests.sha256Hex(first), "true", first);
 
         AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
-                "repo", "generic", null, "my-pkg", "1.0.0", "a.txt", sha256Hex(different), "true", different));
+                "repo", "generic", null, "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(different), "true", different));
         assertEquals("ConflictException", e.getErrorCode());
         assertEquals("a.txt", e.getExtendedData().get("resourceId"));
         assertEquals("asset", e.getExtendedData().get("resourceType"));
@@ -925,10 +1306,10 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "x".getBytes(StandardCharsets.UTF_8);
         service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
-                sha256Hex(content), "false", content);
+                Digests.sha256Hex(content), "false", content);
 
         AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
-                "repo", "generic", null, "my-pkg", "1.0.0", "b.txt", sha256Hex(content), "false", content));
+                "repo", "generic", null, "my-pkg", "1.0.0", "b.txt", Digests.sha256Hex(content), "false", content));
         assertEquals("ConflictException", e.getErrorCode());
         assertEquals("1.0.0", e.getExtendedData().get("resourceId"));
         assertEquals("package-version", e.getExtendedData().get("resourceType"));
@@ -940,13 +1321,13 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "x".getBytes(StandardCharsets.UTF_8);
         PublishPackageVersionResult first = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
-                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "false", content);
+                null, "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content);
         // pv is the same mutable object across calls in this storage backend, so the revision has
         // to be captured now, before the retry below has a chance to change it in place.
         String firstRevision = first.packageVersion().getRevision();
 
         PublishPackageVersionResult retry = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
-                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "false", content);
+                null, "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content);
 
         assertEquals("Published", retry.packageVersion().getStatus());
         assertEquals(firstRevision, retry.packageVersion().getRevision());
@@ -958,11 +1339,11 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "x".getBytes(StandardCharsets.UTF_8);
         service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
-                sha256Hex(content), "false", content);
+                Digests.sha256Hex(content), "false", content);
 
         byte[] different = "y".getBytes(StandardCharsets.UTF_8);
         AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
-                "repo", "generic", null, "my-pkg", "1.0.0", "a.txt", sha256Hex(different), "false", different));
+                "repo", "generic", null, "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(different), "false", different));
         assertEquals("ConflictException", e.getErrorCode());
         assertEquals("a.txt", e.getExtendedData().get("resourceId"));
         assertEquals("asset", e.getExtendedData().get("resourceType"));
@@ -975,11 +1356,11 @@ class CodeArtifactServiceTest {
         for (int i = 0; i < 350; i++) {
             byte[] content = ("content-" + i).getBytes(StandardCharsets.UTF_8);
             service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0",
-                    "asset-" + i + ".txt", sha256Hex(content), "true", content);
+                    "asset-" + i + ".txt", Digests.sha256Hex(content), "true", content);
         }
         byte[] oneMore = "one-more".getBytes(StandardCharsets.UTF_8);
         AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
-                "repo", "generic", null, "my-pkg", "1.0.0", "asset-350.txt", sha256Hex(oneMore), "true", oneMore));
+                "repo", "generic", null, "my-pkg", "1.0.0", "asset-350.txt", Digests.sha256Hex(oneMore), "true", oneMore));
         assertEquals("ServiceQuotaExceededException", e.getErrorCode());
         assertEquals("1.0.0", e.getExtendedData().get("resourceId"));
         assertEquals("package-version", e.getExtendedData().get("resourceType"));
@@ -987,7 +1368,7 @@ class CodeArtifactServiceTest {
         // Re-publishing an asset name already on the version must not itself trip the cap.
         byte[] resend = "content-0".getBytes(StandardCharsets.UTF_8);
         service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "asset-0.txt",
-                sha256Hex(resend), "true", resend);
+                Digests.sha256Hex(resend), "true", resend);
     }
 
     @Test
@@ -996,7 +1377,7 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "x".getBytes(StandardCharsets.UTF_8);
         service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
-                sha256Hex(content), "false", content);
+                Digests.sha256Hex(content), "false", content);
 
         CodeArtifactPackageVersion pv = service.describePackageVersion(REGION, "dom", null, "repo", "generic", "ns",
                 "my-pkg", "1.0.0");
@@ -1009,14 +1390,105 @@ class CodeArtifactServiceTest {
     }
 
     @Test
+    void describePackageVersionBridgesToReposiliteForMavenSinceNoGenericRecordCanExist() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created =
+                service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.packageVersionExists(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("my-artifact"), eq("1.0.0"))).thenReturn(true);
+
+        CodeArtifactPackageVersion pv = service.describePackageVersion(REGION, "dom", null, "repo", "maven",
+                "com.example", "my-artifact", "1.0.0");
+
+        assertEquals("maven", pv.getFormat());
+        assertEquals("com.example", pv.getNamespace());
+        assertEquals("my-artifact", pv.getPackageName());
+        assertEquals("1.0.0", pv.getVersion());
+        assertEquals("Published", pv.getStatus());
+        assertEquals(Digests.sha256Hex((repoId + "/com.example/my-artifact/1.0.0").getBytes(StandardCharsets.UTF_8)),
+                pv.getRevision());
+    }
+
+    @Test
+    void describePackageVersionSynthesizesTheSameRevisionGetPackageVersionAssetWouldFor() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created =
+                service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        when(verdaccioClient.packageVersionExists(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("1.0.0"))).thenReturn(true);
+        when(verdaccioClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("1.0.0"), eq("my-pkg-1.0.0.tgz")))
+                .thenReturn(Optional.of("tarball bytes".getBytes(StandardCharsets.UTF_8)));
+
+        CodeArtifactPackageVersion described = service.describePackageVersion(REGION, "dom", null, "repo", "npm",
+                null, "my-pkg", "1.0.0");
+        PackageVersionAssetResult asset = service.getPackageVersionAsset(REGION, "dom", null, "repo", "npm", null,
+                "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", null);
+
+        assertEquals(described.getRevision(), asset.packageVersionRevision());
+    }
+
+    @Test
+    void describePackageVersionBridgesToPypiserver() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(pypiserverClient.packageVersionExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("1.0.0"))).thenReturn(true);
+
+        CodeArtifactPackageVersion pv = service.describePackageVersion(REGION, "dom", null, "repo", "pypi", null,
+                "my-pkg", "1.0.0");
+
+        assertEquals("Published", pv.getStatus());
+        assertEquals("my-pkg", pv.getPackageName());
+    }
+
+    @Test
+    void describePackageVersionReturns404WhenTheSidecarHasNoSuchVersionForAContainerBackedFormat() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(pypiserverClient.packageVersionExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("2.0.0"))).thenReturn(false);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.describePackageVersion(REGION, "dom", null,
+                "repo", "pypi", null, "my-pkg", "2.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        assertEquals("2.0.0", e.getExtendedData().get("resourceId"));
+        assertEquals("package-version", e.getExtendedData().get("resourceType"));
+    }
+
+    @Test
+    void describePackageVersionRequiresNamespaceForMaven() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.describePackageVersion(REGION, "dom", null,
+                "repo", "maven", null, "my-artifact", "1.0.0"));
+        assertEquals("ValidationException", e.getErrorCode());
+        verify(reposiliteClient, never()).packageVersionExists(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void describePackageVersionRejectsANamespaceForPypi() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.describePackageVersion(REGION, "dom", null,
+                "repo", "pypi", "ns", "my-pkg", "1.0.0"));
+        assertEquals("ValidationException", e.getErrorCode());
+        verify(pypiserverClient, never()).packageVersionExists(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void describePackageReportsTheDirectPublishDefaultsAndMatchesExactly() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "x".getBytes(StandardCharsets.UTF_8);
         service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
-                sha256Hex(content), "false", content);
+                Digests.sha256Hex(content), "false", content);
         service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my::pkg", "1.0.0", "a.txt",
-                sha256Hex(content), "false", content);
+                Digests.sha256Hex(content), "false", content);
 
         CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
                 "generic", "ns", "my-pkg");
@@ -1104,13 +1576,499 @@ class CodeArtifactServiceTest {
         assertEquals("ValidationException", e.getErrorCode());
     }
 
+    /**
+     * The one package-level operation that works before the package exists at all: AWS documents
+     * that calling it creates the package with no versions and applies the requested restrictions,
+     * so a caller can lock a package down before anything is ever published to it.
+     */
+    @Test
+    void putPackageOriginConfigurationCreatesAPackageWithNoVersionsAndDescribePackageReflectsIt() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException notYetFound = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "generic", "ns", "never-published"));
+        assertEquals("ResourceNotFoundException", notYetFound.getErrorCode());
+
+        CodeArtifactService.PackageDescription configured = service.putPackageOriginConfiguration(REGION, "dom",
+                null, "repo", "generic", "ns", "never-published", "BLOCK", "BLOCK");
+        assertEquals("BLOCK", configured.publishRestriction());
+        assertEquals("BLOCK", configured.upstreamRestriction());
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "never-published");
+        assertEquals("BLOCK", described.publishRestriction());
+        assertEquals("BLOCK", described.upstreamRestriction());
+    }
+
+    /**
+     * The same no-versions-needed existence proof applies uniformly to a container-backed format,
+     * not just generic: the pypi sidecar never heard of this package (its mock answers false by
+     * default, standing in for a real sidecar that was never asked to provision anything for it),
+     * yet the stored origin configuration alone must still be enough for describePackage to find
+     * the package rather than 404ing because the sidecar-exists check came back empty.
+     */
+    @Test
+    void putPackageOriginConfigurationCreatesAContainerBackedPackageWithNoVersionsToo() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", null, "never-published", "BLOCK",
+                "ALLOW");
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "pypi", null, "never-published");
+        assertEquals("BLOCK", described.publishRestriction());
+        assertEquals("ALLOW", described.upstreamRestriction());
+        verify(pypiserverClient, never()).packageExists(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void putPackageOriginConfigurationOverridesTheDirectPublishDefaultsOfAnExistingPackage() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "BLOCK",
+                "ALLOW");
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg");
+        assertEquals("BLOCK", described.publishRestriction());
+        assertEquals("ALLOW", described.upstreamRestriction());
+    }
+
+    @Test
+    void putPackageOriginConfigurationValidatesRestrictionsAndNamespaceShape() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException missingRestrictions = assertThrows(AwsException.class, () -> service
+                .putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", null, null));
+        assertEquals("ValidationException", missingRestrictions.getErrorCode());
+
+        AwsException missingUpstreamOnly = assertThrows(AwsException.class, () -> service
+                .putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "ALLOW",
+                        null));
+        assertEquals("ValidationException", missingUpstreamOnly.getErrorCode());
+
+        AwsException badRestrictionValue = assertThrows(AwsException.class, () -> service
+                .putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg",
+                        "ALLOW_SPECIFIC_REPOSITORIES", "BLOCK"));
+        assertEquals("ValidationException", badRestrictionValue.getErrorCode());
+
+        AwsException badUpstreamValue = assertThrows(AwsException.class, () -> service
+                .putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "ALLOW",
+                        "ALLOW_SPECIFIC_REPOSITORIES"));
+        assertEquals("ValidationException", badUpstreamValue.getErrorCode());
+
+        AwsException missingNamespaceForGeneric = assertThrows(AwsException.class, () -> service
+                .putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", null, "my-pkg", "ALLOW",
+                        "BLOCK"));
+        assertEquals("ValidationException", missingNamespaceForGeneric.getErrorCode());
+
+        AwsException namespaceForPypi = assertThrows(AwsException.class, () -> service
+                .putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", "bogus-namespace", "my-pkg",
+                        "ALLOW", "BLOCK"));
+        assertEquals("ValidationException", namespaceForPypi.getErrorCode());
+
+        // None of the rejections above may have created the package or changed anything about it:
+        // every one of them must still 404 just like before any of these calls were attempted.
+        AwsException stillAbsent = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg"));
+        assertEquals("ResourceNotFoundException", stillAbsent.getErrorCode());
+    }
+
+    /**
+     * Same rejections as above, but against a package that already carries a stored
+     * configuration: a rejected update must leave that prior configuration exactly as it was,
+     * not half-apply the new, invalid restrictions.
+     */
+    @Test
+    void putPackageOriginConfigurationLeavesAnExistingConfigurationUnchangedOnRejection() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "ALLOW",
+                "BLOCK");
+
+        assertThrows(AwsException.class, () -> service.putPackageOriginConfiguration(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg", "ALLOW", "ALLOW_SPECIFIC_REPOSITORIES"));
+
+        CodeArtifactService.PackageDescription unchanged = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg");
+        assertEquals("ALLOW", unchanged.publishRestriction());
+        assertEquals("BLOCK", unchanged.upstreamRestriction());
+    }
+
+    /**
+     * Mirrors the AWS user guide's own worked example: once a package's origin configuration sets
+     * Publish to Block, a direct PublishPackageVersion for that package must be rejected, even for
+     * an otherwise brand-new version, and restoring Publish to Allow lifts the rejection again.
+     */
+    @Test
+    void publishPackageVersionIsRejectedOnceOriginConfigurationBlocksPublish() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "BLOCK",
+                "ALLOW");
+
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        AwsException blocked = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content));
+        assertEquals("ConflictException", blocked.getErrorCode());
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "ALLOW",
+                "ALLOW");
+        PublishPackageVersionResult published = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                "ns", "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content);
+        assertEquals("Published", published.packageVersion().getStatus());
+    }
+
+    /**
+     * Namespace {@code "a::b"} + package {@code "c"} and namespace {@code "a"} + package
+     * {@code "b::c"} are two different, independently valid package coordinates, {@code ::} is not
+     * one of the characters namespace/package names reject, so a storage key that joined them with
+     * a plain {@code ::} delimiter without escaping would see the two as the same package and let
+     * one's origin configuration answer for the other's.
+     */
+    @Test
+    void putPackageOriginConfigurationDoesNotCollideAcrossTheNamespacePackageBoundary() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "a::b", "c", "BLOCK", "ALLOW");
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "a", "b::c", "ALLOW", "BLOCK");
+
+        CodeArtifactService.PackageDescription first = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "a::b", "c");
+        CodeArtifactService.PackageDescription second = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "a", "b::c");
+        assertEquals("BLOCK", first.publishRestriction());
+        assertEquals("ALLOW", first.upstreamRestriction());
+        assertEquals("ALLOW", second.publishRestriction());
+        assertEquals("BLOCK", second.upstreamRestriction());
+    }
+
+    /**
+     * Same coordinate-boundary collision as above, but for published version content rather than
+     * origin configuration: without escaping, the second publish's bytes would be stored under the
+     * same key as the first's, so one package's asset would overwrite or answer for the other's.
+     */
+    @Test
+    void publishPackageVersionDoesNotCollideAcrossTheNamespacePackageBoundary() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] firstContent = "first-package".getBytes(StandardCharsets.UTF_8);
+        byte[] secondContent = "second-package".getBytes(StandardCharsets.UTF_8);
+
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "a::b", "c", "1.0.0", "a.txt",
+                Digests.sha256Hex(firstContent), "false", firstContent);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "a", "b::c", "1.0.0", "a.txt",
+                Digests.sha256Hex(secondContent), "false", secondContent);
+
+        PackageVersionAssetResult first = service.getPackageVersionAsset(REGION, "dom", null, "repo", "generic",
+                "a::b", "c", "1.0.0", "a.txt", null);
+        PackageVersionAssetResult second = service.getPackageVersionAsset(REGION, "dom", null, "repo", "generic",
+                "a", "b::c", "1.0.0", "a.txt", null);
+        assertEquals("first-package", new String(first.asset().getContent(), StandardCharsets.UTF_8));
+        assertEquals("second-package", new String(second.asset().getContent(), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * A build before escaping existed stored namespace/package segments raw, so one could already
+     * contain a literal backslash followed by {@code c}, the exact two characters escaping a colon
+     * now produces. If escaping used {@code \} as its own introducer, that old raw record would
+     * become indistinguishable from the new escaped key of a completely different namespace
+     * ("a:b" instead of "a\cb"). Escaping uses {@code #} instead, a character namespace/package
+     * tokens can never contain (AWS's own wire pattern forbids it the same as Floci's), so the new
+     * coordinate's escaped key can never equal that old raw one.
+     *
+     * <p>Asserting only the new coordinate's own read-back is not enough: that passes whether or
+     * not the two keys actually collided, since the put and the read-back always agree with
+     * whatever was last written under the key they both compute. The legacy record has to be read
+     * back too, straight from the store under its own raw key, to prove the put never touched it.
+     */
+    @Test
+    void newEscapedKeysNeverCollideWithAPreExistingRawKeyThatHappenedToContainABackslash() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String legacyRawKey = REGION + "::dom::repo::generic::a\\cb::x";
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, legacyRawKey, new PackageOriginConfig("BLOCK", "BLOCK"));
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "a:b", "x", "ALLOW", "ALLOW");
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "a:b", "x");
+        assertEquals("ALLOW", described.publishRestriction());
+        assertEquals("ALLOW", described.upstreamRestriction());
+
+        PackageOriginConfig legacy = packageOriginConfigStore.getForAccount(ACCOUNT_ID, legacyRawKey).orElseThrow();
+        assertEquals("BLOCK", legacy.getPublishRestriction());
+        assertEquals("BLOCK", legacy.getUpstreamRestriction());
+    }
+
+    /**
+     * {@code #} is the escape introducer, so a namespace that already contains it reaches
+     * {@link CodeArtifactService#escapeKeySegment} unchanged (there's no {@code :} or {@code \} in
+     * it to escape) and can spell out another coordinate's already-escaped key directly: namespace
+     * {@code "a#cb"} builds the identical key as the escaped form of namespace {@code "a:b"}.
+     * {@code describePackage}/{@code putPackageOriginConfiguration} already reject {@code #} via
+     * {@code validatePackageCoordinates}, but {@code describePackageVersion} and
+     * {@code getPackageVersionAsset} used to only check for blank, reaching the shared key-building
+     * code with an unvalidated namespace. Both now validate the same token rule before building a
+     * key, so this is rejected rather than silently answering for a different package.
+     */
+    @Test
+    void readPathsRejectANamespaceThatSpellsOutAnotherCoordinatesEscapedKey() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "victim".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "a:b", "x", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+
+        AwsException describeVersion = assertThrows(AwsException.class, () -> service.describePackageVersion(REGION,
+                "dom", null, "repo", "generic", "a#cb", "x", "1.0.0"));
+        assertEquals("ValidationException", describeVersion.getErrorCode());
+
+        AwsException getAsset = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION, "dom",
+                null, "repo", "generic", "a#cb", "x", "1.0.0", "a.txt", null));
+        assertEquals("ValidationException", getAsset.getErrorCode());
+    }
+
+    @Test
+    void deletePackageRemovesEveryVersionAndAssetButLeavesOtherPackagesAlone() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "2.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "other-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+
+        CodeArtifactService.PackageDescription deleted = service.deletePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg");
+        assertEquals("generic", deleted.format());
+        assertEquals("ns", deleted.namespace());
+        assertEquals("my-pkg", deleted.packageName());
+
+        AwsException goneAsPackage = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg"));
+        assertEquals("ResourceNotFoundException", goneAsPackage.getErrorCode());
+        AwsException goneVersionOne = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION,
+                "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt", null));
+        assertEquals("ResourceNotFoundException", goneVersionOne.getErrorCode());
+        AwsException goneVersionTwo = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION,
+                "dom", null, "repo", "generic", "ns", "my-pkg", "2.0.0", "a.txt", null));
+        assertEquals("ResourceNotFoundException", goneVersionTwo.getErrorCode());
+
+        CodeArtifactService.PackageDescription stillThere = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "other-pkg");
+        assertEquals("other-pkg", stillThere.packageName());
+
+        AwsException alreadyDeleted = assertThrows(AwsException.class, () -> service.deletePackage(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg"));
+        assertEquals("ResourceNotFoundException", alreadyDeleted.getErrorCode());
+
+        AwsException unknown = assertThrows(AwsException.class, () -> service.deletePackage(REGION, "dom", null,
+                "repo", "generic", "ns", "no-such-package"));
+        assertEquals("ResourceNotFoundException", unknown.getErrorCode());
+    }
+
+    /**
+     * The real DeletePackage response's deletedPackage.originConfiguration reports whatever
+     * restrictions were actually in effect, not CodeArtifact's bare ALLOW/BLOCK defaults.
+     */
+    @Test
+    void deletePackageReportsTheOriginConfigurationThatWasActuallyInEffect() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "ALLOW",
+                "ALLOW");
+
+        CodeArtifactService.PackageDescription deleted = service.deletePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg");
+        assertEquals("ALLOW", deleted.publishRestriction());
+        assertEquals("ALLOW", deleted.upstreamRestriction());
+    }
+
+    /**
+     * DeletePackage removes the package entity, origin configuration included (AWS's own doc:
+     * "Deletes a package and all associated package versions"). A leftover origin-config record
+     * must not resurrect the deleted package as a zero-version one on the next DescribePackage.
+     */
+    @Test
+    void deletePackageClearsTheOriginConfigurationSoDescribePackageStays404Afterward() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "BLOCK",
+                "BLOCK");
+
+        service.deletePackage(REGION, "dom", null, "repo", "generic", "ns", "my-pkg");
+
+        AwsException gone = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg"));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+    }
+
+    /**
+     * An origin-config-only package (no version ever published) is still a package
+     * describePackage finds; deletePackage must agree rather than 404ing on the same coordinates
+     * describePackage just reported as existing.
+     */
+    @Test
+    void deletePackageRemovesAnOriginConfigOnlyPackageThatWasNeverPublishedTo() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "never-published",
+                "BLOCK", "BLOCK");
+
+        CodeArtifactService.PackageDescription deleted = service.deletePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "never-published");
+        assertEquals("BLOCK", deleted.publishRestriction());
+        assertEquals("BLOCK", deleted.upstreamRestriction());
+
+        AwsException gone = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null,
+                "repo", "generic", "ns", "never-published"));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+    }
+
+    /**
+     * Same case for a container-backed format: the sidecar still gets asked (unlike
+     * describePackage's short-circuit, deletePackage cannot skip this: a package set up through
+     * PutPackageOriginConfiguration could also have real content published to it directly through
+     * the native protocol later, which deletePackage still has to find and remove), but it reports
+     * nothing there, and the stored origin configuration alone must still let deletePackage
+     * succeed rather than 404 on a package describePackage itself finds.
+     */
+    @Test
+    void deletePackageRemovesAnOriginConfigOnlyContainerBackedPackageThatTheSidecarNeverHeardOf() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", null, "never-published", "ALLOW",
+                "BLOCK");
+        when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("never-published")))
+                .thenReturn(false);
+
+        CodeArtifactService.PackageDescription deleted = service.deletePackage(REGION, "dom", null, "repo", "pypi",
+                null, "never-published");
+        assertEquals("ALLOW", deleted.publishRestriction());
+        verify(pypiserverClient, never()).deletePackage(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void deletePackageBridgesToReposiliteForMavenAfterConfirmingItExists() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created =
+                service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.packageExists(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("my-artifact"))).thenReturn(true);
+
+        CodeArtifactService.PackageDescription deleted = service.deletePackage(REGION, "dom", null, "repo", "maven",
+                "com.example", "my-artifact");
+
+        assertEquals("maven", deleted.format());
+        verify(reposiliteClient).deletePackage(repoId, "dom", "repo", "com.example", "my-artifact");
+    }
+
+    @Test
+    void deletePackageReportsNotFoundForAContainerBackedPackageThatDoesNotExistRatherThanDeletingAnything() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(verdaccioClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(false);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.deletePackage(REGION, "dom", null, "repo",
+                "npm", null, "my-pkg"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        verify(verdaccioClient, never()).deletePackage(any(), any(), any(), any(), any());
+    }
+
+    /**
+     * {@link RepositorySidecarManager#deletePackage}'s default throws
+     * {@link UnsupportedOperationException} for a sidecar that genuinely cannot delete (every sidecar
+     * Floci actually backs can, but the service must still handle one that can't, present or future);
+     * this stubs that default's own throw straight onto the mock to exercise it without needing a
+     * real sidecar that refuses. The service must not let it propagate as an unhandled 500: it
+     * becomes a real, if deliberately blunt, documented AWS error instead.
+     */
+    @Test
+    void deletePackageTranslatesAnUnsupportedSidecarDeleteIntoAnInternalServerException() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(true);
+        doThrow(new UnsupportedOperationException("pypi packages cannot be deleted through this sidecar"))
+                .when(pypiserverClient).deletePackage(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg"));
+
+        AwsException e = assertThrows(AwsException.class, () -> service.deletePackage(REGION, "dom", null, "repo",
+                "pypi", null, "my-pkg"));
+        assertEquals("InternalServerException", e.getErrorCode());
+    }
+
+    /**
+     * Mirrors describePackage's own boundary-validation test: deletePackage must reject the same
+     * malformed coordinates before touching repository state, not just the single maven-namespace
+     * check it had before this test existed.
+     */
+    @Test
+    void deletePackageValidatesPackageAndNamespaceShapeBeforeTouchingRepositoryState() {
+        AwsException badPackageName = assertThrows(AwsException.class, () -> service.deletePackage(REGION,
+                "no-such-domain", null, "repo", "generic", "ns", "has/slash"));
+        assertEquals("ValidationException", badPackageName.getErrorCode());
+
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException badNamespace = assertThrows(AwsException.class, () -> service.deletePackage(REGION, "dom",
+                null, "repo", "generic", "has#hash", "my-pkg"));
+        assertEquals("ValidationException", badNamespace.getErrorCode());
+
+        AwsException missingNamespaceForGeneric = assertThrows(AwsException.class, () -> service.deletePackage(
+                REGION, "dom", null, "repo", "generic", null, "my-pkg"));
+        assertEquals("ValidationException", missingNamespaceForGeneric.getErrorCode());
+
+        AwsException missingNamespaceForMaven = assertThrows(AwsException.class, () -> service.deletePackage(
+                REGION, "dom", null, "repo", "maven", null, "my-artifact"));
+        assertEquals("ValidationException", missingNamespaceForMaven.getErrorCode());
+    }
+
+    /**
+     * pypi packages have no namespace at all (same API-reference fact describePackage's own test
+     * documents). Without this rejection, a caller-supplied namespace would be silently ignored by
+     * the sidecar's existence check below and the real package would be deleted anyway, as if the
+     * namespace the caller specified had actually been honored.
+     */
+    @Test
+    void deletePackageRejectsANamespaceSuppliedForPypiRatherThanDeletingTheRealPackageAnyway() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("real-pkg")))
+                .thenReturn(true);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.deletePackage(REGION, "dom", null, "repo",
+                "pypi", "bogus-namespace", "real-pkg"));
+        assertEquals("ValidationException", e.getErrorCode());
+        verify(pypiserverClient, never()).deletePackage(any(), any(), any(), any(), any());
+    }
+
     @Test
     void getPackageVersionAssetReturnsExactBytesAndValidatesRevision() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
         PublishPackageVersionResult published = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
-                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "false", content);
+                null, "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content);
 
         PackageVersionAssetResult result = service.getPackageVersionAsset(REGION, "dom", null, "repo", "generic",
                 null, "my-pkg", "1.0.0", "a.txt", null);
@@ -1145,7 +2103,7 @@ class CodeArtifactServiceTest {
                 "com.example", "my-artifact", "1.0.0", "my-artifact-1.0.0.jar", null);
 
         assertEquals("jar bytes", new String(result.asset().getContent(), StandardCharsets.UTF_8));
-        assertEquals(sha256Hex((repoId + "/com.example/my-artifact/1.0.0").getBytes(StandardCharsets.UTF_8)),
+        assertEquals(Digests.sha256Hex((repoId + "/com.example/my-artifact/1.0.0").getBytes(StandardCharsets.UTF_8)),
                 result.packageVersionRevision());
     }
 
@@ -1263,6 +2221,254 @@ class CodeArtifactServiceTest {
         assertEquals("package-version", wrongRevision.getExtendedData().get("resourceType"));
     }
 
+    // ---------------------------------------------------------- GetPackageVersionReadme
+
+    @Test
+    void getPackageVersionReadmeRejectsAFormatAwsDoesNotSupportForThisAction() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        // AWS's own API reference restricts this one action's format parameter to npm/pypi/nuget,
+        // narrower than every other package-version action here, which accepts the full 8-value
+        // set: maven, swift, generic, ruby, and cargo package versions carry no readme in real
+        // CodeArtifact at all, so every one of them is checked here, not just maven.
+        for (String format : new String[] {"maven", "swift", "generic", "ruby", "cargo"}) {
+            AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom",
+                    null, "repo", format, "com.example", "my-artifact", "1.0.0"), format);
+            assertEquals("ValidationException", e.getErrorCode(), format);
+        }
+    }
+
+    /**
+     * npm, like pypi, can only ever be answered from what was captured at publish time: confirmed
+     * directly against a live Verdaccio container that it hoists {@code readme} to the top level
+     * only (the single most-recently-published version), dropping the per-version field a real
+     * npm client's own publish envelope actually sends. See
+     * {@link CodeArtifactNpmDataPlane#forwardSpooled} for where this is captured for real.
+     */
+    @Test
+    void getPackageVersionReadmeReturnsWhatWasCapturedAtNpmPublishTime() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "npm", "myscope", "my-pkg", "1.0.0", "# My Package");
+
+        CodeArtifactService.PackageVersionReadmeResult result = service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "npm", "myscope", "my-pkg", "1.0.0");
+
+        assertEquals("# My Package", result.readme());
+        assertEquals("my-pkg", result.packageName());
+        assertEquals("1.0.0", result.version());
+    }
+
+    @Test
+    void getPackageVersionReadme404sForNpmWhenNeverCaptured() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "npm", null, "my-pkg", "9.9.9"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        assertEquals("package-version", e.getExtendedData().get("resourceType"));
+    }
+
+    @Test
+    void getPackageVersionReadmeReturnsWhatWasCapturedAtPypiUploadTime() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "pypi", null, "my-pkg", "1.0.0", "Long description in reStructuredText.");
+
+        CodeArtifactService.PackageVersionReadmeResult result = service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "my-pkg", "1.0.0");
+
+        assertEquals("Long description in reStructuredText.", result.readme());
+    }
+
+    @Test
+    void getPackageVersionReadme404sForPypiWhenNeverCaptured() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "never-published", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    /**
+     * nuget is a documented valid format for this action, but nothing in Floci implements the
+     * real NuGet wire protocol, so no nuget package version can ever actually exist here; this
+     * must 404 honestly rather than throwing some other error for a format it otherwise accepts.
+     */
+    @Test
+    void getPackageVersionReadme404sForNugetSinceNothingCanEverPublishOne() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "nuget", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void recordPublishedPackageVersionReadmeSkipsAPackageNameContainingTheEscapeCharacterWithoutCorruptingOthers() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        // The escape character itself can never reach escapeKeySegment's own key building, the
+        // same way validatePackageToken already keeps it out of every JSON-API coordinate: this
+        // call is just dropped, logged, and never throws back into the sidecar upload it reports.
+        recordReadme("dom", "repo", "pypi", null, "bad#name", "1.0.0", "bad text");
+        recordReadme("dom", "repo", "pypi", null, "legit", "1.0.0", "legit text");
+
+        CodeArtifactService.PackageVersionReadmeResult result = service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "legit", "1.0.0");
+        assertEquals("legit text", result.readme());
+    }
+
+    @Test
+    void recordPublishedPackageVersionReadmeAfterTheRepositoryIsAlreadyDeletedIsIgnored() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.deleteRepository(REGION, "dom", null, "repo");
+
+        recordReadme("dom", "repo", "pypi", null, "my-pkg", "1.0.0", "late text");
+
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void deleteRepositoryRemovesItsCapturedPypiReadmesSoARecreatedRepositoryDoesNotInheritThem() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "pypi", null, "my-pkg", "1.0.0", "old text");
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void deletePackageRemovesItsCapturedPypiReadmesSoARepublishedPackageDoesNotInheritThem() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "pypi", null, "my-pkg", "1.0.0", "old text");
+        when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(true);
+
+        service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my-pkg");
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void forgetContainerBackedPackageRemovesItsCapturedNpmReadmeTooSoAReplacedPackageDoesNotInheritIt() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "npm", null, "my-pkg", "1.0.0", "old text");
+
+        service.forgetContainerBackedPackage(REGION, "dom", null, "repo", "npm", null, "my-pkg");
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "npm", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    /**
+     * {@code getPackageVersionReadmeRejectsAFormatAwsDoesNotSupportForThisAction} above only
+     * covers the format check; a Qodo review found this method's other required-field validation
+     * (domain/repository/package/version) had no regression coverage of its own, nor any proof
+     * that a rejected request leaves a previously captured readme untouched.
+     */
+    @Test
+    void getPackageVersionReadmeRejectsMissingRequiredFieldsWithoutChangingStoredState() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "npm", null, "my-pkg", "1.0.0", "untouched text");
+
+        AwsException missingDomain = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION,
+                null, null, "repo", "npm", null, "my-pkg", "1.0.0"));
+        assertEquals("ValidationException", missingDomain.getErrorCode());
+        AwsException missingRepository = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(
+                REGION, "dom", null, null, "npm", null, "my-pkg", "1.0.0"));
+        assertEquals("ValidationException", missingRepository.getErrorCode());
+        AwsException missingPackage = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION,
+                "dom", null, "repo", "npm", null, null, "1.0.0"));
+        assertEquals("ValidationException", missingPackage.getErrorCode());
+        AwsException missingVersion = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION,
+                "dom", null, "repo", "npm", null, "my-pkg", null));
+        assertEquals("ValidationException", missingVersion.getErrorCode());
+
+        CodeArtifactService.PackageVersionReadmeResult result = service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "npm", null, "my-pkg", "1.0.0");
+        assertEquals("untouched text", result.readme());
+    }
+
+    /**
+     * Same race {@code recordContainerBackedAssetBytesAfterAConcurrentDeletePackageIsIgnored}
+     * already closes for byte accounting, found again by Qodo review for readme capture: a delayed
+     * npm callback's readme capture must not resurrect a readme for a package a concurrent
+     * {@code DeletePackage} already removed.
+     */
+    @Test
+    void recordPublishedPackageVersionReadmeAfterAConcurrentDeletePackageIsIgnored() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "npm", null, "late");
+        when(verdaccioClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("late")))
+                .thenReturn(true);
+        service.deletePackage(REGION, "dom", null, "repo", "npm", null, "late");
+
+        service.recordPublishedPackageVersionReadme(REGION, "dom", null, "repo", "npm", null, "late", "1.0.0",
+                "too late", fence);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "npm", null, "late", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    /**
+     * Found by Qodo review: pypi readme capture/lookup/deletion all used the package name exactly
+     * as the caller spelled it, while {@code accountingPackageName} (and so byte accounting, the
+     * fence, and sidecar resolution itself) treats case- and {@code -_.}-equivalent spellings as
+     * the same pypi package. A readme captured under one spelling has to be answerable, and
+     * deletable, under any PEP 503-equivalent spelling of the same name.
+     */
+    @Test
+    void getPackageVersionReadmeResolvesPypiSpellingVariantsToTheSameReadme() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "pypi", null, "My_Package", "1.0.0", "the readme");
+
+        CodeArtifactService.PackageVersionReadmeResult result = service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "my-package", "1.0.0");
+
+        assertEquals("the readme", result.readme());
+        // Echoes the caller's own spelling back, not the normalized one used for the lookup.
+        assertEquals("my-package", result.packageName());
+    }
+
+    @Test
+    void deletePackageRemovesAPypiReadmeCapturedUnderADifferentSpelling() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "pypi", null, "My.Package", "1.0.0", "the readme");
+        when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-package")))
+                .thenReturn(true);
+
+        service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my-package");
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "My_Package", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
     @Test
     void concurrentUnfinishedPublishesOfDifferentAssetsBothPersist() throws InterruptedException {
         service.createDomain(REGION, "dom", null, Map.of());
@@ -1280,7 +2486,7 @@ class CodeArtifactServiceTest {
                         go.await();
                         byte[] content = ("content-" + index).getBytes(StandardCharsets.UTF_8);
                         service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg",
-                                "1.0.0", "asset-" + index + ".txt", sha256Hex(content), "true", content);
+                                "1.0.0", "asset-" + index + ".txt", Digests.sha256Hex(content), "true", content);
                     } catch (InterruptedException ignored) {
                         Thread.currentThread().interrupt();
                     }
@@ -1295,13 +2501,5 @@ class CodeArtifactServiceTest {
         CodeArtifactPackageVersion pv = service.describePackageVersion(REGION, "dom", null, "repo", "generic", null,
                 "my-pkg", "1.0.0");
         assertEquals(assetCount, pv.getAssets().size());
-    }
-
-    private static String sha256Hex(byte[] content) {
-        try {
-            return SigV4RequestValidator.sha256Hex(content);
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
     }
 }
