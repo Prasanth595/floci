@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -23,6 +24,9 @@ class S3OwnershipControlsIntegrationTest {
             """;
     private static final String SCHEMA_MESSAGE =
             "The XML you provided was not well-formed or did not validate against our published schema.";
+
+    @Inject
+    S3Service s3Service;
 
     @Test
     @Order(1)
@@ -85,6 +89,49 @@ class S3OwnershipControlsIntegrationTest {
         given().header("x-amz-object-ownership", "InvalidOwnership")
                 .when().put("/" + BUCKET + "-invalid-mode")
                 .then().statusCode(400).body(containsString("InvalidArgument"));
+    }
+
+    @Test
+    @Order(2)
+    void createBucketAcceptsCannedAclsAndRejectsConflictingGrants() {
+        for (String cannedAcl : new String[] {
+                "log-delivery-write", "aws-exec-read", "bucket-owner-read", "bucket-owner-full-control"}) {
+            given().header("x-amz-object-ownership", "ObjectWriter")
+                    .header("x-amz-acl", cannedAcl)
+                    .when().put("/" + BUCKET + "-canned-" + cannedAcl)
+                    .then().statusCode(200);
+        }
+        given().header("x-amz-object-ownership", "ObjectWriter")
+                .header("x-amz-acl", "private")
+                .header("x-amz-grant-read", "id=\"123456789012\"")
+                .when().put("/" + BUCKET + "-conflicting-acl")
+                .then().statusCode(400)
+                .body(containsString("<Code>InvalidRequest</Code>"))
+                .body(containsString("Specifying both Canned ACLs and Header Grants is not allowed"));
+    }
+
+    @Test
+    @Order(2)
+    void createBucketAppliesAccountBlockPublicAclsOnlyWhenConfigured() {
+        given().header("x-amz-object-ownership", "ObjectWriter")
+                .header("x-amz-acl", "public-read")
+                .when().put("/" + BUCKET + "-public-unblocked")
+                .then().statusCode(200);
+
+        s3Service.putAccountPublicAccessBlock("000000000000", """
+                <PublicAccessBlockConfiguration>
+                    <BlockPublicAcls>true</BlockPublicAcls>
+                </PublicAccessBlockConfiguration>
+                """);
+        try {
+            given().header("x-amz-object-ownership", "ObjectWriter")
+                    .header("x-amz-acl", "public-read")
+                    .when().put("/" + BUCKET + "-public-blocked")
+                    .then().statusCode(400)
+                    .body(containsString("<Code>InvalidBucketAclWithBlockPublicAccessError</Code>"));
+        } finally {
+            s3Service.deleteAccountPublicAccessBlock("000000000000");
+        }
     }
 
     @Test

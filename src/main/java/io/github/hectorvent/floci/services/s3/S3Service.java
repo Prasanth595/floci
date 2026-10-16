@@ -127,6 +127,8 @@ public class S3Service implements Resettable, ResourceProvider {
             .end("Rule")
             .end("OwnershipControls")
             .build();
+    private static final Set<String> OBJECT_OWNERSHIP_VALUES = Set.of(
+            "BucketOwnerEnforced", "BucketOwnerPreferred", "ObjectWriter");
     private static final Set<String> SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES = Set.of("AES256", "aws:kms", "aws:kms:dsse", "aws:fsx");
     private static final String SSE_C_ALGORITHM = "AES256";
     private static final int SSE_C_KEY_BYTES = 32;
@@ -480,16 +482,12 @@ public class S3Service implements Resettable, ResourceProvider {
                                String grantFullControl, String grantReadAcp, String grantWriteAcp) {
         requirePathSafeBucketName(bucketName);
         String ownership = requestedOwnership == null ? "BucketOwnerEnforced" : requestedOwnership;
-        if (!Set.of("BucketOwnerEnforced", "BucketOwnerPreferred", "ObjectWriter").contains(ownership)) {
+        if (!OBJECT_OWNERSHIP_VALUES.contains(ownership)) {
             throw new AwsException("InvalidArgument", "Invalid x-amz-object-ownership value: " + ownership, 400);
-        }
-        if (!isBlank(cannedAcl) && !Set.of("private", "public-read", "public-read-write", "authenticated-read")
-                .contains(cannedAcl)) {
-            throw new AwsException("InvalidArgument", "Unsupported x-amz-acl value: " + cannedAcl, 400);
         }
         if (!isBlank(cannedAcl) && (!isBlank(grantRead) || !isBlank(grantWrite)
                 || !isBlank(grantFullControl) || !isBlank(grantReadAcp) || !isBlank(grantWriteAcp))) {
-            throw new AwsException("InvalidArgument", "Conflicting ACL headers", 400);
+            throw new AwsException("InvalidRequest", "Specifying both Canned ACLs and Header Grants is not allowed", 400);
         }
         String requestedAcl = resolveObjectAclXml(cannedAcl, grantRead, grantWrite,
                 grantFullControl, grantReadAcp, grantWriteAcp);
@@ -501,8 +499,10 @@ public class S3Service implements Resettable, ResourceProvider {
             throw new AwsException("InvalidBucketAclWithObjectOwnership",
                     "Bucket cannot have ACLs set with ObjectOwnership's BucketOwnerEnforced setting", 400);
         }
-        if (S3AclPublicAccessEvaluator.aclIsPublic(requestedAcl)) {
-            throw accessDeniedException(bucketName, null);
+        if (S3AclPublicAccessEvaluator.aclIsPublic(requestedAcl)
+                && accountBlockPublicAccess(ownerId()).blockPublicAcls()) {
+            throw new AwsException("InvalidBucketAclWithBlockPublicAccessError",
+                    "Bucket cannot have public ACLs set with BlockPublicAccess enabled", 400);
         }
         var existing = bucketStore.get(bucketName);
         if (existing.isPresent()) {
@@ -5627,8 +5627,7 @@ public class S3Service implements Resettable, ResourceProvider {
         if (rule.count("ObjectOwnership") != 1 || ownership == null) {
             throw new AwsException("MalformedXML", S3_XML_SCHEMA_ERROR, 400);
         }
-        if (!Set.of("BucketOwnerPreferred", "ObjectWriter", "BucketOwnerEnforced")
-                .contains(ownership.text())) {
+        if (!OBJECT_OWNERSHIP_VALUES.contains(ownership.text())) {
             throw new AwsException("MalformedXML", S3_XML_SCHEMA_ERROR, 400);
         }
     }
