@@ -695,7 +695,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         if (!running) {
             return;
         }
-        reaper.execute(() -> {
+        // Docker can take seconds to report the status under load. The reaper stays free to rearm dropped watches.
+        Thread.ofVirtual().name("lambda-web-exit").start(() -> {
             try {
                 LOG.infov("The Lambda Web environment {0} exited with status {1}: {2}",
                         environment.containerId, exitStatus(environment.containerId),
