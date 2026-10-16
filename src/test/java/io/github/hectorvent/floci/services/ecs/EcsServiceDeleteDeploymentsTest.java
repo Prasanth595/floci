@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.ecs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -24,7 +23,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -113,15 +111,17 @@ class EcsServiceDeleteDeploymentsTest {
         }).when(service).currentServiceDeployment(any());
 
         Thread update = worker(() -> service.updateService(CLUSTER, "racy", null, null, null, null, true, REGION));
-        updater.set(update);
-        update.start();
-        assertTrue(passedCheck.await(10, TimeUnit.SECONDS));
-
         Thread delete = worker(() -> service.deleteService(CLUSTER, "racy", true, REGION));
-        delete.start();
-        awaitBlockedOrDone(delete);
-        release.countDown();
-        joinAll(update, delete);
+        updater.set(update);
+        try {
+            update.start();
+            assertTrue(passedCheck.await(10, TimeUnit.SECONDS));
+            delete.start();
+            awaitBlockedOrDone(delete);
+        } finally {
+            release.countDown();
+            joinAll(update, delete);
+        }
 
         assertEquals(List.of(), service.listServiceDeployments("racy", CLUSTER, null, REGION),
                 "an update racing a delete leaves no deployment behind");
@@ -157,58 +157,67 @@ class EcsServiceDeleteDeploymentsTest {
     }
 
     @Test
-    void probingUnknownServiceNamesRetainsNoLocks() throws Exception {
+    void aResetDuringADeleteDoesNotLetARecreateLoseItsDeployment() throws Exception {
         EcsService service = newMockModeService();
         service.createCluster(CLUSTER, REGION);
         registerTaskDef(service);
-        service.createService(CLUSTER, "real", "del-fam", 0, LaunchType.FARGATE, List.of(), null, REGION);
-        java.lang.reflect.Field field = EcsService.class.getDeclaredField("serviceLocks");
-        field.setAccessible(true);
-        Map<?, ?> locks = (Map<?, ?>) field.get(service);
-        int before = locks.size();
+        service.createService(CLUSTER, "reset", "del-fam", 1, LaunchType.FARGATE, List.of(), null, REGION);
+        service.reconcileServices();
 
-        for (int i = 0; i < 5; i++) {
-            String name = "ghost-" + i;
-            assertThrows(AwsException.class,
-                    () -> service.updateService(CLUSTER, name, null, null, null, null, true, REGION));
-            assertThrows(AwsException.class, () -> service.deleteService(CLUSTER, name, true, REGION));
+        CountDownLatch stopping = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread delete = worker(() -> service.deleteService(CLUSTER, "reset", true, REGION));
+        Thread create = worker(() ->
+                service.createService(CLUSTER, "reset", "del-fam", 0, LaunchType.FARGATE, List.of(), null, REGION));
+        // Parks the delete between marking the service INACTIVE and cleaning up its records.
+        doAnswer(inv -> {
+            if (Thread.currentThread() == delete) {
+                stopping.countDown();
+                release.await();
+            }
+            return null;
+        }).when(containerManager).releaseTaskNetwork(any(), any());
+        try {
+            delete.start();
+            assertTrue(stopping.await(10, TimeUnit.SECONDS), "delete reached task stop");
+            service.clear();
+            create.start();
+            awaitBlockedOrDone(create);
+        } finally {
+            release.countDown();
+            joinAll(delete, create);
         }
 
-        assertEquals(before, locks.size(), "requests for services that do not exist add no lock entries");
-    }
-
-    @Test
-    void clearDropsTheServiceLocks() throws Exception {
-        EcsService service = newMockModeService();
-        service.createCluster(CLUSTER, REGION);
-        registerTaskDef(service);
-        service.createService(CLUSTER, "gone", "del-fam", 0, LaunchType.FARGATE, List.of(), null, REGION);
-        java.lang.reflect.Field field = EcsService.class.getDeclaredField("serviceLocks");
-        field.setAccessible(true);
-        Map<?, ?> locks = (Map<?, ?>) field.get(service);
-        assertEquals(1, locks.size());
-
-        service.clear();
-
-        assertEquals(0, locks.size(), "a state reset leaves no service lock behind");
+        assertEquals("ACTIVE", service.describeServices(CLUSTER, List.of("reset"), REGION).getFirst().getStatus());
+        assertEquals(1, service.listServiceDeployments("reset", CLUSTER, null, REGION).size(),
+                "a service recreated after a reset keeps its deployment when the older delete resumes");
     }
 
     private final ConcurrentLinkedQueue<Throwable> workerFailures = new ConcurrentLinkedQueue<>();
 
     /** A thread that records what it throws, so a failed worker cannot leave a passing test behind. */
     private Thread worker(Runnable body) {
-        return new Thread(() -> {
+        Thread t = new Thread(() -> {
             try {
                 body.run();
-            } catch (Throwable t) {
-                workerFailures.add(t);
+            } catch (Throwable e) {
+                workerFailures.add(e);
             }
         });
+        t.setDaemon(true);
+        return t;
     }
 
     private void joinAll(Thread... threads) throws InterruptedException {
         for (Thread t : threads) {
             t.join(10_000);
+        }
+        for (Thread t : threads) {
+            if (t.isAlive()) {
+                t.interrupt();
+            }
+        }
+        for (Thread t : threads) {
             assertTrue(!t.isAlive(), "worker thread finished");
         }
         assertTrue(workerFailures.isEmpty(), "workers threw: " + workerFailures);
@@ -218,6 +227,8 @@ class EcsServiceDeleteDeploymentsTest {
         for (int i = 0; i < 2000 && t.isAlive() && t.getState() != Thread.State.BLOCKED; i++) {
             Thread.sleep(5);
         }
+        assertTrue(!t.isAlive() || t.getState() == Thread.State.BLOCKED,
+                "worker blocked or finished before timeout");
     }
 
     private static ServiceDeployment onlyDeployment(EcsService service, String serviceName) {

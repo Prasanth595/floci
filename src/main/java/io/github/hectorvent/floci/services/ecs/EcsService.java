@@ -217,8 +217,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private Map<String, CapacityProvider> capacityProviders = new ConcurrentHashMap<>();
     // taskSetArn → TaskSet
     private final Map<String, TaskSet> taskSets = new ConcurrentHashMap<>();
-    // Serializes create/update/delete of one service key (region, cluster, name).
-    private final Map<String, Object> serviceLocks = new ConcurrentHashMap<>();
+    // Serializes create/update/delete of one service key (region, cluster, name). A fixed set of
+    // stripes, never cleared, so unknown or failed names retain nothing and a state reset cannot
+    // hand a same-key call a different lock than one still held by an in-flight call.
+    // ponytail: distinct services sharing a stripe serialize too; widen if contention shows.
+    private static final int SERVICE_LOCK_STRIPES = 64;
+    private final Object[] serviceLocks = newServiceLocks();
     // serviceDeploymentArn → ServiceDeployment
     private final Map<String, ServiceDeployment> serviceDeployments = new ConcurrentHashMap<>();
     // serviceRevisionArn → ServiceRevision
@@ -421,7 +425,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public void clear() {
         // The stores hold the ECS state and afterReset() restarts the reconciler.
         launchFailures.clear();
-        serviceLocks.clear();
     }
 
     /**
@@ -2579,7 +2582,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         String serviceName = request.getServiceName();
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
-        synchronized (serviceLocks.computeIfAbsent(key, k -> new Object())) {
+        synchronized (serviceLock(key)) {
             if (services.containsKey(key)) {
                 EcsServiceModel existingSvc = services.get(key);
 
@@ -2709,7 +2712,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         boolean forceNewDeployment = request.isForceNewDeployment();
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
-        synchronized (lockForExisting(key, serviceName)) {
+        synchronized (serviceLock(key)) {
             EcsServiceModel svc = services.get(key);
             if (svc == null) {
                 throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
@@ -2953,12 +2956,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return operatingSystemFamily;
     }
 
-    // A name that was never created takes no lock, so probing unknown names retains nothing.
-    private Object lockForExisting(String key, String serviceName) {
-        if (!services.containsKey(key)) {
-            throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
+    private static Object[] newServiceLocks() {
+        Object[] locks = new Object[SERVICE_LOCK_STRIPES];
+        for (int i = 0; i < locks.length; i++) {
+            locks[i] = new Object();
         }
-        return serviceLocks.computeIfAbsent(key, k -> new Object());
+        return locks;
+    }
+
+    private Object serviceLock(String key) {
+        return serviceLocks[Math.floorMod(key.hashCode(), SERVICE_LOCK_STRIPES)];
     }
 
     public EcsServiceModel deleteService(String clusterRef, String serviceName, boolean force, String region) {
@@ -2967,7 +2974,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         serviceName = extractServiceName(serviceName);
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
-        synchronized (lockForExisting(key, serviceName)) {
+        synchronized (serviceLock(key)) {
             EcsServiceModel svc = services.get(key);
             if (svc == null) {
                 throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
