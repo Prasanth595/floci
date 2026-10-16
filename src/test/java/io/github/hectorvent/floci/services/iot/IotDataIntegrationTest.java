@@ -194,7 +194,8 @@ class IotDataIntegrationTest {
         .then()
             .statusCode(409)
             .header("x-amzn-ErrorType", equalTo("ConflictException"))
-            .body("__type", equalTo("ConflictException"));
+            .body("__type", equalTo("ConflictException"))
+            .body("message", equalTo("Version conflict"));
 
         given()
             .contentType("application/json")
@@ -228,7 +229,8 @@ class IotDataIntegrationTest {
         .then()
             .statusCode(409)
             .header("x-amzn-ErrorType", equalTo("ConflictException"))
-            .body("__type", equalTo("ConflictException"));
+            .body("__type", equalTo("ConflictException"))
+            .body("message", equalTo("Version conflict"));
 
         given()
             .queryParam("name", "settings")
