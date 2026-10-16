@@ -406,14 +406,15 @@ written, and its `SnapStart` when it sets an `ApplyOn` other than `None`. An upd
 code, `Environment` or `MemorySize`, or a parameter the code uses, publishes a new version and
 moves the alias to it. A parameter used only in `Environment` or `MemorySize` does not, and neither
 does a property outside the hash, such as `Timeout`. Under `AutoPublishAliasAllProperties` the hash
-covers every property floci gives the function, plus its `SnapStart`. A string
-`AutoPublishCodeSha256` replaces the hash with its first ten characters. A new id publishes only
+covers every property floci gives the function, plus its `SnapStart`; those properties differ from
+the ones SAM generates, so these ids are floci's own rather than SAM's. An `AutoPublishCodeSha256`
+that is a string, or a `Ref` to a parameter holding one, replaces the hash with its first ten
+characters; an empty value leaves the hash in place. A new id publishes only
 when the function's code or configuration changed since its last version. floci does not give the
 function `SnapStart`, so turning it on changes the id but publishes nothing, and neither does a new
 `AutoPublishCodeSha256` alone or a `Tags` edit under `AutoPublishAliasAllProperties`: the alias
-stays where it is. On AWS a new
-`AutoPublishCodeSha256` alone also publishes, because SAM appends it to the function's
-`Description`; floci's transform sets no `Description` on the function.
+stays where it is. On AWS a new `AutoPublishCodeSha256` alone also publishes, because SAM appends it
+to the function's `Description`; floci's transform sets no `Description` on the function.
 
 The version a new id replaces stays published: like SAM, floci gives the version
 `DeletionPolicy: Retain` unless the function sets a `DeletionPolicy` or `VersionDeletionPolicy`

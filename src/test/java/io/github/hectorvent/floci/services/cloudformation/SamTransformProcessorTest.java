@@ -214,6 +214,12 @@ class SamTransformProcessorTest {
         String allProperties = ", \"AutoPublishAliasAllProperties\": true";
         assertNotEquals(publishedVersionId(template.formatted(allProperties)),
                 publishedVersionId(template.formatted(allProperties + ", \"SnapStart\": {\"ApplyOn\": \"None\"}")));
+        assertNotEquals(publishedVersionId(template.formatted(allProperties)),
+                publishedVersionId(template.formatted(allProperties + ", \"Timeout\": 9")),
+                "every property is hashed, Timeout included");
+        assertEquals("MyFuncVersion102360dfc3",
+                publishedVersionId(template.formatted(", \"AutoPublishAliasAllProperties\": false")),
+                "false hashes as if the property were absent");
     }
 
     /**
@@ -491,12 +497,17 @@ class SamTransformProcessorTest {
                 "a substituted parameter hashes as its value");
         assertNotEquals(publishedVersionId(template.formatted(sub, ""), Map.of("Release", "1")),
                 publishedVersionId(template.formatted(sub, ""), Map.of("Release", "2")));
+        assertNotEquals(publishedVersionId(template.formatted(ref, ""), Map.of("Release", "1")),
+                publishedVersionId(template.formatted(ref, ""), Map.of("Release", "2")));
         String allProperties = ", \"AutoPublishAliasAllProperties\": true";
         assertNotEquals(publishedVersionId(template.formatted(ref, allProperties), Map.of("Release", "1")),
                 publishedVersionId(template.formatted(ref, allProperties), Map.of("Release", "2")));
         String codeSha = ", \"AutoPublishCodeSha256\": {\"Ref\": \"Release\"}";
         assertEquals("MyFuncVersion2",
                 publishedVersionId(template.formatted("\"app.zip\"", codeSha), Map.of("Release", "2")));
+        assertEquals(publishedVersionId(template.formatted("\"app.zip\"", ""), Map.of()),
+                publishedVersionId(template.formatted("\"app.zip\"", codeSha), Map.of("Release", "")),
+                "a Ref resolving to an empty value leaves the hash in place");
     }
 
     private String publishedVersionId(String template) throws Exception {
