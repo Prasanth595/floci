@@ -140,11 +140,15 @@ class S3CfnProvisionerTest {
         assertOwnershipControlsFailModelValidation(controls, reason);
     }
 
-    /** A repeated rule that is malformed by itself fails for its own fault first, as a single one does. */
+    /**
+     * Every rule is checked on its own before any repeat, so a malformed rule fails for its own
+     * fault, as a single one does, whether it is the repeated rule or comes after a repeat.
+     */
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
-            {"Rules": [{}, {}]}                         | #/OwnershipControls/Rules/0: required key [ObjectOwnership] not found
-            {"Rules": ["ObjectWriter", "ObjectWriter"]} | #/OwnershipControls/Rules/0: expected type: JSONObject, found: String
+            {"Rules": [{}, {}]}                                                                       | #/OwnershipControls/Rules/0: required key [ObjectOwnership] not found
+            {"Rules": ["ObjectWriter", "ObjectWriter"]}                                               | #/OwnershipControls/Rules/0: expected type: JSONObject, found: String
+            {"Rules": [{"ObjectOwnership": "ObjectWriter"}, {"ObjectOwnership": "ObjectWriter"}, {}]} | #/OwnershipControls/Rules/2: required key [ObjectOwnership] not found
             """)
     void aRepeatedRuleIsCheckedOnItsOwnFirst(String controls, String reason) {
         assertOwnershipControlsFailModelValidation(controls, reason);
