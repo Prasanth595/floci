@@ -1903,7 +1903,13 @@ public class S3Controller {
     private List<CompletedPart> parseCompleteMultipartBody(String xml) {
         List<Map<String, String>> parts = XmlParser.extractGroups(xml, "Part");
         if (parts.isEmpty()) {
-            throw malformedCompleteMultipartXml();
+            if (xml == null || xml.isEmpty()) {
+                throw emptyCompleteMultipartXml();
+            }
+            if (!"CompleteMultipartUpload".equals(XmlParser.rootElementName(xml))) {
+                throw malformedCompleteMultipartXml();
+            }
+            throw emptyCompleteMultipartXml();
         }
         List<CompletedPart> completedParts = new ArrayList<>();
         for (Map<String, String> part : parts) {
@@ -1925,6 +1931,10 @@ public class S3Controller {
 
     private static AwsException malformedCompleteMultipartXml() {
         return new AwsException("MalformedXML", "The XML you provided was not well-formed.", 400);
+    }
+
+    private static AwsException emptyCompleteMultipartXml() {
+        return new AwsException("InvalidRequest", "You must specify at least one part", 400);
     }
 
     private Map<Integer, S3Checksum> completedPartChecksums(List<CompletedPart> parts) {
