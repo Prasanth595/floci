@@ -112,6 +112,8 @@ Notes and limitations:
 
 EC2 containers receive `AWS_EC2_METADATA_SERVICE_ENDPOINT` for IMDS and `AWS_ENDPOINT_URL` for AWS service API calls back to Floci.
 
+CloudFormation `AWS::EC2::VPCEndpoint` resolves `IpAddressType` on create and update, including parameter references. Omission, a selected `AWS::NoValue` branch, or `not-specified` uses the default `ipv4`; an explicitly empty value is rejected. Updates retain the existing replacement behavior; synthetic interfaces remain IPv4-only.
+
 ## Instance Metadata Service (IMDS)
 
 Floci runs an IMDS-compatible HTTP server on port `9169` of the host. Each launched container receives the environment variable `AWS_EC2_METADATA_SERVICE_ENDPOINT` pointing to this server.
@@ -129,6 +131,8 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
 ```
 
 As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A token is valid only on the instance that requested it: presenting it from another instance returns `401`. A request without a token header still uses IMDSv1; Floci does not enforce `HttpTokens=required`.
+
+User data is returned as the original base64-decoded bytes, without decompressing gzip content or converting binary data to text. Older records without the original encoding, or records with malformed saved encoding, use their saved UTF-8 text. The response uses `application/octet-stream`, matching the [AWS user-data retrieval contract](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html). Missing or empty data returns `404`; whitespace is preserved. Script execution retains its separate bounded gzip decoding.
 
 ### Supported IMDS endpoints
 
@@ -149,10 +153,14 @@ As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT
 | `GET /latest/meta-data/iam/info` | IAM instance profile info |
 | `GET /latest/meta-data/iam/security-credentials/` | Role name list |
 | `GET /latest/meta-data/iam/security-credentials/{role}` | Temporary credentials |
-| `GET /latest/user-data` | UserData script |
+| `GET /latest/meta-data/identity-credentials/ec2/info` | Instance identity role info (`Code`, `LastUpdated`, `AccountId`) |
+| `GET /latest/meta-data/identity-credentials/ec2/security-credentials/ec2-instance` | Instance identity role credentials |
+| `GET /latest/user-data` | Original user-data bytes, including compressed content |
 | `GET /latest/dynamic/instance-identity/document` | Identity document JSON |
 
 IAM credentials are served when the instance has an `IamInstanceProfile.Arn` that resolves to an existing instance profile with one role in the profile's account. The role list uses the role name, which can differ from the profile name. Missing profiles, missing roles, and requests for another role return `404`.
+
+Instance identity credentials are served for every instance, with or without an instance profile, under `identity-credentials/ec2/`, with directory listings at each level. They are a session of the instance identity role, `arn:<partition>:sts::<account>:assumed-role/aws:ec2-instance/<instance-id>` to `GetCallerIdentity`, where `<account>` is the account that launched the instance. As on AWS, no identity policy applies to that role, so with IAM enforcement on they are granted nothing beyond what needs no permission, such as `sts:GetCallerIdentity`. They follow the same lifetime, refresh and revocation rules as role credentials. The SSM Agent requests them first when it registers.
 
 Each registered instance receives its own temporary IAM session. Credentials last one hour and refresh on retrieval during the final five minutes; the previous generation remains valid until expiration. Floci revokes tracked sessions when the instance is unregistered or IMDS shuts down, and discards persisted EC2 sessions when Floci restarts. Restored guests obtain fresh credentials after metadata registration is rebuilt.
 
@@ -212,15 +220,15 @@ Floci seeds the following resources on first use in each region so Terraform, th
 
 | Action | Description |
 |--------|-------------|
-| CreateVpc | Creates a VPC with the requested CIDR block. |
+| CreateVpc | Creates a VPC with the requested CIDR block. `InstanceTenancy` accepts `default` or `dedicated`; `host` is rejected with `InvalidParameterValue`, as on AWS. |
 | DescribeVpcs | Lists or returns stored VPCs. |
-| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, or an attached internet gateway or egress-only internet gateway. Instances, NAT gateways and other subnet-resident resources are not checked. |
+| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway or egress-only internet gateway, a transit gateway attachment, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Lists common AWS interface endpoint services and S3 (gateway and interface) in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
-| CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument` and the per-subnet IPv4 and IPv6 addresses named by `SubnetConfiguration.N`. An `Ipv4` value outside the named subnet's CIDR, or among the first four or the last address AWS reserves in it, is rejected with `InvalidParameterValue`. |
-| DescribeVpcEndpoints | Lists or returns stored VPC endpoints. |
-| ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, and sets or resets the endpoint policy. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` and `IpAddressType` are accepted and ignored. |
+| CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument` and the per-subnet IPv4 and IPv6 addresses named by `SubnetConfiguration.N`. `IpAddressType` defaults to `ipv4`. Interface and gateway address types are stored as metadata. Synthesized endpoint interfaces still carry IPv4 only; IPv6 networking is not emulated. An `Ipv4` value outside the named subnet's CIDR, or among the first four or the last address AWS reserves in it, is rejected with `InvalidParameterValue`. |
+| DescribeVpcEndpoints | Lists or returns stored VPC endpoints, including their IP address type. |
+| ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, sets or resets the endpoint policy, and updates stored `IpAddressType` metadata. Omitting the type preserves its current value; malformed types are rejected before changes are applied. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` is accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
 | DescribeVpnGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
@@ -238,7 +246,7 @@ gateway lifecycles.
 |--------|-------------|
 | CreateSubnet | Creates a subnet in a VPC. |
 | DescribeSubnets | Lists or returns stored subnets. |
-| DeleteSubnet | Deletes a subnet from the local EC2 store. |
+| DeleteSubnet | Deletes a subnet from the local EC2 store. Fails with `DependencyViolation` while the subnet still has a transit gateway attachment or anything holding a network interface in it: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifySubnetAttribute | Updates supported subnet attributes. |
 
 ### Security Groups
@@ -291,6 +299,14 @@ that publish those images.
 | DeleteTags | Removes tags from supported EC2 resources. |
 | DescribeTags | Lists tags stored for EC2 resources. |
 
+Public tag mutations reject keys beginning with `aws:` regardless of ASCII case.
+An empty `DeleteTags` tag list removes user tags and preserves AWS-managed tags.
+CloudFormation tag updates and rollbacks likewise leave AWS-managed tags intact.
+Instance and security-group templates validate desired tags before changing resource properties
+or deleting old tags. Volume and Spot request creation also reject reserved keys before allocation.
+Nested launch-template tags follow AWS's case-sensitive check: `aws:` is rejected with
+`InvalidTagKey.Malformed`, while `AWS:` and mixed-case prefixes can be stored in template versions.
+
 ### Internet Gateways
 
 | Action | Description |
@@ -300,7 +316,7 @@ that publish those images.
 | DeleteInternetGateway | Deletes an internet gateway. |
 | AttachInternetGateway | Attaches an internet gateway to a VPC. |
 | DetachInternetGateway | Detaches an internet gateway from a VPC. |
-| CreateEgressOnlyInternetGateway | Creates an egress-only internet gateway attached to an existing VPC (`InvalidVpcID.NotFound` otherwise). Applies `TagSpecification` tags. `ClientToken` is echoed back but not used for idempotency. |
+| CreateEgressOnlyInternetGateway | Creates an egress-only internet gateway attached to an existing VPC (`InvalidVpcID.NotFound` otherwise). Applies `TagSpecification` tags. A retry with the same `ClientToken` returns the gateway the first call created; the same token with a different `VpcId` fails with `IdempotentParameterMismatch`. |
 | DescribeEgressOnlyInternetGateways | Lists stored egress-only internet gateways, filtered by ID and by the `egress-only-internet-gateway-id`, `attachment.vpc-id`, `attachment.state` and tag filters. An unknown ID returns an empty set, as AWS does. Pagination parameters are validated; results come back in one page. |
 | DeleteEgressOnlyInternetGateway | Deletes an egress-only internet gateway; an unknown ID fails with `InvalidGatewayID.NotFound`. |
 
@@ -315,7 +331,7 @@ that publish those images.
 | DisassociateRouteTable | Removes a route table association. |
 | CreateRoute | Adds a route to a route table. Accepts `InstanceId`, `NetworkInterfaceId`, and `VpcPeeringConnectionId` as targets (alongside `GatewayId`/`NatGatewayId`/`EgressOnlyInternetGatewayId`) and reports them back on `DescribeRouteTables`. |
 | ReplaceRoute | Replaces the target of an existing route, accepting `InstanceId`, `NetworkInterfaceId`, and `VpcPeeringConnectionId`. |
-| DeleteRoute | Removes a route from a route table. |
+| DeleteRoute | Removes a route from a route table. Refuses the route to the VPC CIDR that `CreateRouteTable` seeds with `InvalidParameterValue`, and reports a destination with no route as `InvalidRoute.NotFound`. |
 
 ### VPC Peering Connections
 
@@ -594,6 +610,15 @@ fixed socket/core/vCPU shape rather than one derived from the instance family.
 | DisassociateAddress | Removes an Elastic IP address association. |
 | ReleaseAddress | Releases an Elastic IP address record. |
 
+`ReleaseAddress` automatically disassociates an instance's Elastic IP only in the default VPC.
+In a nondefault VPC it returns `InvalidIPAddress.InUse` without changing the association;
+call `DisassociateAddress` first, as specified by the
+[EC2 API reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ReleaseAddress.html).
+
+Deleting an interface, including deletion on instance termination, disassociates its
+Elastic IP without releasing the allocation. A retained interface keeps its association
+after termination; release still follows that interface's VPC rules.
+
 An allocated Elastic IP's `54.x.x.x` address is invented and routes nowhere, so associating
 it re-points it at the address the instance is actually reachable on — the same value
 DescribeInstances reports. This is a deliberate deviation from AWS, where an EIP's public IP
@@ -608,6 +633,13 @@ allocated address.
 | DescribeAvailabilityZones | Returns the configured local availability zones. |
 | DescribeRegions | Returns the regions known to the local EC2 service. |
 | DescribeAccountAttributes | Returns local account-level EC2 attributes. |
+
+A zone id has AWS's shape, a short region prefix and `-az<n>`: `use1-az1` in `us-east-1`, `apne1-az1`
+in `ap-northeast-1`, `usgw1-az1` in `us-gov-west-1`. On AWS the pairing of a zone name with a zone id
+differs per account; Floci always pairs zone `a` with `az1`, `b` with `az2`, and so on. Subnets, VPC
+flow-log records and EFS mount targets report the same id for the same zone. The ISO and EUSC
+regions, for which AWS publishes no zone id, keep the whole region as the prefix
+(`us-iso-east-1-az1`).
 
 ### Instance Types
 
@@ -646,6 +678,18 @@ These members of `RequestLaunchTemplateData` are stored and read back unchanged 
 `InstanceRequirementsRequest`, including the nested `BaselinePerformanceFactors.Cpu.References`.
 Within `NetworkInterfaces`, `ConnectionTrackingSpecification` is stored and read back with all
 three of its timeout members.
+
+At launch, `RunInstances` and `CreateFleet` apply the template's `BlockDeviceMappings` under the
+request's, field by field: a request entry for a `DeviceName` the template maps changes only the
+members it sets, and the rest keep the template's values; devices only one side maps apply as
+given. An Auto Scaling group launching from a template gets the template's mappings the same
+way. The root volume's type comes from the mapping for the AMI's root device, else from the
+AMI's own root mapping, else `gp3`, and `CreateImage` records that type on the new AMI's root
+mapping. A mapping with `NoDevice` set removes its device whatever else it names, so it sets no
+type and its `VolumeType` is not checked. A mapping naming a `VolumeType` outside the service model's enum fails with
+`InvalidParameterValue`, as `ModifyVolume` does. Template versions are not checked when they are
+stored, so a template naming an unknown `VolumeType` is accepted by `CreateLaunchTemplate` and
+fails at launch.
 
 Both blocks are validated by `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` before
 anything is stored. An `InstanceRequirements` block must carry `VCpuCount` and `MemoryMiB`, each
@@ -740,7 +784,7 @@ A standalone ENI created via `CreateNetworkInterface` can also be handed to `Run
 | DetachVolume | Detaches a volume from an instance, optionally forced; returns the attachment in `detaching` state. |
 
 When `floci.services.ec2.volume-block-devices` is enabled (the default), attached EBS volumes are backed by real Linux loop devices inside running instance containers and synthesized EKS cluster node containers:
-- **Storage mechanism**: Backing sparse raw image files are allocated in Floci storage under `floci-aws-ec2-volumes` (named volume or host path). A privileged helper container (`floci-aws-ec2-volume-helper`, running `floci.services.ec2.volume-helper-image`, default `alpine:3.21`) manages Linux loop devices via `losetup`.
+- **Storage mechanism**: Backing sparse raw image files are allocated in Floci storage under `floci-aws-ec2-volumes` (named volume or host path). A privileged helper container (`floci-aws-ec2-volume-helper`, running `floci.services.ec2.volume-helper-image`, default `alpine:3.21`) manages Linux loop devices via `losetup`. It starts on the first volume operation and is removed when Floci shuts down; the backing files stay in storage.
 - **Target device nodes**: Inside privileged target instance containers, the corresponding device node is created at the requested path (for example `/dev/xvdf` or `/dev/sdf`) using `mknod` or a symlink to the loop device, matching the exact size specified during volume creation. Target containers can format filesystems (such as ext4 or xfs), mount them, and persist data across detach and reattach.
 - **Restart reconciliation**: When an instance container stops and starts, or when Floci restarts, attached volume device nodes are automatically restored inside the target container. Backing raw files remain preserved across reboots in persistent storage.
 - **Graceful degradation**: If Docker is unavailable, the target instance container is not running, or the container is not privileged, volume attachments degrade gracefully to metadata-only tracking without failing the API call.
@@ -775,6 +819,13 @@ Validation matches AWS behavior:
 | DescribeSpotInstanceRequests | Lists spot instance requests, optionally filtered by id. |
 | CancelSpotInstanceRequests | Cancels the named spot instance requests, returning each id with its new state. |
 | DescribeSpotPriceHistory | Returns synthetic spot price history for known instance types across modeled availability zones. |
+
+`RequestSpotInstances` preserves the original base64 user data in the Spot request
+and launched instance. Binary and gzip payloads remain intact when described or
+retrieved through IMDS; script execution uses the same bounded decoder as
+`RunInstances`. Invalid base64, oversized payloads and malformed gzip return
+`InvalidParameterValue` before launch. Older stored Spot requests without the
+original encoding return base64 derived from their saved UTF-8 text.
 
 Spot prices returned by `DescribeSpotPriceHistory` are synthetic and derived deterministically from instance type specifications: `((vcpu * 0.0016) + (memoryGiB * 0.0012)) * (1.0 + (azOffset * 0.03))`, formatted to six decimal places. They bear no relation to real AWS spot prices and are intended for testing cost-aware schedulers rather than spend estimation. Supported filters are `availability-zone`, `availability-zone-id`, `instance-type`, `product-description`, `spot-price`, and `timestamp`. Pagination is supported via `MaxResults` and `NextToken`.
 
@@ -922,6 +973,11 @@ Synthesised addresses come from the subnet's own CIDR block, skipping the first 
 and the last one as AWS reserves them, and skipping every address a persisted instance, network
 interface or NAT gateway in the subnet still holds, so a restart does not hand one out twice. A
 subnet with no free address left fails the request with `InsufficientFreeAddressesInSubnet`.
+
+`CreateSubnet` derives `AvailableIpAddressCount` from the IPv4 CIDR, excluding the
+five AWS-reserved addresses. `DescribeSubnets` subtracts addresses currently held
+by instances, network interfaces, NAT gateways and interface endpoints. ASG
+scale-out uses this count when selecting among subnets in the same zone.
 
 ## Requirements
 

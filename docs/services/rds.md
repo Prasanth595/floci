@@ -57,7 +57,11 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `PromoteReadReplica` | Detach a read replica into a standalone instance and turn automated backups on |
 | `SwitchoverReadReplica` | Refused with `InvalidDBInstanceState`: AWS supports switchover only for Oracle and SQL Server replicas, neither of which is emulated |
 | `PromoteReadReplicaDBCluster` | Refused with `InvalidDBClusterStateFault`: no cluster is created as a replica of an instance |
-| `DescribeOrderableDBInstanceOptions` | List deterministic instance class options |
+| `DescribeDBEngineVersions` | List the engine catalogue's versions with their parameter group family, default flag and upgrade targets |
+| `DescribeEngineDefaultParameters` | Return a known family's default parameters (an empty list, as Floci's default groups hold none) |
+| `DescribeEngineDefaultClusterParameters` | Return a known family's default cluster parameters (an empty list, as for instances) |
+| `DescribeValidDBInstanceModifications` | Return the storage an instance can move to: its type and the sizes a modify stores as asked |
+| `DescribeOrderableDBInstanceOptions` | List the orderable engine, version and instance class combinations from the engine catalogue; see [Engine catalogue](#engine-catalogue) |
 | `DescribeEvents` | - |
 | `CreateEventSubscription` | Create an event notification subscription (stored, nothing is published) |
 | `DescribeEventSubscriptions` | List subscriptions, or the one the request names |
@@ -67,6 +71,14 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBClusterEndpoints` | List a cluster's built-in writer and reader endpoints and its custom endpoints, with the four documented filters |
 | `ModifyDBClusterEndpoint` | Change a custom endpoint's type or member list |
 | `DeleteDBClusterEndpoint` | Delete a custom endpoint |
+| `EnableHttpEndpoint` | Turn on an Aurora cluster's Data API endpoint by ARN; see [Data API endpoint](#data-api-endpoint) |
+| `DisableHttpEndpoint` | Turn off a cluster's Data API endpoint by ARN |
+| `DescribeDBLogFiles` | List an instance's log files, read from its database container; see [Log files](#log-files) |
+| `DownloadDBLogFilePortion` | Read a block of a log file, from the start or the most recent lines |
+| `AddRoleToDBCluster` | Associate an IAM role with a cluster, optionally for a feature; see [IAM role associations](#iam-role-associations) |
+| `RemoveRoleFromDBCluster` | Remove a role from a cluster |
+| `AddRoleToDBInstance` | Associate an IAM role with an instance for a feature |
+| `RemoveRoleFromDBInstance` | Remove a role from an instance |
 | `AddSourceIdentifierToSubscription` | Add a source id to a subscription |
 | `RemoveSourceIdentifierFromSubscription` | Remove a source id from a subscription |
 | `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource` |
@@ -176,6 +188,27 @@ checked against the instance's other window. Modifications apply immediately —
     `Copy`, `Delete` and the `restore` attribute behave as they do for instance snapshots, under
     `arn:aws:rds:<region>:<account>:cluster-snapshot:<name>`. RDS reserved instances aren't
     modeled (there's no reserved-instance API), so tagging doesn't apply to them.
+
+## Boolean parameters
+
+The following parameters accept `true` or `false` (case-insensitive). Other values,
+including empty strings, return `InvalidParameterValue` before changing resources.
+
+| Actions | Parameters | When omitted |
+|---|---|---|
+| `CreateDBProxy` | `RequireTLS`, `DebugLogging` | Defaults to `false` |
+| `ModifyDBProxy` | `RequireTLS`, `DebugLogging` | Preserves the current value |
+| `ResetDBParameterGroup`, `ResetDBClusterParameterGroup` | `ResetAllParameters` | Defaults to `false`; named parameter resets keep their existing behavior |
+| `CopyDBClusterSnapshot` | `CopyTags` | Defaults to `false`; explicit request tags still apply |
+| `CreateEventSubscription` | `Enabled` | Defaults to `true` |
+| `ModifyEventSubscription` | `Enabled` | Preserves the current value |
+| `RestoreDBInstanceFromDBSnapshot` | `MultiAZ`, `EnableIAMDatabaseAuthentication` | Defaults to `false`, regardless of the snapshot setting |
+| `RestoreDBClusterFromSnapshot`, `RestoreDBClusterToPointInTime` | `EnableIAMDatabaseAuthentication` | Defaults to `false`, regardless of the source setting |
+
+Malformed reset flags leave saved parameter overrides unchanged. Malformed event-subscription
+flags leave the subscription and its topic, source type and event categories unchanged.
+Malformed restore flags are rejected before starting an instance or cluster restore.
+
 
 ## Event notification subscriptions
 
@@ -532,6 +565,33 @@ same-region replicas; a cross-region replica keeps its link with the replication
 `terminated` until it is promoted or deleted, which is what AWS does for PostgreSQL. Deleting a
 replica drops it from its source's list.
 
+## Engine catalogue
+
+`DescribeDBEngineVersions` and `DescribeOrderableDBInstanceOptions` read one curated catalogue: a
+representative version for each major version Floci knows through its managed parameter and option
+groups (PostgreSQL 13 to 18, MySQL 8.0 and 8.4, MariaDB 10.11, 11.2 and 11.4, SQL Server Standard 15,
+Aurora PostgreSQL 15 to 17 and Aurora MySQL 8.0). It is not AWS's full version list. Each version
+reports the parameter group family the create path computes for it, its major version and its upgrade
+targets (the engine's later versions, with `IsMajorVersionUpgrade` set across a major version). Each
+engine's default is the version a create request that names none gets (instances, clusters and global
+clusters alike), so `DefaultOnly` agrees with what Floci builds; for Aurora MySQL that is
+`8.0.mysql_aurora.3.05.2`. Each version also reports what Floci supports for it: `SupportsReadReplica`
+for PostgreSQL only, `SupportsGlobalDatabases` for the two Aurora engines, and `SupportsParallelQuery`
+and `SupportsBabelfish` as false. `ExportableLogTypes` and `SupportedFeatureNames` list the engine's
+documented log types and IAM role feature names. `EngineVersion` takes an exact version or a major version such as `16`, and the
+documented filters (`db-parameter-group-family`, `engine`, `engine-mode`, `engine-version`, `status`)
+apply. Every version is `available`, so `IncludeAll` changes nothing.
+
+`DescribeEngineDefaultParameters` and `DescribeEngineDefaultClusterParameters` accept a family from the
+catalogue (`InvalidParameterValue` otherwise) and return an empty parameter list, consistent with
+`DescribeDBParameters` on a default group, which lists only values set on the group.
+`DescribeValidDBInstanceModifications` reports the instance's storage type and the sizes `ModifyDBInstance`
+stores as asked: the current size, and from the smallest real increase up to the engine's maximum (16384
+GiB for SQL Server, 65536 GiB otherwise). Storage only grows, and for PostgreSQL, MySQL and MariaDB an
+increase under 10% is rounded up to 10%, so at 40 GiB the second range starts at 44. An Aurora instance
+has no storage of its own to modify, so its list is empty. `DescribeOrderableDBInstanceOptions` matches
+`EngineVersion` exactly or as a major version prefix, so `8.0` finds the MySQL `8.0.36` rows.
+
 ## Cluster endpoints
 
 `CreateDBClusterEndpoint` adds an Aurora custom endpoint to an available cluster. As the Aurora user
@@ -559,6 +619,79 @@ Custom endpoints are modelled, not routed: a custom endpoint reports the cluster
 (read from the cluster each time, so it follows a restart onto another proxy port), so it is
 reachable, but connections through it go where the cluster endpoint sends them rather than being
 spread across the chosen members.
+
+## Data API endpoint
+
+`EnableHttpEndpoint` and `DisableHttpEndpoint` turn a cluster's Data API endpoint on and off by the
+cluster's ARN, and `DescribeDBClusters` reports it as `HttpEndpointEnabled`. `CreateDBCluster` and
+`ModifyDBCluster` take `EnableHttpEndpoint` too, as does the `AWS::RDS::DBCluster` CloudFormation
+property, so Terraform's `enable_http_endpoint` and CDK's `enableDataApi` read back what they set.
+
+The Data API is offered for Aurora PostgreSQL and Aurora MySQL clusters, so turning it on for any
+other engine is `InvalidParameterCombination` (a create checks before the cluster exists); turning
+it off is always accepted. An ARN that names no cluster in the caller's account and Region is
+`ResourceNotFoundFault`, and a cluster that is not available is `InvalidResourceStateFault`. The flag
+is recorded and reported only: the Data API (`rds-data`) does not refuse a cluster with it off.
+
+## Log files
+
+`DescribeDBLogFiles` and `DownloadDBLogFilePortion` read an instance's log from its database
+container (`docker logs`, the most recent 100,000 lines), cut into files the way RDS names them: PostgreSQL rotates hourly into
+`error/postgresql.log.YYYY-MM-DD-HH` (UTC), MySQL and MariaDB keep `error/mysql-error.log`, and SQL
+Server keeps `log/ERROR`. An Aurora member reads its cluster's container. `LastWritten` is the time
+Docker recorded for the file's last line, and `Size` the bytes of its lines.
+
+`DescribeDBLogFiles` takes `FilenameContains`, `FileLastWritten` (files written at or after it) and
+`FileSize` (files larger than it), and pages by `MaxRecords` / `Marker`. `DownloadDBLogFilePortion`
+follows the API reference: without a `Marker` it returns the most recent `NumberOfLines` lines (the
+whole file, up to 10000 lines, without either), `Marker` `0` starts at the first line, and the
+returned `Marker` continues until `AdditionalDataPending` is false. A block stops at 1 MB, and a
+single line longer than that is cut at 1 MB, as the API reference says the block is truncated.
+Control characters XML cannot carry (a terminal colour code) come back as U+FFFD.
+
+An instance that is not available, or whose database container cannot be found or started, is
+`DBInstanceNotReady`, and an unknown file name `DBLogFileNotFoundFault`. Negative `FileSize`,
+`FileLastWritten` or `Marker` values are `InvalidParameterValue`. In mock RDS mode there is no container, so an instance has no log files.
+
+## IAM role associations
+
+`AddRoleToDBCluster` and `AddRoleToDBInstance` associate an IAM role with an available cluster or
+instance, and `DescribeDBClusters` / `DescribeDBInstances` report it in `AssociatedRoles` with status
+`ACTIVE` straight away. `CreateDBCluster` accepts `AssociatedRoles` too: a list that names a role twice,
+or has an entry without a `RoleArn`, refuses the create before any cluster exists, and the roles are
+associated in one step, so a create that fails leaves no cluster behind.
+
+`FeatureName` (such as `s3Import`, `s3Export` or `Lambda`) is optional for a cluster and required for an
+instance. A role is associated at most once per cluster (`DBClusterRoleAlreadyExists`, which covers
+the role ARN only, so two roles may share a feature), and a role or a feature at most once per instance
+(`DBInstanceRoleAlreadyExists`, documented as "The specified RoleArn or FeatureName value is already
+associated"). `RemoveRoleFromDBCluster` removes the
+role, matching the feature name when one is given, and `RemoveRoleFromDBInstance` removes the role for
+the feature named; an association that does not exist is `DBClusterRoleNotFound` /
+`DBInstanceRoleNotFound`. A stopped cluster or instance refuses both (`InvalidDBClusterStateFault` /
+`InvalidDBInstanceState`).
+
+A `FeatureName` must be one the engine lists in `SupportedFeatureNames` (`DescribeDBEngineVersions`),
+matched without regard to case; any other is `InvalidParameterValue`, and a `CreateDBCluster` naming
+one creates nothing. MySQL, MariaDB and Aurora MySQL list none, so their roles take no feature name.
+
+Associations are recorded, not exercised: Floci does not check the role in IAM and does not hand the
+role's credentials to the database, so an `aws_s3` import still needs credentials of its own. Deleting a cluster or instance drops its
+associations, and snapshots, restores and read replicas start without any.
+
+## Aurora managed password opt-out
+
+When `ModifyDBCluster` disables `ManageMasterUserPassword` while the managed secret has
+cross-Region replicas, the request succeeds but retains the cluster password and its
+`MasterUserSecret` metadata, as Aurora does. Remove the secret's replicas and retry to
+release password management. Other requested cluster settings still apply.
+
+Floci reserves the secret while changing backend credentials, without holding a shared
+Secrets Manager lock during backend I/O. Replication and deletion requests for that secret
+fail while release is in progress; unrelated secrets remain available.
+A failed backend password rotation retains the managed secret and stored credentials.
+If Secrets Manager support is unavailable, opt-out fails before changing cluster state.
+This does not provide a transaction across database backends and persistent storage.
 
 ## Point in time restore
 
@@ -655,6 +788,30 @@ The RDS auth proxy validates the master username and password at the proxy layer
 
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
 
+Aurora members use their cluster's IAM database authentication setting and master
+username and password for backend connections. `EnableIAMDatabaseAuthentication`
+on `CreateDBInstance` does not override the cluster setting. A member request with
+`MasterUsername` or `MasterUserPassword` returns `InvalidParameterCombination`;
+configure those credentials on the cluster and omit them from the member request.
+Managed master secrets belong to the cluster; `ManageMasterUserPassword` on a member
+does not create a separate member secret. When a cluster record lacks a credential,
+the member retains its normalized default for that field.
+
+`ModifyDBInstance` preserves the cluster-owned master password when
+`MasterUserPassword` is supplied for a member; other supported instance settings
+still apply. Change the cluster password with `ModifyDBCluster`.
+
+Accepted cluster password changes update stored member credentials even when the
+cluster has no backend or runs in mock mode. An unchanged password does not update
+relays. Rotating an initialized data volume requires a running backend; changing
+stored metadata alone does not rotate that volume.
+
+Changing `EnableIAMDatabaseAuthentication` with `ModifyDBCluster` updates existing
+Aurora members and applies to new connections through the cluster and member
+endpoints. Omitting the flag preserves the current setting. Existing connections
+are not disconnected.
+
+
 A token can be signed with an access key or with temporary credentials: an assumed role's, or the execution role credentials Floci hands a Lambda function. A token signed with temporary credentials carries their session token in `X-Amz-Security-Token`, and it is accepted while that session is valid and only with the session token issued alongside the access key.
 
 On RDS, a token is only good for the endpoint it was generated for: the hostname, port and region passed to `generate-db-auth-token` are the ones the instance (or cluster, or RDS Proxy) publishes. MySQL and MariaDB endpoints in Floci always refuse a token generated for another endpoint. PostgreSQL endpoints do the same by default; set `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING=false` to accept a token generated for another name, for clients that generate tokens for a container name or DNS alias the endpoint does not publish. Either way, the username must match the `DBUser` in the token exactly. Because clients on the host reach the same proxy over the loopback interface, a token generated for `localhost` or `127.0.0.1` on the published port is accepted as well. Clients on a Docker network connect by Floci's container name, so set `FLOCI_SERVICES_RDS_ENDPOINT_HOST` to that name (see [Docker Compose](#docker-compose)) so it is what the endpoint publishes and tokens are generated for. With [IAM enforcement](iam.md#iam-enforcement-mode) turned on, the token's principal must also be allowed `rds-db:connect` on the database user, scoped the way AWS scopes it:
@@ -663,13 +820,13 @@ On RDS, a token is only good for the endpoint it was generated for: the hostname
 arn:aws:rds-db:<region>:<account-id>:dbuser:<DbiResourceId>/<db-user-name>
 ```
 
-Aurora clusters use the `DbClusterResourceId`, and connections through an RDS Proxy use the proxy's `prx-…` resource id. A token that fails any of these checks is refused with the engine's ordinary authentication failure; the reason is written to Floci's log.
+Aurora cluster endpoints and their member instance endpoints use the cluster's `DbClusterResourceId`, including after member reboot or runtime recovery, and connections through an RDS Proxy use the proxy's `prx-…` resource id. A token that fails any of these checks is refused with the engine's ordinary authentication failure; the reason is written to Floci's log.
 
 On PostgreSQL, the token names a database role (`DBUser`) and the session runs as that role: `current_user` and `session_user` both report it, objects it creates are owned by it, and a token naming a role the database does not have is refused with `FATAL: role "..." does not exist`. Create the role first with `CREATE ROLE <name> WITH LOGIN` as the master user, and grant it whatever the application needs.
 
 Underneath, the proxy reaches the container as the master user and hands the session over to the token's role, so an IAM session that talks its way back to the master role, via `RESET SESSION AUTHORIZATION` and its variants, is terminated with `FATAL: permission denied to set session authorization` rather than being allowed to regain superuser. `SET ROLE` is untouched: PostgreSQL still permission-checks it against the token's role, exactly as on RDS. One difference from RDS: the proxy learns of the switch from PostgreSQL's own report, so when several statements are batched into a single query after the switch, their results are returned before the session is closed.
 
-The parameters a PostgreSQL client sends when it connects (`options` such as `-c search_path=app`, `application_name`, and any other run-time parameter) apply to the session as they do on RDS. An IAM session for a role other than the master gets them once the session has been handed over to the token's role, applied with `set_config()` so PostgreSQL checks each one against that role's privileges, and a parameter PostgreSQL refuses fails the login with PostgreSQL's own error, as it would at startup. A `session_authorization` naming any other role is refused with `permission denied to set session authorization` before anything is applied, since PostgreSQL would authorize it against the master the proxy connected as. Because those sessions have already started, three things differ from RDS: `options` may carry only `-c name=value` and `--name=value` switches, a parameter that can only be set at connection start is refused with `cannot be set after connection start`, and `replication` connections are refused. And because the values are set with `set_config()` rather than at startup, `RESET` (and `RESET ALL`) takes such a parameter back to the server default, not to the value the client connected with: after `-c search_path=app`, `RESET search_path` gives `"$user", public` where RDS keeps `app`.
+The parameters a PostgreSQL client sends when it connects (`options` such as `-c search_path=app`, `application_name`, and any other run-time parameter) apply to the session as they do on RDS. An IAM session for a role other than the master gets them once the session has been handed over to the token's role, applied with `set_config()` so PostgreSQL checks each one against that role's privileges, and a parameter PostgreSQL refuses fails the login with PostgreSQL's own error, as it would at startup. The role's own `ALTER ROLE ... SET` defaults load as they do at login: the role-wide ones, then those for the database. They are the values `RESET` returns to, and they apply with the authority of whoever stored them, so a superuser-only default set by an administrator binds the role even after `RESET ALL`. To get this, a role with defaults has its backend session opened a second time, with the defaults as startup options. A default PostgreSQL refuses is skipped with a `WARNING`, as at login. A `role` default is checked against the role's memberships, and a `client_encoding` default applies unless the client chose an encoding; both are set once the session is the role's, so `RESET` does not return to them. Defaults stored on the master role itself are not undone for these sessions. A `session_authorization` naming any other role is refused with `permission denied to set session authorization` before anything is applied, since PostgreSQL would authorize it against the master the proxy connected as. Because those sessions have already started, three things differ from RDS: `options` may carry only `-c name=value` and `--name=value` switches, a parameter that can only be set at connection start is refused with `cannot be set after connection start`, and `replication` connections are refused. And because the values are set with `set_config()` rather than at startup, `RESET` (and `RESET ALL`) takes such a parameter back to the server default, not to the value the client connected with: after `-c search_path=app`, `RESET search_path` gives `"$user", public` where RDS keeps `app`.
 
 On MySQL, `AWSAuthenticationPlugin` is proprietary to RDS and ships in no public MySQL build, so
 `CREATE USER ... IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'` would fail against the container
@@ -688,31 +845,45 @@ password in cleartext, MySQL sends a scramble, so the proxy would have to drive 
 
 ## TLS / SSL
 
-The RDS auth proxy terminates TLS itself (the backend container stays plaintext) using a
-self-signed CA whose Subject Alternative Names cover every advertised host Floci has handed
-out for a DB instance, cluster, or RDS Proxy — the Docker bridge IP, `host.docker.internal`,
-`localhost`, or whatever `rds.endpointHost` resolves to. The CA is persisted at
-`{storage.persistent-path}/tls/rds-ca.crt` and grows its SAN list as new hosts appear, so the
-same root survives restarts and works for every local database, not just the one that
-generated it.
+The RDS auth proxy terminates TLS itself (the backend container stays plaintext). It presents
+a non-CA server certificate followed by Floci's shared root CA, so strict TLS
+clients can validate an end-entity certificate rather than being asked to accept a CA as a server.
+The server certificate's Subject Alternative Names cover every advertised DB instance, cluster,
+or RDS Proxy host: the Docker bridge IP, `host.docker.internal`, `localhost`, or whatever
+`rds.endpointHost` resolves to.
 
-Floci logs the certificate path (and the `PGSSLROOTCERT` hint) the first time it generates or
-loads it:
+The shared CA is the same one used by ACM, IoT, and EKS. It is persisted at
+`{storage.persistent-path}/tls/floci-root-ca.crt`, with its owner-only private key in
+`floci-root-ca.key`. The server certificate is issued in memory on startup and when a new host
+appears, and renewed before expiry during TLS use; its SAN list is recorded in `rds-ca.metadata.json`.
+Renewal preserves the CA and SANs. If the CA itself expires, the proxy refuses new TLS use
+rather than silently changing client trust; restart to regenerate the unusable CA and trust its replacement.
+The shared CA certificate and key do not change during SAN growth or restarts. Missing or
+corrupt SAN metadata is rebuilt without replacing a valid
+CA. An invalid or unusable CA/key pair is replaced with a warning; only then must clients trust
+the replacement CA again.
+
+The proxy also writes the shared root certificate to `tls/rds-ca.crt`, preserving existing
+`PGSSLROOTCERT` and MySQL `--ssl-ca` paths. This compatibility copy is refreshed when the proxy
+initializes, even if the old RDS certificate is expired or corrupt. The unused `rds-ca.key`
+is removed; the shared CA key and existing `rds-ca.metadata.json` SAN list are retained.
+The shared certificate is also available from `GET /_floci/ca.pem`.
+
+The proxy logs the shared certificate path when it first issues a server certificate:
 
 ```
-RDS proxy TLS: CA cert at ./data/tls/rds-ca.crt
-RDS proxy TLS: for sslmode=verify-full set PGSSLROOTCERT=./data/tls/rds-ca.crt
+RDS proxy TLS: for sslmode=verify-full set PGSSLROOTCERT=./data/tls/floci-root-ca.crt
 ```
 
 Because the SAN matches the address you actually connect to, `verify-full` (the same level
-Aurora enforces in AWS) works locally too — no need to fall back to `sslmode=disable` just to
+Aurora enforces in AWS) works locally too, without falling back to `sslmode=disable` just to
 exercise the same connection-string settings you use in production:
 
 ```bash
 # PostgreSQL
-PGSSLROOTCERT=./data/tls/rds-ca.crt psql "host=localhost port=7001 user=admin sslmode=verify-full"
+PGSSLROOTCERT=./data/tls/floci-root-ca.crt psql "host=localhost port=7001 user=admin sslmode=verify-full"
 
 # MySQL / MariaDB
 mysql -h 127.0.0.1 -P 7002 -u root -psecret123 \
-  --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/rds-ca.crt
+  --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/floci-root-ca.crt
 ```

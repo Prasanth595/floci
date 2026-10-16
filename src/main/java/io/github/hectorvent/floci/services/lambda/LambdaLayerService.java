@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.lambda;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
@@ -21,7 +23,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -123,6 +124,7 @@ public class LambdaLayerService {
 
         String description = (String) request.get("Description");
         String licenseInfo = (String) request.get("LicenseInfo");
+        LambdaService.validateMaxLength(licenseInfo, "licenseInfo", 512);
 
         LambdaService.validateEnumList(request.get("CompatibleRuntimes"), "compatibleRuntimes",
                 LambdaService.RUNTIME_VALUES, 15);
@@ -359,8 +361,7 @@ public class LambdaLayerService {
      */
     private static String encodeMarker(String cursor) {
         String signed = cursor + MARKER_SEPARATOR + sign(cursor);
-        return Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(signed.getBytes(StandardCharsets.UTF_8));
+        return Base64Url.encode(signed);
     }
 
     private static String decodeMarker(String marker) {
@@ -389,8 +390,7 @@ public class LambdaLayerService {
         try {
             Mac mac = Mac.getInstance("HmacSHA256");
             mac.init(new SecretKeySpec(MARKER_KEY, "HmacSHA256"));
-            return Base64.getUrlEncoder().withoutPadding()
-                    .encodeToString(mac.doFinal(cursor.getBytes(StandardCharsets.UTF_8)));
+            return Base64Url.encode(mac.doFinal(cursor.getBytes(StandardCharsets.UTF_8)));
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("HmacSHA256 is required to paginate layers", e);
         }
@@ -524,7 +524,7 @@ public class LambdaLayerService {
     }
 
     /**
-     * True when the ARN is a well-formed layer version ARN outside the {@code aws} partition.
+     * True when the ARN is a well-formed layer version ARN outside the request's partition.
      * Partitions are isolated, so such a layer is unreachable rather than merely unreadable, and
      * {@link #getLayerVersionByArn} already rejects it outright. Attaching one to a function has
      * to reject too, or Floci would persist an ARN its own lookup path calls invalid.
@@ -593,12 +593,7 @@ public class LambdaLayerService {
     }
 
     private String computeSha256(byte[] data) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(data);
-            return Base64.getEncoder().encodeToString(digest);
-        } catch (NoSuchAlgorithmException e) {
-            return "";
-        }
+        return Base64.getEncoder().encodeToString(Digests.sha256(data));
     }
 
     private void deleteDirectory(Path dir) {

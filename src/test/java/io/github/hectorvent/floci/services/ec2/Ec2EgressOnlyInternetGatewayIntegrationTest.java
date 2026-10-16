@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -9,6 +11,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * The calls aws_egress_only_internet_gateway makes: create with a VPC and TagSpecification, read
@@ -27,11 +30,11 @@ class Ec2EgressOnlyInternetGatewayIntegrationTest {
     private static String vpcId;
     private static String eigwId;
 
-    private static io.restassured.specification.RequestSpecification ec2() {
+    private static RequestSpecification ec2() {
         return given().header("Authorization", AUTH_HEADER);
     }
 
-    private static io.restassured.response.ValidatableResponse describeById() {
+    private static ValidatableResponse describeById() {
         return ec2()
             .formParam("Action", "DescribeEgressOnlyInternetGateways")
             .formParam("EgressOnlyInternetGatewayId.1", eigwId)
@@ -177,5 +180,57 @@ class Ec2EgressOnlyInternetGatewayIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+    }
+
+    @Test
+    @Order(7)
+    void aRetriedCreateWithTheSameClientTokenReturnsTheFirstGateway() {
+        String vpc = createVpc("198.51.100.0/25");
+        String first = createWithToken(vpc, "eigw-retry-token")
+            .statusCode(200)
+            .extract().path("CreateEgressOnlyInternetGatewayResponse.egressOnlyInternetGateway"
+                + ".egressOnlyInternetGatewayId");
+        String second = createWithToken(vpc, "eigw-retry-token")
+            .statusCode(200)
+            .extract().path("CreateEgressOnlyInternetGatewayResponse.egressOnlyInternetGateway"
+                + ".egressOnlyInternetGatewayId");
+        assertEquals(first, second);
+
+        ec2()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("Filter.1.Name", "attachment.vpc-id")
+            .formParam("Filter.1.Value.1", vpc)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(ITEM + ".size()", equalTo(1))
+            .body(ITEM + ".egressOnlyInternetGatewayId", equalTo(first));
+
+        String otherVpc = createVpc("198.51.100.128/25");
+        createWithToken(otherVpc, "eigw-retry-token")
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("IdempotentParameterMismatch"));
+    }
+
+    private static String createVpc(String cidr) {
+        return ec2()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", cidr)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+    }
+
+    private static ValidatableResponse createWithToken(String vpc, String token) {
+        return ec2()
+            .formParam("Action", "CreateEgressOnlyInternetGateway")
+            .formParam("VpcId", vpc)
+            .formParam("ClientToken", token)
+        .when()
+            .post("/")
+        .then();
     }
 }

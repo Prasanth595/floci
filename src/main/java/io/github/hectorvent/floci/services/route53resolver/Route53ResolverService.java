@@ -8,20 +8,17 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -86,7 +83,7 @@ public class Route53ResolverService {
      * Kept beside the endpoint rather than on it: the modeled {@code ResolverEndpoint} shape
      * carries {@code IpAddressCount} and no IP list, and the handlers return the stored node
      * verbatim, so holding the addresses on the resource would put an unmodeled member on the
-     * wire. Only the CreatorRequestId conflict check reads this.
+     * wire. Read by the CreatorRequestId conflict check and ListResolverEndpointIpAddresses.
      */
     private final StorageBackend<String, ObjectNode> endpointIpRequestStore;
     private final ObjectMapper objectMapper;
@@ -188,6 +185,17 @@ public class Route53ResolverService {
         if (!ipAddresses.isArray() || ipAddresses.isEmpty()) {
             throw new AwsException(INVALID_PARAMETER, "IpAddresses is required", 400);
         }
+        // IpAddresses is modeled list min 2 / max 20: a resolver endpoint needs at
+        // least two addresses for redundancy.
+        int ipAddressCount = ipAddresses.size();
+        if (ipAddressCount < 2) {
+            throw new AwsException(INVALID_PARAMETER,
+                    "IpAddresses must contain at least two IP addresses.", 400);
+        }
+        if (ipAddressCount > 20) {
+            throw new AwsException(INVALID_PARAMETER,
+                    "IpAddresses must contain at most twenty IP addresses.", 400);
+        }
         Optional<ObjectNode> replay = replayOf(endpointStore, request, region);
         if (replay.isPresent()) {
             ObjectNode existing = replay.get();
@@ -229,6 +237,39 @@ public class Route53ResolverService {
 
     public List<ObjectNode> listResolverEndpoints() {
         return endpointStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    }
+
+    /**
+     * The endpoint's addresses as AWS {@code IpAddressResponse} entries, built from the
+     * {@code IpAddresses} recorded at create time. {@code IpId} is derived from the endpoint,
+     * the entry and its position in the recorded list, so it is stable across calls. An
+     * address the request left for AWS to pick has no {@code Ip}: Floci does not allocate
+     * from the subnet.
+     */
+    public List<ObjectNode> listResolverEndpointIpAddresses(String id) {
+        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+        // A missing record would otherwise read as an empty list beside a nonzero
+        // IpAddressCount; fail loudly with the modeled InternalServiceErrorException instead.
+        JsonNode recorded = endpointIpRequestStore.get(id)
+                .map(node -> node.get("IpAddressRequests"))
+                .filter(JsonNode::isArray)
+                .orElseThrow(() -> new AwsException("InternalServiceErrorException",
+                        "No IP addresses recorded for resolver endpoint: " + id, 400));
+        List<ObjectNode> addresses = new ArrayList<>();
+        for (int i = 0; i < recorded.size(); i++) {
+            JsonNode request = recorded.get(i);
+            ObjectNode address = objectMapper.createObjectNode();
+            // The index keeps repeated entries (two addresses in one subnet, both left for AWS
+            // to pick) distinct; the stored list is normalised once at create, so it is stable.
+            address.put("IpId", "rni-" + deterministicHex(id + "|" + i + "|" + canonicalKey(request), 17));
+            copyIfPresent(request, address, "SubnetId", "Ip", "Ipv6");
+            address.put("Status", "ATTACHED");
+            address.put("StatusMessage", "This IP address is operational.");
+            address.set("CreationTime", endpoint.get("CreationTime"));
+            address.set("ModificationTime", endpoint.get("CreationTime"));
+            addresses.add(address);
+        }
+        return addresses;
     }
 
     public ObjectNode updateResolverEndpoint(String id, JsonNode request) {
@@ -641,11 +682,6 @@ public class Route53ResolverService {
     }
 
     private static String deterministicHex(String seed, int length) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(seed.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest).substring(0, length);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 unavailable", e);
-        }
+        return Digests.sha256Hex(seed).substring(0, length);
     }
 }

@@ -2,7 +2,11 @@ package io.github.hectorvent.floci.core.common;
 
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.core.MultivaluedHashMap;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Optional;
 
@@ -22,7 +26,8 @@ class ProtocolClaimerIntegrationTest {
 
     private Optional<ProtocolClaim> claim(String method, String path, String contentType,
                                           String smithyProtocol, String xAmzTarget, String authorization) {
-        return claimer.claim(new ClaimSignals(method, path, contentType, smithyProtocol, xAmzTarget, authorization));
+        return claimer.claim(new ClaimSignals(method, path, contentType, smithyProtocol, xAmzTarget,
+                authorization, null, new MultivaluedHashMap<>()));
     }
 
     @Test
@@ -118,6 +123,30 @@ class ProtocolClaimerIntegrationTest {
     }
 
     @Test
+    void botoSwfJsonClaimsOnlyTheDocumentedRootTarget() {
+        String target = "com.amazonaws.swf.service.model.SimpleWorkflowService.RegisterActivityType";
+        ProtocolClaim legacy = claim("POST", "/", "Application/JSON; charset=UTF-8",
+                null, target, null).orElseThrow();
+        assertEquals(WireProtocol.AWS_JSON_1_0, legacy.protocol());
+        assertEquals("swf", legacy.service().externalKey());
+        assertEquals("RegisterActivityType", legacy.operation());
+        assertEquals(target, legacy.target());
+
+        assertTrue(claim("POST", "/", "text/plain", null, target, null).isEmpty());
+        assertTrue(claim("POST", "/", "application/json", "rpc-v2-json", target, null).isEmpty());
+        assertEquals("swf", claim("POST", "/", "application/json", null,
+                "SimpleWorkflowService.RegisterActivityType", null).orElseThrow().service().externalKey());
+        assertTrue(claim("POST", "/", "application/json", null,
+                "com.amazonaws.swf.service.model.SimpleWorkflowServiceOther.RegisterActivityType", null).isEmpty());
+        assertTrue(claim("POST", "/", "application/json", null,
+                "AmazonSSM.DescribeParameters", null).isEmpty());
+        assertEquals(WireProtocol.REST, claim("GET", "/", "application/json",
+                null, target, null).orElseThrow().protocol());
+        assertEquals(WireProtocol.REST, claim("POST", "/other", "application/json",
+                null, target, null).orElseThrow().protocol());
+    }
+
+    @Test
     void unknownTargetStillClaimsProtocolWithoutService() {
         ProtocolClaim claim = claim("POST", "/", "application/x-amz-json-1.1",
                 null, "NoSuchService.DoThing", null).orElseThrow();
@@ -138,6 +167,34 @@ class ProtocolClaimerIntegrationTest {
                 "application/x-www-form-urlencoded", null, null, null).orElseThrow();
         assertEquals(WireProtocol.AWS_QUERY, withoutAuth.protocol());
         assertNull(withoutAuth.service());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Action", "Operation"})
+    void cloudWatchGetsUseTheQueryClaimWithOrWithoutASignature(String actionParameter) {
+        MultivaluedHashMap<String, String> query = new MultivaluedHashMap<>();
+        query.putSingle(actionParameter, "GetMetricStatistics");
+        query.putSingle("Version", "2010-08-01");
+        for (String authorization : new String[] {null, SQS_AUTH.replace("/sqs/", "/monitoring/")}) {
+            ProtocolClaim claim = claimer.claim(new ClaimSignals("GET", "/", null, null, null,
+                    authorization, null, query)).orElseThrow();
+            assertEquals(WireProtocol.AWS_QUERY, claim.protocol());
+            assertEquals("monitoring", claim.service().externalKey());
+            assertEquals("GetMetricStatistics", claim.operation());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "GET, /bucket",
+            "POST, /"
+    })
+    void cloudWatchGetClaimRequiresARootGet(String method, String path) {
+        MultivaluedHashMap<String, String> query = new MultivaluedHashMap<>();
+        query.putSingle("Action", "GetMetricStatistics");
+        ProtocolClaim claim = claimer.claim(new ClaimSignals(method, path, null, null, null,
+                SQS_AUTH.replace("/sqs/", "/monitoring/"), null, query)).orElseThrow();
+        assertEquals(WireProtocol.REST, claim.protocol());
     }
 
     @Test

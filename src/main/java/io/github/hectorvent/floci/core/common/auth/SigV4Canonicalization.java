@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.core.common.auth;
 
+import io.github.hectorvent.floci.core.common.Digests;
+
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -42,7 +44,7 @@ public final class SigV4Canonicalization {
             String stringToSign = ALGORITHM + "\n"
                     + amzDate + "\n"
                     + scope.credentialScope() + "\n"
-                    + SigV4RequestValidator.sha256Hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
+                    + Digests.sha256Hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
             String expected = SigV4RequestValidator.hexEncode(
                     SigV4RequestValidator.hmacSha256(signingKey, stringToSign));
             if (MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8),
@@ -134,8 +136,9 @@ public final class SigV4Canonicalization {
      *
      * <p>The sentinels ({@code UNSIGNED-PAYLOAD}, the {@code STREAMING-*} forms) mean the caller
      * chose not to sign the body, and are honoured only when {@code x-amz-content-sha256} is itself
-     * in {@code SignedHeaders}: that is, when the choice is covered by the signature. A presigned
-     * request is unsigned-payload by convention; every AWS presigner emits it that way.
+     * in {@code SignedHeaders}: that is, when the choice is covered by the signature. Callers whose
+     * presigning protocol uses an unsigned payload select it explicitly; body-bearing STS
+     * requests from the Java SDK instead carry the actual body hash.
      */
     public static String payloadHash(String declaredContentSha256, String signedHeaders, byte[] body,
                                      boolean presigned) throws Exception {
@@ -147,7 +150,7 @@ public final class SigV4Canonicalization {
         if (presigned) {
             return "UNSIGNED-PAYLOAD";
         }
-        return SigV4RequestValidator.sha256Hex(body == null ? new byte[0] : body);
+        return Digests.sha256Hex(body == null ? new byte[0] : body);
     }
 
     /** RFC 3986 percent-encoding as SigV4 defines it: {@code /} is escaped, {@code -._~} are not. */

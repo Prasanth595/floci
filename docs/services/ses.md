@@ -209,17 +209,24 @@ when message tags are supplied both as a request field and as a header,
 AWS uses only the request field's tags and does not join the two sets.
 Floci matches this: header tags apply only when the request passes none.
 
-All other `X-SES-*` headers, including the sending-authorization headers
-`X-SES-SOURCE-ARN`, `X-SES-FROM-ARN`, and `X-SES-RETURN-PATH-ARN`, are
-stripped from the relayed message without being acted on.
+The sending-authorization headers `X-SES-SOURCE-ARN`, `X-SES-FROM-ARN`, and
+`X-SES-RETURN-PATH-ARN` are read for the verified-sender check (see
+[Current Behavior](#current-behavior)): the first instance of each counts, and the
+matching `SourceArn`, `FromArn` or `ReturnPathArn` request parameter wins over
+it, as on AWS. All `X-SES-*` headers are stripped from the relayed message;
+the ones not listed here are not acted on.
 
 ## Local Inspection Endpoint
 
 For test assertions and debugging, Floci exposes a LocalStack-compatible mailbox endpoint:
 
-- `GET /_aws/ses` lists captured messages
+- `GET /_aws/ses` lists captured messages, oldest first by `Timestamp`
 - `GET /_aws/ses?id=<message-id>` returns a specific captured message
+- `GET /_aws/ses?email=<address>` returns the messages whose `Source` equals that value exactly, so a sender given as `Name <a@example.com>` is matched in that form; with `id` as well, both filters apply
 - `DELETE /_aws/ses` clears the captured mailbox
+- `DELETE /_aws/ses?id=<message-id>` deletes only that message; an unknown id deletes nothing
+
+The `email` filter matches the sender, as on [LocalStack](https://docs.localstack.cloud/aws/services/ses/), not a recipient. Earlier Floci versions matched it against `ToAddresses`; to find the messages sent to an address, list them all and filter on `Destination.ToAddresses`.
 
 Messages are stored locally by Floci and can be persisted when SES storage is backed by persistent or hybrid storage.
 
@@ -295,10 +302,11 @@ curl $AWS_ENDPOINT_URL/_aws/ses
 
 ## Current Behavior
 
-- Identity verification succeeds immediately; no real DNS or inbox verification flow is required.
+- An email address identity is verified as soon as it is created; no inbox verification flow is required. A domain identity stays `Pending` until its DKIM CNAME records exist in a Route 53 hosted zone in Floci, then becomes `Success`.
+- `SendEmail`, `SendRawEmail` and `SendTemplatedEmail`, and v2 `SendEmail`, require verified senders, as on AWS ([SendEmail](https://docs.aws.amazon.com/ses/latest/APIReference/API_SendEmail.html), [Email sending errors](https://docs.aws.amazon.com/ses/latest/dg/troubleshoot-error-messages.html)): each address used as a "From", "Source", "Sender" or "Return-Path" address must be a verified email address identity or an address in a verified domain identity or one of its subdomains. That is the `Source` or `FromEmailAddress` and the `ReturnPath` or `FeedbackForwardingEmailAddress`, plus, on a raw message, every mailbox of its `From` header, its `Sender` and its `Return-Path` header. A v2 raw send reads the `From` header only in place of a missing `FromEmailAddress` and accepts any `From` header when one is given (probe-confirmed), so the header is checked only then. Every other address present is checked; whether AWS still checks a `Return-Path` header that the request's return path overrides has not been probed. One `MessageRejected` lists every unverified address ("Email address is not verified. The following identities failed the check in region US-EAST-1: a@example.com, b@example.com") and nothing is captured or relayed. An address covered by a sending-authorization ARN of another account (`SourceArn`, `FromArn`, `ReturnPathArn`, their `X-SES-*-ARN` headers, or v2 `FromEmailAddressIdentityArn` and `FeedbackForwardingEmailAddressIdentityArn`) is not checked, since it is the owner's identity; on a raw send the source ARN also covers the `From` and return-path addresses that have no ARN of their own. The bulk sends do not check the sender. The verification codes and invitations Cognito sends are not affected.
 - `SendEmail` stores the text body or the HTML body as the captured message body.
 - `SetIdentityNotificationTopic` publishes to the configured topic on a Bounce/Complaint/Delivery event (triggered via the mailbox simulator addresses or the suppression list), independent of any configuration set. The payload uses the legacy format (`notificationType`, no `mail.tags`, headers only when `SetIdentityHeadersInNotificationsEnabled` is on).
-- Identity (sending authorization) policies are stored and returned as metadata: the policy document, the per-identity limit of 20, and the create/update/delete error shapes match AWS, but Floci does not evaluate policy authorization (Principal-account existence, Resource-ARN match) or gate sending on it.
+- Identity (sending authorization) policies are stored and returned as metadata: the policy document, the per-identity limit of 20, and the create/update/delete error shapes match AWS, but Floci does not evaluate policy authorization (Principal-account existence, Resource-ARN match) or gate sending on it. A send naming another account's identity ARN skips the verified-sender check for the addresses it covers, without looking that identity up or reading its policy.
 - Receipt rule sets and receipt rules are stored inertly: Floci has no inbound-mail endpoint, so stored rules route no mail and their actions never execute, but the management API round-trips with AWS ordering, validation, and error semantics (probe-verified). Action targets are validated against the local emulator with the AWS error codes: an SNS `TopicArn`, S3 `BucketName`, or Lambda `FunctionArn` must reference an existing local resource, and a `BounceAction` `Sender` must be a verified identity. Deviations: S3 bucket write permissions, KMS keys, and `ConnectAction` role assumability are not verified (AWS checks these); `WorkmailAction` gets no resource validation (neither does AWS). Receipt IP filters are stored the same way, with the probed AWS validation and the 100-filter limit, but no inbound connection is ever filtered. `ReorderReceiptRuleSet` requires an exact permutation of the set's rules; `CloneReceiptRuleSet` copies them under a new creation timestamp, leaving the active flag behind.
 - Custom verification email templates are stored and returned; `Create`/`Update` require the `FromEmailAddress` to be a verified identity (or a verified domain) and reject an invalid redirection URL, matching AWS. `SendCustomVerificationEmail` renders the template into the `/_aws/ses` inspection mailbox (and the SMTP relay, when configured) and registers the recipient as a pending-verification identity, matching AWS. The template body has no placeholder that AWS substitutes, so it is passed through verbatim with the same fixed disclaimer AWS always appends; the unique verification link AWS appends is not reproduced because Floci has no verification-click flow. The `SuccessRedirectionURL` / `FailureRedirectionURL` are stored and returned by Get/List but are the post-click redirect targets, so they are not used at send time.
 - For the REST JSON API see [SES v2](#v2) below.
@@ -483,7 +491,30 @@ The contact lists (`ListContactLists`, `ListContacts`), the dedicated-IP lists (
 
 DKIM follows AWS's domain-centric model. A **domain** identity carries DKIM tokens (generated at verification, stable across `VerifyDomainDkim` calls); its `DkimVerificationStatus` tracks **DNS record detection** — it transitions to `Success` when the expected `<token>._domainkey.<domain>` CNAMEs are present in the Route53 emulation, not when DKIM is enabled. An **email** identity has no DKIM of its own: its `DkimAttributes` (`SigningEnabled`, `Status`, `Tokens`) are inherited from its parent domain identity when one is registered. The parent is the exact domain after the `@` (verified against AWS): a verified `example.com` covers `user@example.com` but not `user@mail.example.com` unless `mail.example.com` is itself a registered identity. `SetIdentityDkimEnabled` / `PutEmailIdentityDkimAttributes` only toggle the signing flag (they no longer force the verification status); `PutEmailIdentityDkimSigningAttributes` sets the signing origin (`AWS_SES` Easy DKIM — regenerating tokens when the key length changes — or `EXTERNAL` BYODKIM).
 
+SES v2 `CreateEmailIdentity` and `GetEmailIdentity` report `DkimAttributes.SigningHostedZone` for
+Easy DKIM identities. Floci reports the fixed emulator value `dkim.amazonses.com`, and
+Route53-backed DKIM detection uses that same constant to construct `<token>.<SigningHostedZone>`.
+The zone is not identity state or configurable; Floci does not reproduce AWS's region-
+and identity-specific hosted-zone assignment. Email identities inherit their registered domain's
+DKIM attributes. BYODKIM identities and email identities without a
+registered Easy DKIM domain do not report this SES-hosted zone.
+
 S/MIME certificate associations are stored per region and never used: Floci does not sign mail. Associating validates the request as SES does (a domain identity needs a `FromAddress` in the domain or one of its subdomains, one certificate per address regardless of case) but, like SES, does not inspect the certificate. `ListEmailIdentityCertificates` reports `ACTIVE` while the association meets the [S/MIME certificate considerations](https://docs.aws.amazon.com/ses/latest/dg/send-email-authentication-smime.html#send-email-authentication-smime-certificate-considerations), plus the requirements a probe found SES also enforces (an end-entity certificate whose key usage includes `digitalSignature` and whose extended key usage includes `emailProtection`), checked against Floci's ACM and identity verification when the list is read, with the certificate's expiry as `CertificateExpiryTime`, and `FAILED` otherwise. There is no `PROVISIONING` phase, `DisassociateEmailIdentityCertificate` removes an association at once, and the certificate is not listed as in use by ACM. As on SES, `DeleteEmailIdentity` refuses an identity that still has a certificate associated, whatever its status. The v1 `DeleteIdentity` and `DeleteVerifiedEmailAddress` share the identities and refuse it too, with the same `BadRequestException` the tenant-association guard returns there; SES's v1 behaviour was not probed.
+
+### Request member types
+
+The send operations (`SendEmail`, `SendBulkEmail`, `SendCustomVerificationEmail`) check the request body against the SES v2 service model before anything else is validated, as AWS's restJson1 deserializer does. The first body member of the wrong JSON type, in body order, is a `SerializationException` with AWS's deserializer message:
+
+| Member type | Value sent | Message |
+|---|---|---|
+| string, blob | number or boolean | `NUMBER_VALUE can not be converted to a String` (`TRUE_VALUE` / `FALSE_VALUE`; `a Blob` for a blob) |
+| string, blob | object / array | `Start of structure or map found where not expected.` / `Start of list found where not expected` |
+| structure, map | array / any other non-object | `Start of list found where not expected` / `Expected null` |
+| list | object / any other non-array | `Start of structure or map found where not expected.` / `Expected list or null` |
+
+A JSON `null` member counts as absent. A `null` address list element passes this check and fails later, as on AWS: `SendEmail` answers `Invalid email address null.` after its content and sender checks and before the tenant lookup, and `SendBulkEmail` reports it as the `INVALID_PARAMETER` status of the entry it belongs to (of every entry for a `null` Reply-To), or as `Destination cannot be empty` when no entry of the request has a non-null recipient. The account-level sending switch is still checked first, so a paused account answers `SendingPausedException` even for a malformed body.
+
+The body shapes are vendored in `src/main/resources/aws/sesv2-request-shapes.json`, generated by `tools/aws/regen_sesv2_shapes.py` from the botocore release pinned in `tools/aws/requirements.txt`.
 
 ### IAM enforcement
 
@@ -495,3 +526,23 @@ does not grant them yet. The other actions the service reference lists for some 
 checked: `ses:TagResource` for the create operations, and `iam:PassRole` (with `iam:PassedToService`
 `ses.amazonaws.com`) for creating or updating an event destination. A v2 `SendEmail` is authorized as
 `ses:SendEmail` whatever its content: `ses:SendRawEmail` is a v1 action.
+
+SES publishes to an SNS topic as `ses.amazonaws.com`, so the topic's policy decides whether it may,
+whatever the sender's own SNS permissions: an event destination's events with the configuration set's
+ARN as `aws:SourceArn`, and an identity's bounce, complaint and delivery notifications with the ARN of
+the identity that names the topic, the sender's own or its domain's. Both carry the sending account as
+`aws:SourceAccount` and `aws:SourceOwner`. The default policy of a topic in the sending account admits
+SES; a topic whose policy was replaced, or a topic in another account, needs a statement for SES like
+the one in the [SES Developer Guide](https://docs.aws.amazon.com/ses/latest/dg/event-publishing-add-event-destination-sns.html).
+Floci checks the topic when SES publishes, not when an event destination is created or a notification
+topic is set. A refused event is not delivered. When a notification cannot be published because the
+topic is gone or its policy refuses SES, Floci does what SES does: it takes the topic out of the
+identity's bounce and complaint settings that name it and turns email feedback forwarding back on,
+while a delivery setting stays. A topic that is gone counts with enforcement off too. SES also emails the account about
+the change, which Floci does not. Floci delivers only to topics in the sending account, so a
+notification another account's topic allows is not delivered either.
+
+`CreateReceiptRule` and `UpdateReceiptRule` check the same way: an action whose `TopicArn` names a
+topic whose policy does not let SES publish for that rule is refused with `InvalidSnsTopic`, as a
+topic that does not exist is, the rule's ARN being the `aws:SourceArn`. The rules still route no
+mail.

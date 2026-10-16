@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -20,6 +21,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.model.StackUpdateSnapshot;
 import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
@@ -64,6 +66,30 @@ public class CloudFormationService implements ResourceProvider {
 
     private static final int MAX_OPERATION_THREADS = 16;
     private static final int MAX_QUEUED_OPERATIONS = 128;
+
+    // Texts a client may match on, kept here so each has one place to change. All but
+    // SKIP_NESTED_UNSUPPORTED are the texts real CloudFormation emits, measured against a real
+    // account; that one is Floci's own, for a skip AWS accepts and Floci does not support.
+    private static final String UPDATE_REFUSED = "Stack:%s is in %s state and can not be updated.";
+    private static final String CONTINUE_ROLLBACK_REFUSED =
+            "RollbackUpdatedStack cannot be called from current stack status";
+    private static final String SKIP_NOT_UPDATE_FAILED =
+            "Only the resources in UPDATE_FAILED state are allowed to be skipped";
+    private static final String SKIP_NOT_IN_STACK = "Resources with logicalIds [%s] do not belong to stack %s";
+    private static final String SKIP_NESTED_STACK_MISSING = "Stack [%s] does not exist";
+    private static final String SKIP_NESTED_UNSUPPORTED =
+            "Skipping a resource of a nested stack is not supported by Floci: %s";
+    private static final String SKIPPED_RESOURCE_REASON = "Resource skipped during UpdateRollback";
+    private static final String FORCED_ROLLBACK_COMPLETE_REASON =
+            "One or more resources were skipped during UpdateRollback. These resources were not rolled"
+                    + " back and may have drifted from the template. Run drift detection (DetectStackDrift)"
+                    + " to review their current state before your next update.";
+    private static final String FORCE_WITH_SKIPS = "ForceRollback and ResourcesToSkip are mutually exclusive";
+    private static final String CONTINUE_STACK_MISSING = "Stack: %s does not exist";
+    private static final Pattern CONTINUE_STACK_NAME =
+            Pattern.compile("[a-zA-Z][-a-zA-Z0-9]*|arn:[-a-zA-Z0-9:/._+]*");
+    private static final Pattern RESOURCE_TO_SKIP =
+            Pattern.compile("[a-zA-Z0-9]+|[a-zA-Z][-a-zA-Z0-9]*\\.[a-zA-Z0-9]+");
 
     private final ConcurrentHashMap<String, Stack> stacks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, DeletedStackEntry> deletedStacks = new ConcurrentHashMap<>();
@@ -234,10 +260,15 @@ public class CloudFormationService implements ResourceProvider {
      * rather than by suffix, because {@code UPDATE_ROLLBACK_COMPLETE} ends the same way and is a
      * perfectly updatable stack: it is where an update that failed and rolled back settles, and
      * retrying the update is how it is repaired.
+     *
+     * <p>{@code UPDATE_ROLLBACK_FAILED} is refused because the rollback of the last update left
+     * resources in an unknown state, and an update would build on them. ContinueUpdateRollback
+     * finishes that rollback, and DeleteStack removes the stack; both stay allowed.
      */
     static boolean refusesUpdate(String status) {
         return status != null
-                && (status.endsWith("_IN_PROGRESS") || "ROLLBACK_COMPLETE".equals(status));
+                && (status.endsWith("_IN_PROGRESS") || "ROLLBACK_COMPLETE".equals(status)
+                        || "UPDATE_ROLLBACK_FAILED".equals(status));
     }
 
     /**
@@ -346,6 +377,34 @@ public class CloudFormationService implements ResourceProvider {
                                       Map<String, String> tags, String region, String accountId,
                                       boolean attachToReviewInProgressStack, boolean fromPreviousTemplate) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
+        boolean isCreateType = "CREATE".equalsIgnoreCase(changeSetType);
+        // An update names its stack by name or stack ID; the map is keyed by name. One that names no
+        // live stack is keyed as given, so it lands in the missing-stack branch below.
+        Stack live = isCreateType ? null : resolveStack(stackName, region, accountId);
+
+        // Ahead of the transform and the preflight below, which both read the parameter values. A
+        // request the claim below refuses for its stack alone (an update of a stack that is missing
+        // or cannot be updated, a create over a name in use) gets that refusal instead: there is no
+        // deployed value for its UsePreviousValue to keep.
+        Stack named = isCreateType ? stacks.get(stackKey(accountId, stackName, region)) : live;
+        boolean refusedForItsStack = isCreateType
+                ? named != null && !(attachToReviewInProgressStack && "REVIEW_IN_PROGRESS".equals(named.getStatus()))
+                : named == null || "DELETE_COMPLETE".equals(named.getStatus()) || refusesUpdate(named.getStatus());
+        if (!refusedForItsStack) {
+            requireParameterValues(resolvedTemplate, parameters);
+        }
+
+        // The preflight evaluates AWS::StackName and AWS::StackId as the execution will: an update
+        // or a create attaching to a placeholder against that stack, any other create against the
+        // id it is given below, allocated now. A create over a name in use is checked as that new
+        // stack, never as the stack holding the name; an update of a missing stack, refused below,
+        // with the name it gave and an empty id.
+        boolean attaches = isCreateType && named != null && !refusedForItsStack;
+        String createdStackId = isCreateType && !attaches ? newStackId(stackName, region, accountId) : null;
+        Stack identity = isCreateType ? (attaches ? named : null) : live;
+        String preflightStackName = identity != null ? identity.getStackName() : stackName;
+        String preflightStackId = identity != null ? identity.getStackId()
+                : createdStackId != null ? createdStackId : "";
 
         // Real CloudFormation runs a declared macro (here, only AWS::Serverless-2016-10-31)
         // before it ever evaluates the template's own resources or conditions. On real AWS,
@@ -353,7 +412,7 @@ public class CloudFormationService implements ResourceProvider {
         // unpackaged DefinitionUri) does not fail the API call: it creates the change set and
         // marks it FAILED, with the transform's own error in StatusReason. Match that here instead
         // of throwing, so this failure is reported by the change set, not by a 400 on creation.
-        String samTransformFailureReason = samTransformFailureReason(stackName, resolvedTemplate);
+        String samTransformFailureReason = samTransformFailureReason(stackName, resolvedTemplate, parameters, region);
 
         // Reject an unresolvable or circular dependency graph up front, before any stack state is
         // created, so CreateStack/UpdateStack fail synchronously the way real CloudFormation does.
@@ -361,7 +420,8 @@ public class CloudFormationService implements ResourceProvider {
         // template declaring the SAM transform, whether or not that transform succeeded, so
         // gating this call on samTransformFailureReason == null duplicates that check for no
         // effect.
-        validateResourceDependencies(resolvedTemplate, parameters, region, accountId);
+        validateResourceDependencies(resolvedTemplate, parameters, preflightStackName, preflightStackId,
+                region, accountId);
 
         // A CREATE change set against a name that already has a stack of any status - including
         // ROLLBACK_COMPLETE - is a real conflict: AWS requires an explicit DeleteStack before a
@@ -391,10 +451,6 @@ public class CloudFormationService implements ResourceProvider {
         // was already released, losing an accepted change set or corrupting the map's links. Only
         // persistStack() stays outside: it is storage I/O, and compute()'s contract is that the
         // remapping function does short, non-blocking work.
-        boolean isCreateType = "CREATE".equalsIgnoreCase(changeSetType);
-        // An update names its stack by name or stack ID; the map is keyed by name. One that names no
-        // live stack is keyed as given, so it lands in the missing-stack branch below.
-        Stack live = isCreateType ? null : resolveStack(stackName, region, accountId);
         String canonicalStackName = live == null ? stackName : live.getStackName();
         ChangeSet[] created = new ChangeSet[1];
         Stack stack = stacks.compute(stackKey(accountId, canonicalStackName, region), (k, existing) -> {
@@ -403,7 +459,10 @@ public class CloudFormationService implements ResourceProvider {
                 if (!isCreateType) {
                     throw noStackToUpdate(stackName, region, accountId);
                 }
-                target = newStack(stackName, region, accountId);
+                // The id the preflight saw; a placeholder that left the map since then has none.
+                target = newStack(stackName,
+                        createdStackId != null ? createdStackId : newStackId(stackName, region, accountId),
+                        region, accountId);
                 if (tags != null) target.getTags().putAll(tags);
                 // A CREATE change set puts a brand-new stack into REVIEW_IN_PROGRESS. Record the
                 // matching stack-level event (as AWS and LocalStack do) so DescribeStackEvents is
@@ -469,8 +528,7 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     private static AwsException cannotBeUpdated(String stackId, String status) {
-        return new AwsException("ValidationError",
-                "Stack:" + stackId + " is in " + status + " state and can not be updated.", 400);
+        return new AwsException("ValidationError", UPDATE_REFUSED.formatted(stackId, status), 400);
     }
 
     // AWS refuses a deleted stack's ID by its state, while a name, or an ID it never issued,
@@ -492,7 +550,8 @@ public class CloudFormationService implements ResourceProvider {
      * transform's own per-resource message. The count is always 1: {@code expandSamTemplate}
      * throws on the first bad resource rather than accumulating them.
      */
-    private String samTransformFailureReason(String stackName, String templateBody) {
+    private String samTransformFailureReason(String stackName, String templateBody, Map<String, String> parameters,
+                                             String region) {
         JsonNode template;
         try {
             template = parseTemplate(templateBody);
@@ -504,9 +563,9 @@ public class CloudFormationService implements ResourceProvider {
         if (!samTransformProcessor.hasSamTransform(template)) {
             return null;
         }
+        JsonNode expanded;
         try {
-            samTransformProcessor.expandSamTemplate(template);
-            return null;
+            expanded = samTransformProcessor.expandSamTemplate(template, samTransformParameters(template, parameters, region));
         } catch (AwsException e) {
             return "Transform AWS::Serverless-2016-10-31 failed with: Invalid Serverless "
                     + "Application Specification document. Number of errors found: 1. "
@@ -521,6 +580,14 @@ public class CloudFormationService implements ResourceProvider {
                     stackName, e.getMessage());
             throw e;
         }
+        // The transform succeeded but produced a template CloudFormation rejects: AWS fails the
+        // change set with the template error itself, not a transform failure.
+        try {
+            requireStringConditionReferencesIn(expanded);
+        } catch (AwsException e) {
+            return e.getMessage();
+        }
+        return null;
     }
 
     // ── DescribeChangeSet ─────────────────────────────────────────────────────
@@ -553,7 +620,8 @@ public class CloudFormationService implements ResourceProvider {
                 // The deployed stack's template is always the SAM-expanded form (see
                 // executeTemplate); comparing the change set's raw SAM source against it would
                 // report every SAM-generated resource as Add/Remove even on a no-op update.
-                newTemplate = samTransformProcessor.expandSamTemplate(newTemplate);
+                newTemplate = samTransformProcessor.expandSamTemplate(newTemplate,
+                        samTransformParameters(newTemplate, cs.getParameters(), region));
             }
             JsonNode newResources = newTemplate.path("Resources");
             boolean createType = "CREATE".equalsIgnoreCase(cs.getChangeSetType())
@@ -595,9 +663,10 @@ public class CloudFormationService implements ResourceProvider {
                     changedParams.add(k);
                 }
             });
-            // A parameter that was deployed but is omitted from this update with no template
-            // Default is dropped entirely by resolveDefaultParameters (matching what
-            // ExecuteChangeSet does); flag its disappearance too, not just a value change.
+            // A parameter that was deployed but that the new template no longer declares, and the
+            // update does not pass, is absent from the new values, as it is when ExecuteChangeSet
+            // runs; flag its disappearance too, not just a value change. One the template still
+            // declares has a value or a Default: createChangeSet refuses the update otherwise.
             oldResolvedParams.keySet().forEach(k -> {
                 if (!newResolvedParams.containsKey(k)) {
                     changedParams.add(k);
@@ -614,7 +683,7 @@ public class CloudFormationService implements ResourceProvider {
                     ? resolveConditions(oldTemplate, oldResolvedParams, stack, region, regionResolver.getAccountId())
                     : Map.of();
             Map<String, Boolean> newConditions = resolveConditions(
-                    newTemplate, newResolvedParams, null, region, regionResolver.getAccountId());
+                    newTemplate, newResolvedParams, stack, region, regionResolver.getAccountId());
             Set<String> changedConditions = new HashSet<>();
             newConditions.forEach((name, val) -> {
                 if (!Objects.equals(val, oldConditions.get(name))) {
@@ -1039,6 +1108,91 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
+    // ── ContinueUpdateRollback ────────────────────────────────────────────────
+
+    /**
+     * Retries the rollback of a stack in {@code UPDATE_ROLLBACK_FAILED}, the only status AWS accepts
+     * it from; any other status is refused here, before anything changes, as is a malformed request
+     * or a forced rollback that also names skips. The status check and the move to
+     * {@code UPDATE_ROLLBACK_IN_PROGRESS} are one step under the stack's lock, so a racing update or
+     * second retry is refused. Everything else, the {@code resourcesToSkip} checks against the stack
+     * included, runs on the operation executor, because AWS accepts the call and reports a bad skip
+     * as the reason the rollback failed again.
+     */
+    public Future<?> continueUpdateRollback(
+            String stackNameOrArn, List<String> resourcesToSkip, boolean forceRollback, String region) {
+        validateContinueUpdateRollback(stackNameOrArn, resourcesToSkip);
+        if (forceRollback && !resourcesToSkip.isEmpty()) {
+            throw new AwsException("ValidationError", FORCE_WITH_SKIPS, 400);
+        }
+        String accountId = currentAccount();
+        Stack found = resolveStack(stackNameOrArn, region, accountId);
+        if (found == null) {
+            throw new AwsException("ValidationError", CONTINUE_STACK_MISSING.formatted(stackNameOrArn), 400);
+        }
+        String stackName = found.getStackName();
+        List<String> skips = List.copyOf(resourcesToSkip);
+        StackMutationSnapshot[] snapshot = new StackMutationSnapshot[1];
+        Stack stack = stacks.compute(stackKey(accountId, stackName, region), (k, existing) -> {
+            if (existing == null) {
+                throw new AwsException("ValidationError", CONTINUE_STACK_MISSING.formatted(stackNameOrArn), 400);
+            }
+            if (!"UPDATE_ROLLBACK_FAILED".equals(existing.getStatus())) {
+                throw new AwsException("ValidationError", CONTINUE_ROLLBACK_REFUSED, 400);
+            }
+            snapshot[0] = snapshot(existing);
+            existing.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
+            addEvent(existing, existing.getStackName(), existing.getStackId(),
+                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_IN_PROGRESS", "User Initiated");
+            return existing;
+        });
+        try {
+            persistStack(stack);
+            return submitOperation(() -> RequestScopes.runAs(accountId, region,
+                    () -> resumeUpdateRollback(stack, skips, forceRollback, region)));
+        } catch (AwsException e) {
+            if ("LimitExceededException".equals(e.getErrorCode())) {
+                Stack restored = restoreStack(accountId, stackName, region, snapshot[0]);
+                if (restored != null) {
+                    persistStack(restored);
+                }
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Refuses a malformed ContinueUpdateRollback request as AWS does, before the stack is looked up:
+     * every constraint violation of {@code StackName} and {@code ResourcesToSkip} in one
+     * {@code ValidationError}, with AWS's texts. A skip has no length limit.
+     */
+    private static void validateContinueUpdateRollback(String stackNameOrArn, List<String> resourcesToSkip) {
+        List<String> violations = new ArrayList<>();
+        if (stackNameOrArn == null) {
+            violations.add("Value null at 'stackName' failed to satisfy constraint: Member must not be null");
+        } else {
+            if (stackNameOrArn.isEmpty()) {
+                violations.add("Value '' at 'stackName' failed to satisfy constraint:"
+                        + " Member must have length greater than or equal to 1");
+            }
+            if (!CONTINUE_STACK_NAME.matcher(stackNameOrArn).matches()) {
+                violations.add("Value '" + stackNameOrArn + "' at 'stackName' failed to satisfy constraint:"
+                        + " Member must satisfy regular expression pattern: " + CONTINUE_STACK_NAME.pattern());
+            }
+        }
+        if (resourcesToSkip.stream().anyMatch(skip -> !RESOURCE_TO_SKIP.matcher(skip).matches())) {
+            violations.add("Value '" + resourcesToSkip + "' at 'resourcesToSkip' failed to satisfy constraint:"
+                    + " Member must satisfy constraint: [Member must satisfy regular expression pattern: "
+                    + RESOURCE_TO_SKIP.pattern() + "]");
+        }
+        if (!violations.isEmpty()) {
+            String prefix = violations.size() == 1
+                    ? "1 validation error detected: "
+                    : violations.size() + " validation errors detected: ";
+            throw new AwsException("ValidationError", prefix + String.join("; ", violations), 400);
+        }
+    }
+
     private StackMutationSnapshot snapshot(Stack stack) {
         Map<ChangeSet, ChangeSetState> states = new IdentityHashMap<>();
         for (ChangeSet changeSet : stack.changeSetsSnapshot().values()) {
@@ -1281,8 +1435,83 @@ public class CloudFormationService implements ResourceProvider {
     // ── DescribeStackResources ────────────────────────────────────────────────
 
     public List<StackResource> describeStackResources(String stackName, String region) {
-        Stack stack = getStackOrThrow(stackName, region);
-        return new ArrayList<>(stack.resourcesSnapshot().values());
+        return describeStackResources(stackName, null, null, region);
+    }
+
+    /**
+     * The stack's resources, narrowed by the two filters {@code DescribeStackResources} accepts.
+     *
+     * <p>AWS takes either {@code StackName} or {@code PhysicalResourceId}, never both: given a
+     * physical id it answers with the whole stack that resource belongs to, rather than that one
+     * resource. {@code LogicalResourceId} is only a filter on the result, so naming one the stack
+     * does not have is an empty answer; {@code DescribeStackResource}, the singular action where
+     * the resource is required rather than optional, is the one that raises for a miss.
+     *
+     * <p>Both filters being silently ignored is worse than it sounds for a caller that filters and
+     * then reads the first member: it gets whichever resource the stack happens to list first.
+     * Serverless Framework resolves an AppSync API id exactly that way.
+     */
+    public List<StackResource> describeStackResources(String stackName, String logicalResourceId,
+                                                      String physicalResourceId, String region) {
+        return describeStackResourcesView(stackName, logicalResourceId, physicalResourceId, region).resources();
+    }
+
+    /** The stack a call resolved to and the resources it answered with; the stack's own name is
+     * what AWS stamps on every member, and the caller may not have supplied it. */
+    public record StackResourcesView(String stackName, List<StackResource> resources) {
+    }
+
+    /** @see #describeStackResources(String, String, String, String) */
+    public StackResourcesView describeStackResourcesView(String stackName, String logicalResourceId,
+                                                         String physicalResourceId, String region) {
+        boolean hasStackName = stackName != null && !stackName.isBlank();
+        boolean hasPhysicalId = physicalResourceId != null && !physicalResourceId.isBlank();
+        if (!hasStackName && !hasPhysicalId) {
+            throw new AwsException("ValidationError",
+                    "Either StackName or PhysicalResourceId must be specified.", 400);
+        }
+        if (hasStackName && hasPhysicalId) {
+            throw new AwsException("ValidationError",
+                    "Cannot specify both StackName and PhysicalResourceId.", 400);
+        }
+
+        // A physical id names the stack, it does not narrow it: AWS returns "the associated
+        // resources of the stack that the resource belongs to", which is the whole stack.
+        Stack stack = hasStackName
+                ? getStackOrThrow(stackName, region)
+                : stackContaining(physicalResourceId, region);
+        List<StackResource> resources = new ArrayList<>(stack.resourcesSnapshot().values());
+
+        // Only a filter on the result. The reference documents no error for a logical id the
+        // stack does not have, and DescribeStackResource, the singular action where the resource
+        // is required rather than optional, is the one that raises for a miss.
+        if (logicalResourceId != null && !logicalResourceId.isBlank()) {
+            resources.removeIf(r -> !logicalResourceId.equals(r.getLogicalId()));
+        }
+        return new StackResourcesView(stack.getStackName(), resources);
+    }
+
+    /**
+     * The stack owning a physical id, for the {@code PhysicalResourceId}-only form of the call.
+     *
+     * <p>Live stacks are considered before deleted ones, newest first within each group.
+     * {@code listStacks} answers oldest first and keeps deleted stacks for their retention window,
+     * so walking it directly resolves a redeployed resource to the stack that used to own it.
+     */
+    private Stack stackContaining(String physicalResourceId, String region) {
+        List<Stack> candidates = new ArrayList<>(listStacks(region));
+        candidates.sort(Comparator
+                .comparing((Stack s) -> "DELETE_COMPLETE".equals(s.getStatus()))
+                .thenComparing(Stack::getCreationTime, Comparator.reverseOrder()));
+        for (Stack stack : candidates) {
+            boolean owns = stack.resourcesSnapshot().values().stream()
+                    .anyMatch(r -> physicalResourceId.equals(r.getPhysicalId()));
+            if (owns) {
+                return stack;
+            }
+        }
+        throw new AwsException("ValidationError",
+                "Stack for " + physicalResourceId + " does not exist", 400);
     }
 
     // ── ListStacks ────────────────────────────────────────────────────────────
@@ -1389,6 +1618,22 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
+     * The parameter values the SAM transform sees: the given ones over each {@code Default}, with
+     * {@code AWS::SSM::Parameter::Value<String>} parameters already read from Parameter Store, as
+     * CloudFormation resolves them before it runs the transform. A parameter that cannot be fetched
+     * leaves the values unresolved here; the execution path reports that failure with its own error.
+     */
+    private Map<String, String> samTransformParameters(JsonNode template, Map<String, String> params, String region) {
+        Map<String, String> given = resolveDefaultParameters(template, params);
+        try {
+            return resolveSsmParameters(template, given, region);
+        } catch (AwsException e) {
+            LOG.debugv("SAM transform sees unresolved parameters: {0}", e.getMessage());
+            return given;
+        }
+    }
+
+    /**
      * Substitutes {@code AWS::SSM::Parameter::Value<String>}-typed parameter values — which carry
      * an SSM parameter <em>name</em> — with the value stored in Parameter Store for the stack's
      * account and region, as real CloudFormation does before template processing. Missing
@@ -1436,6 +1681,9 @@ public class CloudFormationService implements ResourceProvider {
             Set<String> changedResourceIds = isCreate
                     ? Set.of()
                     : changedResourceIds(stack, templateBody, params, region);
+            JsonNode previousResources = isCreate
+                    ? objectMapper.missingNode()
+                    : previousResources(stack, previousState, region, accountId);
             JsonNode template = parseTemplate(templateBody);
             stack.setOriginalTemplateBody(templateBody);
 
@@ -1451,13 +1699,16 @@ public class CloudFormationService implements ResourceProvider {
             boolean hasSamTransform = samTransformProcessor.hasSamTransform(template);
             if (hasSamTransform) {
                 LOG.infov("Applying SAM transform for stack {0}", stack.getStackName());
-                template = samTransformProcessor.expandSamTemplate(template);
+                template = samTransformProcessor.expandSamTemplate(template, samTransformParameters(template, params, region));
             }
 
             // Persist the merged/expanded tree, not the raw submitted body, whenever either
             // processor actually changed it, so the change-set baseline diffs against it instead of
             // against a stale Fn::Transform node. A template neither processor touched keeps its
             // submitted body byte for byte.
+            // A template CloudFormation rejects outright fails before the stack takes it on, as the
+            // synchronous check does for a template no transform touched.
+            requireStringConditionReferencesIn(template);
             if (includeMerged || hasSamTransform) {
                 templateBody = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(template);
             }
@@ -1493,6 +1744,15 @@ public class CloudFormationService implements ResourceProvider {
             if (resources.isObject()) {
                 List<String> sortedLogicalIds = topologicalSort(resources, conditions);
 
+                if (!isCreate) {
+                    for (String logicalId : sortedLogicalIds) {
+                        StackResource existing = stack.getResources().get(logicalId);
+                        if (existing != null && dispatcher.requiresUpdateRecovery(existing)) {
+                            changedResourceIds.add(logicalId);
+                        }
+                    }
+                }
+
                 for (String logicalId : sortedLogicalIds) {
                     if (!isCreate && !changedResourceIds.contains(logicalId)) {
                         continue;
@@ -1526,7 +1786,10 @@ public class CloudFormationService implements ResourceProvider {
                         stack.getResources().put(logicalId, resource);
                     }
 
-                    String inProgressStatus = isCreate
+                    // A logical id the stack did not hold is created, even on an update, as AWS
+                    // reports it; that includes a resource whose condition just turned true.
+                    boolean creating = isCreate || previousResource == null;
+                    String inProgressStatus = creating
                             ? "CREATE_IN_PROGRESS"
                             : "UPDATE_IN_PROGRESS";
                     addEvent(
@@ -1542,15 +1805,20 @@ public class CloudFormationService implements ResourceProvider {
                                 props.isMissingNode() ? null : props,
                                 engine, region, accountId, isCreate, previousResource);
                     } else {
+                        JsonNode previousDefinition = previousResources.path(logicalId);
+                        JsonNode priorProps = type.equals(previousDefinition.path("Type").asText())
+                                && previousDefinition.path("Properties").isObject()
+                                ? previousDefinition.path("Properties") : null;
                         resource = dispatcher.provision(logicalId, type, props.isMissingNode() ? null : props,
                                 engine, region, accountId, stack.getStackName(),
                                 resource.getPhysicalId(), resource.getAttributes(),
                                 event -> addEvent(stack, logicalId, event.getPhysicalResourceId(), type,
-                                        event.getResourceStatus(), event.getResourceStatusReason()));
+                                        event.getResourceStatus(), event.getResourceStatusReason()),
+                                priorProps);
                     }
                     resource.setUpdateReplacePolicy(
                             resDef.path("UpdateReplacePolicy").asText(null));
-                    if (!isCreate) {
+                    if (!creating) {
                         if ("CREATE_COMPLETE".equals(resource.getStatus())) {
                             resource.setStatus("UPDATE_COMPLETE");
                         } else if ("CREATE_FAILED".equals(resource.getStatus())) {
@@ -1999,6 +2267,109 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
+    /**
+     * The body of ContinueUpdateRollback, on a stack already moved to UPDATE_ROLLBACK_IN_PROGRESS:
+     * checks {@code resourcesToSkip}, reports each skipped resource UPDATE_COMPLETE, runs the
+     * rollback walker again over the resources still owed a rollback, and finishes as the rollback
+     * of the failed update does. A bad skip touches no resource: the stack returns to
+     * UPDATE_ROLLBACK_FAILED with the reason, keeping what a later retry needs. A forced rollback
+     * skips every UPDATE_FAILED resource of the stack instead, and says so when it completes.
+     */
+    void resumeUpdateRollback(Stack stack, List<String> resourcesToSkip, boolean forceRollback, String region) {
+        try {
+            List<String> skips = forceRollback
+                    ? stack.resourcesSnapshot().values().stream()
+                            .filter(resource -> "UPDATE_FAILED".equals(resource.getStatus()))
+                            .map(StackResource::getLogicalId)
+                            .toList()
+                    : resourcesToSkip;
+            String invalidSkip = invalidSkipReason(stack, skips);
+            if (invalidSkip != null) {
+                // Reason and event before the status, which is the volatile publishing write.
+                stack.setStatusReason(invalidSkip);
+                addEvent(stack, stack.getStackName(), stack.getStackId(),
+                        "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_FAILED", invalidSkip);
+                stack.setStatus("UPDATE_ROLLBACK_FAILED");
+                persistStack(stack);
+                LOG.warnv("Stack {0} update rollback not continued: {1}", stack.getStackName(), invalidSkip);
+                return;
+            }
+            StackUpdateSnapshot previousState = stack.getUpdateRollbackSnapshot();
+            List<String> owedResourceIds = stack.getUpdateRollbackResourceIds();
+            if (previousState == null || owedResourceIds == null) {
+                // A stack stored before the snapshot was kept: every UPDATE_FAILED resource is owed a
+                // rollback, and the template the stack holds now is the one it keeps.
+                previousState = snapshotForUpdate(stack);
+                owedResourceIds = new ArrayList<>();
+                for (StackResource previous : previousState.resources().values()) {
+                    if ("UPDATE_FAILED".equals(previous.getStatus())) {
+                        owedResourceIds.add(previous.getLogicalId());
+                        previous.setStatus("UPDATE_COMPLETE");
+                        previous.setStatusReason(null);
+                    }
+                }
+            }
+            Set<String> owed = new LinkedHashSet<>(owedResourceIds);
+            for (String logicalId : skips) {
+                StackResource resource = stack.getResources().get(logicalId);
+                resource.setStatus("UPDATE_COMPLETE");
+                resource.setStatusReason(SKIPPED_RESOURCE_REASON);
+                addEvent(stack, logicalId, resource.getPhysicalId(), resource.getResourceType(),
+                        "UPDATE_COMPLETE", SKIPPED_RESOURCE_REASON);
+                owed.remove(logicalId);
+            }
+            // Recorded before and after the walker, so an unexpected failure never re-runs a skip or a done rollback.
+            stack.setUpdateRollbackSnapshot(previousState);
+            stack.setUpdateRollbackResourceIds(List.copyOf(owed));
+            List<String> rollbackFailures = rollbackUpdatedResources(
+                    stack, previousState.resources(), owed, region);
+            stack.setUpdateRollbackResourceIds(List.copyOf(rollbackFailures));
+            finishUpdateRollback(stack, region, previousState, rollbackFailures,
+                    forceRollback && !skips.isEmpty() ? FORCED_ROLLBACK_COMPLETE_REASON : null);
+        } catch (Exception e) {
+            // Nobody reads this worker's future: a stack left UPDATE_ROLLBACK_IN_PROGRESS here could
+            // never be continued. The snapshot and the resources still owed a rollback are kept.
+            LOG.errorv("Stack {0} update rollback could not continue: {1}",
+                    stack.getStackName(), e.getMessage());
+            stack.setStatusReason(e.getMessage());
+            addEvent(stack, stack.getStackName(), stack.getStackId(),
+                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_FAILED", e.getMessage());
+            stack.setStatus("UPDATE_ROLLBACK_FAILED");
+            persistStack(stack);
+        }
+    }
+
+    /**
+     * Why AWS would fail the rollback over {@code resourcesToSkip}, or {@code null} when every
+     * skip is an UPDATE_FAILED resource of this stack. AWS names a nested stack's resource
+     * {@code NestedStackName.ResourceLogicalID}; Floci does not support skipping one.
+     */
+    private static String invalidSkipReason(Stack stack, List<String> resourcesToSkip) {
+        List<String> notInStack = new ArrayList<>();
+        boolean notUpdateFailed = false;
+        for (String logicalId : resourcesToSkip) {
+            int dot = logicalId.indexOf('.');
+            if (dot >= 0) {
+                String nestedStackId = logicalId.substring(0, dot);
+                StackResource nested = stack.getResources().get(nestedStackId);
+                if (nested == null || !"AWS::CloudFormation::Stack".equals(nested.getResourceType())) {
+                    return SKIP_NESTED_STACK_MISSING.formatted(nestedStackId);
+                }
+                return SKIP_NESTED_UNSUPPORTED.formatted(logicalId);
+            }
+            StackResource resource = stack.getResources().get(logicalId);
+            if (resource == null) {
+                notInStack.add(logicalId);
+            } else if (!"UPDATE_FAILED".equals(resource.getStatus())) {
+                notUpdateFailed = true;
+            }
+        }
+        if (!notInStack.isEmpty()) {
+            return SKIP_NOT_IN_STACK.formatted(String.join(", ", notInStack), stack.getStackName());
+        }
+        return notUpdateFailed ? SKIP_NOT_UPDATE_FAILED : null;
+    }
+
     private void rollbackFailedUpdate(
             Stack stack,
             String region,
@@ -2012,6 +2383,23 @@ public class CloudFormationService implements ResourceProvider {
 
         List<String> rollbackFailures = rollbackUpdatedResources(
                 stack, previousState.resources(), attemptedResourceIds, region);
+        finishUpdateRollback(stack, region, previousState, rollbackFailures, null);
+    }
+
+    /**
+     * Ends an update rollback, the first one and every ContinueUpdateRollback retry alike: restores
+     * the parameters, outputs and exports, and the template once every resource rolled back, then
+     * settles the stack in UPDATE_ROLLBACK_COMPLETE, with {@code completionReason} as its reason, or
+     * UPDATE_ROLLBACK_FAILED. A rollback that fails keeps the snapshot and the resources still owed
+     * a rollback on the stack for a retry.
+     */
+    private void finishUpdateRollback(
+            Stack stack,
+            String region,
+            StackUpdateSnapshot previousState,
+            List<String> rollbackFailures,
+            String completionReason) {
+        List<String> owedResourceIds = List.copyOf(rollbackFailures);
         // Parameters are independent of resource-rollback outcome - always restore them to the last
         // successfully deployed values, even when resource rollback itself fails and the stack lands
         // in UPDATE_ROLLBACK_FAILED, so DescribeStacks and later change-set previews don't keep
@@ -2036,19 +2424,24 @@ public class CloudFormationService implements ResourceProvider {
         }
         stack.setLastUpdatedTime(now());
         if (rollbackFailures.isEmpty()) {
-            stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
-            stack.setStatusReason(null);
+            stack.setUpdateRollbackSnapshot(null);
+            stack.setUpdateRollbackResourceIds(null);
+            // Reason and event before the status, which is the volatile publishing write.
+            stack.setStatusReason(completionReason);
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_COMPLETE", null);
+                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_COMPLETE", completionReason);
+            stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
             LOG.infov("Stack {0} update rolled back (UPDATE_ROLLBACK_COMPLETE)",
                     stack.getStackName());
         } else {
             String reason = "The following resource(s) failed to roll back: ["
                     + String.join(", ", rollbackFailures) + "].";
-            stack.setStatus("UPDATE_ROLLBACK_FAILED");
+            stack.setUpdateRollbackSnapshot(previousState);
+            stack.setUpdateRollbackResourceIds(owedResourceIds);
             stack.setStatusReason(reason);
             addEvent(stack, stack.getStackName(), stack.getStackId(),
                     "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_FAILED", reason);
+            stack.setStatus("UPDATE_ROLLBACK_FAILED");
             LOG.errorv("Stack {0} update rollback failed: {1}", stack.getStackName(), reason);
         }
         persistStack(stack);
@@ -2096,8 +2489,9 @@ public class CloudFormationService implements ResourceProvider {
                         || dispatcher.rollbackUpdate(resource,
                                 event -> addEvent(stack, resource.getLogicalId(), event.getPhysicalResourceId(),
                                         resource.getResourceType(), event.getResourceStatus(), event.getResourceStatusReason()))) {
-                    resource.setStatus(previous.getStatus());
-                    resource.setStatusReason(previous.getStatusReason());
+                    boolean recoveredPendingUpdate = dispatcher.requiresUpdateRecovery(previous);
+                    resource.setStatus(recoveredPendingUpdate ? "UPDATE_COMPLETE" : previous.getStatus());
+                    resource.setStatusReason(recoveredPendingUpdate ? null : previous.getStatusReason());
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "UPDATE_COMPLETE",
                             "Resource update rolled back");
@@ -2167,6 +2561,71 @@ public class CloudFormationService implements ResourceProvider {
         return existing;
     }
 
+    /**
+     * The resources of the processed template an update replaces, so a provisioner can tell a
+     * property the update removes from one the stack never declared. All of them, since an update
+     * can provision a resource whose own definition did not change. Evaluated under the previous
+     * deployment's conditions: a top-level property whose {@code Fn::If} chose {@code AWS::NoValue}
+     * was never applied and is left out. Missing when there is no previous template, and when it no
+     * longer parses: the update then proceeds as if nothing had been declared.
+     */
+    private JsonNode previousResources(Stack stack, StackUpdateSnapshot previousState, String region,
+                                       String accountId) {
+        if (previousState.templateBody() == null) {
+            return objectMapper.missingNode();
+        }
+        try {
+            JsonNode previousTemplate = parseTemplate(previousState.templateBody());
+            // As the change-set preview does: raw parameters for a stack persisted before
+            // resolvedParameters existed.
+            Map<String, String> previousParams = previousState.resolvedParameters().isEmpty()
+                    ? previousState.parameters() : previousState.resolvedParameters();
+            Map<String, Boolean> conditions = resolveConditions(previousTemplate, previousParams, stack, region,
+                    accountId);
+            ObjectNode resources = objectMapper.createObjectNode();
+            for (Map.Entry<String, JsonNode> entry : previousTemplate.path("Resources").properties()) {
+                JsonNode definition = entry.getValue();
+                ObjectNode applied = resources.putObject(entry.getKey());
+                applied.set("Type", definition.path("Type"));
+                if (definition.path("Properties").isObject()) {
+                    applied.set("Properties", appliedProperties(definition.path("Properties"), conditions));
+                }
+            }
+            return resources;
+        } catch (Exception e) {
+            LOG.warnv("Previous template of stack {0} could not be evaluated ({1}); its updated resources see no prior properties",
+                    stack.getStackName(), e.getMessage());
+            return objectMapper.missingNode();
+        }
+    }
+
+    /**
+     * The top-level properties left after each one's {@code Fn::If} is decided, without those that
+     * chose {@code AWS::NoValue}. Decided as the template engine decides it: a condition the
+     * template does not define is false.
+     */
+    private ObjectNode appliedProperties(JsonNode properties, Map<String, Boolean> conditions) {
+        ObjectNode applied = objectMapper.createObjectNode();
+        for (Map.Entry<String, JsonNode> property : properties.properties()) {
+            JsonNode value = decideIf(property.getValue(), conditions);
+            boolean noValue = value.isObject() && value.size() == 1 && "AWS::NoValue".equals(value.path("Ref").asText());
+            if (!noValue) {
+                applied.set(property.getKey(), property.getValue());
+            }
+        }
+        return applied;
+    }
+
+    /** The branch an {@code Fn::If} chose, following nested ones; any other value as it is. */
+    private static JsonNode decideIf(JsonNode value, Map<String, Boolean> conditions) {
+        while (value.isObject() && value.size() == 1 && value.path("Fn::If").isArray()
+                && value.path("Fn::If").size() >= 3) {
+            JsonNode branches = value.path("Fn::If");
+            value = conditions.getOrDefault(branches.get(0).asText(), false) ? branches.get(1) : branches.get(2);
+        }
+        return value;
+    }
+
     private StackUpdateSnapshot snapshotForUpdate(Stack stack) {
         return new StackUpdateSnapshot(
                 stack.getTemplateBody(),
@@ -2199,17 +2658,6 @@ public class CloudFormationService implements ResourceProvider {
         copy.setTimestamp(source.getTimestamp());
         copy.setAttributes(new HashMap<>(source.getAttributes()));
         return copy;
-    }
-
-    private record StackUpdateSnapshot(
-            String templateBody,
-            String originalTemplateBody,
-            Map<String, String> parameters,
-            Map<String, String> resolvedParameters,
-            Map<String, String> outputs,
-            Map<String, String> exports,
-            Map<String, String> outputExportNames,
-            Map<String, StackResource> resources) {
     }
 
     private record UpdateCleanupFailure(
@@ -2412,6 +2860,8 @@ public class CloudFormationService implements ResourceProvider {
                 throw new IllegalStateException(reason);
             }
 
+            stack.setUpdateRollbackSnapshot(null);
+            stack.setUpdateRollbackResourceIds(null);
             // Before the status, never after. Status is the volatile publishing write, so a reader
             // that observes DELETE_COMPLETE is guaranteed to observe every write that preceded it.
             // Assigned afterwards, a concurrent DescribeStacks can report the terminal status with
@@ -2506,16 +2956,128 @@ public class CloudFormationService implements ResourceProvider {
 
     private Map<String, Boolean> resolveConditions(JsonNode template, Map<String, String> params,
                                                    Stack stack, String region, String accountId) {
+        return resolveConditions(template, params, stack.getStackName(), stack.getStackId(), region, accountId);
+    }
+
+    /**
+     * Evaluates the template's {@code Conditions} through the template engine, so an operand of
+     * {@code Fn::Equals} can be any intrinsic the engine resolves, {@code Fn::FindInMap} and the
+     * pseudo parameters included. {@code AWS::StackName} and {@code AWS::StackId} resolve to the
+     * name and id given, so every evaluation of one stack's template passes the stack's own; a
+     * create's preflight passes the id createChangeSet allocates for the stack it then creates.
+     */
+    private Map<String, Boolean> resolveConditions(JsonNode template, Map<String, String> params,
+                                                   String stackName, String stackId, String region,
+                                                   String accountId) {
         Map<String, Boolean> conditions = new HashMap<>();
         JsonNode condNode = template.path("Conditions");
         if (!condNode.isObject()) {
             return conditions;
         }
+        Map<String, JsonNode> mappings = new HashMap<>();
+        template.path("Mappings").fields().forEachRemaining(e -> mappings.put(e.getKey(), e.getValue()));
+        // Every declared parameter has a value or a Default once a template is deployed, but a stack
+        // stored by an older Floci may lack one. It compares as "", as it did when that stack was
+        // deployed, rather than as its own name, which is how the engine answers a Ref it cannot resolve.
+        Map<String, String> conditionParams = new HashMap<>(params);
+        template.path("Parameters").fieldNames().forEachRemaining(name -> conditionParams.putIfAbsent(name, ""));
+        // A template being deployed with an import in a condition is refused up front
+        // (requireStringConditionReferences); one here is a stored template's, which reads it as "".
+        CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
+                accountId, region, stackName, stackId, conditionParams, Map.of(), Map.of(),
+                conditions, mappings, objectMapper, name -> "");
         // Two-pass: collect all names first, then evaluate (handles forward references)
         condNode.fields().forEachRemaining(e -> conditions.put(e.getKey(), false));
         condNode.fields().forEachRemaining(e ->
-                conditions.put(e.getKey(), evaluateCondition(e.getValue(), params, conditions, region, accountId)));
+                conditions.put(e.getKey(), evaluateCondition(e.getValue(), conditions, engine)));
         return conditions;
+    }
+
+    private static final String NON_STRING_CONDITION_REFERENCE =
+            "Template error: every Condition object must have a single String value.";
+    private static final String IMPORT_VALUE_IN_CONDITION =
+            "Template error: Cannot use Fn::ImportValue in Conditions.";
+
+    /**
+     * Rejects a template whose conditions name another one with anything but a string, as
+     * CloudFormation does before evaluating any of them: {@code Fn::And}, {@code Fn::Or} and
+     * {@code Fn::Not} stop early, so evaluation alone would read such an operand as false or never
+     * reach it. SAM's translator emits this shape when a conditional function's event invoke
+     * destination is itself conditional. Also rejects {@code Fn::ImportValue} anywhere in a
+     * condition, which CloudFormation does not allow there. Checked on the template being deployed
+     * only, so a stored template read as the old side of a diff, a rollback or a delete ordering is
+     * never a reason an update cannot proceed.
+     */
+    private static void requireStringConditionReferencesIn(JsonNode template) {
+        template.path("Conditions").forEach(CloudFormationService::requireStringConditionReferences);
+    }
+
+    private static void requireStringConditionReferences(JsonNode expression) {
+        if (expression.isArray()) {
+            expression.forEach(CloudFormationService::requireStringConditionReferences);
+            return;
+        }
+        if (!expression.isObject()) {
+            return;
+        }
+        if (expression.has("Condition") && !expression.get("Condition").isTextual()) {
+            throw new AwsException("ValidationError", NON_STRING_CONDITION_REFERENCE, 400);
+        }
+        if (expression.has("Fn::ImportValue")) {
+            throw new AwsException("ValidationError", IMPORT_VALUE_IN_CONDITION, 400);
+        }
+        expression.forEach(CloudFormationService::requireStringConditionReferences);
+    }
+
+    /**
+     * Refuses a template that declares a parameter the request gives no value and the template no
+     * {@code Default}, as CloudFormation refuses CreateStack, UpdateStack and CreateChangeSet,
+     * naming every such parameter in the order the template declares them. An empty value is a
+     * value. {@code UsePreviousValue} is one too: the request handler has already replaced it with
+     * the deployed value, or left the parameter without one when nothing was deployed. A template
+     * that does not parse is left for the paths that report that, and so is what an
+     * {@code AWS::Include} supplies, which only execution merges: a parameter whose definition uses
+     * one, or every parameter when the section itself is one.
+     */
+    void requireParameterValues(String templateBody, Map<String, String> params) {
+        JsonNode template;
+        try {
+            template = parseTemplate(templateBody);
+        } catch (Exception ignored) {
+            // No Parameters section to check; executing the change set reports the parse error.
+            return;
+        }
+        JsonNode declared = template.path("Parameters");
+        if (AwsIncludeProcessor.AWS_INCLUDE.equals(declared.path("Fn::Transform").path("Name").asText(""))) {
+            return;
+        }
+        Map<String, String> given = resolveDefaultParameters(template, params);
+        List<String> missing = new ArrayList<>();
+        declared.properties().forEach(parameter -> {
+            String name = parameter.getKey();
+            if (!"Fn::Transform".equals(name) && !awsIncludeProcessor.containsAwsInclude(parameter.getValue())
+                    && !given.containsKey(name)) {
+                missing.add(name);
+            }
+        });
+        if (!missing.isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "Parameters: [" + String.join(", ", missing) + "] must have values", 400);
+        }
+    }
+
+    /**
+     * The values a template deploys with: {@code params} over each parameter's {@code Default}, or
+     * {@code params} alone when the template does not parse. UpdateStackSet resolves
+     * {@code UsePreviousValue} against these, since a stack set keeps only the values it was given.
+     */
+    Map<String, String> parametersWithDefaults(String templateBody, Map<String, String> params) {
+        try {
+            return resolveDefaultParameters(parseTemplate(templateBody), params);
+        } catch (Exception ignored) {
+            // No Defaults to add from a template that does not parse; the given values stand.
+            return params != null ? params : Map.of();
+        }
     }
 
     /**
@@ -2531,7 +3093,8 @@ public class CloudFormationService implements ResourceProvider {
      * graph the execution path resolves correctly.
      */
     private void validateResourceDependencies(String templateBody, Map<String, String> params,
-                                               String region, String accountId) {
+                                               String stackName, String stackId, String region,
+                                               String accountId) {
         JsonNode template;
         try {
             template = parseTemplate(templateBody);
@@ -2548,16 +3111,18 @@ public class CloudFormationService implements ResourceProvider {
             return;
         }
 
+        requireStringConditionReferencesIn(template);
         Map<String, String> resolvedParams = resolveDefaultParameters(template, params);
+        // Against the stack name and id the execution will use, which createChangeSet decides.
         Map<String, Boolean> conditions =
-                resolveConditions(template, resolvedParams, null, region, accountId);
+                resolveConditions(template, resolvedParams, stackName, stackId, region, accountId);
 
         // Throws the ValidationError for either case; the order itself is computed again on execution.
         topologicalSort(resources, conditions);
     }
 
-    private boolean evaluateCondition(JsonNode expr, Map<String, String> params,
-                                      Map<String, Boolean> conditions, String region, String accountId) {
+    private boolean evaluateCondition(JsonNode expr, Map<String, Boolean> conditions,
+                                      CloudFormationTemplateEngine engine) {
         if (expr == null || expr.isNull()) {
             return false;
         }
@@ -2571,20 +3136,18 @@ public class CloudFormationService implements ResourceProvider {
             if (expr.has("Fn::Equals")) {
                 JsonNode args = expr.get("Fn::Equals");
                 if (args.isArray() && args.size() == 2) {
-                    String left = resolveConditionValue(args.get(0), params, region, accountId);
-                    String right = resolveConditionValue(args.get(1), params, region, accountId);
-                    return left.equals(right);
+                    return conditionOperand(args.get(0), engine).equals(conditionOperand(args.get(1), engine));
                 }
             }
             if (expr.has("Fn::Not")) {
                 JsonNode args = expr.get("Fn::Not");
                 if (args.isArray() && !args.isEmpty()) {
-                    return !evaluateCondition(args.get(0), params, conditions, region, accountId);
+                    return !evaluateCondition(args.get(0), conditions, engine);
                 }
             }
             if (expr.has("Fn::And")) {
                 for (JsonNode item : expr.get("Fn::And")) {
-                    if (!evaluateCondition(item, params, conditions, region, accountId)) {
+                    if (!evaluateCondition(item, conditions, engine)) {
                         return false;
                     }
                 }
@@ -2592,7 +3155,7 @@ public class CloudFormationService implements ResourceProvider {
             }
             if (expr.has("Fn::Or")) {
                 for (JsonNode item : expr.get("Fn::Or")) {
-                    if (evaluateCondition(item, params, conditions, region, accountId)) {
+                    if (evaluateCondition(item, conditions, engine)) {
                         return true;
                     }
                 }
@@ -2602,21 +3165,22 @@ public class CloudFormationService implements ResourceProvider {
         return false;
     }
 
-    private String resolveConditionValue(JsonNode node, Map<String, String> params,
-                                         String region, String accountId) {
-        if (node.isTextual()) {
-            return node.textValue();
+    /**
+     * An {@code Fn::Equals} operand as the template engine resolves it. One the engine cannot
+     * resolve, such as an {@code Fn::Sub} whose template is not a string, compares as an empty
+     * string, as every function did before conditions went through the engine, so a template that
+     * evaluated then, stored or new, still evaluates and gets its dependency checks.
+     */
+    private static String conditionOperand(JsonNode operand, CloudFormationTemplateEngine engine) {
+        try {
+            return engine.resolve(operand);
+        } catch (AwsException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            LOG.debugv("Condition operand {0} did not resolve and compares as an empty string: {1}",
+                    operand, e.getMessage());
+            return "";
         }
-        if (node.isObject() && node.has("Ref")) {
-            String name = node.get("Ref").asText();
-            return switch (name) {
-                case "AWS::AccountId" -> accountId;
-                case "AWS::Region" -> region;
-                case "AWS::NoValue" -> "";
-                default -> params.getOrDefault(name, "");
-            };
-        }
-        return node.asText();
     }
 
     private JsonNode parseTemplate(String templateBody) throws Exception {
@@ -2812,6 +3376,34 @@ public class CloudFormationService implements ResourceProvider {
         String childTemplate = fetchTemplateFromS3(templateUrl);
         String childStackName = parentStack.getStackName() + "-" + logicalId;
 
+        // Resolved as a property value: Parameters may be an Fn::If choosing between whole maps,
+        // and a value that is AWS::NoValue passes nothing, so the child's Default applies. A list,
+        // such as an Fn::GetAZs resolves to, is passed joined with commas, and a null as an empty
+        // string, as before.
+        Map<String, String> childParams = new LinkedHashMap<>();
+        JsonNode parameters = props == null ? null : engine.resolveNodeOmittingNoValue(props.get("Parameters"));
+        if (parameters != null && parameters.isObject()) {
+            parameters.fields().forEachRemaining(e -> {
+                JsonNode value = e.getValue();
+                if (value.isArray()) {
+                    List<String> items = new ArrayList<>();
+                    value.forEach(item -> items.add(item.asText()));
+                    childParams.put(e.getKey(), String.join(",", items));
+                } else {
+                    childParams.put(e.getKey(), value.isNull() ? "" : value.asText());
+                }
+            });
+        }
+        // CloudFormation creates or updates the child with these values, so the call fails as a
+        // CreateStack or UpdateStack would, before the child is created or changed.
+        try {
+            requireParameterValues(childTemplate, childParams);
+        } catch (AwsException e) {
+            resource.setStatus("CREATE_FAILED");
+            resource.setStatusReason(e.getMessage());
+            return resource;
+        }
+
         Stack childStack = null;
         boolean childCreate = isCreate || previousResource == null
                 || previousResource.getPhysicalId() == null;
@@ -2820,15 +3412,9 @@ public class CloudFormationService implements ResourceProvider {
             childCreate = childStack == null;
         }
         if (childCreate) {
-            childStack = newStack(childStackName, region, accountId);
+            childStack = newStack(childStackName, newStackId(childStackName, region, accountId), region, accountId);
             childStack.setStatus("CREATE_IN_PROGRESS");
             stacks.put(stackKey(accountId, childStackName, region), childStack);
-        }
-
-        Map<String, String> childParams = new LinkedHashMap<>();
-        if (props != null && props.has("Parameters") && props.get("Parameters").isObject()) {
-            props.get("Parameters").fields().forEachRemaining(e ->
-                    childParams.put(e.getKey(), engine.resolve(e.getValue())));
         }
 
         executeTemplate(childStack, childTemplate, childParams, null, childCreate, region, accountId);
@@ -2859,13 +3445,16 @@ public class CloudFormationService implements ResourceProvider {
     }
 
 
-    private Stack newStack(String stackName, String region, String accountId) {
+    private static String newStackId(String stackName, String region, String accountId) {
+        return AwsArnUtils.Arn.of("cloudformation", region, accountId, "stack/" + stackName + "/" + UUID.randomUUID()).toString();
+    }
+
+    private Stack newStack(String stackName, String stackId, String region, String accountId) {
         Stack stack = new Stack();
         stack.setStackName(stackName);
         stack.setRegion(region);
         stack.setAccountId(accountId);
         stack.setStatus("REVIEW_IN_PROGRESS");
-        String stackId = AwsArnUtils.Arn.of("cloudformation", region, accountId, "stack/" + stackName + "/" + UUID.randomUUID()).toString();
         stack.setStackId(stackId);
         stack.setCreationTime(now());
         return stack;

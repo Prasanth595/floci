@@ -19,7 +19,7 @@ the remaining formats (NuGet, etc.) have no real proxy behind them yet.
 | --- | --- |
 | `CreateDomain` | Creates a domain (max 10 per account per Region), optionally with a KMS encryption key and initial tags. |
 | `DeleteDomain` | Deletes a domain; fails with `ConflictException` while it still contains repositories, and with `ResourceNotFoundException` for a missing domain (as AWS does, although the API reference does not list it). |
-| `DescribeDomain` | Returns a domain's full description, including its repository count. |
+| `DescribeDomain` | Returns a domain's full description, including its repository count and the total size of its assets (generic, Maven, npm, and pypi; see Known limitations). |
 | `ListDomains` | Lists domain summaries for the account and Region, paginated. |
 | `GetAuthorizationToken` | Issues a bearer token scoped to a domain, valid for 0 (12 hours) or 900-43200 seconds, required by the `maven` and `npm` repository endpoints. |
 | `PutDomainPermissionsPolicy` | Attaches or replaces a domain's resource policy, versioned by `policyRevision`. |
@@ -39,8 +39,11 @@ the remaining formats (NuGet, etc.) have no real proxy behind them yet.
 | `DisassociateExternalConnection` | Removes a repository's external connection. |
 | `PublishPackageVersion` | Uploads a generic-format asset, creating or extending a package version; requires `x-amz-content-sha256` and verifies it against the real hash of the bytes received. |
 | `DescribePackage` | Returns a package's format, namespace, name, and origin controls (`publish` and `upstream` restrictions). |
+| `DeletePackage` | Deletes a package and every one of its versions; `ResourceNotFoundException` for one that does not exist. |
+| `PutPackageOriginConfiguration` | Sets a package's `publish`/`upstream` origin-control restrictions; can create the package (with no versions) if it doesn't exist yet. |
 | `DescribePackageVersion` | Returns a package version's status, revision, and origin. |
 | `GetPackageVersionAsset` | Downloads one asset from a package version by name, optionally pinned to a specific revision. |
+| `GetPackageVersionReadme` | Returns the readme text for a package version; `npm`, `pypi`, and `nuget` only, matching AWS's own restriction for this action. |
 | `TagResource` | Adds or updates tags on a domain or repository ARN. |
 | `UntagResource` | Removes tags by key from a domain or repository ARN. |
 | `ListTagsForResource` | Lists the tags on a domain or repository ARN. |
@@ -265,24 +268,62 @@ state.
   itself has no JSON index support to pass through. Low practical risk in itself, since PEP 691
   requires clients to accept HTML as a fallback and pip/uv both do, but it is a real gap against
   AWS's documented surface, not just a quirk of the sidecar.
-- **`DescribePackageVersion` can't see Maven-, npm-, or pypi-uploaded package versions.** Those
-  three formats' repository endpoints are deliberately metadata-free passthroughs straight to
-  their sidecar container (Reposilite/Verdaccio/pypiserver) and never create the generic-format
-  package-version record this action depends on (`CodeArtifactService.describePackageVersion`
-  only ever looks up `packageVersions.getForAccount`, the record only the `generic` format's
-  `PublishPackageVersion` flow creates). `GetPackageVersionAsset` no longer has this gap: it
-  bridges to each format's own sidecar (via a new `RepositorySidecarManager.fetchPackageVersionAsset`
-  method each sidecar client implements) when there's no generic-format record, so it now works
-  uniformly across formats the way real CodeArtifact's does. `DescribePackageVersion` is a harder
-  problem for the same bridge: it describes every asset and the status of a whole version, not one
-  named file, and none of these sidecars expose that shape cheaply (Reposilite has no per-GAV
-  metadata beyond file listings; Verdaccio's own registry API could answer it for npm but Maven and
-  pypi have nothing equivalent), so it remains unbridged and still 404s for these three formats.
-- **`DescribePackage` origin controls are fixed.** Floci never ingests packages from an upstream
-  source and does not store origin controls, so every package reports `publish: ALLOW` and
-  `upstream: BLOCK`, the default for a package whose first version was published directly. For
-  Maven, npm, and pypi, `DescribePackage` asks the repository's sidecar whether the package exists,
-  which starts that sidecar if it is not already running.
+- **`DescribePackageVersion` reports only format/namespace/packageName/version/revision/status/origin
+  for Maven, npm, and pypi, same as it does for generic.** Real CodeArtifact's `PackageVersionDescription`
+  can also carry `displayName`, `summary`, `homePage`, `sourceCodeRepository`, `licenses`, and
+  `publishedTime`, extracted from the package's own metadata; none of those are populated for any
+  format today, container-backed or generic. For Maven, npm, and pypi, the version's existence is
+  confirmed directly against its sidecar (`RepositorySidecarManager.packageVersionExists`) rather
+  than through the generic-format-only `packageVersions` record `GetPackageVersionAsset`'s own
+  bridge also moved past, and the revision is synthesized the same deterministic way
+  `GetPackageVersionAsset`'s bridge already does, so describing a version and then fetching one of
+  its assets see the same revision. Every sidecar-backed version reports `Published`: none of
+  these three formats' native publish paths (`mvn deploy`, `npm publish`, `twine upload`) can leave
+  a version in any other status the way a generic publish deliberately can with `unfinished=true`.
+- **`DescribePackage`'s origin controls default to `publish: ALLOW`/`upstream: BLOCK`** (the
+  default for a package whose first version was published directly, since Floci never ingests
+  packages from an upstream source) **until a caller sets them explicitly with
+  `PutPackageOriginConfiguration`.** For Maven, npm, and pypi, `DescribePackage` asks the
+  repository's sidecar whether the package exists, which starts that sidecar if it is not already
+  running; a package that exists only because `PutPackageOriginConfiguration` created it (no
+  versions yet) is found without touching any sidecar.
+- **`PutPackageOriginConfiguration`'s `publish: BLOCK` is only enforced for the `generic`
+  format.** `PublishPackageVersion`, the one path it actually gates, accepts only `generic` to
+  begin with; Maven, npm, and pypi publishes go through their own native wire protocol (`mvn
+  deploy`, `npm publish`, `twine upload`) directly against the repository endpoint, which does not
+  yet check this setting. `upstream` is stored and reported faithfully for every format but is
+  never enforced for any of them, since Floci has no upstream ingestion path to block in the first
+  place.
+- **`DescribeDomain`'s `assetSizeBytes` only counts what was published after this field started
+  being computed.** Generic-format bytes are summed live from the still-existing
+  `PublishPackageVersion` records, so they're always current. Maven, npm, and pypi have no such
+  record to sum (the same absent generic-format record `DescribePackageVersion`'s own bridge works
+  around by asking the sidecar directly instead), so each proxy reports its own successfully-written
+  byte count directly; a package published through one of those three formats
+  before this accounting existed was never reported and is not retroactively counted. A genuine
+  conflict or an idempotent no-op retry (any of the three formats' own duplicate-publish
+  protection) correctly adds nothing either way. Both `DeleteRepository` and `DeletePackage` clean
+  up every format's own records and byte counts (and, for `DeleteRepository`, the per-version
+  asset content underneath them), so a repository or package recreated under the same name never
+  inherits a predecessor's bytes. Maven/npm/pypi byte counts live only in memory, the same as the
+  sidecar content they describe (see the restart limitation below), not through `StorageFactory`
+  like every durable store here: the content these bytes count does not survive a restart either,
+  so neither does the count.
+- **A whole-package `npm unpublish` is accounted for; unpublishing a single version of a
+  multi-version package is not.** The pinned Verdaccio image is configured to honor `npm
+  unpublish` natively (`unpublish: $all`), bypassing `DeletePackage` entirely; the npm data plane
+  detects that one specific wire shape (`DELETE .../-rev/<revision>`) and cleans up this service's
+  own byte count and deletion fence once Verdaccio confirms it. Removing a single version from a
+  multi-version package is a different, harder-to-detect shape (a `PUT` carrying an updated
+  packument, indistinguishable at the wire level from an ordinary republish), and is not detected;
+  since this accounting is per-package, not per-version, there is no narrower count a single
+  version's removal could subtract from in the first place.
+- **A `maven-metadata.xml` upload for a versioned snapshot (`.../<artifact>/<version>/
+  maven-metadata.xml`) is counted under a package name built from its version string, not its real
+  artifact name.** Every real `mvn deploy` writes a group/artifact-level `maven-metadata.xml`
+  too, which this correctly attributes to the real artifact; only the rarer, version-scoped
+  snapshot form gets a package name this way. The bytes are still counted toward the domain total
+  either way, just under an internal accounting bucket nothing else ever looks up by name.
 
 See the [CodeArtifact API Reference](https://docs.aws.amazon.com/codeartifact/latest/APIReference/Welcome.html).
 

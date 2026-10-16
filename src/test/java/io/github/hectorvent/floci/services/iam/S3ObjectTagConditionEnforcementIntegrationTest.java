@@ -1,11 +1,18 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.net.URI;
+
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -33,7 +40,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class S3ObjectTagConditionEnforcementIntegrationTest {
 
     private static final String ADMIN = "test";
-    private static final String REGION = "us-east-1";
+
+    @TestHTTPResource("/")
+    static URI baseUri;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     private static final String EXISTING_A = "\"Condition\":{\"StringEquals\":{\"s3:ExistingObjectTag/env\":\"a\"}}";
     private static final String REQUEST_A = "\"Condition\":{\"StringEquals\":{\"s3:RequestObjectTag/env\":\"a\"}}";
@@ -113,15 +125,16 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
 
     @Test
     void anOlderVersionIsAuthorizedAgainstItsOwnTags() {
-        Fixture f = new Fixture("version");
-        f.versioning();
+        Fixture f = new Fixture("version", true);
         // Two versions of one key with different tags. The current version carries the tag the
         // policy allows; the one under it does not.
         String denied = f.seedVersion("a/rolled", "env=b");
-        f.seedVersion("a/rolled", "env=a");
+        String allowed = f.seedVersion("a/rolled", "env=a");
 
-        f.policy(allow("s3:GetObject", f.objects(), EXISTING_A));
+        // A read naming a version is checked as s3:GetObjectVersion, which carries the key too.
+        f.policy(allow("\"s3:GetObject\",\"s3:GetObjectVersion\"", f.objects(), EXISTING_A));
         assertEquals(200, f.get("a/rolled"), "the current version carries the allowed tag");
+        assertEquals(200, f.getVersion("a/rolled", allowed), "the same version, named by its id");
         assertEquals(403, f.getVersion("a/rolled", denied),
                 "the older version carries a foreign tag, so its own tags decide");
     }
@@ -136,6 +149,21 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
         assertEquals(403, f.put("a/bad", "%zz=a", null), "an undecodable key");
     }
 
+    @Test
+    void aReadNamingTheNullVersionIsAuthorizedAgainstTheVersionItServes() {
+        Fixture f = new Fixture("nullversion", true);
+        // Written with versioning on, the key has no null version. S3 answers a read naming one with
+        // NoSuchVersion, but floci serves it the current version, so that version's tags must decide
+        // or the deny on them would be skipped.
+        f.seedVersion("a/secret", "env=b");
+        f.policy(allow("\"s3:GetObject\",\"s3:GetObjectVersion\"", f.objects(), null) + ","
+                + "{\"Effect\":\"Deny\",\"Action\":[\"s3:GetObject\",\"s3:GetObjectVersion\"],"
+                + "\"Resource\":\"" + f.objects() + "\","
+                + "\"Condition\":{\"StringEquals\":{\"s3:ExistingObjectTag/env\":\"b\"}}}");
+        assertEquals(403, f.get("a/secret"), "the current version carries the denied tag");
+        assertEquals(403, f.getVersion("a/secret", "null"), "the same version, reached through versionId=null");
+    }
+
     private static String allow(String actions, String resource, String condition) {
         String action = actions.startsWith("\"") ? "[" + actions + "]" : "\"" + actions + "\"";
         return "{\"Effect\":\"Allow\",\"Action\":" + action + ",\"Resource\":\"" + resource + "\""
@@ -143,26 +171,32 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
     }
 
     /** One bucket, a few tagged objects seeded as the admin, and one IAM user with an access key. */
-    private static final class Fixture {
+    private final class Fixture {
         final String bucket;
         final String user;
         final String accessKeyId;
 
         Fixture(String name) {
+            this(name, false);
+        }
+
+        Fixture(String name, boolean versioned) {
             String suffix = Long.toString(System.nanoTime(), 36);
             bucket = "objtag-" + name + "-" + suffix;
             user = "objtag-" + name + "-" + suffix;
+            cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(),
+                    auth(ADMIN, "s3"), bucket));
             given().header("Authorization", auth(ADMIN, "s3")).when().put("/" + bucket).then().statusCode(200);
             seed("a/tagged-a", "env=a");
             seed("a/tagged-b", "env=b");
             seed("a/untagged", null);
             seed("b/theirs", "env=b");
             seed("b/theirs-2", "env=b");
-            given().formParam("Action", "CreateUser").formParam("UserName", user)
-                    .header("Authorization", auth(ADMIN, "iam")).when().post("/").then().statusCode(200);
-            accessKeyId = given().formParam("Action", "CreateAccessKey").formParam("UserName", user)
-                    .header("Authorization", auth(ADMIN, "iam")).when().post("/").then().statusCode(200)
-                    .extract().path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
+            accessKeyId = EnforcementFixtures.createUser(cleanup, baseUri.getPort(),
+                    auth(ADMIN, "iam"), user).accessKeyId();
+            if (versioned) {
+                versioning();
+            }
         }
 
         String objects() {
@@ -232,8 +266,4 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
         }
     }
 
-    private static String auth(String accessKeyId, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260629/" + REGION + "/" + service
-                + "/aws4_request, SignedHeaders=host, Signature=abc";
-    }
 }

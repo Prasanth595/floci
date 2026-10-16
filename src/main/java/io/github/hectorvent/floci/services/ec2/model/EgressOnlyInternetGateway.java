@@ -12,6 +12,7 @@ public class EgressOnlyInternetGateway {
 
     private String egressOnlyInternetGatewayId;
     private String region;
+    private String clientToken;
     private List<InternetGatewayAttachment> attachments = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
 
@@ -24,6 +25,9 @@ public class EgressOnlyInternetGateway {
 
     public String getRegion() { return region; }
     public void setRegion(String region) { this.region = region; }
+
+    public String getClientToken() { return clientToken; }
+    public void setClientToken(String clientToken) { this.clientToken = clientToken; }
 
     public List<InternetGatewayAttachment> getAttachments() { return attachments; }
     public void setAttachments(List<InternetGatewayAttachment> attachments) { this.attachments = attachments; }
