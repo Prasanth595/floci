@@ -3436,8 +3436,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .forEach(m -> requireValidVolumeType(m.getEbs().getVolumeType()));
         Image launchImage = findImageForCapture(region, imageId);
         String rootVolumeType = rootVolumeTypeFor(launchImage, mappedDevices);
-        String rootDeviceName = launchImage != null && launchImage.getRootDeviceName() != null
-                ? launchImage.getRootDeviceName() : new Instance().getRootDeviceName();
+        String rootDeviceName = rootDeviceNameFor(launchImage);
         boolean deleteRootOnTermination = rootDeleteOnTerminationFor(launchImage, rootDeviceName, mappedDevices);
         List<Instance> launched = new ArrayList<>();
         // Resolving the AMI, building the instances that depend on it and publishing them is one
@@ -6935,8 +6934,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     private static String rootVolumeTypeFor(Image image,
                                             List<LaunchTemplateData.BlockDeviceMapping> requestMappings) {
-        String rootDeviceName = image != null && image.getRootDeviceName() != null
-                ? image.getRootDeviceName() : new Instance().getRootDeviceName();
+        String rootDeviceName = rootDeviceNameFor(image);
         if (requestMappings != null) {
             for (LaunchTemplateData.BlockDeviceMapping m : requestMappings) {
                 if (m.getEbs() != null && m.getEbs().getVolumeType() != null
@@ -6950,10 +6948,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         return image.getBlockDeviceMappings().stream()
                 .filter(m -> m.getEbs() != null && m.getEbs().getVolumeType() != null
-                        && Objects.equals(m.getDeviceName(), image.getRootDeviceName()))
+                        && Objects.equals(m.getDeviceName(), rootDeviceName))
                 .map(m -> m.getEbs().getVolumeType())
                 .findFirst()
                 .orElse(DEFAULT_ROOT_VOLUME_TYPE);
+    }
+
+    /** The device a launch roots on: the image's declared root device, or the instance default when it declares none. */
+    private static String rootDeviceNameFor(Image image) {
+        return image != null && image.getRootDeviceName() != null && !image.getRootDeviceName().isBlank()
+                ? image.getRootDeviceName() : new Instance().getRootDeviceName();
     }
 
     private static boolean rootDeleteOnTerminationFor(Image image, String rootDeviceName,
@@ -7071,7 +7075,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         image.setImageOwnerAlias(null);
         image.setPublic(false);
         image.setArchitecture(architecture != null ? architecture : "x86_64");
-        image.setRootDeviceName(rootDeviceName != null ? rootDeviceName : "/dev/sda1");
+        image.setRootDeviceName(rootDeviceName != null && !rootDeviceName.isBlank() ? rootDeviceName : "/dev/sda1");
         image.setRootDeviceType("ebs");
         image.setVirtualizationType("hvm");
         image.setHypervisor("xen");
@@ -10278,7 +10282,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (resource instanceof Instance inst) {
             return switch (filterName) {
                 case "instance-id" -> matchesValue(values, inst.getInstanceId());
-                case "client-token" -> matchesValue(values, inst.getClientToken());
+                case "client-token" -> inst.getClientToken() != null && matchesValue(values, inst.getClientToken());
                 case "instance-state-name" -> matchesValue(values, inst.getState().getName());
                 case "instance-type" -> matchesValue(values, inst.getInstanceType());
                 case "vpc-id" -> matchesValue(values, inst.getVpcId());
