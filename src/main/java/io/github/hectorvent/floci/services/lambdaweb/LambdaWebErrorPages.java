@@ -27,6 +27,11 @@ final class LambdaWebErrorPages {
             APPLICATION_ERROR);
     static final Page INIT_CODE_ERROR = new Page(502, "Bad Gateway", "Application.InitCodeError", APPLICATION_ERROR);
     static final Page RUNTIME_EXIT = new Page(502, "Bad Gateway", "Runtime.Exit", APPLICATION_ERROR);
+    private static final String RATE_EXCEEDED = "Request rate exceeded. Please try again later.";
+    static final Page ENDPOINT_MAX_ENV_THROTTLE = new Page(429, "Too Many Requests",
+            "Platform.EndpointMaxEnvThrottle", RATE_EXCEEDED);
+    static final Page ENDPOINT_REQUEST_THROTTLE = new Page(429, "Too Many Requests",
+            "Platform.EndpointRequestThrottle", RATE_EXCEEDED);
 
     /** The edge in front of the platform refuses a method itself, with its own page and header casing. */
     static final String MALFORMED_REQUEST_TYPE = "Platform.MalformedRequest";

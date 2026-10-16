@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebEnvironmentManager.Environment;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebEnvironmentManager.StartFailure;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebEnvironmentManager.Throttled;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService.WebFunctionTarget;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionRevision;
 import io.vertx.core.Future;
@@ -69,6 +70,7 @@ public class LambdaWebDataPlane {
     private final ServiceConfigAccess serviceConfigAccess;
     private final Vertx vertx;
     private final HttpClient client;
+    private final LambdaWebRateLimiter rateLimiter = new LambdaWebRateLimiter();
 
     @Inject
     public LambdaWebDataPlane(LambdaWebService service, LambdaWebEnvironmentManager environments,
@@ -109,9 +111,14 @@ public class LambdaWebDataPlane {
             return;
         }
         WebFunctionTarget target = located.get();
-        if (target.endpoint().throttleConfig != null
-                && Integer.valueOf(0).equals(target.endpoint().throttleConfig.rateLimit)) {
+        Integer rateLimit = target.endpoint().throttleConfig == null ? null : target.endpoint().throttleConfig.rateLimit;
+        if (Integer.valueOf(0).equals(rateLimit)) {
             page(request, LambdaWebErrorPages.ENDPOINT_DISABLED, requestId, false);
+            return;
+        }
+        if (rateLimit != null && !rateLimiter.tryAcquire(String.join("|", target.accountId(), target.region(),
+                target.function().functionName, target.endpoint().endpointName), rateLimit)) {
+            page(request, LambdaWebErrorPages.ENDPOINT_REQUEST_THROTTLE, requestId, false);
             return;
         }
         WebFunctionRevision revision = LambdaWebService.pickRevision(target);
@@ -133,13 +140,20 @@ public class LambdaWebDataPlane {
             if (dead != null) {
                 environments.discard(dead);
             }
-            return environments.acquire(target.accountId(), target.region(), target.function(), revision);
+            Integer maxEnvironments = target.endpoint().scalingConfig == null
+                    ? null : target.endpoint().scalingConfig.maxEnvironments;
+            return environments.acquire(target.accountId(), target.region(), target.function(),
+                    target.endpoint().endpointName, maxEnvironments, revision);
         }, false)
                 .onSuccess(environment -> forward(request, host, target, revision, environment, requestId, dead == null))
                 .onFailure(error -> {
                     request.resume();
                     if (error instanceof StartFailure failure) {
                         page(request, failure.page(), requestId, false);
+                        return;
+                    }
+                    if (error instanceof Throttled) {
+                        page(request, LambdaWebErrorPages.ENDPOINT_MAX_ENV_THROTTLE, requestId, false);
                         return;
                     }
                     LOG.errorv(error, "Could not start an environment for {0}", host);

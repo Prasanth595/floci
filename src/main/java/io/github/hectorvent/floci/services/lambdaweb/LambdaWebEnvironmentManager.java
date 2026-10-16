@@ -49,7 +49,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -86,31 +88,34 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private static final Duration EXIT_WATCH_REARM = Duration.ofSeconds(1);
 
     /**
-     * A started container. {@code acquire} reserves it for one request and {@code release} gives
-     * the reservation back; the idle reaper only stops an environment with no reservation.
+     * One container of an endpoint's pool. It joins the pool before it starts, so requests that
+     * arrive while it initializes wait for it instead of starting more. {@code acquire} reserves it
+     * for one request and {@code release} gives the reservation back; the idle reaper only stops an
+     * environment with no reservation.
      */
     public static final class Environment {
-        private final String key;
+        private final String poolKey;
+        private final String revisionId;
         private final String accountId;
-        private final String containerId;
-        private final String host;
-        private final int port;
-        private final String logStream;
-        private final Optional<SessionCreds> roleCredentials;
+        private final CompletableFuture<Void> ready = new CompletableFuture<>();
+        private volatile String containerId;
+        private volatile String host;
+        private volatile int port;
+        private volatile String logStream;
+        private volatile SessionCreds roleCredentials;
         private final AtomicInteger inFlight = new AtomicInteger();
         private final AtomicLong lastUsed = new AtomicLong(System.nanoTime());
         private final AtomicBoolean alive = new AtomicBoolean(true);
         private final AtomicReference<Instant> exitedAt = new AtomicReference<>();
 
-        Environment(String key, String accountId, String containerId, String host, int port, String logStream,
-                    Optional<SessionCreds> roleCredentials) {
-            this.key = key;
+        Environment(String poolKey, String revisionId, String accountId) {
+            this.poolKey = poolKey;
+            this.revisionId = revisionId;
             this.accountId = accountId;
-            this.containerId = containerId;
-            this.host = host;
-            this.port = port;
-            this.logStream = logStream;
-            this.roleCredentials = roleCredentials;
+        }
+
+        private boolean isReady() {
+            return ready.isDone() && !ready.isCompletedExceptionally();
         }
 
         public String containerId() {
@@ -158,6 +163,13 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         }
     }
 
+    /** Every environment of the endpoint is full and {@code maxEnvironments} allows no more. */
+    public static final class Throttled extends RuntimeException {
+        Throttled() {
+            super(LambdaWebErrorPages.ENDPOINT_MAX_ENV_THROTTLE.errorType());
+        }
+    }
+
     private final EmulatorConfig config;
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -167,7 +179,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private final ZipExtractor zipExtractor;
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials executionRoleCredentials;
-    private final ConcurrentHashMap<String, Environment> environments = new ConcurrentHashMap<>();
+    /** The environments of each endpoint in each region, keyed account, region, function and endpoint. */
+    private final ConcurrentHashMap<String, List<Environment>> pools = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
     private final ScheduledExecutorService reaper = Executors.newSingleThreadScheduledExecutor(task -> {
         Thread thread = new Thread(task, "lambda-web-environments");
@@ -195,31 +208,90 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     }
 
     /**
-     * The running environment of {@code revision}, started if there is none, reserved for one
-     * request. The caller releases it when the request is over. Blocks on Docker and S3.
+     * An environment of the endpoint for {@code revision} with room for one more request, reserved
+     * for it. The least busy one is taken, the one idle longest on a tie, so requests rotate. When
+     * all are full a new one starts unless {@code maxEnvironments} is reached, which is
+     * {@link Throttled}. The caller releases the environment when the request is over. Blocks on
+     * Docker and S3.
      */
-    public Environment acquire(String accountId, String region, WebFunction fn, WebFunctionRevision revision) {
-        String key = String.join("|", accountId, region, fn.functionName, revision.revisionId);
-        synchronized (lockFor(key)) {
-            Environment existing = environments.get(key);
-            if (existing != null && existing.isAlive()) {
-                existing.reserve();
-                return existing;
+    public Environment acquire(String accountId, String region, WebFunction fn, String endpointName,
+                               Integer maxEnvironments, WebFunctionRevision revision) {
+        String poolKey = String.join("|", accountId, region, fn.functionName, endpointName);
+        int perEnvironment = Math.max(1, revision.serviceConfig.maxConcurrencyPerEnvironment);
+        Environment chosen;
+        boolean starter = false;
+        synchronized (lockFor(poolKey)) {
+            List<Environment> pool = pools.computeIfAbsent(poolKey, ignored -> new ArrayList<>());
+            chosen = pool.stream()
+                    .filter(each -> each.isAlive() && each.revisionId.equals(revision.revisionId)
+                            && each.inFlight.get() < perEnvironment)
+                    .min(Comparator.comparingInt((Environment each) -> each.inFlight.get())
+                            .thenComparingLong(each -> each.lastUsed.get()))
+                    .orElse(null);
+            if (chosen == null) {
+                if (maxEnvironments != null && pool.size() >= maxEnvironments) {
+                    throw new Throttled();
+                }
+                chosen = new Environment(poolKey, revision.revisionId, accountId);
+                pool.add(chosen);
+                starter = true;
             }
-            Environment started = start(key, accountId, region, fn, revision);
-            started.reserve();
-            environments.put(key, started);
-            return started;
+            chosen.reserve();
+        }
+        if (!starter) {
+            awaitReady(chosen);
+            return chosen;
+        }
+        try {
+            start(chosen, region, fn, revision);
+        } catch (RuntimeException e) {
+            chosen.alive.set(false);
+            removeFromPool(chosen);
+            chosen.ready.completeExceptionally(e);
+            throw e;
+        }
+        if (!chosen.isAlive()) {
+            IllegalStateException stopped = new IllegalStateException("The environment was stopped while it started");
+            chosen.ready.completeExceptionally(stopped);
+            stopContainer(chosen);
+            throw stopped;
+        }
+        chosen.ready.complete(null);
+        return chosen;
+    }
+
+    private static void awaitReady(Environment environment) {
+        try {
+            environment.ready.get();
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw new IllegalStateException(e.getCause());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private void removeFromPool(Environment environment) {
+        synchronized (lockFor(environment.poolKey)) {
+            List<Environment> pool = pools.get(environment.poolKey);
+            if (pool != null) {
+                pool.remove(environment);
+            }
         }
     }
 
     /** Stops an environment, with the one second AWS gives the process after SIGTERM. */
     public void discard(Environment environment) {
+        removeFromPool(environment);
         if (!environment.alive.compareAndSet(true, false)) {
-            environments.remove(environment.key, environment);
             return;
         }
-        environments.remove(environment.key, environment);
+        if (environment.containerId == null) {
+            return;
+        }
         try {
             exitCodeIfStopped(environment.containerId).ifPresent(exitCode ->
                     LOG.infov("The Lambda Web environment {0} had exited with status {1}: {2}",
@@ -227,6 +299,10 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         } catch (RuntimeException e) {
             LOG.debugv(e, "Could not inspect the Lambda Web environment {0}", environment.containerId);
         }
+        stopContainer(environment);
+    }
+
+    private void stopContainer(Environment environment) {
         try {
             lifecycleManager.stopAndRemove(environment.containerId, null, 1);
         } finally {
@@ -252,7 +328,17 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
 
     @Override
     public void stopManagedContainers() {
-        new ArrayList<>(environments.values()).forEach(this::discard);
+        allEnvironments().forEach(this::discard);
+    }
+
+    private List<Environment> allEnvironments() {
+        List<Environment> all = new ArrayList<>();
+        for (Map.Entry<String, List<Environment>> pool : pools.entrySet()) {
+            synchronized (lockFor(pool.getKey())) {
+                all.addAll(pool.getValue());
+            }
+        }
+        return all;
     }
 
     @PreDestroy
@@ -266,10 +352,10 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
 
     private void reapIdle() {
         long idleNanos = TimeUnit.SECONDS.toNanos(config.services().lambda().containerIdleTimeoutSeconds());
-        for (Environment environment : new ArrayList<>(environments.values())) {
+        for (Environment environment : allEnvironments()) {
             try {
-                synchronized (lockFor(environment.key)) {
-                    if (environment.inFlight.get() != 0
+                synchronized (lockFor(environment.poolKey)) {
+                    if (!environment.isReady() || environment.inFlight.get() != 0
                             || System.nanoTime() - environment.lastUsed.get() <= idleNanos) {
                         continue;
                     }
@@ -282,8 +368,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         }
     }
 
-    private Environment start(String key, String accountId, String region, WebFunction fn,
-                              WebFunctionRevision revision) {
+    private void start(Environment environment, String region, WebFunction fn, WebFunctionRevision revision) {
+        String accountId = environment.accountId;
         String image = ecrRegistryManager.rewriteImageUri(imageResolver.resolve(revision.buildConfig.runtime));
         String shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         String name = ContainerStorageHelper.prefixedDockerName(config, "floci-lambda-web",
@@ -320,14 +406,15 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
             EndpointInfo endpoint = info.getEndpoint(APP_PORT);
             awaitListening(containerId);
-            String logStream = LOG_STREAM_DATE.format(Instant.now()) + "/" + fn.functionName + "[" + revision.revisionId
-                    + "]" + UUID.randomUUID().toString().replace("-", "");
-            Environment environment = new Environment(key, accountId, containerId, endpoint.host(), endpoint.port(),
-                    logStream, roleCredentials);
+            environment.containerId = containerId;
+            environment.host = endpoint.host();
+            environment.port = endpoint.port();
+            environment.logStream = LOG_STREAM_DATE.format(Instant.now()) + "/" + fn.functionName + "["
+                    + revision.revisionId + "]" + UUID.randomUUID().toString().replace("-", "");
+            environment.roleCredentials = roleCredentials.orElse(null);
             watchExit(environment);
             LOG.infov("Started the Lambda Web environment {0} of {1} revision {2} at {3}:{4}",
                     containerId, fn.functionName, revision.revisionId, endpoint.host(), endpoint.port());
-            return environment;
         } catch (RuntimeException e) {
             lifecycleManager.stopAndRemove(containerId, null, 1);
             roleCredentials.ifPresent(creds -> executionRoleCredentials.unregister(accountId, creds.accessKeyId()));
@@ -351,8 +438,10 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     }
 
     private void forgetCredentials(Environment environment) {
-        environment.roleCredentials.ifPresent(creds ->
-                executionRoleCredentials.unregister(environment.accountId, creds.accessKeyId()));
+        SessionCreds credentials = environment.roleCredentials;
+        if (credentials != null) {
+            executionRoleCredentials.unregister(environment.accountId, credentials.accessKeyId());
+        }
     }
 
     /** The code goes in by {@code docker cp}, so it works when Floci itself runs in a container. */
@@ -559,7 +648,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             return;
         }
         environment.exitedAt.compareAndSet(null, finishedAt(environment.containerId).orElse(Instant.now()));
-        environments.remove(environment.key, environment);
+        removeFromPool(environment);
         reaper.execute(() -> {
             try {
                 LOG.infov("The Lambda Web environment {0} exited with status {1}: {2}",

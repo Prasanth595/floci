@@ -23,6 +23,8 @@ class LambdaWebErrorPagesTest {
         assertEquals(228, length(LambdaWebErrorPages.TIMEOUT_LISTEN_ERROR));
         assertEquals(228, length(LambdaWebErrorPages.INIT_CODE_ERROR));
         assertEquals(228, length(LambdaWebErrorPages.RUNTIME_EXIT));
+        assertEquals(237, length(LambdaWebErrorPages.ENDPOINT_MAX_ENV_THROTTLE));
+        assertEquals(237, length(LambdaWebErrorPages.ENDPOINT_REQUEST_THROTTLE));
         assertEquals(180, LambdaWebErrorPages.MALFORMED_REQUEST_HTML.getBytes(StandardCharsets.UTF_8).length);
     }
 
