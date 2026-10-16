@@ -870,6 +870,7 @@ class RedshiftServerlessServiceTest {
         RedshiftServerlessSnapshot snapshot = service.createSnapshot("arn-snap", "arn-ns", null, null, REGION);
 
         assertEquals("arn-snap", service.snapshotNameFromArn(snapshot.getSnapshotArn(), REGION));
+        assertEquals("arn-snap", service.snapshotNameFromArn(snapshot.getSnapshotArn(), REGION, "resourceArn"));
         for (String foreign : List.of(
                 "arn:aws:redshift-serverless:eu-west-1:" + ACCOUNT_ID + ":snapshot/arn-snap",
                 "arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/arn-snap",
@@ -877,6 +878,12 @@ class RedshiftServerlessServiceTest {
             AwsException rejected = assertThrows(AwsException.class,
                     () -> service.snapshotNameFromArn(foreign, REGION));
             assertEquals("ValidationException", rejected.getErrorCode());
+            assertEquals("snapshotArn does not identify a snapshot in this account and Region.", rejected.getMessage());
+
+            AwsException rejectedResource = assertThrows(AwsException.class,
+                    () -> service.snapshotNameFromArn(foreign, REGION, "resourceArn"));
+            assertEquals("ValidationException", rejectedResource.getErrorCode());
+            assertEquals("resourceArn does not identify a snapshot in this account and Region.", rejectedResource.getMessage());
         }
     }
 
@@ -1067,6 +1074,23 @@ class RedshiftServerlessServiceTest {
         AwsException missing = assertThrows(AwsException.class, () -> service.updateSnapshot("nope-snap", 5, REGION));
         assertEquals("ResourceNotFoundException", missing.getErrorCode());
         assertThrows(AwsException.class, () -> service.updateSnapshot(null, 5, REGION));
+    }
+
+    @Test
+    void creatingWorkgroupWithUnknownTrackNameIsRejected() {
+        create("tr-ns");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createWorkgroup("tr-wg", "tr-ns", settings(null, null, null, "nightly"), null, REGION));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void updatingWorkgroupWithUnknownTrackNameIsRejected() {
+        create("upd-tr-ns");
+        createWorkgroup("upd-tr-wg", "upd-tr-ns");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateWorkgroup("upd-tr-wg", settings(null, null, null, "preview"), REGION));
+        assertEquals("ValidationException", ex.getErrorCode());
     }
 
     private Namespace create(String namespaceName) {

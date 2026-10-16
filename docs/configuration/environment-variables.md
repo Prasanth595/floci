@@ -221,6 +221,8 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_S3_ENABLED` | `true` | Enable the S3 service |
 | `FLOCI_SERVICES_S3_DEFAULT_PRESIGN_EXPIRY_SECONDS` | `3600` | Default pre-signed URL expiry when none is specified |
 | `FLOCI_SERVICES_S3_GLOBAL_BUCKET_NAMESPACE` | `false` | When `true`, bucket/object resolution spans every account's partition so a bucket created in one account is visible cross-account (a single global namespace), matching real S3's global bucket names. Off by default keeps buckets isolated per account |
+| `FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED` | `true` | Apply bucket lifecycle expiration rules (`Expiration`, `NoncurrentVersionExpiration`, `AbortIncompleteMultipartUpload`) in the background |
+| `FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS` | `60` | How often the lifecycle sweep runs |
 
 ### DynamoDB
 
@@ -343,6 +345,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_COGNITO_ENABLED` | `true` | Enable the Cognito User Pools service |
+| `FLOCI_SERVICES_COGNITO_ENFORCE_TOKEN_VALIDITY_LIMITS` | `true` | Reject app clients whose token validity is outside AWS's limits (access and ID tokens 5 minutes to 1 day, refresh tokens 60 minutes to 3,650 days). Set to `false` to allow shorter tokens, for example in expiry tests |
 
 ### Step Functions
 
@@ -437,6 +440,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_RDS_DOCKER_NETWORK` | _(none)_ | Docker network for RDS containers (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
 | `FLOCI_SERVICES_RDS_DATA_ENABLED` | `true` | Enable the RDS Data API service. Requires `FLOCI_SERVICES_RDS_ENABLED=true` |
 | `FLOCI_SERVICES_RDS_DATA_TRANSACTION_TTL_SECONDS` | `180` | Idle timeout, in seconds, before leaked RDS Data API transactions expire |
+| `FLOCI_SERVICES_RDS_DATA_DATABASE_RESUMING_EXCEPTION_ENABLED` | `false` | Return HTTP 400 `DatabaseResumingException` while an auto-paused Aurora backend resumes, instead of waiting |
 
 ### OpenSearch
 
@@ -445,6 +449,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_OPENSEARCH_ENABLED` | `true` | Enable the OpenSearch service |
 | `FLOCI_SERVICES_OPENSEARCH_MOCK` | `false` | When `true`, domains are created instantly without a real container (API only) |
 | `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | *(unset)* | Optional fixed Docker image for every OpenSearch domain; when unset, images resolve per requested `EngineVersion` |
+| `FLOCI_SERVICES_OPENSEARCH_DATA_VOLUME` | *(unset)* | Data volume for domain containers: an absolute path bind-mounts `<path>/<account-id>/<region>/<domain-name>`; any other value creates a named volume `<name>-<account-id>-<region>-<domain-name>`. With `FLOCI_DOCKER_RESOURCE_NAMESPACE`, the layouts are `<path>/<namespace>/<account-id>/<region>/<domain-name>` and `<name>-<namespace>-<account-id>-<region>-<domain-name>`. Linux daemon paths starting with `/` retain Linux syntax on Windows; native Windows absolute paths retain native handling. A temporary root container prepares bind-directory ownership and owner write access using the selected image, leaving existing files untouched; preparation failure aborts startup. Storage is never removed on domain delete. Named volumes are created without Floci labels when absent, so Floci-scoped prunes and label sweeps leave them alone. When unset, Floci manages each domain's storage |
 | `FLOCI_SERVICES_OPENSEARCH_PROXY_BASE_PORT` | `9400` | First port in the OpenSearch proxy range |
 | `FLOCI_SERVICES_OPENSEARCH_PROXY_MAX_PORT` | `9499` | Last port in the OpenSearch proxy range |
 | `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Keep OpenSearch containers running when Floci stops |
@@ -554,7 +559,7 @@ Floci starts the web console as a sidecar container the first time `/_floci/ui` 
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_UI_ENABLED` | `true` | Enable the web console sidecar |
-| `FLOCI_SERVICES_UI_IMAGE` | `floci/floci-ui:latest` | Console image to run |
+| `FLOCI_SERVICES_UI_IMAGE` | `floci/floci-ui:0.7.0` | Console image to run |
 | `FLOCI_SERVICES_UI_CONTAINER_NAME` | `floci-ui` | Name of the sidecar container |
 | `FLOCI_SERVICES_UI_PORT` | `4500` | Host port the console is published on |
 | `FLOCI_SERVICES_UI_BIND_ADDRESS` | _(none)_ | Host interface that port is published on. Unset publishes on every interface; set `127.0.0.1` when Floci's own port is loopback-only |

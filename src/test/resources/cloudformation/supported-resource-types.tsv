@@ -134,6 +134,9 @@ AWS::Lambda::NetworkConnector	LambdaMicrovmsCfnProvisioner
 AWS::Lambda::Permission	LambdaAddressingCfnProvisioner
 AWS::Lambda::Url	LambdaAddressingCfnProvisioner
 AWS::Lambda::Version	LambdaVersionAliasCfnProvisioner
+AWS::Lambda::WebFunction	LambdaWebCfnProvisioner
+AWS::Lambda::WebFunctionEndpoint	LambdaWebCfnProvisioner
+AWS::Lambda::WebFunctionRevision	LambdaWebCfnProvisioner
 AWS::Logs::LogGroup	LogsCfnProvisioner
 AWS::Logs::LogStream	LogsLogStreamCfnProvisioner
 AWS::Logs::MetricFilter	LogsMetricFilterCfnProvisioner
@@ -160,6 +163,7 @@ AWS::Route53::HostedZone	Route53CfnProvisioner
 AWS::Route53::RecordSet	Route53CfnProvisioner
 AWS::S3::Bucket	S3CfnProvisioner
 AWS::S3::BucketPolicy	S3CfnProvisioner
+AWS::SES::EmailIdentity	SesCfnProvisioner
 AWS::SNS::Subscription	SnsCfnProvisioner
 AWS::SNS::Topic	SnsCfnProvisioner
 AWS::SNS::TopicPolicy	SnsCfnProvisioner

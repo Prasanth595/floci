@@ -111,7 +111,7 @@ public class S3Controller {
     private static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter
             .ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
             .withZone(ZoneId.of("UTC"));
-    private static final DateTimeFormatter RFC_822 = DateTimeFormatter
+    static final DateTimeFormatter RFC_822 = DateTimeFormatter
             .ofPattern("EEE, dd MMM yyyy HH:mm:ss z", Locale.US)
             .withZone(ZoneId.of("GMT"));
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -418,8 +418,7 @@ public class S3Controller {
                             httpHeaders.getHeaderString("If-Match"),
                             httpHeaders.getHeaderString("If-None-Match"),
                             uriInfo.getQueryParameters().getFirst("uploadId"),
-                            uriInfo.getQueryParameters().getFirst("partNumber") != null
-                                    ? Integer.parseInt(uriInfo.getQueryParameters().getFirst("partNumber")) : null,
+                            uriInfo.getQueryParameters().getFirst("partNumber"),
                             uriInfo,
                             httpHeaders,
                             body != null ? new ByteArrayInputStream(body) : null);
@@ -801,7 +800,7 @@ public class S3Controller {
                               @HeaderParam("If-Match") String ifMatch,
                               @HeaderParam("If-None-Match") String ifNoneMatch,
                               @QueryParam("uploadId") String uploadId,
-                              @QueryParam("partNumber") Integer partNumber,
+                              @QueryParam("partNumber") String partNumber,
                               @Context UriInfo uriInfo,
                               @Context HttpHeaders httpHeaders,
                               InputStream body) {
@@ -847,12 +846,13 @@ public class S3Controller {
 
             if (uploadId != null && partNumber != null) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
+                int parsedPartNumber = PartRange.parseUploadPartNumber(partNumber);
                 if (copySource != null && !copySource.isEmpty()) {
                     return handleUploadPartCopy(
-                            copySource, bucket, key, uploadId, partNumber, httpHeaders, authorization);
+                            copySource, bucket, key, uploadId, parsedPartNumber, httpHeaders, authorization);
                 }
                 requireDeclaredSizeWithin(httpHeaders, contentEncoding, contentSha256, S3Service.MAX_PART_SIZE);
-                Part part = s3Service.storePart(bucket, key, uploadId, partNumber,
+                Part part = s3Service.storePart(bucket, key, uploadId, parsedPartNumber,
                         decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
                         uploadChecksums(httpHeaders, uriInfo),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
@@ -1903,7 +1903,13 @@ public class S3Controller {
     private List<CompletedPart> parseCompleteMultipartBody(String xml) {
         List<Map<String, String>> parts = XmlParser.extractGroups(xml, "Part");
         if (parts.isEmpty()) {
-            throw malformedCompleteMultipartXml();
+            if (xml == null || xml.isEmpty()) {
+                throw emptyCompleteMultipartXml();
+            }
+            if (!"CompleteMultipartUpload".equals(XmlParser.rootElementName(xml))) {
+                throw malformedCompleteMultipartXml();
+            }
+            throw emptyCompleteMultipartXml();
         }
         List<CompletedPart> completedParts = new ArrayList<>();
         for (Map<String, String> part : parts) {
@@ -1925,6 +1931,10 @@ public class S3Controller {
 
     private static AwsException malformedCompleteMultipartXml() {
         return new AwsException("MalformedXML", "The XML you provided was not well-formed.", 400);
+    }
+
+    private static AwsException emptyCompleteMultipartXml() {
+        return new AwsException("InvalidRequest", "You must specify at least one part", 400);
     }
 
     private Map<Integer, S3Checksum> completedPartChecksums(List<CompletedPart> parts) {
@@ -2939,6 +2949,7 @@ public class S3Controller {
         appendSseCustomerHeaders(resp, obj);
         appendChecksumHeaders(resp, obj.getChecksum());
         appendLockHeaders(resp, obj);
+        appendExpirationHeader(resp, obj);
     }
 
     // includeChecksum must be false for a range the stored checksum does not describe:
@@ -2983,6 +2994,14 @@ public class S3Controller {
             appendChecksumHeaders(resp, obj.getChecksum());
         }
         appendLockHeaders(resp, obj);
+        appendExpirationHeader(resp, obj);
+    }
+
+    private void appendExpirationHeader(Response.ResponseBuilder resp, S3Object obj) {
+        String expiration = s3Service.expirationHeader(obj);
+        if (expiration != null) {
+            resp.header("x-amz-expiration", expiration);
+        }
     }
 
     private void appendSseCustomerHeaders(Response.ResponseBuilder resp, S3Object obj) {
@@ -3554,12 +3573,13 @@ public class S3Controller {
         }
         // S3 InvalidArgument responses carry ArgumentName and ArgumentValue so the SDK can
         // surface which input was rejected, and EntityTooSmall and EntityTooLarge the proposed and
-        // allowed sizes. They travel through AwsException.extendedData.
+        // allowed sizes. Multipart size errors also identify the rejected part.
+        // They travel through AwsException.extendedData.
         if (e.getExtendedData() != null) {
-            for (String sizeField : List.of("ProposedSize", "MinSizeAllowed", "MaxSizeAllowed")) {
-                Object size = e.getExtendedData().get(sizeField);
-                if (size != null) {
-                    xmlBuilder.elem(sizeField, size.toString());
+            for (String field : List.of("ProposedSize", "MinSizeAllowed", "MaxSizeAllowed", "PartNumber", "ETag")) {
+                Object value = e.getExtendedData().get(field);
+                if (value != null) {
+                    xmlBuilder.elem(field, value.toString());
                 }
             }
             Object resource = e.getExtendedData().get("Resource");
@@ -3844,13 +3864,16 @@ public class S3Controller {
      * {@code AuthorizationHeaderMalformed}.
      */
     private void rejectUnknownPostRegion(String credential) {
-        if (credential == null || credential.isEmpty() || config.partitions().allowUnknownRegions()) {
+        if (credential == null || credential.isEmpty()) {
             return;
         }
         String region = regionResolver.resolveRegionFromPresignedCredential(credential);
-        if (!RegionResolver.isKnownRegion(region)) {
-            throw new AwsException("AuthorizationHeaderMalformed", "The authorization header is malformed; "
-                    + "the region '" + region + "' is wrong; expecting a region AWS publishes.", 400);
+        boolean ambiguous = RegionResolver.containsArnDelimiter(region);
+        if (ambiguous || (!RegionResolver.isKnownRegion(region) && !config.partitions().allowUnknownRegions())) {
+            String message = ambiguous ? "The authorization header is malformed; the region '" + region
+                    + "' must not contain ':'." : "The authorization header is malformed; "
+                    + "the region '" + region + "' is wrong; expecting a region AWS publishes.";
+            throw new AwsException("AuthorizationHeaderMalformed", message, 400);
         }
     }
 

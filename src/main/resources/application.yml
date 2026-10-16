@@ -31,6 +31,8 @@ quarkus:
       require-localhost: false
     limits:
       max-body-size: ${floci.protocols.max-request-size}M
+      # Lambda Web Functions accept a request head of up to 128 KiB and answer 431 past it.
+      max-header-size: 128K
   shutdown:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
@@ -76,6 +78,7 @@ quarkus:
         - cloudformation/*.json
         - redshift/*.sql
         - i18n/*.properties
+        - floci/version.properties
         - org/apache/velocity/runtime/defaults/*.properties
         # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
         # driver reads its time zone table at connect time.
@@ -363,6 +366,8 @@ floci:
       enforce-auth: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
+      lifecycle-sweep-enabled: true          # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED - apply lifecycle expiration rules in the background
+      lifecycle-sweep-interval-seconds: 60   # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS
     dynamodb:
       enabled: true
       vector-index-allocation-seconds: 4   # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS. Resource allocation phase of a vector index added by UpdateTable.
@@ -436,6 +441,13 @@ floci:
       default-image: "redpandadata/redpanda:latest"
       kafka-host-port-base: 9300
       kafka-host-port-max: 9399
+      # bootstrap-hostname: unset by default, so GetBootstrapBrokers returns the broker's
+      # Docker-network address. Only applies when Floci runs in a container: each broker then
+      # also has a host listener, published on a port from the kafka-host-port range and
+      # advertised as <this hostname, else localhost>:<port>. When set, GetBootstrapBrokers
+      # returns both listeners, <container-name>:9092,<hostname>:<port>, so clients on the
+      # Docker host and in sibling containers can each discover the broker.
+      # Env var: FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME=localhost
     amazonmq:
       enabled: true
       mock: false
@@ -497,6 +509,7 @@ floci:
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
+      database-resuming-exception-enabled: false # FLOCI_SERVICES_RDS_DATA_DATABASE_RESUMING_EXCEPTION_ENABLED
     redshift-data:
       enabled: true
       result-ttl-hours: 24
@@ -545,6 +558,7 @@ floci:
       enabled: true
     cognito:
       enabled: true
+      enforce-token-validity-limits: true
     stepfunctions:
       enabled: true
       allow-plaintext-http: false
@@ -594,6 +608,19 @@ floci:
       # single image (e.g. private registry mirror). When unset, the image is
       # picked from OpenSearchVersions.imageFor(EngineVersion).
       # default-image: "registry.example.com/opensearch:2.19.5"
+      # data-volume: optional data volume for the spawned domain containers; an absolute
+      # path is bind-mounted as <path>/<account-id>/<region>/<domain-name> (nested under a <namespace>
+      # subdirectory when docker.resource-namespace is set), any other value is a Docker
+      # volume name and each domain gets its own <name>-<namespace>-<account-id>-<region>-<domain-name> volume
+      # of it (no namespace segment when unset). Storage named here is never removed on
+      # domain delete, and a volume created when absent carries no Floci label, so no
+      # sweep of Floci-labelled volumes collects it. When unset, each domain gets a
+      # Floci-managed volume.
+      # Linux daemon paths starting with / keep their path syntax on Windows.
+      # Bind-directory ownership is prepared by a temporary root container using the
+      # selected image. Existing files are untouched; init failure aborts domain startup.
+      # data-volume: "opensearch-data"
+      # data-volume: "/srv/floci/opensearch"
       proxy-base-port: 9400
       proxy-max-port: 9499
       keep-running-on-shutdown: false
@@ -670,7 +697,7 @@ floci:
       prefer-local-images: true
     ui:
       enabled: true
-      image: "floci/floci-ui:latest"
+      image: "floci/floci-ui:0.7.0"
       container-name: floci-ui
       port: 4500
       # bind-address: unset by default, so Docker publishes the console on every interface.

@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.iam.IamService.PresignedScope;
 import io.github.hectorvent.floci.services.iam.RequestPrincipal;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
+import io.github.hectorvent.floci.services.iam.ResourcePolicyProviders;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
@@ -287,6 +288,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (!config.services().iam().enforcementEnabled()) {
             return;
         }
+        ProtocolClaim rpcV2Route = rpcV2RouteClaim(ctx);
+        if (rpcV2Route != null) {
+            // The claim filter runs before routing and can leave a call this endpoint serves
+            // unclaimed, as an unrecognised smithy-protocol value does. Every check below that reads
+            // the claim has to see the call that runs: unclaimed, an unsigned one would pass as REST.
+            ctx.setProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY, rpcV2Route);
+        }
 
         String auth = ctx.getHeaderString("Authorization");
         boolean emptyHeader = auth != null && auth.isBlank();
@@ -408,7 +416,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         List<String> resources = resolveResourceArns(credentialScope,
-                arnBuilder.buildResources(credentialScope, ctx, region, accountId));
+                "logs".equals(credentialScope)
+                        ? arnBuilder.buildLogStreamResources(action, ctx, region, accountId, requestPartition())
+                        : arnBuilder.buildResources(credentialScope, ctx, region, accountId));
 
         Optional<PresignedScope> presignedScope = iamService.presignedScope(akid);
         if (presignedScope.isPresent()) {
@@ -436,7 +446,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                         "s3", "", decodedPath.substring(1)).toString());
             }
             // IAM's resource glob treats * and ? in object keys as patterns. An internal URL
-            // credential is narrower: it may authorize only its literal object and action.
+            // credential is narrower: it may authorize only its literal object and action. That
+            // action is never a version action: a generated URL signs only its X-Amz-* parameters,
+            // so it names no versionId, and PreSignedUrlFilter refuses one appended to it as a
+            // signature mismatch before this check.
             if (!scope.action().equals(action) || resources.isEmpty()
                     || resources.stream().anyMatch(resource -> !scope.resourceArn().equals(resource))) {
                 ctx.abortWith(accessDeniedForRequest(action, credentialScope, ctx));
@@ -510,15 +523,21 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // against real AWS: under a GetObject allow conditioned on s3:ExistingObjectTag the
         // conditional write is AccessDenied, under a GetObject allow scoped by prefix alone it
         // succeeds, and with no GetObject at all it is denied. If-None-Match needs no such
-        // permission.
-        if ("s3:PutObject".equals(action) && ctx.getHeaderString("If-Match") != null) {
+        // permission. The user guide's conditional writes page lists PutObject, CopyObject and
+        // CompleteMultipartUpload as the operations that take If-Match; CreateMultipartUpload and
+        // UploadPart, also checked as s3:PutObject, ignore it, so it adds nothing to them.
+        if ("s3:PutObject".equals(action) && evaluatesIfMatch(ctx) && ctx.getHeaderString("If-Match") != null) {
             abortIfDenied(ctx, caller, principal, "s3:GetObject", credentialScope, resources,
                     withoutObjectTags(targetContexts), region, accountId, akid);
         }
         // A DeleteObject conditioned on an ETag reveals whether the object still has it, and the
         // conditional-deletes guide requires s3:GetObject for it; If-Match: * (existence only)
-        // needs just s3:DeleteObject. The read is checked the way the PutObject case above is.
-        if ("s3:DeleteObject".equals(action) && isPlainDeleteObject(ctx)
+        // needs just the delete. A delete naming a version, checked as s3:DeleteObjectVersion, is
+        // checked the same way: the guide says the condition is evaluated against the current
+        // version only, so the read is of that one, s3:GetObject. The read is checked the way the
+        // PutObject case above is.
+        if (("s3:DeleteObject".equals(action) || "s3:DeleteObjectVersion".equals(action))
+                && isPlainDeleteObject(ctx)
                 && isETagCondition(ctx.getHeaderString("If-Match"))) {
             abortIfDenied(ctx, caller, principal, "s3:GetObject", credentialScope, resources,
                     withoutObjectTags(targetContexts), region, accountId, akid);
@@ -526,9 +545,21 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     // The DELETE subresources S3Controller.deleteObject routes away from DeleteObject (?uploadId= is
-    // AbortMultipartUpload, which the action registry also files under s3:DeleteObject). Everything
-    // else, including the x-id and X-Amz-* parameters SDKs and presigned URLs add, is a DeleteObject.
+    // AbortMultipartUpload). Everything else, including the x-id and X-Amz-* parameters SDKs and
+    // presigned URLs add, is a DeleteObject.
     private static final Set<String> NON_DELETE_OBJECT_SUBRESOURCES = Set.of("uploadId", "tagging", "annotation");
+
+    // PutObject and CopyObject are any PUT S3Controller does not run as UploadPart or UploadPartCopy,
+    // which name both an uploadId and a partNumber; CompleteMultipartUpload is a POST naming its
+    // upload, without ?uploads.
+    private static boolean evaluatesIfMatch(ContainerRequestContext ctx) {
+        MultivaluedMap<String, String> params = ctx.getUriInfo().getQueryParameters();
+        boolean namesUpload = params.containsKey("uploadId");
+        if ("PUT".equalsIgnoreCase(ctx.getMethod())) {
+            return !(namesUpload && params.containsKey("partNumber"));
+        }
+        return "POST".equalsIgnoreCase(ctx.getMethod()) && namesUpload && !params.containsKey("uploads");
+    }
 
     private static boolean isPlainDeleteObject(ContainerRequestContext ctx) {
         return "DELETE".equalsIgnoreCase(ctx.getMethod())
@@ -546,8 +577,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     /**
      * Resolves both the IAM namespace and action from the service that will actually handle the
-     * request. Query traffic shares the dispatch resolver with {@link AwsQueryController}; REST
-     * traffic uses the JAX-RS resource class that won route matching.
+     * request. Query traffic shares the dispatch resolver with {@link AwsQueryController}; an RPC v2
+     * call takes the service and operation its route dispatches; REST traffic uses the JAX-RS
+     * resource class that won route matching.
      */
     private ResolvedAuthorization resolveAuthorization(String auth, String claimedScope,
                                                         ContainerRequestContext ctx) {
@@ -566,6 +598,18 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     IamAuthorizedActions.actionFor(servingScope, queryAction));
         }
 
+        // Read from the route rather than the claim: a path the claim filter takes for RPC v2 can
+        // reach another route, and an X-Amz-Target header names an operation this endpoint ignores.
+        ProtocolClaim rpcV2Route = rpcV2RouteClaim(ctx);
+        if (rpcV2Route != null) {
+            if (rpcV2Route.service() == null) {
+                return new ResolvedAuthorization(claimedScope, null); // no service: the endpoint answers 404
+            }
+            String servingScope = iamServiceScope(rpcV2Route.service(), claimedScope);
+            return new ResolvedAuthorization(servingScope,
+                    IamAuthorizedActions.actionFor(servingScope, rpcV2Route.operation()));
+        }
+
         ResolvedAuthorization routeAuthorization = restRouteAuthorization(ctx);
         if (routeAuthorization != null) {
             return routeAuthorization;
@@ -577,6 +621,25 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         return new ResolvedAuthorization(servingScope, rest
                 ? actionRegistry.resolveRoute(servingScope, ctx)
                 : actionRegistry.resolve(servingScope, ctx));
+    }
+
+    /**
+     * The claim of a call JAX-RS routed to the Smithy RPC v2 endpoint, made from the service and
+     * operation in the route's path parameters, which are what that endpoint dispatches. Null for
+     * any other request.
+     */
+    private ProtocolClaim rpcV2RouteClaim(ContainerRequestContext ctx) {
+        if (resourceInfo == null || !AwsJsonCborController.class.equals(resourceInfo.getResourceClass())) {
+            return null;
+        }
+        MultivaluedMap<String, String> parameters = ctx.getUriInfo().getPathParameters();
+        String serviceId = parameters.getFirst(AwsJsonCborController.RPC_V2_SERVICE_PARAMETER);
+        String operation = parameters.getFirst(AwsJsonCborController.RPC_V2_OPERATION_PARAMETER);
+        if (serviceId == null || operation == null) {
+            return null;
+        }
+        return new ProtocolClaim(WireProtocol.RPCV2_CBOR, catalog.byCborSdkServiceId(serviceId).orElse(null),
+                operation, null);
     }
 
     /**
@@ -1079,15 +1142,21 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (action == null) return null;
         // Action set sourced from IamActionRegistry — see that file for any
         // additions. HEAD on an object is bucketed under s3:GetObject by the
-        // registry, so we distinguish via httpMethod.
+        // registry, so we distinguish via httpMethod. The POST operations checked as
+        // s3:PutObject or s3:GetObject (multipart create and complete, Select) cannot
+        // be told apart from the action, so they get no name rather than a wrong one.
+        if ("POST".equalsIgnoreCase(httpMethod)) {
+            return null;
+        }
         return switch (action) {
-            case "s3:GetObject" -> "HEAD".equalsIgnoreCase(httpMethod) ? "HeadObject" : "GetObject";
+            case "s3:GetObject", "s3:GetObjectVersion" ->
+                    "HEAD".equalsIgnoreCase(httpMethod) ? "HeadObject" : "GetObject";
             case "s3:PutObject" -> "PutObject";
-            case "s3:DeleteObject" -> "DeleteObject";
+            case "s3:DeleteObject", "s3:DeleteObjectVersion" -> "DeleteObject";
             case "s3:ListBucket" -> "ListObjects";
             case "s3:ListAllMyBuckets" -> "ListBuckets";
-            case "s3:GetObjectAcl" -> "GetObjectAcl";
-            case "s3:PutObjectAcl" -> "PutObjectAcl";
+            case "s3:GetObjectAcl", "s3:GetObjectVersionAcl" -> "GetObjectAcl";
+            case "s3:PutObjectAcl", "s3:PutObjectVersionAcl" -> "PutObjectAcl";
             case "s3:GetObjectTagging" -> "GetObjectTagging";
             case "s3:PutObjectTagging" -> "PutObjectTagging";
             case "s3:DeleteObjectTagging" -> "DeleteObjectTagging";
@@ -1177,17 +1246,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     private List<ResourcePolicyProvider.ResourcePolicy> resolveResourcePolicies(String credentialScope, String resourceArn) {
-        if (resourcePolicyProviders == null || resourcePolicyProviders.isUnsatisfied()) {
-            return List.of();
-        }
-        List<ResourcePolicyProvider.ResourcePolicy> policies = new ArrayList<>();
-        for (ResourcePolicyProvider provider : resourcePolicyProviders) {
-            List<ResourcePolicyProvider.ResourcePolicy> providerPolicies = provider.getResourcePolicies(credentialScope, resourceArn);
-            if (providerPolicies != null && !providerPolicies.isEmpty()) {
-                policies.addAll(providerPolicies);
-            }
-        }
-        return policies;
+        return ResourcePolicyProviders.policiesFor(resourcePolicyProviders, credentialScope, resourceArn);
     }
 
     /**

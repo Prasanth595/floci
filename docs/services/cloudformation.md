@@ -131,6 +131,31 @@ an atomic ownership check against another stack or a direct Cognito API writer r
 Failed in-place restoration preserves the original name and scopes for a `ContinueUpdateRollback`
 retry. Deleting the current server keeps this snapshot if deletion fails.
 
+## SSM parameters
+
+Like AWS's resource handler, `AWS::SSM::Parameter` is created with one `PutParameter` that carries
+the template's tags and does not overwrite. A name that already exists outside the stack fails the
+resource with `ParameterAlreadyExists`; the stack never overwrites, adopts or deletes that
+parameter. Floci applies the `Name`, `Type`, `Value` and `Tags` properties.
+
+An update that keeps `Name` overwrites the parameter. When a later resource fails the update, the
+rollback writes the prior value and settings back, as a new SSM version when they changed (the
+version history is not rewound, as on AWS), and returns the tags the previous or the failed
+template set to their prior values; other tags are left alone. As on AWS, the update first checks
+that the parameter exists: one deleted outside the stack fails it with `ParameterNotFound` before
+anything is written. A rollback that finds the parameter gone fails the same way, leaving the stack
+in `UPDATE_ROLLBACK_FAILED`.
+
+Giving `Name` a new value replaces the parameter. The previous parameter stays until the update
+commits, and is then deleted unless `UpdateReplacePolicy` is `Retain`; a failed update deletes the
+replacement instead. A restore or delete that fails during the rollback leaves the stack in
+`UPDATE_ROLLBACK_FAILED`, and `ContinueUpdateRollback` retries it (see
+[Failed update rollbacks](#failed-update-rollbacks)). Deleting a parameter that is already gone
+counts as deleted. Known differences: removing an explicit `Name` keeps the parameter under that
+name, where AWS replaces it with one under a generated name; and an update in place of a parameter
+deleted outside the stack ends in `UPDATE_ROLLBACK_COMPLETE`, since nothing was written, where AWS's
+rollback repeats the existence check and likely ends in `UPDATE_ROLLBACK_FAILED`.
+
 ## Supported Resource Types
 
 Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`. Each delegates to
@@ -147,8 +172,9 @@ cross-resource references.
 | S3 | `Bucket`, `BucketPolicy` (document stored on the bucket; S3 does not evaluate it) |
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
 | SNS | `Topic`, `Subscription`, `TopicPolicy` |
+| SES | `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment) |
 | DynamoDB | `Table` (`TimeToLiveSpecification` applied on create and update; to rename an enabled TTL attribute, disable TTL in one update and enable the new attribute in a later one), `GlobalTable` |
-| Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `EventInvokeConfig` (also what a SAM function's `EventInvokeConfig` expands into), `MicrovmImage`, `NetworkConnector`, `Url`. Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
+| Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `EventInvokeConfig` (also what a SAM function's `EventInvokeConfig` expands into), `MicrovmImage`, `NetworkConnector`, `Url`, `WebFunction` (control plane only; the endpoint domain does not serve requests yet), `WebFunctionEndpoint` (`RegionalEndpoints` is not exposed to `Fn::GetAtt` yet), `WebFunctionRevision` (every property is createOnly, so a change mints a new revision). Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
 | IAM | `Role`, `User` (template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete), `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
 | Organizations | `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy` |
 | SSM | `Parameter` |
@@ -161,7 +187,7 @@ cross-resource references.
 | ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `SubnetGroup`, `User` (Tags are ignored), `UserGroup` (Tags are ignored), `ServerlessCache` (GetAtt uses the dotted Endpoint.* and ReaderEndpoint.* form) |
 | Redshift | `Cluster` (single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported), `ClusterParameterGroup`, `ClusterSubnetGroup`, `ClusterSecurityGroup` (accepted; no EC2-Classic security group model) |
 | Redshift Serverless | `Namespace` (ManageAdminPassword is accepted and not applied; GetAtt uses the dotted Namespace.* form), `Workgroup` (starts a real container; one workgroup per namespace; capacity, VPC and price-performance settings are stored only; snapshot restore properties are ignored; GetAtt uses the dotted Workgroup.* form) |
-| EC2 | `VPC`, `Subnet`, `SecurityGroup` (inline `SecurityGroupIngress`/`SecurityGroupEgress` supported), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `VPCEndpoint`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog` |
+| EC2 | `VPC` (deleted on stack teardown; a VPC with dependents outside the stack, including anything still holding a network interface in its subnets (an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone interface, an interface endpoint), fails the delete with `DependencyViolation`, as on AWS), `Subnet`, `SecurityGroup` (inline `SecurityGroupIngress`/`SecurityGroupEgress` supported), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `VPCEndpoint`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog` |
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
 | Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup`, `LifecycleHook`, `ScalingPolicy` |
 | Application Auto Scaling | `ScalableTarget` (`ScheduledActions` are accepted and not run; Floci has no scheduled scaling), `ScalingPolicy` |
@@ -210,6 +236,21 @@ Set `floci.services.cloudformation.allow-stub-unsupported-resource-types` to `fa
 (`FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_UNSUPPORTED_RESOURCE_TYPES=false`) to fail such a
 resource instead: it reaches `CREATE_FAILED` and the stack rolls back. Use it in a pipeline that
 must not pass over a resource it never got.
+
+## SES Email Identities
+
+`AWS::SES::EmailIdentity` provisions an SES identity and supports in-place option updates and
+replacement when `EmailIdentity` changes. Change-set previews also mark the replacement and its
+`Ref` dependents.
+
+If an update rollback cannot restore the identity snapshot, the stack remains in
+`UPDATE_ROLLBACK_FAILED`. `ContinueUpdateRollback` retries the restoration; `UpdateStack` is
+rejected until rollback completes. A successful retry permits later updates. `DeleteStack` can
+delete the current managed identity without first restoring its snapshot.
+
+Cleanup keeps displaced-identity records while deletion attempts remain. After three cleanup
+attempts, an exhausted entry is removed from stack management and a later `DeleteStack` does not
+retry it. Committed update cleanup uses the same three-attempt limit.
 
 ## EventBridge Scheduler Schedules
 
@@ -365,6 +406,16 @@ references in `MasterUsername` and `MasterUserPassword` during resource creation
 
 Dynamic-reference expansion is currently scoped to these RDS credential properties.
 
+## RDS Associated Roles
+
+`AWS::RDS::DBCluster` and `AWS::RDS::DBInstance` apply `AssociatedRoles` through the same checks as
+`AddRoleToDBCluster` / `AddRoleToDBInstance` (see [RDS IAM role associations](rds.md#iam-role-associations)):
+
+- `Fn::If` may select the whole list or a single entry, and `AWS::NoValue` leaves it out. A value that is not a list of roles is a `ValidationError`.
+- On create, the roles are associated with the new cluster or instance. A list RDS refuses (a missing `RoleArn`, an instance role without `FeatureName`, or a cluster role named twice) fails the resource, and the new database is deleted again. As in AWS, an instance role or feature the list repeats is skipped, not refused. A renamed instance keeps its predecessor until the new one has its roles.
+- On `UpdateStack` (no interruption, as in AWS), a cluster's list is checked first, then the roles the template gained are added, and the roles the previous template declared and the new one drops are removed. A role associated outside the stack is kept while the template leaves it out; declaring it fails the update with `DBClusterRoleAlreadyExists`, as in AWS. If any step of an update is refused, the roles it already added are removed and the ones it removed are put back, so the database matches what the stack still records and a retry starts from there. A rolled-back cluster replacement restores the record of which roles the stack declared.
+- An Aurora cluster member (`AWS::RDS::DBInstance` with `DBClusterIdentifier`) cannot carry `AssociatedRoles`: the schema documents the property as not applicable there, since the cluster manages its roles. The resource fails with a `ValidationError` pointing at the cluster's `AssociatedRoles`.
+
 ## Account-Aware Provisioning
 
 Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's account** namespace
@@ -390,6 +441,19 @@ before provisioning:
   tags, bucket names) from Parameter Store.
 - `AWS::SSM::Parameter::Value<List<String>>` and `AWS::SSM::Parameter::Name` typed parameters are
   **not yet** resolved — they are passed through as their literal input.
+- **A declared parameter needs a value.** One that the request gives no value and the template no
+  `Default` fails `CreateStack`, `UpdateStack` and `CreateChangeSet` with `ValidationError`
+  `Parameters: [Env] must have values`, naming each such parameter, before anything changes. An
+  empty value counts as a value. An update does not carry values over: set `UsePreviousValue` to
+  keep the deployed one. `UsePreviousValue` on a parameter that has no deployed value passes none.
+  The values are checked before the template's dependency checks (a cycle, an unresolved
+  dependency, a malformed condition), which read them, so a template with a cycle and a missing
+  value gets this error. A request for a stack that does not exist, cannot be updated, or already
+  exists gets that stack error instead of this one; a dependency error still comes before the
+  stack error. The same check
+  refuses `CreateStackSet` and `UpdateStackSet`, and fails a nested stack's resource whose
+  `Parameters` leave a child parameter without a value. A parameter that an `AWS::Include` defines
+  is not checked, nor is any parameter in a section that carries an `AWS::Include` of its own.
 
 The `AWS::SSM::Parameter` **resource** type exposes `Value`, `Type`, `Name`, and `Arn` attributes through
 `Ref` / `Fn::GetAtt` so downstream resources can consume a parameter the same stack creates.
@@ -454,6 +518,17 @@ Template `Conditions` are evaluated before provisioning. A resource whose `Condi
 **false is skipped** — it is never provisioned, does not appear in `DescribeStackResources`, and its
 `Ref` / `Fn::GetAtt` are not required to resolve. This matches CloudFormation and is required for the
 condition-heavy templates CDK and LZA emit.
+
+The operands of `Fn::Equals` are resolved as resource property values are, so `Ref` to a parameter
+or a pseudo parameter (`AWS::StackName` and `AWS::StackId` included) and `Fn::FindInMap`, the
+functions CloudFormation supports there, work inside a condition. The dependency check a create runs
+before the stack exists sees the `AWS::StackId` the stack is then given. An operand Floci cannot
+resolve compares as an empty string. `AWS::NotificationARNs` is the empty list everywhere, as
+Floci keeps no notification ARNs. `Fn::ImportValue` is not allowed in a condition, as in CloudFormation: `CreateStack`,
+`UpdateStack` and `CreateChangeSet` refuse such a template, with the message `Template error: Cannot
+use Fn::ImportValue in Conditions.` A SAM template's change set fails with that reason instead, and
+so does the stack when CreateStack or UpdateStack executes it; an `AWS::Include` template fails when
+it is executed.
 
 ## Custom Resources and the CDK Provider Framework
 
@@ -602,8 +677,10 @@ Deviations from AWS to be aware of:
   removals as well.
 - After `DeleteStack` completes, a retained resource's `DELETE_SKIPPED` record is only visible
   through `DescribeStackEvents` for the deleted stack, not `DescribeStackResources`.
-- `UpdateReplacePolicy`, and the `RetainExceptOnCreate` request parameter of `CreateStack` /
-  `UpdateStack`, are not implemented.
+- `UpdateReplacePolicy` is honored only by the resource types that delete a displaced resource once
+  the update commits, such as an SSM parameter or a log stream; other types keep the displaced
+  resource, or delete it during the update, whatever the policy. The `RetainExceptOnCreate` request
+  parameter of `CreateStack` / `UpdateStack` is not implemented.
 
 ## StackSets
 

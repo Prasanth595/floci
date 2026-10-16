@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbConditionKeys;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbTableNames;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
+import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -56,13 +58,22 @@ public class IamConditionContextResolver {
     private static final String BUFFERED_FORM_BODY = "floci.bufferedFormBody";
     private static final String REQUEST_TAG_PREFIX = "aws:RequestTag/";
     private static final String RESOURCE_TAG_PREFIX = "aws:ResourceTag/";
+    /**
+     * The services that set {@code aws:SourceOwner} when they publish to an SNS topic, a deprecated key
+     * SNS keeps for the integrations that had it (SNS Developer Guide, "aws:SourceAccount versus
+     * aws:SourceOwner"). The guide lists more; these are the ones that call through
+     * {@link ServiceCallAuthorizer}.
+     */
+    private static final Set<String> SNS_SOURCE_OWNER_SERVICES = Set.of("ses");
     public static final String EXISTING_OBJECT_TAG_PREFIX = "s3:ExistingObjectTag/";
     public static final String REQUEST_OBJECT_TAG_PREFIX = "s3:RequestObjectTag/";
     public static final String REQUEST_OBJECT_TAG_KEYS = "s3:RequestObjectTagKeys";
+    public static final String VERSION_ID = "s3:versionid";
 
     private final Instance<DynamoDbFacade> dynamoDbFacade;
     private final Instance<Ec2Service> ec2Service;
     private final Instance<S3Service> s3Service;
+    private final Instance<CloudWatchLogsService> logsService;
     private final RequestContext requestContext;
     private final EmulatorConfig config;
 
@@ -70,11 +81,13 @@ public class IamConditionContextResolver {
     public IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
                                        Instance<Ec2Service> ec2Service,
                                        Instance<S3Service> s3Service,
+                                       Instance<CloudWatchLogsService> logsService,
                                        RequestContext requestContext,
                                        EmulatorConfig config) {
         this.dynamoDbFacade = dynamoDbFacade;
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
+        this.logsService = logsService;
         this.requestContext = requestContext;
         this.config = config;
     }
@@ -86,8 +99,38 @@ public class IamConditionContextResolver {
             case "ec2" -> ec2ConditionContext(action, ctx);
             case "dynamodb" -> dynamoDbConditionContext(action, ctx);
             case "iam" -> iamConditionContext(action, ctx);
+            case "logs" -> logStreamConditionContext(action, ctx);
             default -> null;
         };
+    }
+
+    /** Stream access uses the owning log group's tags, in the handler's account and region. */
+    private Map<String, List<String>> logStreamConditionContext(String action, ContainerRequestContext ctx) {
+        if (!("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action))) {
+            return null;
+        }
+        JsonNode body = bufferedJsonBody(ctx);
+        if (body == null || !logsService.isResolvable()) {
+            return null;
+        }
+        String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
+        Map<String, String> tags;
+        try {
+            tags = logsService.get().listTagsLogGroup(body.path("logGroupName").asText(), region);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            // Leave the handler to report a missing group; unexpected lookup errors must not hide a deny.
+            return null;
+        }
+        if (tags == null || tags.isEmpty()) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        tags.forEach((key, value) -> conditions.put(RESOURCE_TAG_PREFIX + key,
+                List.of(value == null ? "" : value)));
+        return conditions;
     }
 
     private static Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {
@@ -124,6 +167,38 @@ public class IamConditionContextResolver {
         return conditions;
     }
 
+    /**
+     * The request context of a call an AWS service makes on its own behalf, such as SES publishing to
+     * a topic, from the IAM User Guide's global condition keys: {@code aws:PrincipalIsAWSService} is
+     * {@code true}; {@code aws:PrincipalServiceName} and {@code aws:PrincipalServiceNamesList} name the
+     * service; {@code aws:SourceArn} and {@code aws:SourceAccount} name the resource whose
+     * configuration triggered the call, when it has them; and {@code aws:ResourceAccount} and
+     * {@code aws:RequestedRegion} describe the target. The keys that describe an IAM principal,
+     * {@code aws:PrincipalArn} and {@code aws:PrincipalAccount} among them, are left out: no IAM
+     * principal makes the call. A call to an SNS topic from a service SNS lists as setting it also
+     * carries {@code aws:SourceOwner}, the source account, which is what the default topic policy
+     * checks.
+     */
+    public static Map<String, List<String>> serviceCallContext(String servicePrincipal, String resourceArn,
+                                                               String resourceOwnerAccountId,
+                                                               String sourceArn, String sourceAccount) {
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        conditions.put("aws:PrincipalIsAWSService", List.of("true"));
+        conditions.put("aws:PrincipalServiceName", List.of(servicePrincipal));
+        conditions.put("aws:PrincipalServiceNamesList", List.of(servicePrincipal));
+        putIfPresent(conditions, "aws:SourceArn", sourceArn);
+        putIfPresent(conditions, "aws:SourceAccount", sourceAccount);
+        if (SNS_SOURCE_OWNER_SERVICES.contains(ServicePrincipals.serviceName(servicePrincipal))
+                && AwsArnUtils.isArnFor(resourceArn, "sns")) {
+            putIfPresent(conditions, "aws:SourceOwner", sourceAccount);
+        }
+        String resourceAccount = accountFromArn(resourceArn);
+        putIfPresent(conditions, "aws:ResourceAccount",
+                resourceAccount == null || resourceAccount.isBlank() ? resourceOwnerAccountId : resourceAccount);
+        putIfPresent(conditions, "aws:RequestedRegion", AwsArnUtils.regionOrDefault(resourceArn, null));
+        return conditions;
+    }
+
     private static String accountFromArn(String arn) {
         if (arn == null || !arn.startsWith("arn:")) {
             return null;
@@ -141,22 +216,40 @@ public class IamConditionContextResolver {
     // ── S3 ──────────────────────────────────────────────────────────────────────
 
     private Map<String, List<String>> s3ConditionContext(String action, ContainerRequestContext ctx) {
+        Map<String, List<String>> conditions = s3ActionConditionContext(action, ctx);
+        // A version action is checked only for a request naming a version, and carries its id.
+        if (S3ObjectActions.isVersionAction(action) && ctx.getUriInfo() != null) {
+            String versionId = ctx.getUriInfo().getQueryParameters().getFirst("versionId");
+            if (versionId != null) {
+                conditions = merge(conditions, Map.of(VERSION_ID, List.of(versionId)));
+            }
+        }
+        return conditions;
+    }
+
+    private Map<String, List<String>> s3ActionConditionContext(String action, ContainerRequestContext ctx) {
         return switch (action) {
             case "s3:ListBucket" -> s3BucketListConditionContext(ctx.getUriInfo().getQueryParameters());
-            case "s3:PutBucketTagging" -> s3PutBucketTaggingConditionContext(ctx);
-            case "s3:GetBucketTagging", "s3:DeleteBucketTagging", "s3:DeleteBucket" ->
-                    s3BucketResourceTagConditionContext(ctx);
+            // DeleteBucketTagging is checked as s3:PutBucketTagging, and sends no tags of its own:
+            // what it has is the bucket's current tags, as GetBucketTagging does.
+            case "s3:PutBucketTagging" -> "DELETE".equalsIgnoreCase(ctx.getMethod())
+                    ? s3BucketResourceTagConditionContext(ctx)
+                    : s3PutBucketTaggingConditionContext(ctx);
+            case "s3:GetBucketTagging", "s3:DeleteBucket" -> s3BucketResourceTagConditionContext(ctx);
             // Object tags. Which action is given which key is what real AWS was measured to do,
             // not what reads naturally: s3:DeleteObject is given neither key, and s3:PutObject is
             // given the tags of the REQUEST only, never those of an object it is about to
             // overwrite. See S3ObjectTagConditionEnforcementIntegrationTest.
             //
-            // s3:GetObjectVersion is deliberately absent. IamActionRegistry authorizes a GET
-            // carrying ?versionId= as s3:GetObject, and IamEnforcementFilter is the only caller
-            // of resolve, so an arm for it would never be reached. The versionId is read from the
-            // request instead, below.
-            case "s3:GetObject", "s3:GetObjectTagging", "s3:GetObjectAcl",
-                 "s3:PutObjectAcl", "s3:DeleteObjectTagging" -> s3ExistingObjectTagConditionContext(ctx);
+            // The version actions IamActionRegistry checks for a request naming a versionId carry
+            // the key as their base actions do, per the Service Reference, as do the annotation
+            // actions, and the versionId picks whose tags are read.
+            case "s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectTagging", "s3:GetObjectAcl",
+                 "s3:GetObjectVersionAcl", "s3:PutObjectAcl", "s3:PutObjectVersionAcl", "s3:DeleteObjectTagging",
+                 "s3:GetObjectAnnotation", "s3:GetObjectVersionAnnotation", "s3:ListObjectAnnotations",
+                 "s3:ListObjectVersionAnnotations", "s3:PutObjectAnnotation", "s3:PutObjectVersionAnnotation",
+                 "s3:DeleteObjectAnnotation", "s3:DeleteObjectVersionAnnotation" ->
+                    s3ExistingObjectTagConditionContext(ctx);
             case "s3:PutObject" -> s3RequestObjectTagConditionContext(ctx);
             case "s3:PutObjectTagging" -> merge(s3ExistingObjectTagConditionContext(ctx),
                     s3PutObjectTaggingBodyConditionContext(ctx));

@@ -93,7 +93,9 @@ part in authorizing calls to the function:
 - Other operations act on the caller's own function of the name the ARN gives, whatever account
   the ARN names, and are authorized against that function. Floci does not serve them on another
   account's function, which AWS allows through a function policy.
-- Within one account, a statement naming the caller grants on its own.
+- Within one account, a statement naming the caller grants on its own. One naming only the
+  account, as `AddPermission --principal <account-id>` writes it, delegates to the account, so the
+  caller's identity policy has to allow the call too.
 - An invoke is authorized against the version or alias it names, in the function name or in
   `Qualifier`. A grant added with `Qualifier` covers that version or alias only, and a grant on the
   function does not cover a qualified invoke. Other operations are authorized against the
@@ -531,6 +533,10 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 
     Only first-time populates are gated. Warm containers, already-populated volumes, and
     functions under 32 MB are never serialised by this.
+
+    The temporary copy helper is removed without a stop grace period once copying
+    finishes or fails. It runs no Lambda code; actual execution environments retain
+    their normal shutdown and extension-drain behavior.
 
 !!! note "Bounding warm containers"
     After an invocation the container stays warm so the next call skips the cold start, and is

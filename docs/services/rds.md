@@ -71,6 +71,8 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBClusterEndpoints` | List a cluster's built-in writer and reader endpoints and its custom endpoints, with the four documented filters |
 | `ModifyDBClusterEndpoint` | Change a custom endpoint's type or member list |
 | `DeleteDBClusterEndpoint` | Delete a custom endpoint |
+| `EnableHttpEndpoint` | Turn on an Aurora cluster's Data API endpoint by ARN; see [Data API endpoint](#data-api-endpoint) |
+| `DisableHttpEndpoint` | Turn off a cluster's Data API endpoint by ARN |
 | `AddRoleToDBCluster` | Associate an IAM role with a cluster, optionally for a feature; see [IAM role associations](#iam-role-associations) |
 | `RemoveRoleFromDBCluster` | Remove a role from a cluster |
 | `AddRoleToDBInstance` | Associate an IAM role with an instance for a feature |
@@ -616,6 +618,19 @@ Custom endpoints are modelled, not routed: a custom endpoint reports the cluster
 reachable, but connections through it go where the cluster endpoint sends them rather than being
 spread across the chosen members.
 
+## Data API endpoint
+
+`EnableHttpEndpoint` and `DisableHttpEndpoint` turn a cluster's Data API endpoint on and off by the
+cluster's ARN, and `DescribeDBClusters` reports it as `HttpEndpointEnabled`. `CreateDBCluster` and
+`ModifyDBCluster` take `EnableHttpEndpoint` too, as does the `AWS::RDS::DBCluster` CloudFormation
+property, so Terraform's `enable_http_endpoint` and CDK's `enableDataApi` read back what they set.
+
+The Data API is offered for Aurora PostgreSQL and Aurora MySQL clusters, so turning it on for any
+other engine is `InvalidParameterCombination` (a create checks before the cluster exists); turning
+it off is always accepted. An ARN that names no cluster in the caller's account and Region is
+`ResourceNotFoundFault`, and a cluster that is not available is `InvalidResourceStateFault`. The flag
+is recorded and reported only: the Data API (`rds-data`) does not refuse a cluster with it off.
+
 ## IAM role associations
 
 `AddRoleToDBCluster` and `AddRoleToDBInstance` associate an IAM role with an available cluster or
@@ -634,9 +649,12 @@ the feature named; an association that does not exist is `DBClusterRoleNotFound`
 `DBInstanceRoleNotFound`. A stopped cluster or instance refuses both (`InvalidDBClusterStateFault` /
 `InvalidDBInstanceState`).
 
-Associations are recorded, not exercised: Floci does not check the role in IAM, does not check the
-feature name against the engine, and does not hand the role's credentials to the database, so an
-`aws_s3` import still needs credentials of its own. Deleting a cluster or instance drops its
+A `FeatureName` must be one the engine lists in `SupportedFeatureNames` (`DescribeDBEngineVersions`),
+matched without regard to case; any other is `InvalidParameterValue`, and a `CreateDBCluster` naming
+one creates nothing. MySQL, MariaDB and Aurora MySQL list none, so their roles take no feature name.
+
+Associations are recorded, not exercised: Floci does not check the role in IAM and does not hand the
+role's credentials to the database, so an `aws_s3` import still needs credentials of its own. Deleting a cluster or instance drops its
 associations, and snapshots, restores and read replicas start without any.
 
 ## Aurora managed password opt-out
@@ -748,11 +766,23 @@ The RDS auth proxy validates the master username and password at the proxy layer
 
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
 
-New Aurora members inherit IAM database authentication from their cluster.
-`EnableIAMDatabaseAuthentication` on `CreateDBInstance` does not override the
-cluster setting, including when the instance parameter is omitted.
-Member IAM connections currently require the cluster master username and password
-to be supplied when creating the member; those credentials are not yet inherited.
+Aurora members use their cluster's IAM database authentication setting and master
+username and password for backend connections. `EnableIAMDatabaseAuthentication`
+on `CreateDBInstance` does not override the cluster setting. A member request with
+`MasterUsername` or `MasterUserPassword` returns `InvalidParameterCombination`;
+configure those credentials on the cluster and omit them from the member request.
+Managed master secrets belong to the cluster; `ManageMasterUserPassword` on a member
+does not create a separate member secret. When a cluster record lacks a credential,
+the member retains its normalized default for that field.
+
+`ModifyDBInstance` preserves the cluster-owned master password when
+`MasterUserPassword` is supplied for a member; other supported instance settings
+still apply. Change the cluster password with `ModifyDBCluster`.
+
+Accepted cluster password changes update stored member credentials even when the
+cluster has no backend or runs in mock mode. An unchanged password does not update
+relays. Rotating an initialized data volume requires a running backend; changing
+stored metadata alone does not rotate that volume.
 
 Changing `EnableIAMDatabaseAuthentication` with `ModifyDBCluster` updates existing
 Aurora members and applies to new connections through the cluster and member

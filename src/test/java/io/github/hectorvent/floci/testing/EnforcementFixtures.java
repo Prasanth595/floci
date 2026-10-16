@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.testing;
 
+import io.restassured.filter.Filter;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
@@ -8,13 +9,14 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 import static io.restassured.RestAssured.given;
 
 /**
  * Takes an IAM user or an S3 bucket that a test created back out of the shared application, and
- * makes the users an enforcement test signs as ({@link #createUser}, {@link #auth}), registering
- * each one's removal as it goes. A {@code @QuarkusTest} shares one application with every other
+ * makes the users an enforcement test signs as ({@link #createUser}, {@link #auth}) and the SNS
+ * topics it publishes to ({@link #createTopic}), registering each one's removal as it goes. A {@code @QuarkusTest} shares one application with every other
  * test class, so a fixture left behind outlives the class that made it and is visible to the next
  * class that lists users or buckets unscoped. Registered with {@link PartitionCleanup} as each
  * fixture is made.
@@ -221,13 +223,29 @@ public final class EnforcementFixtures {
      *                      delete object versions, and delete the bucket
      */
     public static void removeBucket(int port, String authorization, String bucket) {
-        if (s3(port, authorization).when().head("/" + bucket)
+        removeBucket(() -> s3(port, authorization), bucket);
+    }
+
+    /**
+     * {@link #removeBucket(int, String, String)} under a profile that turns on
+     * {@code floci.services.s3.enforce-auth}, where S3 verifies every header signature and a
+     * fixed {@code Authorization} header is refused. Each request is signed by {@code signer}.
+     *
+     * @param signer a request signer, such as {@code S3RequestSigner}, for an identity allowed to
+     *               list bucket versions, delete object versions, and delete the bucket
+     */
+    public static void removeBucket(int port, Filter signer, String bucket) {
+        removeBucket(() -> given().port(port).filter(signer), bucket);
+    }
+
+    private static void removeBucket(Supplier<RequestSpecification> s3, String bucket) {
+        if (s3.get().when().head("/" + bucket)
                 .then().extract().statusCode() == 404) {
             return;
         }
         List<ObjectVersion> previousPage = List.of();
         while (true) {
-            XmlPath listing = s3(port, authorization).queryParam("versions", "")
+            XmlPath listing = s3.get().queryParam("versions", "")
                     .queryParam("max-keys", 10)
                     .when().get("/" + bucket)
                     .then().statusCode(200).extract().xmlPath();
@@ -243,14 +261,37 @@ public final class EnforcementFixtures {
             for (ObjectVersion version : page) {
                 String encodedKey = URLEncoder.encode(version.key(), StandardCharsets.UTF_8)
                         .replace("+", "%20").replace("%2F", "/");
-                s3(port, authorization).urlEncodingEnabled(false)
+                s3.get().urlEncodingEnabled(false)
                         .queryParam("versionId", version.versionId())
                         .when().delete("/" + bucket + "/" + encodedKey)
                         .then().statusCode(204);
             }
             previousPage = page;
         }
-        s3(port, authorization).when().delete("/" + bucket).then().statusCode(204);
+        s3.get().when().delete("/" + bucket).then().statusCode(204);
+    }
+
+    /**
+     * Creates an SNS topic in the account {@code authorization} signs for, registering its deletion
+     * with {@code cleanup} as soon as it exists, and returns its ARN.
+     *
+     * @param authorization an SNS-scoped header for the account the topic belongs to
+     */
+    public static String createTopic(PartitionCleanup cleanup, int port, String authorization, String name) {
+        String topicArn = query(port, authorization, "CreateTopic", "Name", name)
+                .statusCode(200).extract().path("CreateTopicResponse.CreateTopicResult.TopicArn");
+        cleanup.register(() -> query(port, authorization, "DeleteTopic", "TopicArn", topicArn).statusCode(200));
+        return topicArn;
+    }
+
+    /**
+     * Replaces a topic's access policy.
+     *
+     * @param authorization an SNS-scoped header for the topic's owner
+     */
+    public static void setTopicPolicy(int port, String authorization, String topicArn, String policy) {
+        query(port, authorization, "SetTopicAttributes", "TopicArn", topicArn,
+                "AttributeName", "Policy", "AttributeValue", policy).statusCode(200);
     }
 
     private static void addVersions(List<ObjectVersion> page, XmlPath listing, String element) {
@@ -266,6 +307,12 @@ public final class EnforcementFixtures {
 
     private static ValidatableResponse iam(int port, String authorization, String action,
                                            String... params) {
+        return query(port, authorization, action, params);
+    }
+
+    /** A Query-protocol request: the action and its parameters as form fields. */
+    private static ValidatableResponse query(int port, String authorization, String action,
+                                             String... params) {
         RequestSpecification request = given().port(port)
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", authorization)
