@@ -618,10 +618,6 @@ fixed socket/core/vCPU shape rather than one derived from the instance family.
 In a nondefault VPC it returns `InvalidIPAddress.InUse` without changing the association;
 call `DisassociateAddress` first, as specified by the
 [EC2 API reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ReleaseAddress.html).
-Associating an Elastic IP with an instance that already has one disassociates the earlier
-address, which stays allocated, as the
-[AssociateAddress reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_AssociateAddress.html)
-describes.
 
 Deleting an interface, including deletion on instance termination, disassociates its
 Elastic IP without releasing the allocation. A retained interface keeps its association
@@ -729,9 +725,7 @@ Two behaviours worth calling out, because they are what Terraform reads back:
   requests and `CreateFleet` launches, so `aws_launch_template.iam_instance_profile.name` converges.
 - **`NetworkInterfaces` stays a `NetworkInterfaces` block.** Its `Groups` are not hoisted into
   top-level `SecurityGroupIds`; on AWS the two are mutually exclusive. A launch from the template
-  resolves its security groups from whichever of the two is populated, and takes its subnet and
-  `AssociatePublicIpAddress` from the interface at device index 0. When that interface names no
-  subnet, `CreateFleet` still uses the first interface that does.
+  resolves its security groups from whichever of the two is populated.
 
 #### Launch template versions
 
@@ -1103,19 +1097,3 @@ The file uses the same schema as `src/main/resources/ec2/image-catalog.yaml` and
 include every image that process should expose. Missing or invalid files fail on first
 catalog use; leaving the setting unset preserves the bundled catalog. Containerized
 Floci needs the file mounted at the configured container path.
-
-### Public IPv4 addresses in mock mode
-
-Mock instances apply `MapPublicIpOnLaunch` unless the primary launch interface explicitly
-sets `AssociatePublicIpAddress`. Direct launches, EC2 Fleet launches and Auto Scaling launch
-templates preserve both `true` and `false` overrides. An automatically assigned public address
-appears when the instance reaches `running`, whether DescribeInstances or
-DescribeInstanceStatus observes it first. It remains stable while running, is released on stop
-or termination, and is replaced on restart; the private address remains unchanged.
-
-An associated Elastic IP replaces the automatic address and is kept across a stop.
-Disassociating it from a running instance assigns a new automatic address when the launch
-requested one. A terminated instance has no public address.
-
-A launch template with network interfaces cannot be combined with an instance-level
-`SubnetId`; place the subnet on the primary network interface instead.
