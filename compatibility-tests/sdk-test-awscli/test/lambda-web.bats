@@ -147,7 +147,8 @@ create_function() {
     assert_output --partial "lambda-web-logstream: "
     assert_output --partial "Hello from Lambda Web!"
 
-    run curl -sS -i -H "Host: nope.001.lambda-web.us-east-1.localhost:4566" "$FLOCI_ENDPOINT/"
+    # A domain Floci never minted, in the shape it mints.
+    run curl -sS -i -H "Host: nopenopenopenope.001.lambda-web.us-east-1.localhost:4566" "$FLOCI_ENDPOINT/"
     assert_success
     assert_output --partial "HTTP/1.1 404"
     assert_output --partial "lambda-web-error-type: Platform.InvalidEndpoint"
