@@ -9617,6 +9617,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // ─── Elastic IPs ───────────────────────────────────────────────────────────
 
     public Address allocateAddress(String region) {
+        return allocateAddress(region, null, null);
+    }
+
+    public Address allocateAddress(String region, String publicIpv4Pool, String networkBorderGroup) {
         ensureDefaultResources(region);
         String allocId = "eipalloc-" + randomHex(17);
         String ip = "54." + (new Random().nextInt(256)) + "." + (new Random().nextInt(256)) + "." + (new Random().nextInt(256));
@@ -9624,6 +9628,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         addr.setAllocationId(allocId);
         addr.setPublicIp(ip);
         addr.setRegion(region);
+        // shortcut: pool and border group are metadata until real pool allocation is modeled.
+        addr.setPublicIpv4Pool(publicIpv4Pool);
+        addr.setNetworkBorderGroup(networkBorderGroup);
         addresses.put(key(region, allocId), addr);
         return addr;
     }
@@ -10414,14 +10421,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             };
         }
         // These are the AWS-documented DescribeAddresses filters this store can back with
-        // real data; two documented filters (network-border-group,
-        // network-interface-owner-id) are omitted because Address has no such field and
+        // real data; network-interface-owner-id is omitted because Address has no such field and
         // fabricating one would be its own wrong answer.
         if (resource instanceof Address addr) {
             return switch (filterName) {
                 case "allocation-id" -> matchesValue(values, addr.getAllocationId());
                 case "public-ip" -> matchesValue(values, addr.getPublicIp());
                 case "domain" -> matchesValue(values, addr.getDomain());
+                case "network-border-group" -> matchesValue(values, addr.getNetworkBorderGroup());
                 case "association-id" -> addr.getAssociationId() != null
                         && matchesValue(values, addr.getAssociationId());
                 case "instance-id" -> addr.getInstanceId() != null

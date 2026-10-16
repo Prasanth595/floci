@@ -608,6 +608,14 @@ fixed socket/core/vCPU shape rather than one derived from the instance family.
 | DisassociateAddress | Removes an Elastic IP address association. |
 | ReleaseAddress | Releases an Elastic IP address record. |
 
+`AllocateAddress` and `DescribeAddresses` return `PublicIpv4Pool` and `NetworkBorderGroup`.
+Omitted values default to `amazon` and the request Region, including for older persisted
+allocations without these fields. Explicit values survive association, disassociation and
+restart. `DescribeAddresses` also supports the `network-border-group` filter. These values
+are stored as metadata; Floci does not allocate real BYOIP addresses or route by border group.
+See [AllocateAddress](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_AllocateAddress.html)
+and [Elastic IP allocation](https://docs.aws.amazon.com/vpc/latest/userguide/WorkWithEIPs.html).
+
 `ReleaseAddress` automatically disassociates an instance's Elastic IP only in the default VPC.
 In a nondefault VPC it returns `InvalidIPAddress.InUse` without changing the association;
 call `DisassociateAddress` first, as specified by the
