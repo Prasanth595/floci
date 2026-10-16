@@ -1,8 +1,9 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
@@ -27,11 +28,11 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.util.Base64;
-import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 import java.util.zip.GZIPOutputStream;
 
@@ -482,24 +483,6 @@ class AutoScalingServiceTest {
         assertNull(secondPage.nextToken());
     }
 
-    // StorageBackedMap snapshots keys and reads values lazily, so a group deleted mid-read
-    // surfaces as a null value; DescribeTags must skip it rather than fail.
-    @Test
-    void describeTagsSkipsAGroupDeletedDuringTheRead() throws Exception {
-        service.createOrUpdateTags(REGION, "test-asg", "auto-scaling-group", Map.of("k", "v"), Map.of());
-        Field field = AutoScalingService.class.getDeclaredField("groups");
-        field.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        Map<String, AutoScalingGroup> live = (Map<String, AutoScalingGroup>) field.get(service);
-        Map<String, AutoScalingGroup> withVanished = new HashMap<>(live);
-        withVanished.put(REGION + "::vanished", null);
-        field.set(service, withVanished);
-
-        PaginatedResult<AutoScalingService.TagDescription> page = service.describeTags(REGION, List.of(), null, null);
-
-        assertEquals(List.of("k"), page.items().stream().map(AutoScalingService.TagDescription::key).toList());
-    }
-
     @Test
     void startInstanceRefreshMarksActiveInstancesForReplacement() {
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-original", "InService", "lt-original", "1");
@@ -927,6 +910,40 @@ class AutoScalingServiceTest {
         assertDoesNotThrow(() -> service.setInstanceHealth(REGION, "i-health", "Unhealthy", true));
         assertEquals("Unhealthy", service.describeAutoScalingInstances(REGION, List.of("i-health"))
                 .getFirst().getHealthStatus());
+    }
+
+    @Test
+    void groupDeletedMidIterationIsSkippedNotReturnedAsNull() {
+        // A StorageBackedMap snapshots keys, then reads each value lazily; a group deleted between the
+        // two reads comes back as a key with no value. Model that with a key the store lists but cannot get.
+        InMemoryStorage<String, AutoScalingGroup> storage = new InMemoryStorage<>() {
+            @Override
+            public Set<String> keys() {
+                Set<String> keys = new LinkedHashSet<>();
+                keys.add(AutoScalingService.asgKey(REGION, "deleted-asg"));
+                keys.addAll(super.keys());
+                return keys;
+            }
+        };
+        StorageBackedMap<AutoScalingGroup> groups = new StorageBackedMap<>(storage);
+        groups.putAll(service.groups);
+        service.groups = groups;
+        service.attachInstances(REGION, "test-asg", List.of("i-live"));
+        service.createOrUpdateTags(REGION, "test-asg", "auto-scaling-group", Map.of("k", "v"), Map.of());
+
+        assertFalse(service.describeAutoScalingGroups(null, null).contains(null));
+        assertEquals(List.of("test-asg"), service.describeAutoScalingGroups(REGION, null).stream()
+                .map(AutoScalingGroup::getAutoScalingGroupName).toList());
+        assertEquals(1, service.describeAutoScalingInstances(REGION, null).size());
+        assertEquals(List.of("k"), service.describeTags(REGION, List.of(), null, null).items().stream()
+                .map(AutoScalingService.TagDescription::key).toList());
+
+        service.setInstanceHealth(REGION, "i-live", "Unhealthy", false);
+        service.terminateInstanceInAutoScalingGroup(REGION, "i-live", false);
+        AsgInstance stored = storage.get(AutoScalingService.asgKey(REGION, "test-asg")).orElseThrow()
+                .getInstances().getFirst();
+        assertEquals("Unhealthy", stored.getHealthStatus());
+        assertEquals("Terminating", stored.getLifecycleState());
     }
 
     private static final class AutoScalingGroupFixture {

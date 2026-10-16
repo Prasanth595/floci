@@ -87,6 +87,7 @@ public final class CfnRollback {
      * {@code rollbackUpdate}.
      */
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
+    public static final String S3_BUCKET_UPDATE_SNAPSHOT_ATTR = "__FlociS3BucketUpdateSnapshot";
 
     /**
      * Holds the description, event pattern and retention an EventBridge archive carried before an
@@ -111,6 +112,14 @@ public final class CfnRollback {
      * update call and spent by its {@code rollbackUpdate}.
      */
     public static final String REST_API_UPDATE_SNAPSHOT_ATTR = "__FlociRestApiUpdateSnapshot";
+
+    /**
+     * Holds the tags a web function or the mutable configuration a web function endpoint carried
+     * before the in-place update in flight changed it, so a failed stack update can put it back.
+     * Written by {@code LambdaWebCfnProvisioner} before its update call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR = "__FlociLambdaWebUpdateSnapshot";
 
     /**
      * Holds the function ARN, status, caching flag, token settings and tags an IoT authorizer
