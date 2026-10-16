@@ -295,6 +295,5 @@ aws autoscaling set-desired-capacity \
   --auto-scaling-group-name my-asg \
   --desired-capacity 3
 ```
-```
 
 Launch configurations accept an IAM instance profile name or ARN. Unknown and foreign profiles fail creation with `ValidationError`. At launch, the reconciler resolves a stored name to its ARN in the owning account. `CreateAutoScalingGroup` and `UpdateAutoScalingGroup` refuse, with `ValidationError`, a launch template that names both an instance profile name and an ARN, directly or through the mixed instances policy.
