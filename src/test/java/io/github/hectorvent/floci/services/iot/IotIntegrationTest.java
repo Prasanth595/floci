@@ -857,6 +857,24 @@ class IotIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("CertificateValidationException"));
+
+        given()
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/certificate/register-no-ca")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        given()
+            .contentType("application/json")
+            .body(Map.of("certificatePem", certificatePem, "status", "UNKNOWN"))
+        .when()
+            .post("/certificate/register-no-ca")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
     }
 
     @Test
@@ -918,6 +936,30 @@ class IotIntegrationTest {
         .then()
             .statusCode(200)
             .body("principalThingObjects", empty());
+
+        given()
+        .when()
+            .get("/principals/things-v2")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        given()
+            .header("x-amzn-principal", certificateArn)
+            .queryParam("maxResults", 0)
+        .when()
+            .get("/principals/things-v2")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        given()
+            .queryParam("maxResults", 251)
+        .when()
+            .get("/things/v2-principal-thing-a/principals-v2")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
     }
 
     private String createThingAndReturnArn(String thingName) {

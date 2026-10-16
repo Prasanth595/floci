@@ -873,12 +873,24 @@ public class IotService {
 
     public Page<String> listThingPrincipalsV2(String thingName, String thingPrincipalType, String region,
                                               Integer maxResults, String nextToken) {
+        validateV2PageSize(maxResults);
         return paginate(ofThingPrincipalType(thingPrincipalType, listThingPrincipals(thingName, region)), maxResults, nextToken);
     }
 
     public Page<String> listPrincipalThingsV2(String principal, String thingPrincipalType, String region,
                                               Integer maxResults, String nextToken) {
+        if (principal == null || principal.isBlank()) {
+            throw new AwsException("InvalidRequestException", "Principal is required", 400);
+        }
+        validateV2PageSize(maxResults);
         return paginate(ofThingPrincipalType(thingPrincipalType, listPrincipalThings(principal, region)), maxResults, nextToken);
+    }
+
+    /** The V2 principal lists accept 1 to 250 results per page, as on AWS. */
+    private static void validateV2PageSize(Integer maxResults) {
+        if (maxResults != null && (maxResults < 1 || maxResults > 250)) {
+            throw new AwsException("InvalidRequestException", "maxResults must be between 1 and 250", 400);
+        }
     }
 
     /** Exclusive attachment is not modelled, so every attachment is {@code NON_EXCLUSIVE_THING}. */
