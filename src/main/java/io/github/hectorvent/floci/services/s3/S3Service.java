@@ -472,7 +472,38 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public Bucket createBucket(String bucketName, String region) {
+        return createBucket(bucketName, region, null, null, null, null, null, null, null);
+    }
+
+    public Bucket createBucket(String bucketName, String region, String requestedOwnership,
+                               String cannedAcl, String grantRead, String grantWrite,
+                               String grantFullControl, String grantReadAcp, String grantWriteAcp) {
         requirePathSafeBucketName(bucketName);
+        String ownership = requestedOwnership == null ? "BucketOwnerEnforced" : requestedOwnership;
+        if (!Set.of("BucketOwnerEnforced", "BucketOwnerPreferred", "ObjectWriter").contains(ownership)) {
+            throw new AwsException("InvalidArgument", "Invalid x-amz-object-ownership value: " + ownership, 400);
+        }
+        if (!isBlank(cannedAcl) && !Set.of("private", "public-read", "public-read-write", "authenticated-read")
+                .contains(cannedAcl)) {
+            throw new AwsException("InvalidArgument", "Unsupported x-amz-acl value: " + cannedAcl, 400);
+        }
+        if (!isBlank(cannedAcl) && (!isBlank(grantRead) || !isBlank(grantWrite)
+                || !isBlank(grantFullControl) || !isBlank(grantReadAcp) || !isBlank(grantWriteAcp))) {
+            throw new AwsException("InvalidArgument", "Conflicting ACL headers", 400);
+        }
+        String requestedAcl = resolveObjectAclXml(cannedAcl, grantRead, grantWrite,
+                grantFullControl, grantReadAcp, grantWriteAcp);
+        if ("BucketOwnerEnforced".equals(ownership)
+                && (!isBlank(grantRead) || !isBlank(grantWrite) || !isBlank(grantReadAcp)
+                || !isBlank(grantWriteAcp)
+                || (!isBlank(grantFullControl) && !isOnlyOwnerFullControlGrant(ownerId(), grantFullControl))
+                || S3AclPublicAccessEvaluator.aclGrantsNonOwner(requestedAcl, ownerId()))) {
+            throw new AwsException("InvalidBucketAclWithObjectOwnership",
+                    "Bucket cannot have ACLs set with ObjectOwnership's BucketOwnerEnforced setting", 400);
+        }
+        if (S3AclPublicAccessEvaluator.aclIsPublic(requestedAcl)) {
+            throw accessDeniedException(bucketName, null);
+        }
         var existing = bucketStore.get(bucketName);
         if (existing.isPresent()) {
             Bucket bucket = existing.get();
@@ -486,7 +517,15 @@ public class S3Service implements Resettable, ResourceProvider {
 
         Bucket bucket = new Bucket(bucketName);
         bucket.setRegion(region);
-        bucket.setOwnershipControlsConfiguration(DEFAULT_OWNERSHIP_CONTROLS_XML);
+        bucket.setOwnershipControlsConfiguration("BucketOwnerEnforced".equals(ownership)
+                ? DEFAULT_OWNERSHIP_CONTROLS_XML : new XmlBuilder()
+                        .start("OwnershipControls", AwsNamespaces.S3)
+                        .start("Rule")
+                        .elem("ObjectOwnership", ownership)
+                        .end("Rule")
+                        .end("OwnershipControls")
+                        .build());
+        bucket.setAcl(requestedAcl);
         bucketStore.put(bucketName, bucket);
         LOG.infov("Created bucket: {0} in region: {1}", bucketName, region);
         return bucket;
@@ -3919,18 +3958,30 @@ public class S3Service implements Resettable, ResourceProvider {
                                                    String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5,
                                                    String checksumAlgorithm, String checksumType,
                                                    Map<String, String> tagging) {
+        return initiateMultipartUpload(bucket, key, contentType, metadata, storageClass, contentDisposition,
+                serverSideEncryption, acl, sseKmsKeyId, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5,
+                checksumAlgorithm, checksumType, tagging, null, null, null, null, null);
+    }
+
+    public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
+                                                   Map<String, String> metadata, String storageClass,
+                                                   String contentDisposition, String serverSideEncryption, String acl,
+                                                   String sseKmsKeyId,
+                                                   String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5,
+                                                   String checksumAlgorithm, String checksumType,
+                                                   Map<String, String> tagging, String grantRead, String grantWrite,
+                                                   String grantFullControl, String grantReadAcp, String grantWriteAcp) {
         return withMultipartBucketReadLock(bucket, () -> {
             ensureBucketExists(bucket);
             Bucket destination = resolveBucket(bucket)
                     .orElseThrow(() -> new AwsException("NoSuchBucket",
                             "The specified bucket does not exist.", 404));
-            if (ownershipIsEnforced(destination) && !isBlank(acl)
-                    && !"bucket-owner-full-control".equals(acl)) {
-                throw new AwsException("AccessControlListNotSupported", "The bucket does not allow ACLs", 400);
-            }
-            if (acl != null && !acl.isBlank()) {
-                cannedObjectAclXml(acl);
-            }
+            PutObjectOptions aclOptions = new PutObjectOptions().withAcl(acl)
+                    .withGrantRead(grantRead).withGrantWrite(grantWrite)
+                    .withGrantFullControl(grantFullControl).withGrantReadAcp(grantReadAcp)
+                    .withGrantWriteAcp(grantWriteAcp);
+            rejectUploadAclWhenOwnershipEnforced(destination, getBucketOwnerAccountId(bucket), aclOptions);
+            resolveObjectAclXml(acl, grantRead, grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
             String normalizedServerSideEncryption = normalizeServerSideEncryption(serverSideEncryption);
             SseCustomerKey customerKey = validateSseCustomerKey(sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
             rejectConflictingServerSideEncryption(normalizedServerSideEncryption, customerKey);
@@ -3949,6 +4000,11 @@ public class S3Service implements Resettable, ResourceProvider {
                 upload.setSseCustomerKeyMd5(customerKey.keyMd5());
             }
             upload.setAcl(acl);
+            upload.setGrantRead(grantRead);
+            upload.setGrantWrite(grantWrite);
+            upload.setGrantFullControl(grantFullControl);
+            upload.setGrantReadAcp(grantReadAcp);
+            upload.setGrantWriteAcp(grantWriteAcp);
             ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromWireValue(checksumAlgorithm);
             ChecksumType requestedChecksumType = ChecksumType.fromWireValue(checksumType);
             if (requestedChecksumType != null && algorithm == null) {
@@ -4400,6 +4456,11 @@ public class S3Service implements Resettable, ResourceProvider {
                                     .withServerSideEncryption(upload.getServerSideEncryption())
                                     .withSseKmsKeyId(upload.getSseKmsKeyId())
                                     .withAcl(upload.getAcl())
+                                    .withGrantRead(upload.getGrantRead())
+                                    .withGrantWrite(upload.getGrantWrite())
+                                    .withGrantFullControl(upload.getGrantFullControl())
+                                    .withGrantReadAcp(upload.getGrantReadAcp())
+                                    .withGrantWriteAcp(upload.getGrantWriteAcp())
                                     .withTagging(upload.getTagging()),
                             compositeETag);
                 } finally {

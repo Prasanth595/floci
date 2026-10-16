@@ -57,6 +57,74 @@ class S3OwnershipControlsIntegrationTest {
     }
 
     @Test
+    @Order(2)
+    void createBucketHonorsExplicitOwnershipAndRejectsIncompatibleAcl() {
+        String legacyBucket = BUCKET + "-explicit-writer";
+        given()
+            .header("x-amz-object-ownership", "ObjectWriter")
+        .when()
+            .put("/" + legacyBucket)
+        .then()
+            .statusCode(200);
+
+        given().when().get("/" + legacyBucket + "?ownershipControls")
+                .then().statusCode(200).body(containsString("<ObjectOwnership>ObjectWriter</ObjectOwnership>"));
+        String grantedBucket = BUCKET + "-explicit-grant";
+        given().header("x-amz-object-ownership", "ObjectWriter")
+                .header("x-amz-grant-read", "id=\"123456789012\"")
+                .when().put("/" + grantedBucket)
+                .then().statusCode(200);
+        given().when().get("/" + grantedBucket + "?acl")
+                .then().statusCode(200).body(containsString("123456789012"));
+        given().header("x-amz-acl", "public-read")
+                .when().put("/" + BUCKET + "-invalid-acl")
+                .then().statusCode(400).body(containsString("InvalidBucketAclWithObjectOwnership"));
+        given().header("x-amz-grant-read", "id=\"123456789012\"")
+                .when().put("/" + BUCKET + "-invalid-grant")
+                .then().statusCode(400).body(containsString("InvalidBucketAclWithObjectOwnership"));
+        given().header("x-amz-object-ownership", "InvalidOwnership")
+                .when().put("/" + BUCKET + "-invalid-mode")
+                .then().statusCode(400).body(containsString("InvalidArgument"));
+    }
+
+    @Test
+    @Order(2)
+    void multipartInitiationRejectsGrantsOnEnforcedBucket() {
+        String bucket = BUCKET + "-multipart-grants";
+        given().when().put("/" + bucket).then().statusCode(200);
+
+        given().header("x-amz-grant-read", "id=\"123456789012\"")
+                .when().post("/" + bucket + "/rejected?uploads")
+                .then().statusCode(400).body(containsString("AccessControlListNotSupported"));
+        given().header("x-amz-grant-full-control", "id=\"000000000000\"")
+                .when().post("/" + bucket + "/accepted?uploads")
+                .then().statusCode(200).body(containsString("<UploadId>"));
+    }
+
+    @Test
+    @Order(2)
+    void multipartGrantSurvivesCompletionOnObjectWriterBucket() {
+        String bucket = BUCKET + "-multipart-writer";
+        String key = "granted-object";
+        given().header("x-amz-object-ownership", "ObjectWriter")
+                .when().put("/" + bucket).then().statusCode(200);
+        String uploadId = given().header("x-amz-grant-read", "id=\"123456789012\"")
+                .when().post("/" + bucket + "/" + key + "?uploads")
+                .then().statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        String partETag = given().body("part-one")
+                .when().put("/" + bucket + "/" + key + "?uploadId=" + uploadId + "&partNumber=1")
+                .then().statusCode(200).extract().header("ETag");
+        String completeXml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"
+                + partETag + "</ETag></Part></CompleteMultipartUpload>";
+        given().contentType("application/xml").body(completeXml)
+                .when().post("/" + bucket + "/" + key + "?uploadId=" + uploadId)
+                .then().statusCode(200);
+        given().when().get("/" + bucket + "/" + key + "?acl")
+                .then().statusCode(200).body(containsString("123456789012"));
+    }
+
+    @Test
     @Order(3)
     void putOwnershipControlsReturns200() {
         given()

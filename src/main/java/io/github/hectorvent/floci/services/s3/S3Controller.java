@@ -452,7 +452,14 @@ public class S3Controller {
                         new String(body, StandardCharsets.UTF_8), "Tag", "Key", "Value");
             }
             String region = bucketRegionForCreate(locationConstraint, regionResolver.resolveRegion(httpHeaders));
-            s3Service.createBucket(bucket, region);
+            s3Service.createBucket(bucket, region,
+                    httpHeaders.getHeaderString("x-amz-object-ownership"),
+                    httpHeaders.getHeaderString("x-amz-acl"),
+                    httpHeaders.getHeaderString("x-amz-grant-read"),
+                    httpHeaders.getHeaderString("x-amz-grant-write"),
+                    httpHeaders.getHeaderString("x-amz-grant-full-control"),
+                    httpHeaders.getHeaderString("x-amz-grant-read-acp"),
+                    httpHeaders.getHeaderString("x-amz-grant-write-acp"));
             // CreateBucketConfiguration may carry a <Tags> array; AWS applies those tags to the
             // new bucket, so a follow-up GetBucketTagging / ListTagsForResource must return them.
             if (!creationTags.isEmpty()) {
@@ -1598,7 +1605,12 @@ public class S3Controller {
                         getChecksumAlgorithm(httpHeaders, uriInfo),
                         resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-type"),
                         parseInlineTaggingHeader(
-                                resolveInlineTaggingSource(httpHeaders.getHeaderString("x-amz-tagging"), uriInfo)));
+                                resolveInlineTaggingSource(httpHeaders.getHeaderString("x-amz-tagging"), uriInfo)),
+                        httpHeaders.getHeaderString("x-amz-grant-read"),
+                        httpHeaders.getHeaderString("x-amz-grant-write"),
+                        httpHeaders.getHeaderString("x-amz-grant-full-control"),
+                        httpHeaders.getHeaderString("x-amz-grant-read-acp"),
+                        httpHeaders.getHeaderString("x-amz-grant-write-acp"));
                 String xml = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                         .start("InitiateMultipartUploadResult", AwsNamespaces.S3)

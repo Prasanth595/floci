@@ -22,6 +22,11 @@ public class MultipartUpload {
     private String sseCustomerAlgorithm;
     private String sseCustomerKeyMd5;
     private String acl;
+    private String grantRead;
+    private String grantWrite;
+    private String grantFullControl;
+    private String grantReadAcp;
+    private String grantWriteAcp;
     private String ownerAccountId;
     private String initiatorAccountId;
     private ChecksumAlgorithm checksumAlgorithm;
@@ -78,6 +83,21 @@ public class MultipartUpload {
 
     public String getAcl() { return acl; }
     public void setAcl(String acl) { this.acl = acl; }
+
+    public String getGrantRead() { return grantRead; }
+    public void setGrantRead(String grantRead) { this.grantRead = grantRead; }
+
+    public String getGrantWrite() { return grantWrite; }
+    public void setGrantWrite(String grantWrite) { this.grantWrite = grantWrite; }
+
+    public String getGrantFullControl() { return grantFullControl; }
+    public void setGrantFullControl(String grantFullControl) { this.grantFullControl = grantFullControl; }
+
+    public String getGrantReadAcp() { return grantReadAcp; }
+    public void setGrantReadAcp(String grantReadAcp) { this.grantReadAcp = grantReadAcp; }
+
+    public String getGrantWriteAcp() { return grantWriteAcp; }
+    public void setGrantWriteAcp(String grantWriteAcp) { this.grantWriteAcp = grantWriteAcp; }
 
     public String getOwnerAccountId() { return ownerAccountId; }
     public void setOwnerAccountId(String ownerAccountId) { this.ownerAccountId = ownerAccountId; }
