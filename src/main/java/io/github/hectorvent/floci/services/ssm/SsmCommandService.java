@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -560,7 +561,7 @@ public class SsmCommandService implements Resettable {
             Map<String, List<String>> parameters,
             int timeoutSeconds,
             String region) {
-        CompletableFuture.runAsync(() -> {
+        CompletableFuture.runAsync(() -> RequestScopes.runAs(accountId, region, () -> {
             String invKey = invocationKey(region, commandId, instanceId);
             CommandInvocation invocation = invocationStore.get(invKey).orElse(null);
             if (invocation == null || "Cancelled".equals(invocation.getStatus())) {
@@ -591,7 +592,7 @@ public class SsmCommandService implements Resettable {
                 invocationStore.put(invKey, invocation);
             }
             updateCommandStatus(commandId, region);
-        }, directExecutionExecutor);
+        }), directExecutionExecutor);
     }
 
     private void applyDirectResult(CommandInvocation invocation, SsmDirectCommandExecutor.ExecutionResult result) {
