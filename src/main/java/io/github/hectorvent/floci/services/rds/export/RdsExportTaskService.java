@@ -115,6 +115,14 @@ public class RdsExportTaskService implements Resettable {
             throw new AwsException("InvalidS3BucketFault",
                     "The S3 bucket " + s3BucketName + " doesn't exist.", 400);
         }
+        String bucketRegion = s3Service.getBucketRegion(s3BucketName);
+        if (bucketRegion == null || bucketRegion.isBlank()) {
+            bucketRegion = regionResolver.getDefaultRegion();
+        }
+        if (!bucketRegion.equalsIgnoreCase(effectiveRegion)) {
+            throw new AwsException("InvalidS3BucketFault", "The S3 bucket " + s3BucketName + " is in "
+                    + bucketRegion + ", not in the snapshot's region " + effectiveRegion + ".", 400);
+        }
 
         ExportTask task = new ExportTask();
         task.setExportTaskIdentifier(exportTaskIdentifier);

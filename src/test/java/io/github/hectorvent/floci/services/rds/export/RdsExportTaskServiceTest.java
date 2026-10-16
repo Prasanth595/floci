@@ -235,6 +235,25 @@ class RdsExportTaskServiceTest {
     }
 
     @Test
+    void aBucketInAnotherRegionIsRefused() {
+        when(s3Service.getBucketRegion("exports")).thenReturn("eu-west-1");
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
+
+        AwsException error = assertThrows(AwsException.class, () -> start(service, "appdb-export", List.of()));
+
+        assertThat(error.getErrorCode(), equalTo("InvalidS3BucketFault"));
+        assertThat(workers, empty());
+    }
+
+    @Test
+    void aBucketWithoutALocationConstraintIsInTheDefaultRegion() {
+        when(s3Service.getBucketRegion("exports")).thenReturn(null);
+        RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
+
+        assertThat(start(service, "appdb-export", List.of()).getStatus(), equalTo("STARTING"));
+    }
+
+    @Test
     void identifiersFollowTheRdsRules() {
         RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
 
@@ -350,10 +369,12 @@ class RdsExportTaskServiceTest {
         String otherArn = "arn:aws:rds:eu-west-1:000000000000:snapshot:appdb-snap";
         when(rdsService.snapshotExportSource(otherArn, "eu-west-1")).thenReturn(new SnapshotExportSource(
                 otherArn, "postgres:16-alpine", "master", "secret", SNAPSHOT_TIME, "-- dump"));
+        when(s3Service.bucketExists("exports-west")).thenReturn(true);
+        when(s3Service.getBucketRegion("exports-west")).thenReturn("eu-west-1");
         RdsExportTaskService service = service((task, source, progress) -> outcome(0, List.of()));
 
         ExportTask east = start(service, "appdb-export", List.of());
-        ExportTask west = service.startExportTask("appdb-export", otherArn, "exports", null,
+        ExportTask west = service.startExportTask("appdb-export", otherArn, "exports-west", null,
                 "arn:aws:iam::000000000000:role/export", "alias/export", List.of(), "eu-west-1");
 
         assertThat(east.getRuntimeArn(), equalTo("arn:aws:rds:us-east-1:000000000000:export-task:appdb-export"));

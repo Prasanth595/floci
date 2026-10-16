@@ -750,7 +750,8 @@ a partial export only for such names.
 What differs from RDS:
 
 - The IAM role is not assumed and the KMS key encrypts nothing: both are recorded and reported back
-  as given. The bucket must exist, or the request fails with `InvalidS3BucketFault`.
+  as given. The bucket must exist and, as on RDS, be in the snapshot's region, or the request fails
+  with `InvalidS3BucketFault`.
 - Only PostgreSQL snapshots can be exported, since Floci's snapshots hold PostgreSQL data only.
   Any other source is refused with `InvalidExportSourceState`, and so is a snapshot that is not
   `available`.
