@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -970,16 +972,21 @@ class SamTransformProcessor {
      * Without this the property is silently dropped and the deploy still reports
      * CREATE_COMPLETE, so the failure only surfaces later, at invoke time.
      *
+     * <p>The version logical id is {@code <function>Version<sha>}, where {@code <sha>} is the
+     * first ten hex digits of the SHA-1 of the function's code, Environment and MemorySize, the
+     * same inputs real SAM hashes. The hash is what makes a code change publish a new version:
+     * the logical id changes, CloudFormation replaces the version resource, and the alias moves
+     * to the newly published number. A stable logical id would keep repointing the alias at the
+     * first version forever.
+     *
      * <p>The alias name is normally a literal, but SAM also allows an intrinsic (e.g.
      * {@code !Ref StageName}). The node is passed through to {@code Name} either way so the
      * template engine resolves it at provision time; only the generated logical id needs a
      * literal, and it drops the suffix when the value isn't textual.
      *
-     * <p>The {@code Ref}s on {@code FunctionName} give {@code topologicalSort} the edges it needs
-     * — function → version and function → alias — so no explicit {@code DependsOn} is needed.
-     * There is no version → alias edge while {@code FunctionVersion} is the literal
-     * {@code $LATEST}; none is required, since the alias does not reference the version. It
-     * returns with the {@code Fn::GetAtt} form once #1987 lands.
+     * <p>{@code FunctionName} is a {@code Ref} to the function, and {@code FunctionVersion} a
+     * {@code Fn::GetAtt} on the version, so {@code topologicalSort} orders function → version →
+     * alias and the alias resolves the published number at provision time.
      */
     private String expandAutoPublishAlias(String functionLogicalId, JsonNode properties, ObjectNode passthrough,
                                           ObjectNode resources) {
@@ -989,7 +996,7 @@ class SamTransformProcessor {
             return null;
         }
 
-        String versionId = uniqueId(functionLogicalId + "Version", resources);
+        String versionId = versionLogicalId(functionLogicalId, properties, resources);
         ObjectNode versionDef = objectMapper.createObjectNode();
         versionDef.put("Type", "AWS::Lambda::Version");
         ObjectNode versionProps = objectMapper.createObjectNode();
@@ -1008,18 +1015,49 @@ class SamTransformProcessor {
         ObjectNode aliasProps = objectMapper.createObjectNode();
         aliasProps.set("FunctionName", ref(functionLogicalId));
         aliasProps.set("Name", aliasName.deepCopy());
-        // Real SAM points the alias at the published version (Fn::GetAtt <Version>.Version).
-        // Floci cannot invoke a published version: the snapshot carries no code path, so a
-        // version-qualified invoke times out on a cold start (#1987) and silently runs $LATEST's
-        // code when a warm container happens to exist (#1988). Aiming the alias there would break
-        // the alias-qualified invoke this expansion exists to enable, so point it at $LATEST — the
-        // alias resolves and runs the function's code, which is the behavior callers depend on.
-        // Switch to the GetAtt form once #1987 lands.
-        aliasProps.put("FunctionVersion", "$LATEST");
+        // The alias must point at the published version, not $LATEST: the point of
+        // AutoPublishAlias is an immutable snapshot a deployment moves atomically. GetAtt makes
+        // the version a dependency, so the engine provisions it first and resolves its number.
+        aliasProps.set("FunctionVersion", getAtt(versionId, "Version"));
         aliasDef.set("Properties", aliasProps);
         aliasDef.setAll(passthrough.deepCopy());
         resources.set(aliasId, aliasDef);
         return aliasId;
+    }
+
+    /**
+     * SAM's generated version logical id: {@code <function>Version} plus the first ten hex digits
+     * of the SHA-1 of the function's code, Environment and MemorySize. A changed code or
+     * configuration changes the id, so CloudFormation replaces the version instead of updating it
+     * in place (which the version provisioner would otherwise short-circuit, pinning the alias).
+     */
+    private String versionLogicalId(String functionLogicalId, JsonNode properties, ObjectNode resources) {
+        ObjectNode hashInput = buildLambdaCode(properties);
+        JsonNode environment = properties.path("Environment");
+        if (isTruthy(environment) && environment.isObject()) {
+            hashInput.set("Variables", environment.path("Variables").deepCopy());
+        }
+        JsonNode memorySize = properties.path("MemorySize");
+        if (isTruthy(memorySize)) {
+            hashInput.set("MemorySize", memorySize.deepCopy());
+        }
+        String sha = Digests.sha1Hex(canonicalJson(hashInput)).substring(0, 10);
+        return uniqueId(functionLogicalId + "Version" + sha, resources);
+    }
+
+    /**
+     * Stable, compact JSON with recursively sorted keys, matching the stringification SAM hashes
+     * for its generated logical ids.
+     */
+    private String canonicalJson(JsonNode node) {
+        try {
+            Object converted = objectMapper.convertValue(node, Object.class);
+            return objectMapper.writer()
+                    .with(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
+                    .writeValueAsString(converted);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize the version hash input", e);
+        }
     }
 
     private static final List<String> EVENT_INVOKE_DESTINATION_TYPES =

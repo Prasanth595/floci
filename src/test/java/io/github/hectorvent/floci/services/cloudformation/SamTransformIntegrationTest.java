@@ -135,32 +135,39 @@ class SamTransformIntegrationTest {
 
         waitForStackStatus(stackName, "CREATE_COMPLETE");
 
-        // The point of the fix: an alias-qualified reference resolves. Before it, this 404'd with
-        // "Alias not found: production" even though the template declared the alias.
+        // AutoPublishAlias publishes version 1 and the alias must bind to it, not $LATEST. Before the
+        // fix the alias pointed at $LATEST, so a code change made outside the stack silently changed
+        // what the alias ran.
         given()
         .when()
             .get("/2015-03-31/functions/sam-alias-func/aliases/production")
         .then()
             .statusCode(200)
             .body("Name", equalTo("production"))
-            // $LATEST rather than the published version real SAM targets — see #1987/#1988 and the
-            // comment in expandAutoPublishAlias. The invoke below is what actually matters.
-            .body("FunctionVersion", equalTo("$LATEST"))
+            .body("FunctionVersion", equalTo("1"))
             .body("AliasArn", containsString(":function:sam-alias-func:production"));
 
-        // The behavior the whole expansion exists for: an alias-qualified invoke runs the function.
-        // Asserting only that the alias *record* exists is not enough — an alias pointing at a
-        // published version satisfies that and still times out on invoke (#1987), which is how an
-        // earlier revision of this change shipped a broken alias past its own tests.
+        // The published version exists and is what the alias names.
         given()
+        .when()
+            .get("/2015-03-31/functions/sam-alias-func/versions")
+        .then()
+            .statusCode(200)
+            .body("Versions.Version", hasItems("$LATEST", "1"));
+
+        // The behavior the whole expansion exists for: an alias-qualified invoke routes to the
+        // version the alias names. A DryRun resolves the qualifier and reports the executed version
+        // without launching a container, so this asserts the alias -> version binding itself.
+        given()
+            .header("X-Amz-Invocation-Type", "DryRun")
             .contentType("application/json")
             .body("{}")
         .when()
             .post("/2015-03-31/functions/sam-alias-func:production/invocations")
         .then()
-            .statusCode(200)
-            .header("X-Amz-Function-Error", nullValue())
-            .body("ok", equalTo(true));
+            .statusCode(204)
+            .header("X-Amz-Executed-Version", equalTo("1"))
+            .header("X-Amz-Function-Error", nullValue());
 
         given()
         .when()
@@ -182,6 +189,7 @@ class SamTransformIntegrationTest {
 
         assertThat(resourcesXml, containsString("<ResourceType>AWS::Lambda::Version</ResourceType>"));
         assertThat(resourcesXml, containsString("<ResourceType>AWS::Lambda::Alias</ResourceType>"));
+        assertThat(resourcesXml, containsString("<LogicalResourceId>AliasFunctionVersion"));
         assertThat(resourcesXml, containsString("<LogicalResourceId>AliasFunctionAliasProduction</LogicalResourceId>"));
     }
 

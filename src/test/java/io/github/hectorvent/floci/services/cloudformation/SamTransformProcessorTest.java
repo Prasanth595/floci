@@ -127,10 +127,21 @@ class SamTransformProcessorTest {
 
         JsonNode resources = processor.expandSamTemplate(template).path("Resources");
 
-        assertTrue(resources.has("MyFuncVersion"));
-        assertEquals("AWS::Lambda::Version", resources.path("MyFuncVersion").path("Type").asText());
+        // Real SAM names the version <function>Version<sha>, ten hex digits of the code hash, so a
+        // code change replaces the version (and moves the alias) instead of updating it in place.
+        String versionId = null;
+        Iterator<String> versionNames = resources.fieldNames();
+        while (versionNames.hasNext()) {
+            String name = versionNames.next();
+            if ("AWS::Lambda::Version".equals(resources.path(name).path("Type").asText())) {
+                versionId = name;
+            }
+        }
+        assertNotNull(versionId, "expansion emitted no AWS::Lambda::Version");
+        assertTrue(versionId.matches("MyFuncVersion[0-9a-f]{10}"),
+                "logical id must carry the code hash, was: " + versionId);
         assertEquals("MyFunc",
-                resources.path("MyFuncVersion").path("Properties").path("FunctionName").path("Ref").asText());
+                resources.path(versionId).path("Properties").path("FunctionName").path("Ref").asText());
 
         // Suffix is sanitize()d, so the logical id stays alphanumeric — see the alias-name case
         // below, where the raw name would otherwise leak a '-' into it.
@@ -141,11 +152,83 @@ class SamTransformProcessorTest {
         assertEquals("production", aliasProps.path("Name").asText());
         assertEquals("MyFunc", aliasProps.path("FunctionName").path("Ref").asText());
 
-        // The alias deliberately targets $LATEST rather than the published version real SAM points
-        // at: Floci cannot invoke a published version (#1987 cold-start timeout, #1988 warm-pool
-        // keying), so the faithful form would break the alias-qualified invoke this expansion
-        // exists to enable.
-        assertEquals("$LATEST", aliasProps.path("FunctionVersion").asText());
+        // The alias targets the published version, not $LATEST. The GetAtt gives the engine the
+        // version → alias edge, so the version is provisioned first and the alias binds its number.
+        assertEquals(versionId, aliasProps.path("FunctionVersion").path("Fn::GetAtt").get(0).asText());
+        assertEquals("Version", aliasProps.path("FunctionVersion").path("Fn::GetAtt").get(1).asText());
+    }
+
+    @Test
+    void expandSamTemplate_autoPublishAliasHashTracksCodeAndConfiguration() throws Exception {
+        // The hash exists so a code change publishes a new version. Changing only the code (same
+        // function) must change the version logical id; so must MemorySize, which SAM includes.
+        JsonNode first = processor.expandSamTemplate(objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "AutoPublishAlias": "production",
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              }
+            }
+            """)).path("Resources");
+
+        JsonNode changedCode = processor.expandSamTemplate(objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "AutoPublishAlias": "production",
+                    "InlineCode": "exports.handler = async () => ({changed: true});"
+                  }
+                }
+              }
+            }
+            """)).path("Resources");
+
+        JsonNode changedMemory = processor.expandSamTemplate(objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "AutoPublishAlias": "production",
+                    "MemorySize": 512,
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              }
+            }
+            """)).path("Resources");
+
+        assertNotEquals(versionLogicalId(first), versionLogicalId(changedCode),
+                "a code change must change the version logical id");
+        assertNotEquals(versionLogicalId(first), versionLogicalId(changedMemory),
+                "a MemorySize change must change the version logical id");
+    }
+
+    private static String versionLogicalId(JsonNode resources) {
+        Iterator<String> names = resources.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            if ("AWS::Lambda::Version".equals(resources.path(name).path("Type").asText())) {
+                return name;
+            }
+        }
+        throw new AssertionError("no AWS::Lambda::Version in " + resources);
     }
 
     @Test
