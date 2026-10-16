@@ -364,19 +364,12 @@ parameters such as `${AWS::Region}` stay as written), its `Environment` and `Mem
 written, and its `SnapStart` when it sets an `ApplyOn` other than `None`. An update that changes the
 code, `Environment` or `MemorySize`, or a parameter the code uses, publishes a new version and
 moves the alias to it. A parameter used only in `Environment` or `MemorySize` does not, and neither
-does a property outside the hash, such as `Timeout`. Under `AutoPublishAliasAllProperties` the hash
-covers every property floci gives the function, plus its `SnapStart`. A string
-`AutoPublishCodeSha256` replaces the hash with its first ten characters. A new id publishes only
-when the function's code or configuration changed since its last version. floci does not give the
-function `SnapStart`, so turning it on changes the id but publishes nothing, and neither does a new
-`AutoPublishCodeSha256` alone or a `Tags` edit under `AutoPublishAliasAllProperties`: the alias
-stays where it is. On AWS a new
-`AutoPublishCodeSha256` alone also publishes, because SAM appends it to the function's
-`Description`; floci's transform sets no `Description` on the function.
+does a property outside the hash, such as `Timeout`. A new id publishes only when the function's
+code or configuration changed since its last version. floci does not give the function
+`SnapStart`, so turning it on changes the id but publishes nothing: the alias stays where it is.
 
 The version a new id replaces stays published: like SAM, floci gives the version
-`DeletionPolicy: Retain` unless the function sets a `DeletionPolicy` or `VersionDeletionPolicy`
-(or a `CapacityProviderConfig`, which makes it `Delete`), and the update reports it
+`DeletionPolicy: Retain` unless the function sets a `DeletionPolicy`, and the update reports it
 `DELETE_SKIPPED`. With `Delete` floci reports the old version `DELETE_COMPLETE` but never deletes
 it, where AWS does. Changes made to `$LATEST` outside the stack, including Lambda's reactive S3
 sync, do not reach the alias until an update publishes a new version. Event sources and API
