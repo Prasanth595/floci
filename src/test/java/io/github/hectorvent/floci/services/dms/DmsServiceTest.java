@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.dms.model.DmsResource;
 import io.github.hectorvent.floci.services.dms.model.ReplicationSubnetGroup;
 import io.github.hectorvent.floci.services.dms.model.ResourceTag;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -208,6 +209,28 @@ class DmsServiceTest {
         AwsException notFound = assertThrows(AwsException.class,
                 () -> service.describeReplicationSubnetGroups(filterRequest("default"), REGION));
         assertEquals("ResourceNotFoundFault", notFound.getErrorCode());
+    }
+
+    @Test
+    void createInstanceNamingDefaultExplicitlyBringsTheDefaultGroupIntoUse() {
+        useDefaultVpc();
+
+        DmsResource instance = service.createReplicationInstance(instanceRequest("Default"), REGION);
+
+        assertEquals("default", instance.getAttributes()
+                .path("ReplicationSubnetGroup").path("ReplicationSubnetGroupIdentifier").asText());
+        List<ReplicationSubnetGroup> described =
+                service.describeReplicationSubnetGroups(filterRequest("default"), REGION).items();
+        assertEquals(1, described.size());
+        assertEquals(List.of("subnet-a", "subnet-b"), described.getFirst().getSubnetIds());
+    }
+
+    @Test
+    void createInstanceNamingDefaultFaultsWhenTheRegionHasNoDefaultSubnets() {
+        AwsException notFound = assertThrows(AwsException.class,
+                () -> service.createReplicationInstance(instanceRequest("default"), REGION));
+        assertEquals("ResourceNotFoundFault", notFound.getErrorCode());
+        assertTrue(service.describeReplicationSubnetGroups(mapper.createObjectNode(), REGION).items().isEmpty());
     }
 
     @Test
@@ -614,6 +637,14 @@ class DmsServiceTest {
         request.put("ReplicationInstanceIdentifier", "uses-default");
         request.put("ReplicationInstanceClass", "dms.t3.micro");
         service.createReplicationInstance(request, REGION);
+    }
+
+    private ObjectNode instanceRequest(String subnetGroup) {
+        ObjectNode request = mapper.createObjectNode();
+        request.put("ReplicationInstanceIdentifier", "names-default");
+        request.put("ReplicationInstanceClass", "dms.t3.micro");
+        request.put("ReplicationSubnetGroupIdentifier", subnetGroup);
+        return request;
     }
 
     private void useDefaultVpc() {

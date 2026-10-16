@@ -211,7 +211,12 @@ public class DmsService implements Resettable {
             subnetGroup = "default";
         } else {
             subnetGroup = subnetGroup.toLowerCase(Locale.ROOT);
-            if (subnetGroups.get(storageKey(region, subnetGroup)).isEmpty()) {
+            // Naming "default" explicitly is how it comes into existence: AWS creates it from the
+            // default-VPC subnets on first use, so it is not stored and is not yet listed here.
+            boolean exists = "default".equals(subnetGroup)
+                    ? defaultSubnetGroup(region, subnetGroup).isPresent()
+                    : subnetGroups.get(storageKey(region, subnetGroup)).isPresent();
+            if (!exists) {
                 throw notFound(subnetGroup);
             }
         }
@@ -261,6 +266,10 @@ public class DmsService implements Resettable {
         if (!subnetGroupInUse(region, identifier)) {
             return Optional.empty();
         }
+        return defaultSubnetGroup(region, identifier);
+    }
+
+    private Optional<ReplicationSubnetGroup> defaultSubnetGroup(String region, String identifier) {
         List<String> defaultSubnets = ec2Service.describeSubnets(region, List.of(), Map.of()).stream()
                 .filter(Subnet::isDefaultForAz)
                 .map(Subnet::getSubnetId)
