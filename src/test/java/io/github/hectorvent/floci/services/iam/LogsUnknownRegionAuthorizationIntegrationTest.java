@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
-import io.github.hectorvent.floci.testing.EnforcementFixtures;
+import io.github.hectorvent.floci.testing.LogsAuthorizationFixtures;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -17,12 +17,11 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.LogsAuthorizationFixtures.expectedTags;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -66,29 +65,17 @@ class LogsUnknownRegionAuthorizationIntegrationTest {
         cleanup.register(() -> call(port, ACCOUNT, region, "DeleteLogGroup", Map.of("logGroupName", group))
                 .then().statusCode(200));
         logsService.createLogGroupForAccount(ACCOUNT, group, null, Map.of("team", "blue"), region);
-        String root = EnforcementFixtures.auth(ACCOUNT, "iam");
-        String user = "logs-tag-marker-" + UUID.randomUUID();
-        String caller = EnforcementFixtures.createUser(cleanup, port, root, user).accessKeyId();
-        given().port(port).header("Authorization", root).formParam("Action", "PutUserPolicy")
-                .formParam("UserName", user).formParam("PolicyName", "marker-tags")
-                .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                        + "\"Action\":\"logs:" + action + "\",\"Resource\":\"*\"}]}")
-                .when().post("/").then().statusCode(200);
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("resourceArn", "arn:aws:logs:" + region + ":" + ACCOUNT + ":log-group:" + group);
-        if (action.equals("TagResource")) {
-            body.put("tags", Map.of("team", "red"));
-        } else if (action.equals("UntagResource")) {
-            body.put("tagKeys", List.of("team"));
-        }
+        String caller = LogsAuthorizationFixtures.user(cleanup, port, ACCOUNT, "logs-tag-marker-", "marker-tags",
+                "{\"Effect\":\"Allow\",\"Action\":\"logs:" + action + "\",\"Resource\":\"*\"}");
+        Map<String, Object> body = LogsAuthorizationFixtures.tagBody(action,
+                "arn:aws:logs:" + region + ":" + ACCOUNT + ":log-group:" + group);
         call(port, caller, "custom:log-group:zone", action, body)
                 .then().statusCode(400).body(containsString("InvalidSignatureException"));
         call(port, ACCOUNT, region, "ListTagsLogGroup", Map.of("logGroupName", group))
                 .then().statusCode(200).body("tags", equalTo(Map.of("team", "blue")));
         Response result = call(port, caller, region, action, body);
         result.then().statusCode(200);
-        Map<String, String> expected = action.equals("TagResource") ? Map.of("team", "red")
-                : action.equals("UntagResource") ? Map.of() : Map.of("team", "blue");
+        Map<String, String> expected = expectedTags(action);
         if (action.equals("ListTagsForResource")) {
             result.then().body("tags", equalTo(expected));
         }
@@ -122,18 +109,13 @@ class LogsUnknownRegionAuthorizationIntegrationTest {
             }
         }
         assertPresent(port, REGION, historical, historicalStream, delete);
-        String user = "logs-region-alias-" + UUID.randomUUID();
-        String root = EnforcementFixtures.auth(ACCOUNT, "iam");
-        String caller = EnforcementFixtures.createUser(cleanup, port, root, user).accessKeyId();
         String condition = conditional ? ",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"blue\"}}" : "";
         String resources = "[\"arn:aws:logs:" + aliasRegion + ":" + ACCOUNT + ":log-group:" + group
                 + ":log-stream:s\",\"arn:aws:logs:" + validUnknownRegion + ":" + ACCOUNT
                 + ":log-group:" + group + ":log-stream:s\"]";
-        given().port(port).header("Authorization", root).formParam("Action", "PutUserPolicy")
-                .formParam("UserName", user).formParam("PolicyName", "streams")
-                .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                        + "\"Action\":\"logs:" + action + "\",\"Resource\":" + resources + condition + "}]}")
-                .when().post("/").then().statusCode(200);
+        String caller = LogsAuthorizationFixtures.user(cleanup, port, ACCOUNT, "logs-region-alias-", "streams",
+                "{\"Effect\":\"Allow\",\"Action\":\"logs:" + action
+                + "\",\"Resource\":" + resources + condition + "}");
         Response response = call(port, caller, aliasRegion, action,
                 Map.of("logGroupName", group, "logStreamName", "s"));
         assertAll("preserve stored identity across an opted-in region delimiter",
@@ -171,19 +153,14 @@ class LogsUnknownRegionAuthorizationIntegrationTest {
             logsService.putLogEventsForAccount(ACCOUNT, group, "s",
                     List.of(Map.of("timestamp", System.currentTimeMillis(), "message", "retained")), region);
         }
-        String user = "logs-resource-owner-" + UUID.randomUUID();
-        String root = EnforcementFixtures.auth(ACCOUNT, "iam");
-        String caller = EnforcementFixtures.createUser(cleanup, port, root, user).accessKeyId();
         String grant = effect.equals("Deny")
                 ? "{\"Effect\":\"Allow\",\"Action\":\"logs:" + action + "\",\"Resource\":\"*\"}," : "";
         String owner = actualOwner ? ACCOUNT : otherAccount;
         String statement = "{\"Effect\":\"" + effect + "\",\"Action\":\"logs:" + action
                 + "\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceAccount\":\""
                 + owner + "\"}}}";
-        given().port(port).header("Authorization", root).formParam("Action", "PutUserPolicy")
-                .formParam("UserName", user).formParam("PolicyName", "streams")
-                .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[" + grant + statement + "]}")
-                .when().post("/").then().statusCode(200);
+        String caller = LogsAuthorizationFixtures.user(cleanup, port, ACCOUNT, "logs-resource-owner-", "streams",
+                grant + statement);
         boolean allowed = effect.equals("Allow") == actualOwner;
         Response response = call(port, caller, region, action, Map.of("logGroupName", group, "logStreamName", "s"));
         assertAll("use the owning account in an admitted custom region",
@@ -212,9 +189,6 @@ class LogsUnknownRegionAuthorizationIntegrationTest {
     }
 
     private static Response call(int port, String caller, String region, String action, Map<String, ?> body) {
-        String auth = "AWS4-HMAC-SHA256 Credential=" + caller + "/20261015/" + region
-                + "/logs/aws4_request, SignedHeaders=host, Signature=abc";
-        return given().port(port).contentType("application/x-amz-json-1.1").header("Authorization", auth)
-                .header("X-Amz-Target", "Logs_20140328." + action).body(body).when().post("/");
+        return LogsAuthorizationFixtures.call(port, caller, region, action, body);
     }
 }

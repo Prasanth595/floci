@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.LogsAuthorizationFixtures;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -19,7 +20,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -399,15 +399,8 @@ class LogsStreamAuthorizationIntegrationTest {
     }
 
     private String user(String account, String statements) {
-        int port = endpoint.getPort();
-        String name = "logs-stream-auth-" + UUID.randomUUID();
-        String root = EnforcementFixtures.auth(account, "iam");
-        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(cleanup, port, root, name);
-        given().port(port).header("Authorization", root).formParam("Action", "PutUserPolicy")
-                .formParam("UserName", name).formParam("PolicyName", "streams")
-                .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[" + statements + "]}")
-                .when().post("/").then().statusCode(200);
-        return credentials.accessKeyId();
+        return LogsAuthorizationFixtures.user(cleanup, endpoint.getPort(), account, "logs-stream-auth-",
+                "streams", statements);
     }
 
     private static String policy(String effect, String action, String resource, String condition) {
@@ -443,11 +436,6 @@ class LogsStreamAuthorizationIntegrationTest {
     }
 
     private static ValidatableResponse call(int port, String caller, String region, String action, Map<String, ?> body) {
-        String authorization = "AWS4-HMAC-SHA256 Credential=" + caller + "/20261015/" + region
-                + "/logs/aws4_request, SignedHeaders=host, Signature=abc";
-        return given().port(port).contentType("application/x-amz-json-1.1")
-                .header("Authorization", authorization)
-                .header("X-Amz-Target", "Logs_20140328." + action)
-                .body(new LinkedHashMap<>(body)).when().post("/").then();
+        return LogsAuthorizationFixtures.call(port, caller, region, action, body).then();
     }
 }

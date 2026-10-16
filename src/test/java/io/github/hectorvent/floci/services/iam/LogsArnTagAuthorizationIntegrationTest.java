@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
-import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.LogsAuthorizationFixtures;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -16,12 +16,11 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.LogsAuthorizationFixtures.expectedTags;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -221,15 +220,8 @@ class LogsArnTagAuthorizationIntegrationTest {
     }
 
     private String user(String statements) {
-        int port = endpoint.getPort();
-        String name = "logs-arn-tag-" + UUID.randomUUID();
-        String root = EnforcementFixtures.auth(ACCOUNT, "iam");
-        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(cleanup, port, root, name);
-        given().port(port).header("Authorization", root).formParam("Action", "PutUserPolicy")
-                .formParam("UserName", name).formParam("PolicyName", "arn-tags")
-                .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[" + statements + "]}")
-                .when().post("/").then().statusCode(200);
-        return credentials.accessKeyId();
+        return LogsAuthorizationFixtures.user(cleanup, endpoint.getPort(), ACCOUNT, "logs-arn-tag-",
+                "arn-tags", statements);
     }
 
     private static String statement(String effect, String action, String resource) {
@@ -242,23 +234,7 @@ class LogsArnTagAuthorizationIntegrationTest {
     }
 
     private ValidatableResponse invoke(String caller, String action, String resource) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("resourceArn", resource);
-        if (action.equals("TagResource")) {
-            body.put("tags", Map.of("team", "red"));
-        } else if (action.equals("UntagResource")) {
-            body.put("tagKeys", List.of("team"));
-        }
-        return call(endpoint.getPort(), caller, action, body);
-    }
-
-    private Map<String, String> expectedTags(String action) {
-        return switch (action) {
-            case "TagResource" -> Map.of("team", "red");
-            case "UntagResource" -> Map.of();
-            case "ListTagsForResource" -> Map.of("team", "blue");
-            default -> throw new IllegalArgumentException(action);
-        };
+        return call(endpoint.getPort(), caller, action, LogsAuthorizationFixtures.tagBody(action, resource));
     }
 
     private void assertTags(String group, Map<String, String> expected) {
@@ -268,10 +244,6 @@ class LogsArnTagAuthorizationIntegrationTest {
     }
 
     private static ValidatableResponse call(int port, String caller, String action, Map<String, ?> body) {
-        String authorization = "AWS4-HMAC-SHA256 Credential=" + caller + "/20261015/" + REGION
-                + "/logs/aws4_request, SignedHeaders=host, Signature=abc";
-        return given().port(port).contentType("application/x-amz-json-1.1")
-                .header("Authorization", authorization).header("X-Amz-Target", "Logs_20140328." + action)
-                .body(new LinkedHashMap<>(body)).when().post("/").then();
+        return LogsAuthorizationFixtures.call(port, caller, REGION, action, body).then();
     }
 }
