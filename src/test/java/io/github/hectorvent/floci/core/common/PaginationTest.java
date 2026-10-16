@@ -93,6 +93,27 @@ class PaginationTest {
         assertEquals("Invalid Marker.", e.getMessage());
     }
 
+    @Test
+    void namespacedPagingWithLimits_validatesMaxResultsAndRejectsForeignToken() {
+        PaginatedResult<String> first = Pagination.paginateNamespaced(ITEMS, Function.identity(), 1, null, 3, 3,
+                "ep", "ValidationException");
+        assertEquals("ep:a", decode(first.nextToken()));
+
+        PaginatedResult<String> second = Pagination.paginateNamespaced(ITEMS, Function.identity(), 1, first.nextToken(), 3, 3,
+                "ep", "ValidationException");
+        assertThat(second.items(), contains("b"));
+
+        AwsException invalidLimit = assertThrows(AwsException.class, () -> Pagination.paginateNamespaced(ITEMS,
+                Function.identity(), 0, null, 3, 3, "ep", "ValidationException"));
+        assertEquals("ValidationException", invalidLimit.getErrorCode());
+
+        AwsException foreignToken = assertThrows(AwsException.class, () -> Pagination.paginateNamespaced(ITEMS,
+                Function.identity(), 1, Base64.getUrlEncoder().withoutPadding().encodeToString("track:a".getBytes(StandardCharsets.UTF_8)),
+                3, 3, "ep", "ValidationException"));
+        assertEquals("ValidationException", foreignToken.getErrorCode());
+        assertEquals("Invalid nextToken.", foreignToken.getMessage());
+    }
+
     private static PaginatedResult<String> page(int limit, String token, String namespace) {
         return Pagination.paginate(ITEMS, Function.identity(), limit, token, namespace, INVALID_TOKEN);
     }

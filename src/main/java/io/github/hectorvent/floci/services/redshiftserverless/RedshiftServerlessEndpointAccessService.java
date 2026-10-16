@@ -52,9 +52,16 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
                                                             List<String> subnetIds,
                                                             List<String> vpcSecurityGroupIds,
                                                             String ownerAccount, String region) {
-        if (!ENDPOINT_NAME.matcher(endpointName).matches() || endpointName.contains("--") || endpointName.endsWith("-")) {
+        if (endpointName == null || !ENDPOINT_NAME.matcher(endpointName).matches()
+                || endpointName.contains("--") || endpointName.endsWith("-")) {
             throw ServerlessSupport.validation("endpointName must be 1 to 30 letters, digits or hyphens, "
                     + "start with a letter, and contain no consecutive or trailing hyphens.");
+        }
+        if (workgroupName == null || workgroupName.isBlank()) {
+            throw ServerlessSupport.validation("workgroupName must not be blank.");
+        }
+        if (subnetIds == null || subnetIds.isEmpty()) {
+            throw ServerlessSupport.validation("subnetIds must not be empty.");
         }
         Workgroup workgroup = serverless.findWorkgroup(workgroupName, region)
                 .filter(found -> ownerAccount == null || ownerAccount.equals(regionResolver.getAccountId()))
@@ -96,18 +103,19 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
                 .sorted(Comparator.comparing(EndpointAccess::getEndpointName))
                 .map(endpoint -> withCurrentConnection(endpoint, region))
                 .toList();
-        return Pagination.paginate(matching, EndpointAccess::getEndpointName, maxResults, nextToken,
-                PAGE_SIZE, PAGE_SIZE, "InvalidPaginationException");
+        return Pagination.paginateNamespaced(matching, EndpointAccess::getEndpointName, maxResults, nextToken,
+                PAGE_SIZE, PAGE_SIZE, "endpoint-access", "ValidationException");
     }
 
     /** Replaces the endpoint's security groups, the only member AWS lets an update change. */
     public synchronized EndpointAccess updateEndpointAccess(String endpointName, List<String> vpcSecurityGroupIds,
                                                             String region) {
-        EndpointAccess updated = new EndpointAccess(require(endpointName, region));
-        if (vpcSecurityGroupIds != null) {
-            updated.setVpcSecurityGroupIds(vpcSecurityGroupIds);
-            endpoints.put(storageKey(region, endpointName), updated);
+        if (vpcSecurityGroupIds == null) {
+            throw ServerlessSupport.validation("vpcSecurityGroupIds must not be null.");
         }
+        EndpointAccess updated = new EndpointAccess(require(endpointName, region));
+        updated.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        endpoints.put(storageKey(region, endpointName), updated);
         return withCurrentConnection(updated, region);
     }
 

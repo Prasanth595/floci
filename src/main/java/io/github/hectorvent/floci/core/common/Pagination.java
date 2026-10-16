@@ -34,7 +34,7 @@ public final class Pagination {
                                                     Integer maxResults, String nextToken,
                                                     int defaultPageSize, int maxResultsLimit,
                                                     String errorCode) {
-        return paginate(all, cursorOf, maxResults, nextToken, defaultPageSize, maxResultsLimit, errorCode,
+        return paginate(all, cursorOf, maxResults, nextToken, defaultPageSize, maxResultsLimit, "", errorCode,
                 "nextToken");
     }
 
@@ -47,13 +47,36 @@ public final class Pagination {
                                                     Integer maxResults, String nextToken,
                                                     int defaultPageSize, int maxResultsLimit,
                                                     String errorCode, String tokenName) {
+        return paginate(all, cursorOf, maxResults, nextToken, defaultPageSize, maxResultsLimit, "", errorCode,
+                tokenName);
+    }
+
+    /**
+     * Namespaced paging with page-size validation. Every cursor is prefixed with {@code namespace},
+     * so a token minted for another operation or resource kind is rejected instead of being decoded
+     * as a cursor into this list.
+     */
+    public static <T> PaginatedResult<T> paginateNamespaced(List<T> all, Function<T, String> cursorOf,
+                                                            Integer maxResults, String nextToken,
+                                                            int defaultPageSize, int maxResultsLimit,
+                                                            String namespace, String errorCode) {
+        return paginate(all, cursorOf, maxResults, nextToken, defaultPageSize, maxResultsLimit, namespace, errorCode,
+                "nextToken");
+    }
+
+    public static <T> PaginatedResult<T> paginate(List<T> all, Function<T, String> cursorOf,
+                                                    Integer maxResults, String nextToken,
+                                                    int defaultPageSize, int maxResultsLimit,
+                                                    String namespace, String errorCode, String tokenName) {
         if (maxResults != null && (maxResults < 1 || maxResults > maxResultsLimit)) {
             throw new AwsException(errorCode,
                     "maxResults must be between 1 and " + maxResultsLimit, 400);
         }
         int limit = maxResults != null ? maxResults : defaultPageSize;
+        String prefix = namespace != null && !namespace.isEmpty() ? namespace + ":" : "";
         return slice(all, cursorOf, limit,
-                decodeCursor(nextToken, "", token -> new AwsException(errorCode, "Invalid " + tokenName + ".", 400)), "");
+                decodeCursor(nextToken, prefix, token -> new AwsException(errorCode, "Invalid " + tokenName + ".", 400)),
+                prefix);
     }
 
     /**

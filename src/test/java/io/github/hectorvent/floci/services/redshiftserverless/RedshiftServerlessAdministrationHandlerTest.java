@@ -104,6 +104,10 @@ class RedshiftServerlessAdministrationHandlerTest {
                 "{\"policy\":" + mapper.valueToTree(policy) + "}"));
         assertEquals("ValidationException", errorType("PutResourcePolicy",
                 "{\"resourceArn\":\"" + snapshotArn + "\"}"));
+        assertEquals("ValidationException", errorType("PutResourcePolicy",
+                "{\"resourceArn\":\"" + snapshotArn + "\",\"policy\":null}"));
+        assertEquals("ValidationException", errorType("PutResourcePolicy",
+                "{\"resourceArn\":\"" + snapshotArn + "\",\"policy\":\"\"}"));
         assertEquals("ValidationException", errorType("GetResourcePolicy",
                 "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/x\"}"));
         assertEquals("resourceArn does not identify a snapshot in this account and Region.",
@@ -162,9 +166,20 @@ class RedshiftServerlessAdministrationHandlerTest {
                         + "\"vpcSecurityGroupIds\":[\"sg-1\"]}"));
         assertEquals("ValidationException", errorType("CreateEndpointAccess",
                 "{\"endpointName\":\"ep-two\",\"workgroupName\":\"ep-wg\"}"));
+        assertEquals("ValidationException", errorType("CreateEndpointAccess",
+                "{\"endpointName\":\"ep-two\",\"workgroupName\":\"ep-wg\",\"subnetIds\":[]}"));
+        assertEquals("ValidationException", errorType("CreateEndpointAccess",
+                "{\"endpointName\":\"ep-two\",\"workgroupName\":\"ep-wg\",\"subnetIds\":null}"));
+        assertEquals("ValidationException", errorType("CreateEndpointAccess",
+                "{\"endpointName\":\"ep-two\",\"workgroupName\":\"\",\"subnetIds\":[\"subnet-a\"]}"));
         assertEquals("ResourceNotFoundException", errorType("CreateEndpointAccess",
                 "{\"endpointName\":\"ep-two\",\"workgroupName\":\"nope\",\"subnetIds\":[\"subnet-a\"],"
                         + "\"vpcSecurityGroupIds\":[\"sg-1\"]}"));
+
+        assertEquals("ValidationException", errorType("UpdateEndpointAccess",
+                "{\"endpointName\":\"ep-one\"}"));
+        assertEquals("ValidationException", errorType("UpdateEndpointAccess",
+                "{\"endpointName\":\"ep-one\",\"vpcSecurityGroupIds\":null}"));
 
         JsonNode updated = ok("UpdateEndpointAccess",
                 "{\"endpointName\":\"ep-one\",\"vpcSecurityGroupIds\":[\"sg-2\",\"sg-3\"]}").get("endpoint");
@@ -172,6 +187,12 @@ class RedshiftServerlessAdministrationHandlerTest {
         assertEquals(1, ok("ListEndpointAccess", "{\"workgroupName\":\"ep-wg\"}").get("endpoints").size());
         assertEquals(0, ok("ListEndpointAccess", "{\"workgroupName\":\"other\"}").get("endpoints").size());
         assertEquals(0, ok("ListEndpointAccess", "{\"vpcId\":\"vpc-1\"}").get("endpoints").size());
+        assertEquals("ValidationException", errorType("ListEndpointAccess", "{\"maxResults\":0}"));
+        assertEquals("ValidationException", errorType("ListEndpointAccess", "{\"maxResults\":101}"));
+        assertEquals("ValidationException", errorType("ListEndpointAccess", "{\"nextToken\":\"bad-token\"}"));
+        JsonNode trackTokenPage = ok("ListTracks", "{\"maxResults\":1}");
+        assertEquals("ValidationException", errorType("ListEndpointAccess",
+                "{\"nextToken\":\"" + trackTokenPage.get("nextToken").textValue() + "\"}"));
 
         assertEquals("DELETING", ok("DeleteEndpointAccess", "{\"endpointName\":\"ep-one\"}")
                 .get("endpoint").get("endpointStatus").textValue());
@@ -220,6 +241,27 @@ class RedshiftServerlessAdministrationHandlerTest {
                             + "\"subnetIds\":[\"subnet-a\"],\"vpcSecurityGroupIds\":[\"sg-1\"]}")
                     .get("endpoint").get("endpointName").textValue());
         }
+    }
+
+    @Test
+    void endpointAccessPagingWalksPagesAndRefusesForeignTokens() {
+        workgroup("page-ns", "page-wg");
+        for (String name : List.of("ep-alpha", "ep-beta", "ep-gamma")) {
+            ok("CreateEndpointAccess", "{\"endpointName\":\"" + name + "\",\"workgroupName\":\"page-wg\","
+                    + "\"subnetIds\":[\"subnet-a\"]}");
+        }
+
+        JsonNode firstPage = ok("ListEndpointAccess", "{\"workgroupName\":\"page-wg\",\"maxResults\":2}");
+        assertEquals(2, firstPage.get("endpoints").size());
+        assertEquals("ep-alpha", firstPage.get("endpoints").get(0).get("endpointName").textValue());
+        assertEquals("ep-beta", firstPage.get("endpoints").get(1).get("endpointName").textValue());
+        assertTrue(firstPage.has("nextToken"));
+
+        String token = firstPage.get("nextToken").textValue();
+        JsonNode secondPage = ok("ListEndpointAccess", "{\"workgroupName\":\"page-wg\",\"nextToken\":\"" + token + "\"}");
+        assertEquals(1, secondPage.get("endpoints").size());
+        assertEquals("ep-gamma", secondPage.get("endpoints").get(0).get("endpointName").textValue());
+        assertFalse(secondPage.has("nextToken"));
     }
 
     @Test
