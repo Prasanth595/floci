@@ -3434,7 +3434,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         mappedDevices.stream()
                 .filter(m -> m.getEbs() != null && m.getEbs().getVolumeType() != null)
                 .forEach(m -> requireValidVolumeType(m.getEbs().getVolumeType()));
-        String rootVolumeType = rootVolumeTypeFor(findImageForCapture(region, imageId), mappedDevices);
+        Image launchImage = findImageForCapture(region, imageId);
+        String rootVolumeType = rootVolumeTypeFor(launchImage, mappedDevices);
+        String rootDeviceName = launchImage != null && launchImage.getRootDeviceName() != null
+                ? launchImage.getRootDeviceName() : new Instance().getRootDeviceName();
+        boolean deleteRootOnTermination = rootDeleteOnTerminationFor(launchImage, rootDeviceName, mappedDevices);
         List<Instance> launched = new ArrayList<>();
         // Resolving the AMI, building the instances that depend on it and publishing them is one
         // step. A DeregisterImage releases the captured layer only when no live instance resolves
@@ -3566,6 +3570,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         // Root EBS volume
                         String rootVolId = "vol-" + randomHex(17);
                         inst.setRootVolumeId(rootVolId);
+                        inst.setRootDeviceName(rootDeviceName);
                         Volume rootVol = new Volume();
                         rootVol.setVolumeId(rootVolId);
                         rootVol.setAvailabilityZone(az);
@@ -3580,7 +3585,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         att.setInstanceId(instanceId);
                         att.setDevice(inst.getRootDeviceName());
                         att.setState("attached");
-                        att.setDeleteOnTermination(true);
+                        att.setDeleteOnTermination(deleteRootOnTermination);
                         att.setAttachTime(Instant.now());
                         rootVol.getAttachments().add(att);
                         volumes.put(key(region, rootVolId), rootVol);
@@ -4040,20 +4045,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 // daemon and, without this, nothing would try again.
                 containerManager.terminate(inst, () ->
                         RequestScopes.runAs(owner, () -> reclaimCapturesPinnedBy(region, inst, terminating)));
-            }
-            // Delete root volume if deleteOnTermination (matches real AWS behavior)
-            if (inst.getRootVolumeId() != null) {
-                Volume rootVol = volumes.get(key(region, inst.getRootVolumeId())).orElse(null);
-                if (rootVol != null) {
-                    boolean attachedElsewhere = rootVol.getAttachments().stream()
-                            .anyMatch(a -> !inst.getInstanceId().equals(a.getInstanceId()));
-                    if (!attachedElsewhere) {
-                        if (volumeBlockDeviceManager != null) {
-                            volumeBlockDeviceManager.deleteVolume(inst.getRootVolumeId());
-                        }
-                        volumes.delete(key(region, inst.getRootVolumeId()));
-                    }
-                }
             }
             detachAttachedVolumesOnTermination(region, inst);
             releaseStandaloneInterfacesOnTermination(region, inst);
@@ -6963,6 +6954,32 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .map(m -> m.getEbs().getVolumeType())
                 .findFirst()
                 .orElse(DEFAULT_ROOT_VOLUME_TYPE);
+    }
+
+    private static boolean rootDeleteOnTerminationFor(Image image, String rootDeviceName,
+            List<LaunchTemplateData.BlockDeviceMapping> requestMappings) {
+        for (LaunchTemplateData.BlockDeviceMapping mapping : requestMappings) {
+            if (Objects.equals(mapping.getDeviceName(), rootDeviceName) && mapping.getEbs() != null
+                    && mapping.getEbs().getDeleteOnTermination() != null) {
+                return mapping.getEbs().getDeleteOnTermination();
+            }
+        }
+        if (image != null && image.getBlockDeviceMappings() != null) {
+            for (BlockDeviceMapping mapping : image.getBlockDeviceMappings()) {
+                if (Objects.equals(mapping.getDeviceName(), rootDeviceName) && mapping.getEbs() != null
+                        && mapping.getEbs().getDeleteOnTermination() != null) {
+                    return mapping.getEbs().getDeleteOnTermination();
+                }
+            }
+        }
+        return true;
+    }
+
+    public Optional<VolumeAttachment> rootVolumeAttachment(Instance instance) {
+        return volumes.get(key(instance.getRegion(), instance.getRootVolumeId()))
+                .flatMap(volume -> volume.getAttachments().stream()
+                        .filter(attachment -> instance.getInstanceId().equals(attachment.getInstanceId()))
+                        .findFirst());
     }
 
     /** The image a CreateImage source was launched from, whether catalog-backed or registered. */
@@ -10261,6 +10278,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (resource instanceof Instance inst) {
             return switch (filterName) {
                 case "instance-id" -> matchesValue(values, inst.getInstanceId());
+                case "client-token" -> matchesValue(values, inst.getClientToken());
                 case "instance-state-name" -> matchesValue(values, inst.getState().getName());
                 case "instance-type" -> matchesValue(values, inst.getInstanceType());
                 case "vpc-id" -> matchesValue(values, inst.getVpcId());
