@@ -2432,6 +2432,60 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void updateItem_sortKeySetToValueWithExtraTypeMember_throwsValidationException() throws Exception {
+        String region = "eu-west-1";
+        createEventsTableWithNumericSortKey(region);
+        service.putItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """), region);
+
+        JsonNode key = mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """);
+        ObjectNode exprValues = (ObjectNode) mapper.readTree("""
+                {":ts":{"N":"1700000000","S":"extra"}}
+                """);
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#ts", "timestamp");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Events", key, null,
+                        "SET #ts = :ts", exprNames, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("more than one datatypes"));
+
+        JsonNode stored = service.getItem("Events", key, region);
+        assertFalse(stored.path("timestamp").has("S"));
+    }
+
+    @Test
+    void updateItem_partitionKeySetToValueWithExtraTypeMember_throwsValidationException() throws Exception {
+        String region = "eu-west-1";
+        createEventsTableWithNumericSortKey(region);
+        service.putItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """), region);
+
+        JsonNode key = mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """);
+        ObjectNode exprValues = (ObjectNode) mapper.readTree("""
+                {":id":{"S":"d1","N":"5"}}
+                """);
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#id", "deviceId");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Events", key, null,
+                        "SET #id = :id", exprNames, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("more than one datatypes"));
+
+        JsonNode stored = service.getItem("Events", key, region);
+        assertFalse(stored.path("deviceId").has("N"));
+    }
+
+    @Test
     void updateItemMissingSortKeyThrowsValidationException() {
         String region = "eu-west-1";
         createOrdersTable(region);
