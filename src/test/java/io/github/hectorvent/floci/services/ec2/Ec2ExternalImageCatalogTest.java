@@ -50,8 +50,11 @@ class Ec2ExternalImageCatalogTest {
                 """);
         AmiImageResolver resolver = new AmiImageResolver(new Ec2ImageCatalog(catalog));
         assertEquals("linux/386", resolver.resolveImage("ami-local-i386").dockerPlatform());
-        assertTrue(new Ec2InstanceTypeCatalog().find("t2.micro").orElseThrow()
-                .supportedArchitectures.contains("i386"));
+        Ec2InstanceTypeCatalog types = new Ec2InstanceTypeCatalog();
+        for (String type : new String[]{"t2.nano", "t2.micro", "t2.small", "t2.medium"}) {
+            assertTrue(types.find(type).orElseThrow().supportedArchitectures.contains("i386"), type);
+        }
+        assertFalse(types.find("t2.large").orElseThrow().supportedArchitectures.contains("i386"));
     }
 
     @Test

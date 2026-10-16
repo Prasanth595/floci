@@ -46,6 +46,7 @@ instanceTypes:
     memoryMib: 4096
     supportedArchitectures:
       - x86_64
+      - i386
     currentGeneration: true
     encryptionInTransitSupported: false
     defaultNetworkCardIndex: 0

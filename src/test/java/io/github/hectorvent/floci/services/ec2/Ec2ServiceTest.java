@@ -3410,6 +3410,31 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void runInstancesAcceptsI386ImageOnT2MediumAndRefusesItOnT2Large() {
+        Ec2ImageCatalog catalog = mock(Ec2ImageCatalog.class);
+        Ec2ImageCatalog.CatalogImage source = new Ec2ImageCatalog.CatalogImage();
+        source.imageId = "ami-i386";
+        source.architecture = "i386";
+        source.rootDeviceName = "/dev/xvda";
+        when(catalog.findByIdOrAlias("ami-i386")).thenReturn(Optional.of(source));
+
+        AmiImageResolver resolver = mock(AmiImageResolver.class);
+        when(resolver.resolveImage("ami-i386"))
+                .thenReturn(new ResolvedAmiImage("i386/alpine:3", ResolvedAmiImage.DEFAULT_RUNTIME, false,
+                        "linux/386"));
+        Ec2Service service = liveService(capturingContainerManager(), resolver, catalog);
+
+        Reservation medium = service.runInstances("us-east-1", "ami-i386", "t2.medium", 1, 1,
+                null, List.of(), null, null, List.of(), null, null);
+        assertEquals("i386", medium.getInstances().getFirst().getArchitecture());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.runInstances("us-east-1", "ami-i386", "t2.large", 1, 1,
+                        null, List.of(), null, null, List.of(), null, null));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    @Test
     void dryRunValidatesImagesBeforeReportingSuccess() {
         Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
         AmiImageResolver resolver = mock(AmiImageResolver.class);
