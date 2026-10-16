@@ -402,8 +402,9 @@ class CognitoSignUpTriggerReentrancyTest {
                         Thread.currentThread().interrupt();
                         throw new AssertionError("interrupted while coordinating snapshot", exception);
                     }
-                    await().atMost(Duration.ofSeconds(5)).until(() -> mutation.get().isDone()
-                            || mutationThread.get().getState() == Thread.State.BLOCKED);
+                    await().pollInterval(Duration.ofMillis(10)).atMost(Duration.ofSeconds(1))
+                            .until(() -> mutation.get().isDone()
+                                    || mutationThread.get().getState() == Thread.State.BLOCKED);
                 }
                 return super.entrySet();
             }
