@@ -287,6 +287,61 @@ class CloudFormationStackSetsIntegrationTest {
         .then().statusCode(200);
     }
 
+    /**
+     * An UpdateStackSet that changes nothing for an instance leaves its stack as it is: the
+     * instance succeeds and its stack is not updated.
+     */
+    @Test
+    void anUpdateStackSetWithNothingToChangeLeavesTheInstanceStackAsItIs() {
+        String setName = "same-" + UUID.randomUUID().toString().substring(0, 8);
+        String queue = "same-" + UUID.randomUUID().toString().substring(0, 8);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", queueTemplate(queue))
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackInstances")
+            .formParam("StackSetName", setName)
+            .formParam("Accounts.member.1", ACCOUNT_B)
+            .formParam("Regions.member.1", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+        assertQueueVisible(ACCOUNT_B, queue);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", queueTemplate(queue))
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "StackSet-" + setName + "-" + ACCOUNT_B)
+            .header("Authorization", auth(ACCOUNT_B, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListStackSetOperations")
+            .formParam("StackSetName", setName)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<Action>UPDATE</Action>"))
+            .body(not(containsString("<Status>FAILED</Status>")));
+    }
+
     @Test
     void updateStackSetReappliesToExistingInstances() {
         String setName = "upd-" + UUID.randomUUID().toString().substring(0, 8);

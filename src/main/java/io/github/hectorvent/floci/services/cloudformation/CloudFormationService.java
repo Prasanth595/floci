@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
@@ -52,6 +53,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -63,6 +65,13 @@ import java.util.stream.Collectors;
 public class CloudFormationService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(CloudFormationService.class);
+
+    /**
+     * The reason CloudFormation gives a change set that submits what the stack already has, and
+     * the condition under which UpdateStack answers "No updates are to be performed."
+     */
+    static final String NO_CHANGES_REASON =
+            "The submitted information didn't contain changes. Submit different information to create a change set.";
 
     private static final int MAX_OPERATION_THREADS = 16;
     private static final int MAX_QUEUED_OPERATIONS = 128;
@@ -456,7 +465,14 @@ public class CloudFormationService implements ResourceProvider {
         // persistStack() stays outside: it is storage I/O, and compute()'s contract is that the
         // remapping function does short, non-blocking work.
         String canonicalStackName = live == null ? stackName : live.getStackName();
+        // Whether the update has nothing to change is decided here, outside compute(): it reads
+        // AWS::Include fragments from S3, runs the SAM transform and resolves SSM parameters. Inside,
+        // the verdict stands only if the stack still holds what it was reached against.
+        DeployedState checked = isCreateType || live == null ? null : DeployedState.of(live);
+        boolean unchangedWhenChecked = checked != null
+                && submitsWhatTheStackHas(live, resolvedTemplate, parameters, tags, region);
         ChangeSet[] created = new ChangeSet[1];
+        boolean[] unchanged = new boolean[1];
         Stack stack = stacks.compute(stackKey(accountId, canonicalStackName, region), (k, existing) -> {
             Stack target;
             if (existing == null) {
@@ -500,6 +516,8 @@ public class CloudFormationService implements ResourceProvider {
                     return existing;
                 }
                 target = existing;
+                unchanged[0] = unchangedWhenChecked && existing == live
+                        && checked.equals(DeployedState.of(existing));
             }
 
             ChangeSet cs = new ChangeSet();
@@ -516,6 +534,10 @@ public class CloudFormationService implements ResourceProvider {
                 cs.setStatus("FAILED");
                 cs.setExecutionStatus("UNAVAILABLE");
                 cs.setStatusReason(samTransformFailureReason);
+            } else if (unchanged[0]) {
+                cs.setStatus("FAILED");
+                cs.setExecutionStatus("UNAVAILABLE");
+                cs.setStatusReason(NO_CHANGES_REASON);
             } else {
                 cs.setStatus("CREATE_COMPLETE");
                 cs.setExecutionStatus("AVAILABLE");
@@ -531,6 +553,15 @@ public class CloudFormationService implements ResourceProvider {
         return created[0];
     }
 
+    /** What {@link #submitsWhatTheStackHas} compares an update against. */
+    private record DeployedState(String template, Map<String, String> parameters,
+                                 Map<String, String> resolvedParameters, Map<String, String> tags) {
+        static DeployedState of(Stack stack) {
+            return new DeployedState(stack.getTemplateBody(), stack.parametersSnapshot(),
+                    stack.resolvedParametersSnapshot(), stack.tagsSnapshot());
+        }
+    }
+
     private static AwsException cannotBeUpdated(String stackId, String status) {
         return new AwsException("ValidationError", UPDATE_REFUSED.formatted(stackId, status), 400);
     }
@@ -543,6 +574,100 @@ public class CloudFormationService implements ResourceProvider {
             return cannotBeUpdated(deleted.getStackId(), deleted.getStatus());
         }
         return new AwsException("ValidationError", "Stack with id " + stackName + " does not exist", 400);
+    }
+
+    /**
+     * Whether an UPDATE has nothing to change: the template it submits comes to the same
+     * {@link ComparedTemplate} as the stack's, with the values each is given, the stack's own tags
+     * or none are sent, and the stack has no nested stack. CloudFormation then answers "No updates
+     * are to be performed." A new Description, Metadata, Rules or an unused parameter, mapping or
+     * condition is therefore not an update, while a change to an active output is, as on AWS.
+     */
+    private boolean submitsWhatTheStackHas(Stack stack, String templateBody, Map<String, String> parameters,
+                                           Map<String, String> tags, String region) {
+        if (stack.getTemplateBody() == null || templateBody == null) {
+            return false;
+        }
+        // Tags are compared as a set. An update that sends none keeps the stack's, and so has
+        // nothing to change; an empty set removes them, which is a change only for a tagged stack.
+        if (tags != null && !tags.equals(stack.tagsSnapshot())) {
+            return false;
+        }
+        Map<String, String> given = parameters == null ? Map.of() : parameters;
+        try {
+            // Compared as execution stores it: AWS::Include fragments read again and merged, then
+            // the SAM transform applied with the stack's parameter values, which it can resolve
+            // into the expansion. A fragment that changed in S3 is a change.
+            JsonNode template = awsIncludeProcessor.mergeIncludes(parseTemplate(templateBody));
+            if (samTransformProcessor.hasSamTransform(template)) {
+                template = samTransformProcessor.expandSamTemplate(template,
+                        samTransformParameters(template, given, region));
+            }
+            // A nested stack is always updated, whether or not its template changed: AWS reads the
+            // child template again and reports the nested stack as a change on every update.
+            for (JsonNode resource : template.path("Resources")) {
+                if ("AWS::CloudFormation::Stack".equals(resource.path("Type").asText())) {
+                    return false;
+                }
+            }
+            Map<String, String> submitted = resolveSsmParameters(template,
+                    resolveDefaultParameters(template, given), region);
+            return comparedDeployedTemplate(stack, region)
+                    .equals(comparedTemplate(template, submitted, stack, region, currentDynamicReferences(region)));
+        } catch (Exception e) {
+            LOG.debugv("Treating an update as a change; a template did not process: {0}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * The stack's deployed template as {@link ComparedTemplate} compares it, with the parameter
+     * values and the dynamic reference values it was deployed with. A stack persisted before
+     * resolved parameter values or dynamic reference digests were kept compares as different from
+     * any update, which converges it and records them for the next time.
+     */
+    private ObjectNode comparedDeployedTemplate(Stack stack, String region) throws Exception {
+        Map<String, String> deployed = stack.resolvedParametersSnapshot().isEmpty()
+                ? stack.parametersSnapshot() : stack.resolvedParametersSnapshot();
+        Map<String, String> digests = stack.dynamicReferenceDigestsSnapshot();
+        return comparedTemplate(parseTemplate(stack.getTemplateBody()), deployed, stack, region,
+                value -> digests.getOrDefault(value, "unrecorded " + UUID.randomUUID()));
+    }
+
+    private UnaryOperator<String> currentDynamicReferences(String region) {
+        return value -> {
+            try {
+                return Digests.sha256Hex(dynamicReferences.resolveDynamicReferences(value, region, false));
+            } catch (RuntimeException e) {
+                // The update fails on it when it runs; until then it is something to change.
+                return "unresolvable " + UUID.randomUUID();
+            }
+        };
+    }
+
+    private ObjectNode comparedTemplate(JsonNode template, Map<String, String> params, Stack stack,
+                                        String region, UnaryOperator<String> dynamicReferenceValue) {
+        String accountId = ownerAccount(stack);
+        Map<String, Boolean> conditions = resolveConditions(template, params, stack, region, accountId);
+        Map<String, JsonNode> mappings = new HashMap<>();
+        template.path("Mappings").fields().forEachRemaining(e -> mappings.put(e.getKey(), e.getValue()));
+        // No dynamic reference resolver: ComparedTemplate hands each reference to dynamicReferenceValue.
+        CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(accountId, region,
+                stack.getStackName(), stack.getStackId(), params, Map.of(), Map.of(), conditions, mappings,
+                objectMapper, name -> null);
+        return ComparedTemplate.of(template, objectMapper, engine, conditions, dynamicReferenceValue);
+    }
+
+    /**
+     * Resolves the dynamic references in {@code value} for a resource being provisioned, and
+     * records what they resolved to for the next update to compare against.
+     */
+    private String resolveDynamicReferencesRecorded(Stack stack, String value, String region) {
+        String resolved = dynamicReferences.resolveDynamicReferences(value, region, false);
+        if (value != null && value.contains("{{resolve:")) {
+            stack.getDynamicReferenceDigests().put(value, Digests.sha256Hex(resolved));
+        }
+        return resolved;
     }
 
     /**
@@ -701,6 +826,23 @@ public class CloudFormationService implements ResourceProvider {
             });
             Set<String> deployedIds = stack.resourcesSnapshot().keySet();
 
+            // A resource is modified when what CloudFormation compares of it differs (see
+            // ComparedTemplate): a DependsOn, or a literal rewritten as a function, is no change,
+            // while a used mapping value or a dynamic reference whose stored value moved is. A
+            // template that cannot be brought to that form falls back to its definitions as written
+            // and the parameters and conditions they read.
+            JsonNode[] compared = new JsonNode[2];
+            if (oldTemplate != null) {
+                try {
+                    compared[0] = comparedDeployedTemplate(stack, region).path("Resources");
+                    compared[1] = comparedTemplate(newTemplate, newResolvedParams, stack, region,
+                            currentDynamicReferences(region)).path("Resources");
+                } catch (Exception e) {
+                    LOG.debugv("Diffing a change set as written; a template did not resolve: {0}", e.getMessage());
+                    compared[0] = null;
+                }
+            }
+
             Set<String> replacedResourceIds = new HashSet<>();
             List<ResourceChange> changes = new ArrayList<>();
             newResources.fields().forEachRemaining(e -> {
@@ -728,10 +870,12 @@ public class CloudFormationService implements ResourceProvider {
                     // it now.
                     changes.add(new ResourceChange("Add", logicalId, null, resourceType, null));
                 } else if (newActive
-                        && (!oldDef.equals(newDef)
-                        || ("AWS::CloudFormation::Stack".equals(resourceType) && isNestedStackChanged(stack, logicalId, newDef, region, accountId))
-                        || referencesAnyParameter(newDef, changedParams)
-                        || referencesAnyCondition(newDef, changedConditions))) {
+                        && ((compared[0] != null
+                                ? !compared[0].path(logicalId).equals(compared[1].path(logicalId))
+                                : !oldDef.equals(newDef)
+                                        || referencesAnyParameter(newDef, changedParams)
+                                        || referencesAnyCondition(newDef, changedConditions))
+                        || ("AWS::CloudFormation::Stack".equals(resourceType) && isNestedStackChanged(stack, logicalId, newDef, region, accountId)))) {
                     boolean typeChanged = !oldDef.path("Type").asText().equals(resourceType);
                     boolean replacement = typeChanged
                             || requiresReplacement(resourceType, oldDef.path("Properties"), newDef.path("Properties"), changedParams, changedConditions);
@@ -1053,7 +1197,13 @@ public class CloudFormationService implements ResourceProvider {
     public void deleteChangeSet(String stackName, String changeSetName, String region) {
         String accountId = currentAccount();
         Stack stack = getStackForChangeSet(stackName, changeSetName, region, accountId);
-        ChangeSet cs = getChangeSetOrThrow(stack, changeSetName, region, accountId);
+        ChangeSet cs = findChangeSet(stack, changeSetName, region, accountId);
+        if (cs == null) {
+            // CloudFormation answers success for a change set the stack does not have, whatever
+            // the stack's status. The AWS CDK deletes its change set by name before every deploy
+            // and relies on it, since it deletes the one that had nothing to change.
+            return;
+        }
         stack.getChangeSets().remove(cs.getChangeSetName());
         persistStack(stack);
     }
@@ -1782,7 +1932,7 @@ public class CloudFormationService implements ResourceProvider {
                             accountId, region, stack.getStackName(),
                             stack.getStackId(), resolvedParams, physicalIds, resourceAttrs, conditions, mappings, objectMapper,
                             name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
-                            value -> dynamicReferences.resolveDynamicReferences(value, region, false));
+                            value -> resolveDynamicReferencesRecorded(stack, value, region));
 
                     StackResource resource = stack.getResources().get(logicalId);
                     StackResource previousResource = resource;
@@ -1948,7 +2098,7 @@ public class CloudFormationService implements ResourceProvider {
                     accountId, region, stack.getStackName(),
                     stack.getStackId(), resolvedParams, physicalIds, resourceAttrs, conditions, mappings, objectMapper,
                     name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
-                    value -> dynamicReferences.resolveDynamicReferences(value, region, false));
+                    value -> resolveDynamicReferencesRecorded(stack, value, region));
 
             // Resolve outputs before mutating stack/global export state, so failed updates do not
             // leave stale or partially registered exports behind.
@@ -3600,12 +3750,21 @@ public class CloudFormationService implements ResourceProvider {
 
     private ChangeSet getChangeSetOrThrow(Stack stack, String changeSetNameOrArn,
                                           String region, String accountId) {
+        ChangeSet changeSet = findChangeSet(stack, changeSetNameOrArn, region, accountId);
+        if (changeSet == null) {
+            throw new AwsException("ChangeSetNotFoundException",
+                    "ChangeSet [" + changeSetNameOrArn + "] does not exist", 400);
+        }
+        return changeSet;
+    }
+
+    private ChangeSet findChangeSet(Stack stack, String changeSetNameOrArn,
+                                    String region, String accountId) {
         ChangeSet changeSet = stack.getChangeSets().get(
                 resolveChangeSetName(changeSetNameOrArn, region, accountId));
         if (changeSet == null || (changeSetNameOrArn != null && changeSetNameOrArn.startsWith("arn:")
                 && !changeSetNameOrArn.equals(changeSet.getChangeSetId()))) {
-            throw new AwsException("ChangeSetNotFoundException",
-                    "ChangeSet [" + changeSetNameOrArn + "] does not exist", 400);
+            return null;
         }
         return changeSet;
     }

@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackInstance;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSet;
@@ -644,9 +645,15 @@ public class StackSetService {
         // Preflight the change set in the target account so AWS::AccountId-based conditions are
         // evaluated against the same account the instance executes in (createChangeSet otherwise runs
         // in the administrator request scope).
-        cfnService.createChangeSet(stackName, changeSetName, changeSetType, ss.getTemplateBody(), null,
-                ss.getParameters(), ss.getCapabilities(), ss.getTags(), region, account);
-        await(cfnService.executeChangeSet(stackName, changeSetName, region, account));
+        ChangeSet changeSet = cfnService.createChangeSet(stackName, changeSetName, changeSetType,
+                ss.getTemplateBody(), null, ss.getParameters(), ss.getCapabilities(), ss.getTags(), region, account);
+        // An instance whose stack already has what the stack set describes is left as it is, as on
+        // AWS: executing its change set, which has nothing to change, would update the stack anyway.
+        boolean nothingToChange = changeSet != null && "FAILED".equals(changeSet.getStatus())
+                && CloudFormationService.NO_CHANGES_REASON.equals(changeSet.getStatusReason());
+        if (!nothingToChange) {
+            await(cfnService.executeChangeSet(stackName, changeSetName, region, account));
+        }
 
         StackInstance inst = new StackInstance();
         inst.setStackSetId(ss.getStackSetId());
