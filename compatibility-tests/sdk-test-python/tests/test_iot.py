@@ -327,7 +327,8 @@ def test_iot_data_retained_messages_and_shadow_conflicts(iot_data_client, unique
         )
         raise AssertionError("stale shadow update should fail")
     except ClientError as exc:
-        assert exc.response["Error"]["Code"] == "VersionConflictException"
+        assert exc.response["Error"]["Code"] == "ConflictException"
+        assert exc.response["Error"]["Message"] == "Version conflict"
 
 
 def test_topic_rule_crud_and_sqs_action(iot_client, iot_data_client, sqs_client, unique_name):
