@@ -1966,7 +1966,8 @@ public class IotService {
         if (parts.length == 5 && "things".equals(parts[1]) && "shadow".equals(parts[3])) {
             return new ReservedShadowTopic(parts[2], null, parts[4]);
         }
-        if (parts.length == 7 && "things".equals(parts[1]) && "shadow".equals(parts[3]) && "name".equals(parts[4])) {
+        if (parts.length == 7 && "things".equals(parts[1]) && "shadow".equals(parts[3]) && "name".equals(parts[4])
+                && SHADOW_NAME_PATTERN.matcher(parts[5]).matches()) {
             return new ReservedShadowTopic(parts[2], parts[5], parts[6]);
         }
         return null;

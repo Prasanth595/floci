@@ -1261,4 +1261,23 @@ class IotServiceTest {
         assertTrue(recorder.recentEvents().isEmpty());
         assertThrows(AwsException.class, () -> service.getThingShadow("sensor-11", null, REGION));
     }
+
+    @Test
+    void anMqttRequestOnANamedTopicWithAnInvalidNameIsIgnored() throws Exception {
+        service.updateThingShadow("sensor-12", null, json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        recorder.clear();
+        clearInvocations(broker);
+        String update = "{\"state\":{\"desired\":{\"color\":\"green\"}},\"clientToken\":\"t\"}";
+
+        mqttShadowRequest("$aws/things/sensor-12/shadow/name/ /update", update);
+        mqttShadowRequest("$aws/things/sensor-12/shadow/name//update", update);
+        mqttShadowRequest("$aws/things/sensor-12/shadow/name/bad!/delete", "{}");
+        mqttShadowRequest("$aws/things/sensor-12/shadow/name/ /get", "{}");
+
+        assertEquals(List.of(), recordedTopics());
+        verifyNoInteractions(broker);
+        JsonNode classic = service.getThingShadow("sensor-12", null, REGION);
+        assertEquals("blue", classic.at("/state/desired/color").asText());
+        assertEquals(1, classic.get("version").asLong());
+    }
 }
