@@ -443,18 +443,22 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
 `PutBucketOwnershipControls`, on create and in place on update.
 
 - A malformed rule fails the resource before the bucket is created or changed, and the stack
-  rolls back. The resource schema's checks come first, in the
-  `Model validation failed (#/OwnershipControls...)` form with `InvalidRequest`:
-  - a value of the wrong type: `OwnershipControls` or a rule that is not an object, `Rules` that
-    is not a list, or an `ObjectOwnership` that is a list or an object;
-  - a key other than `Rules` or `ObjectOwnership` (`extraneous key [<key>] is not permitted`);
-  - a rule listed twice (`array items are not unique`), compared once intrinsic functions such as
-    `Ref` are resolved;
-  - a rule without `ObjectOwnership` (`required key [ObjectOwnership] not found`).
-
-  S3's own check follows and answers `MalformedXML` (`The XML you provided was not well-formed or
-  did not validate against our published schema.`) for no rule, more than one rule, and a mode
-  other than `BucketOwnerEnforced`, `BucketOwnerPreferred` or `ObjectWriter`.
+  rolls back. The resource's status reason gives the cause.
+- What the resource schema refuses is reported first, as
+  `Model validation failed (#/OwnershipControls...: <reason>)`: a value of the wrong type
+  (`OwnershipControls` or a rule that is not an object, `Rules` that is not a list, an
+  `ObjectOwnership` that is a list or an object), a key other than `Rules` on `OwnershipControls`
+  or other than `ObjectOwnership` on a rule (`extraneous key [<key>] is not permitted`), and a
+  rule listed twice (`array items are not unique`). The repeat is checked once every rule passes
+  its own checks, comparing the rules after intrinsic functions such as `Ref` are resolved.
+- A rule without `ObjectOwnership`, which S3 requires and the schema does not, fails in the same
+  form with `required key [ObjectOwnership] not found`.
+- What S3 refuses then fails with the message of the `MalformedXML` error that
+  `PutBucketOwnershipControls` returns, `The XML you provided was not well-formed or did not
+  validate against our published schema.`: no rule, more than one rule, or a mode other than
+  `BucketOwnerEnforced`, `BucketOwnerPreferred` or `ObjectWriter`. AWS's published resource
+  schema refuses two of these itself, a missing `Rules` (`required key [Rules] not found`) and a
+  mode outside the three (its `enum`), so CloudFormation's reason for them may differ.
 - An update that removes `OwnershipControls` from a template that declared it deletes the
   controls, as a removed `NotificationConfiguration` is cleared; real AWS's answer for that
   removal is unmeasured. Controls set outside the stack are left alone while neither the previous
