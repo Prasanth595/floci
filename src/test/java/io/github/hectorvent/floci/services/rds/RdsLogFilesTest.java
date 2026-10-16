@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -123,7 +124,7 @@ class RdsLogFilesTest {
         String huge = "\u00e9".repeat(RdsLogFiles.MAX_BYTES);
         RdsLogFiles.LogFile file = new RdsLogFiles.LogFile("log/ERROR", Instant.EPOCH, 0, List.of(huge, "next"));
         RdsLogFiles.Portion portion = RdsLogFiles.portion(file, "0", 10);
-        int bytes = portion.data().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        int bytes = portion.data().getBytes(StandardCharsets.UTF_8).length;
         assertTrue(bytes <= RdsLogFiles.MAX_BYTES, Integer.toString(bytes));
         assertTrue(portion.data().endsWith("\u00e9\n"), "cut between characters");
         assertEquals("1", portion.marker());

@@ -796,17 +796,12 @@ class RdsControlPlaneTest {
 
     @Test
     @DisplayName("Log files: list an instance's log files and download a block")
-    void sdkReadsInstanceLogFiles() throws InterruptedException {
+    void sdkReadsInstanceLogFiles() {
         String instanceName = TestFixtures.uniqueName("rds-log-files");
         try {
             createDbInstance(rds, instanceName, "log-files-secret");
-            List<DescribeDBLogFilesDetails> files = List.of();
-            for (int i = 0; i < 60 && files.isEmpty(); i++) {
-                files = rds.describeDBLogFiles(b -> b.dbInstanceIdentifier(instanceName)).describeDBLogFiles();
-                if (files.isEmpty()) {
-                    Thread.sleep(1000);
-                }
-            }
+            List<DescribeDBLogFilesDetails> files =
+                    rds.describeDBLogFiles(b -> b.dbInstanceIdentifier(instanceName)).describeDBLogFiles();
             assertThat(files).isNotEmpty();
             assertThat(files).allSatisfy(f -> {
                 assertThat(f.logFileName()).startsWith("error/postgresql.log.");

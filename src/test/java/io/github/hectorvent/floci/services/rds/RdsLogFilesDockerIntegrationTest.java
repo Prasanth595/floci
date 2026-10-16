@@ -50,7 +50,7 @@ class RdsLogFilesDockerIntegrationTest {
     }
 
     @Test
-    void aPostgresInstancesLogIsListedAndDownloaded() throws Exception {
+    void aPostgresInstancesLogIsListedAndDownloaded() {
         String id = "log-files-pg-" + Long.toString(System.nanoTime(), 36);
         try {
             query("CreateDBInstance")
@@ -62,36 +62,23 @@ class RdsLogFilesDockerIntegrationTest {
                     .formParam("AllocatedStorage", "20")
             .when().post("/").then().statusCode(200);
 
-            List<String> names = List.of();
-            for (int i = 0; i < 60 && names.isEmpty(); i++) {
-                XmlPath listed = query("DescribeDBLogFiles").formParam("DBInstanceIdentifier", id)
-                        .when().post("/").then().extract().xmlPath();
-                names = listed.getList("**.findAll { it.name() == 'LogFileName' }", String.class);
-                if (names.isEmpty()) {
-                    Thread.sleep(1000);
-                }
-            }
+            // CreateDBInstance returns once the database accepts connections, so its startup log is
+            // already in the container's output: the first call must see it.
+            List<String> names = query("DescribeDBLogFiles").formParam("DBInstanceIdentifier", id)
+                    .when().post("/").then().statusCode(200).extract().xmlPath()
+                    .getList("**.findAll { it.name() == 'LogFileName' }", String.class);
             assertFalse(names.isEmpty(), "the instance should have a log file");
             assertTrue(names.stream().allMatch(n -> n.matches("error/postgresql\\.log\\.\\d{4}-\\d{2}-\\d{2}-\\d{2}")),
                     names.toString());
 
-            String data = "";
-            for (int i = 0; i < 60 && !data.contains("ready to accept connections"); i++) {
-                StringBuilder all = new StringBuilder();
-                for (String name : names) {
-                    all.append(query("DownloadDBLogFilePortion").formParam("DBInstanceIdentifier", id)
-                            .formParam("LogFileName", name).formParam("Marker", "0")
-                            .when().post("/").then().statusCode(200).extract().xmlPath()
-                            .getString("DownloadDBLogFilePortionResponse.DownloadDBLogFilePortionResult.LogFileData"));
-                }
-                data = all.toString();
-                if (!data.contains("ready to accept connections")) {
-                    Thread.sleep(1000);
-                    names = query("DescribeDBLogFiles").formParam("DBInstanceIdentifier", id)
-                            .when().post("/").then().extract().xmlPath()
-                            .getList("**.findAll { it.name() == 'LogFileName' }", String.class);
-                }
+            StringBuilder all = new StringBuilder();
+            for (String name : names) {
+                all.append(query("DownloadDBLogFilePortion").formParam("DBInstanceIdentifier", id)
+                        .formParam("LogFileName", name).formParam("Marker", "0")
+                        .when().post("/").then().statusCode(200).extract().xmlPath()
+                        .getString("DownloadDBLogFilePortionResponse.DownloadDBLogFilePortionResult.LogFileData"));
             }
+            String data = all.toString();
             assertTrue(data.contains("ready to accept connections"), data);
         } finally {
             query("DeleteDBInstance").formParam("DBInstanceIdentifier", id).formParam("SkipFinalSnapshot", "true")
