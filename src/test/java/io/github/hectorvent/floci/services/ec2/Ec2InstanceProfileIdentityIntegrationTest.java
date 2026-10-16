@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
@@ -258,8 +259,7 @@ class Ec2InstanceProfileIdentityIntegrationTest {
     }
 
     private static RequestSpecification request(String account, String service, String action) {
-        return given().header("Authorization", "AWS4-HMAC-SHA256 Credential=" + account
-                + "/20261010/us-east-1/" + service + "/aws4_request, SignedHeaders=host, Signature=abc")
+        return given().header("Authorization", EnforcementFixtures.auth(account, service))
                 .formParam("Action", action);
     }
 
