@@ -64,14 +64,10 @@ jobs:
         run: .github/scripts/smoke-binary.sh "$(ls target/*-runner)" "$GITHUB_REF_NAME"
 
       - name: Check the glibc floor of the standalone binary
-        # The release asset is dynamically linked against glibc and needs 2.34 or newer (RHEL 9,
-        # Ubuntu 22.04, Debian 12, Amazon Linux 2023). Starting it on the oldest supported base
-        # catches a toolchain change that silently raises the floor.
-        run: |
-          docker run --rm -v "$PWD/target:/b:ro" ubuntu:22.04 sh -c \
-            'set -e; bin=$(ls /b/*-runner); "$bin" -Dquarkus.http.port=0 > /tmp/out 2>&1 & pid=$!; sleep 5;
-             if kill -0 "$pid" 2>/dev/null; then echo "starts on glibc $(ldd --version | head -1)"; kill "$pid";
-             else cat /tmp/out; exit 1; fi'
+        # The release asset links glibc dynamically and must run on 2.34 (RHEL 9, Debian 12,
+        # Ubuntu 22.04, Amazon Linux 2023). The script checks the symbol versions it requires and
+        # starts it in UBI 9, whose glibc is exactly 2.34.
+        run: .github/scripts/check-glibc-floor.sh "$(ls target/*-runner)"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -113,6 +109,9 @@ jobs:
         # the way a user runs it: on the host, no Docker image around it.
         run: .github/scripts/smoke-binary.sh "$(ls target/*-runner)" "$GITHUB_REF_NAME"
 
+      - name: Check the glibc floor of the standalone binary
+        run: .github/scripts/check-glibc-floor.sh "$(ls target/*-runner)"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-arm64
@@ -150,6 +149,9 @@ jobs:
         # The same binary is published as a release asset (publish-binaries), so it is checked
         # the way a user runs it: on the host, no Docker image around it.
         run: .github/scripts/smoke-binary.sh "$(ls target/*-runner)" "$GITHUB_REF_NAME"
+
+      - name: Check the glibc floor of the standalone binary
+        run: .github/scripts/check-glibc-floor.sh "$(ls target/*-runner)"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -337,8 +339,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        # --clobber makes a re-run of this job idempotent.
-        run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+        # The tag starts this workflow before semantic-release creates the GitHub Release, so wait
+        # for it (up to 10 minutes) instead of failing the upload. --clobber makes a re-run idempotent.
+        run: |
+          for _ in $(seq 1 30); do
+            gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 && break
+            echo "waiting for the $GITHUB_REF_NAME release to exist"; sleep 20
+          done
+          gh release view "$GITHUB_REF_NAME" > /dev/null || { echo "::error::release $GITHUB_REF_NAME not found after 10 minutes"; exit 1; }
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
 
   # ── Push native + compat Docker images ───────────────────────────────────
   push-native:
