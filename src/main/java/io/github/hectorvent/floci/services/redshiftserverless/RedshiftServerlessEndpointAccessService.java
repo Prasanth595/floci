@@ -103,19 +103,22 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
                 .sorted(Comparator.comparing(EndpointAccess::getEndpointName))
                 .map(endpoint -> withCurrentConnection(endpoint, region))
                 .toList();
-        return Pagination.paginateNamespaced(matching, EndpointAccess::getEndpointName, maxResults, nextToken,
-                PAGE_SIZE, PAGE_SIZE, "endpoint-access", "ValidationException");
+        if (maxResults != null && (maxResults < 1 || maxResults > PAGE_SIZE)) {
+            throw ServerlessSupport.validation("maxResults must be between 1 and " + PAGE_SIZE);
+        }
+        int limit = maxResults != null ? maxResults : PAGE_SIZE;
+        return Pagination.paginate(matching, EndpointAccess::getEndpointName, limit, nextToken,
+                "endpoint-access", token -> ServerlessSupport.validation("Invalid nextToken."));
     }
 
     /** Replaces the endpoint's security groups, the only member AWS lets an update change. */
     public synchronized EndpointAccess updateEndpointAccess(String endpointName, List<String> vpcSecurityGroupIds,
                                                             String region) {
-        if (vpcSecurityGroupIds == null) {
-            throw ServerlessSupport.validation("vpcSecurityGroupIds must not be null.");
-        }
         EndpointAccess updated = new EndpointAccess(require(endpointName, region));
-        updated.setVpcSecurityGroupIds(vpcSecurityGroupIds);
-        endpoints.put(storageKey(region, endpointName), updated);
+        if (vpcSecurityGroupIds != null) {
+            updated.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+            endpoints.put(storageKey(region, endpointName), updated);
+        }
         return withCurrentConnection(updated, region);
     }
 

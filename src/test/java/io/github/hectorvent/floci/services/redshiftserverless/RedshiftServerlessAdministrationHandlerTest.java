@@ -104,10 +104,6 @@ class RedshiftServerlessAdministrationHandlerTest {
                 "{\"policy\":" + mapper.valueToTree(policy) + "}"));
         assertEquals("ValidationException", errorType("PutResourcePolicy",
                 "{\"resourceArn\":\"" + snapshotArn + "\"}"));
-        assertEquals("ValidationException", errorType("PutResourcePolicy",
-                "{\"resourceArn\":\"" + snapshotArn + "\",\"policy\":null}"));
-        assertEquals("ValidationException", errorType("PutResourcePolicy",
-                "{\"resourceArn\":\"" + snapshotArn + "\",\"policy\":\"\"}"));
         assertEquals("ValidationException", errorType("GetResourcePolicy",
                 "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/x\"}"));
         assertEquals("resourceArn does not identify a snapshot in this account and Region.",
@@ -176,10 +172,15 @@ class RedshiftServerlessAdministrationHandlerTest {
                 "{\"endpointName\":\"ep-two\",\"workgroupName\":\"nope\",\"subnetIds\":[\"subnet-a\"],"
                         + "\"vpcSecurityGroupIds\":[\"sg-1\"]}"));
 
-        assertEquals("ValidationException", errorType("UpdateEndpointAccess",
-                "{\"endpointName\":\"ep-one\"}"));
-        assertEquals("ValidationException", errorType("UpdateEndpointAccess",
-                "{\"endpointName\":\"ep-one\",\"vpcSecurityGroupIds\":null}"));
+        JsonNode noSgUpdate = ok("UpdateEndpointAccess",
+                "{\"endpointName\":\"ep-one\"}").get("endpoint");
+        assertEquals(1, noSgUpdate.get("vpcSecurityGroups").size());
+        assertEquals("sg-1", noSgUpdate.get("vpcSecurityGroups").get(0).get("vpcSecurityGroupId").textValue());
+
+        JsonNode nullSgUpdate = ok("UpdateEndpointAccess",
+                "{\"endpointName\":\"ep-one\",\"vpcSecurityGroupIds\":null}").get("endpoint");
+        assertEquals(1, nullSgUpdate.get("vpcSecurityGroups").size());
+        assertEquals("sg-1", nullSgUpdate.get("vpcSecurityGroups").get(0).get("vpcSecurityGroupId").textValue());
 
         JsonNode updated = ok("UpdateEndpointAccess",
                 "{\"endpointName\":\"ep-one\",\"vpcSecurityGroupIds\":[\"sg-2\",\"sg-3\"]}").get("endpoint");

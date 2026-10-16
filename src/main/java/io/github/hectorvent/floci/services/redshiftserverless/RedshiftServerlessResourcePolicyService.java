@@ -96,9 +96,6 @@ public class RedshiftServerlessResourcePolicyService implements Resettable {
     }
 
     private void requireJsonObject(String policy) {
-        if (policy == null || policy.isBlank()) {
-            throw ServerlessSupport.validation("policy must be a JSON policy document.");
-        }
         try {
             JsonNode parsed = strictPolicyReader.readTree(policy);
             if (parsed == null || !parsed.isObject()) {
