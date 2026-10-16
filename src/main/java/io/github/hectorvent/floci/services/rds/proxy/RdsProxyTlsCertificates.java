@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds.proxy;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.CertificateMetadata;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociVersion;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
@@ -225,13 +226,8 @@ public class RdsProxyTlsCertificates {
     }
 
     private void writeMetadata(Path metadataFile, List<String> sans) throws IOException {
-        CertificateMetadata metadata = CertificateMetadata.create(sans, resolveFlociVersion());
+        CertificateMetadata metadata = CertificateMetadata.create(sans, FlociVersion.current());
         String json = OBJECT_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(metadata);
         Files.writeString(metadataFile, json);
-    }
-
-    private static String resolveFlociVersion() {
-        String env = System.getenv("FLOCI_VERSION");
-        return (env != null && !env.isBlank()) ? env : "dev";
     }
 }

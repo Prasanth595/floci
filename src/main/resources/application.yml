@@ -76,6 +76,7 @@ quarkus:
         - cloudformation/*.json
         - redshift/*.sql
         - i18n/*.properties
+        - floci/version.properties
         - org/apache/velocity/runtime/defaults/*.properties
         # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
         # driver reads its time zone table at connect time.
