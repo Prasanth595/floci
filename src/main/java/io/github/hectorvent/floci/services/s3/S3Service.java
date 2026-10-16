@@ -3995,18 +3995,48 @@ public class S3Service implements Resettable, ResourceProvider {
                                                    String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5,
                                                    String checksumAlgorithm, String checksumType,
                                                    Map<String, String> tagging) {
+        return initiateMultipartUpload(bucket, key, contentType, metadata, checksumType, new PutObjectOptions()
+                .withStorageClass(storageClass)
+                .withContentDisposition(contentDisposition)
+                .withServerSideEncryption(serverSideEncryption)
+                .withAcl(acl)
+                .withSseKmsKeyId(sseKmsKeyId)
+                .withSseCustomerAlgorithm(sseCustomerAlgorithm)
+                .withSseCustomerKey(sseCustomerKey)
+                .withSseCustomerKeyMd5(sseCustomerKeyMd5)
+                .withChecksumAlgorithm(checksumAlgorithm)
+                .withTagging(tagging));
+    }
+
+    /**
+     * Starts a multipart upload of an object that gets {@code objectOptions} when it completes, as a
+     * PutObject takes them: its storage class, encryption, checksum algorithm, canned ACL or grants,
+     * tags and Object Lock settings. The ACL is checked here, so one S3 refuses fails the upload's
+     * creation rather than its completion.
+     */
+    public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
+                                                   Map<String, String> metadata, String checksumType,
+                                                   PutObjectOptions objectOptions) {
+        String storageClass = objectOptions.getStorageClass();
+        String contentDisposition = objectOptions.getContentDisposition();
+        String serverSideEncryption = objectOptions.getServerSideEncryption();
+        String acl = objectOptions.getAcl();
+        String sseKmsKeyId = objectOptions.getSseKmsKeyId();
+        String sseCustomerAlgorithm = objectOptions.getSseCustomerAlgorithm();
+        String sseCustomerKey = objectOptions.getSseCustomerKey();
+        String sseCustomerKeyMd5 = objectOptions.getSseCustomerKeyMd5();
+        String checksumAlgorithm = objectOptions.getChecksumAlgorithm();
+        Map<String, String> tagging = objectOptions.getTagging();
         return withMultipartBucketReadLock(bucket, () -> {
             ensureBucketExists(bucket);
             Bucket destination = resolveBucket(bucket)
                     .orElseThrow(() -> new AwsException("NoSuchBucket",
                             "The specified bucket does not exist.", 404));
-            if (ownershipIsEnforced(destination) && !isBlank(acl)
-                    && !"bucket-owner-full-control".equals(acl)) {
-                throw new AwsException("AccessControlListNotSupported", "The bucket does not allow ACLs", 400);
-            }
-            if (acl != null && !acl.isBlank()) {
-                cannedObjectAclXml(acl);
-            }
+            String ownerAccount = getBucketOwnerAccountId(bucket);
+            rejectUploadAclWhenOwnershipEnforced(destination, ownerAccount, objectOptions);
+            resolveObjectAclXml(ownerAccount, acl, objectOptions.getGrantRead(), objectOptions.getGrantWrite(),
+                    objectOptions.getGrantFullControl(), objectOptions.getGrantReadAcp(),
+                    objectOptions.getGrantWriteAcp());
             String normalizedServerSideEncryption = normalizeServerSideEncryption(serverSideEncryption);
             SseCustomerKey customerKey = validateSseCustomerKey(sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
             rejectConflictingServerSideEncryption(normalizedServerSideEncryption, customerKey);
@@ -4025,6 +4055,14 @@ public class S3Service implements Resettable, ResourceProvider {
                 upload.setSseCustomerKeyMd5(customerKey.keyMd5());
             }
             upload.setAcl(acl);
+            upload.setGrantRead(objectOptions.getGrantRead());
+            upload.setGrantWrite(objectOptions.getGrantWrite());
+            upload.setGrantFullControl(objectOptions.getGrantFullControl());
+            upload.setGrantReadAcp(objectOptions.getGrantReadAcp());
+            upload.setGrantWriteAcp(objectOptions.getGrantWriteAcp());
+            upload.setObjectLockMode(objectOptions.getObjectLockMode());
+            upload.setRetainUntilDate(objectOptions.getRetainUntilDate());
+            upload.setLegalHoldStatus(objectOptions.getLegalHoldStatus());
             ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromWireValue(checksumAlgorithm);
             ChecksumType requestedChecksumType = ChecksumType.fromWireValue(checksumType);
             if (requestedChecksumType != null && algorithm == null) {
@@ -4476,6 +4514,14 @@ public class S3Service implements Resettable, ResourceProvider {
                                     .withServerSideEncryption(upload.getServerSideEncryption())
                                     .withSseKmsKeyId(upload.getSseKmsKeyId())
                                     .withAcl(upload.getAcl())
+                                    .withGrantRead(upload.getGrantRead())
+                                    .withGrantWrite(upload.getGrantWrite())
+                                    .withGrantFullControl(upload.getGrantFullControl())
+                                    .withGrantReadAcp(upload.getGrantReadAcp())
+                                    .withGrantWriteAcp(upload.getGrantWriteAcp())
+                                    .withObjectLockMode(upload.getObjectLockMode())
+                                    .withRetainUntilDate(upload.getRetainUntilDate())
+                                    .withLegalHoldStatus(upload.getLegalHoldStatus())
                                     .withTagging(upload.getTagging()),
                             compositeETag);
                 } finally {
@@ -7248,6 +7294,9 @@ public class S3Service implements Resettable, ResourceProvider {
                         .withGrantFullControl(effectiveOptions.getGrantFullControl())
                         .withGrantReadAcp(effectiveOptions.getGrantReadAcp())
                         .withGrantWriteAcp(effectiveOptions.getGrantWriteAcp())
+                        .withObjectLockMode(effectiveOptions.getObjectLockMode())
+                        .withRetainUntilDate(effectiveOptions.getRetainUntilDate())
+                        .withLegalHoldStatus(effectiveOptions.getLegalHoldStatus())
                         .withChecksumAlgorithm(copyChecksumAlgorithm != null ? copyChecksumAlgorithm.name() : null)
                         .withTagging(effectiveTags)
                         .withIfMatch(effectiveOptions.getIfMatch())

@@ -167,6 +167,14 @@ class S3OwnershipControlsIntegrationTest {
             .body(containsString("AccessControlListNotSupported"));
 
         given()
+            .header("x-amz-grant-read", "uri=\"http://acs.amazonaws.com/groups/global/AllUsers\"")
+        .when()
+            .post("/" + BUCKET + "/rejected-multipart-grant?uploads")
+        .then()
+            .statusCode(400)
+            .body(containsString("AccessControlListNotSupported"));
+
+        given()
             .body("new object")
         .when()
             .put("/" + BUCKET + "/no-acl-object")
