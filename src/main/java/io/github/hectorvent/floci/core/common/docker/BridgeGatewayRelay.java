@@ -15,9 +15,16 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.Config;
 import org.jboss.logging.Logger;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Lets containers reach a Floci that runs directly on a Linux host and listens only on loopback.
@@ -33,6 +40,11 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * <p>It starts only on a Linux host (not inside a container, where containers reach Floci by its
  * own address), only while the public listener is on loopback (a wider bind already covers the
  * gateway), and only when Docker answers.
+ *
+ * <p>Linux accepts packets for any of its own addresses on any interface, so a LAN neighbour that
+ * routes the gateway address through this host could reach the listener. Each connection is
+ * therefore relayed only when its source lies in one of Docker's network subnets; anything else
+ * is closed, as the loopback bind would have refused it.
  */
 @ApplicationScoped
 public class BridgeGatewayRelay {
@@ -40,6 +52,7 @@ public class BridgeGatewayRelay {
     private static final Logger LOG = Logger.getLogger(BridgeGatewayRelay.class);
 
     static final String DEFAULT_BRIDGE = "bridge";
+    private static final long SUBNET_REFRESH_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(5);
 
     private final Vertx vertx;
     private final EmulatorConfig config;
@@ -50,6 +63,8 @@ public class BridgeGatewayRelay {
     private final List<NetServer> servers = new CopyOnWriteArrayList<>();
     private volatile NetClient client;
     private volatile boolean stopped;
+    private final Set<String> dockerSubnets = ConcurrentHashMap.newKeySet();
+    private volatile long subnetsRefreshedAt;
 
     @Inject
     public BridgeGatewayRelay(Vertx vertx, EmulatorConfig config, Config mpConfig,
@@ -97,6 +112,7 @@ public class BridgeGatewayRelay {
             Network bridge = lifecycleManager.getDockerClient().inspectNetworkCmd()
                     .withNetworkId(DEFAULT_BRIDGE).exec();
             gateway = gatewayOf(bridge);
+            refreshSubnets();
         } catch (RuntimeException e) {
             LOG.debugv("Bridge gateway relay not started: Docker is not reachable ({0})", e.getMessage());
             return;
@@ -122,7 +138,7 @@ public class BridgeGatewayRelay {
 
     private void listen(String gateway, int port, String target, NetClient netClient, boolean primary) {
         NetServer netServer = vertx.createNetServer();
-        netServer.connectHandler(front -> relay(front, netClient, target, port));
+        netServer.connectHandler(front -> admit(front, netClient, target, port));
         servers.add(netServer);
         netServer.listen(port, gateway).onComplete(ar -> {
             if (stopped) {
@@ -141,6 +157,105 @@ public class BridgeGatewayRelay {
                         String.valueOf(port), ar.cause().getMessage());
             }
         });
+    }
+
+    /**
+     * Relays a connection from a Docker network and closes any other. A source outside the known
+     * subnets triggers one refresh, at most every few seconds, since a network created after
+     * startup (a compose project, a Floci-managed network) is not known yet.
+     */
+    private void admit(NetSocket front, NetClient netClient, String target, int port) {
+        String source = front.remoteAddress().hostAddress();
+        if (inAnySubnet(source, dockerSubnets)) {
+            relay(front, netClient, target, port);
+            return;
+        }
+        front.pause();
+        vertx.<Boolean>executeBlocking(() -> {
+            if (System.nanoTime() - subnetsRefreshedAt > SUBNET_REFRESH_INTERVAL_NANOS) {
+                refreshSubnets();
+            }
+            return inAnySubnet(source, dockerSubnets);
+        }, false).onComplete(ar -> {
+            if (ar.succeeded() && ar.result()) {
+                relay(front, netClient, target, port);
+            } else {
+                LOG.debugv("Bridge gateway relay: refused {0}, which is not on a Docker network", source);
+                front.close();
+            }
+        });
+    }
+
+    private void refreshSubnets() {
+        subnetsRefreshedAt = System.nanoTime();
+        try {
+            dockerSubnets.addAll(subnetsOf(lifecycleManager.getDockerClient().listNetworksCmd().exec()));
+        } catch (RuntimeException e) {
+            LOG.debugv("Bridge gateway relay: could not list Docker networks ({0})", e.getMessage());
+        }
+    }
+
+    /** Every IPv4 and IPv6 subnet of the given networks, in CIDR form. */
+    static List<String> subnetsOf(List<Network> networks) {
+        List<String> subnets = new ArrayList<>();
+        for (Network network : networks) {
+            if (network == null || network.getIpam() == null || network.getIpam().getConfig() == null) {
+                continue;
+            }
+            for (Network.Ipam.Config ipam : network.getIpam().getConfig()) {
+                String subnet = ipam.getSubnet();
+                if (subnet != null && subnet.contains("/")) {
+                    subnets.add(subnet);
+                }
+            }
+        }
+        return subnets;
+    }
+
+    static boolean inAnySubnet(String address, Collection<String> subnets) {
+        for (String subnet : subnets) {
+            if (inSubnet(address, subnet)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether {@code address}, an IP literal, lies in {@code cidr}; an IPv4-mapped IPv6 source counts as IPv4. */
+    static boolean inSubnet(String address, String cidr) {
+        int slash = cidr.indexOf('/');
+        try {
+            byte[] host = literal(address);
+            byte[] network = literal(cidr.substring(0, slash));
+            int prefix = Integer.parseInt(cidr.substring(slash + 1));
+            if (host == null || network == null || host.length != network.length
+                    || prefix < 0 || prefix > host.length * 8) {
+                return false;
+            }
+            for (int bit = 0; bit < prefix; bit++) {
+                int mask = 0x80 >>> (bit % 8);
+                if ((host[bit / 8] & mask) != (network[bit / 8] & mask)) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (NumberFormatException e) {
+            LOG.debugv("Bridge gateway relay: ignoring malformed subnet {0}", cidr);
+            return false;
+        }
+    }
+
+    private static byte[] literal(String ip) {
+        // Only IP literals reach here (a socket's peer, a subnet Docker reports), so no lookup runs.
+        if (ip == null || ip.isBlank() || !(ip.contains(":") || Character.isDigit(ip.charAt(0)))) {
+            return null;
+        }
+        try {
+            return InetAddress.getByName(ip).getAddress();
+        } catch (UnknownHostException e) {
+            LOG.debugv("Bridge gateway relay: not an IP literal: {0}", ip);
+            return null;
+        }
     }
 
     private static void relay(NetSocket front, NetClient netClient, String target, int port) {
