@@ -5,12 +5,12 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.configservice.model.AggregationAuthorization;
 import io.github.hectorvent.floci.services.configservice.model.ConformancePack;
+import io.github.hectorvent.floci.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -23,7 +23,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -277,39 +276,6 @@ class AwsConfigServiceAggregationAuthorizationTest {
         assertTrue(service.describeConformancePacks(REGION, null).isEmpty(),
                 "a Delete that succeeded left the pack it deleted in the store");
         assertTrue(service.listTagsForResource(arn).isEmpty(), "the deleted pack's tags survived");
-    }
-
-    /** A store whose next write, once armed, parks before writing until released. */
-    private static final class ParkingStore<V> extends InMemoryStorage<String, V> {
-
-        private final AtomicBoolean parkNext = new AtomicBoolean();
-        private final CountDownLatch parked = new CountDownLatch(1);
-        private final CountDownLatch released = new CountDownLatch(1);
-
-        void parkNextWrite() {
-            parkNext.set(true);
-        }
-
-        boolean awaitParked() throws InterruptedException {
-            return parked.await(2, TimeUnit.SECONDS);
-        }
-
-        void release() {
-            released.countDown();
-        }
-
-        @Override
-        public void put(String key, V value) {
-            if (parkNext.getAndSet(false)) {
-                parked.countDown();
-                try {
-                    released.await();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-            super.put(key, value);
-        }
     }
 
     @Test
