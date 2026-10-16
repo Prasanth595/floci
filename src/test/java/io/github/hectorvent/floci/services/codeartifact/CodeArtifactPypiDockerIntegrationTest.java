@@ -77,12 +77,17 @@ class CodeArtifactPypiDockerIntegrationTest {
     @Order(1)
     void uploadThenDownloadRoundTripsTheExactBytesThroughTheSimpleIndex() {
         byte[] content = "real-sdist-bytes".getBytes(StandardCharsets.UTF_8);
+        long assetSizeBytesBeforeUpload = describeDomainAssetSizeBytes();
 
         given().header("Authorization", "Bearer " + bearerToken)
                 .contentType("multipart/form-data; boundary=boundary123")
                 .body(twineUploadBody("boundary123", PACKAGE_NAME, FILENAME, content))
                 .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
                 .then().statusCode(200);
+
+        // assetSizeBytes used to be hardcoded to 0 regardless of what was actually published; this
+        // is the real pypiserver round trip proving a real twine upload now counts.
+        assertEquals(assetSizeBytesBeforeUpload + content.length, describeDomainAssetSizeBytes());
 
         String indexHtml = given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/simple/" + PACKAGE_NAME + "/")
@@ -112,6 +117,8 @@ class CodeArtifactPypiDockerIntegrationTest {
     @Test
     @Order(2)
     void reuploadingTheExactSameFileSucceedsIdempotently() {
+        long assetSizeBytesBeforeReupload = describeDomainAssetSizeBytes();
+
         given().header("Authorization", "Bearer " + bearerToken)
                 .contentType("multipart/form-data; boundary=boundary123")
                 .body(twineUploadBody("boundary123", PACKAGE_NAME, FILENAME, "real-sdist-bytes".getBytes(StandardCharsets.UTF_8)))
@@ -123,6 +130,16 @@ class CodeArtifactPypiDockerIntegrationTest {
                 .then().statusCode(200)
                 .extract().asByteArray();
         assertEquals("real-sdist-bytes", new String(fetched, StandardCharsets.UTF_8));
+        // The idempotent-match short-circuit never forwards to pypiserver, so no new bytes were
+        // written; assetSizeBytes must not count this file a second time.
+        assertEquals(assetSizeBytesBeforeReupload, describeDomainAssetSizeBytes());
+    }
+
+    private static long describeDomainAssetSizeBytes() {
+        return given().header("Authorization", AUTH)
+                .get("/v1/domain?domain=" + DOMAIN)
+                .then().statusCode(200)
+                .extract().jsonPath().getLong("domain.assetSizeBytes");
     }
 
     @Test
@@ -357,6 +374,90 @@ class CodeArtifactPypiDockerIntegrationTest {
     }
 
     /**
+     * The real-world gap this closes: {@code DescribePackageVersion} used to 404 for every
+     * pypi-uploaded version the same reason {@code GetPackageVersionAsset} did. Confirms the
+     * bridge reads the real pypiserver container's own per-project JSON listing (not a mock) to
+     * confirm the version exists, and 404s for one that was never uploaded.
+     */
+    @Test
+    @Order(12)
+    void describePackageVersionBridgesToTheRealPypiserverSidecar() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + PACKAGE_NAME + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("packageVersion.status", equalTo("Published"))
+                .body("packageVersion.packageName", equalTo(PACKAGE_NAME))
+                .body("packageVersion.version", equalTo("1.0.0"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + PACKAGE_NAME + "&version=9.9.9")
+                .then().statusCode(404);
+    }
+
+    /**
+     * pypiserver has no single whole-package delete route the way Verdaccio and Reposilite do, but
+     * its own management endpoint ({@code POST /} with {@code :action=remove_pkg}) does delete a
+     * named version for real, confirmed live: {@code DeletePackage} lists every version through
+     * that same container and removes each one, so this asserts the real removal rather than a
+     * refusal, and that the file this class's earlier tests uploaded is genuinely gone afterward.
+     */
+    @Test
+    @Order(13)
+    void deletePackageRemovesTheFileFromTheRealPypiserverSidecar() {
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi&package="
+                        + PACKAGE_NAME)
+                .then().statusCode(200).body("deletedPackage.package", equalTo(PACKAGE_NAME));
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/simple/" + PACKAGE_NAME + "/")
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + PACKAGE_NAME + "&version=1.0.0&asset=" + FILENAME)
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi&package="
+                        + PACKAGE_NAME)
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    /**
+     * The real-world gap this closes: the readme-capture call site inside {@code
+     * CodeArtifactPypiController#upload} had never once been exercised by a real multipart body
+     * against a live pypiserver container (every other readme test either called {@code
+     * CodeArtifactService} directly or never sent a {@code description} field at all). A
+     * throwaway package, not {@link #PACKAGE_NAME}, so it doesn't disturb the ordered sequence
+     * above.
+     */
+    @Test
+    @Order(14)
+    void getPackageVersionReadmeReturnsWhatARealTwineUploadSent() {
+        String packageName = "floci-pypiserver-readme-spike";
+        String filename = "floci_pypiserver_readme_spike-1.0.0.tar.gz";
+        String description = "# Real Readme\n\nSent as the real twine upload's own description field.";
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename,
+                        "readme-spike-bytes".getBytes(StandardCharsets.UTF_8), description))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/readme?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi&package="
+                        + packageName + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("readme", equalTo(description))
+                .body("package", equalTo(packageName))
+                .body("version", equalTo("1.0.0"));
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code PypiserverSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container.
@@ -411,6 +512,16 @@ class CodeArtifactPypiDockerIntegrationTest {
      * {@code name} and the {@code content} file part, so the rest are included for realism only.
      */
     private static byte[] twineUploadBody(String boundary, String packageName, String filename, byte[] content) {
+        return twineUploadBody(boundary, packageName, filename, content, null);
+    }
+
+    /**
+     * Same real twine shape as the 4-argument overload above, with an optional {@code description}
+     * field (the real PyPI legacy upload API's field for a distribution's long description) a real
+     * {@code twine upload} also sends whenever the project's metadata carries one.
+     */
+    private static byte[] twineUploadBody(String boundary, String packageName, String filename, byte[] content,
+            String description) {
         String preamble = "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\":action\"\r\n\r\n"
                 + "file_upload\r\n"
@@ -426,6 +537,9 @@ class CodeArtifactPypiDockerIntegrationTest {
                 + "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"filetype\"\r\n\r\n"
                 + "sdist\r\n"
+                + (description == null ? "" : "--" + boundary + "\r\n"
+                        + "Content-Disposition: form-data; name=\"description\"\r\n\r\n"
+                        + description + "\r\n")
                 + "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"content\"; filename=\"" + filename + "\"\r\n"
                 + "Content-Type: application/octet-stream\r\n\r\n";

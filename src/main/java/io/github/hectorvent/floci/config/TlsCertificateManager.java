@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.DomainNames;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
@@ -205,7 +206,7 @@ public class TlsCertificateManager implements Resettable {
         CertificateGenerator.GeneratedCertificate issued = ca.issueServerCertificate("localhost", sans, keyAlgorithm, keyPair);
 
         Path dir = tlsDir();
-        CertificateMetadata metadata = CertificateMetadata.create(configuredHostnames, resolveFlociVersion());
+        CertificateMetadata metadata = CertificateMetadata.create(configuredHostnames, FlociVersion.current());
         metadata.setLearnedHostnames(new ArrayList<>(learned));
         writeAtomically(dir.resolve(CERT_NAME), issued.certificatePem());
         writeAtomically(dir.resolve(METADATA_NAME), OBJECT_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(metadata));
@@ -252,7 +253,7 @@ public class TlsCertificateManager implements Resettable {
         config.dns().extraSuffixes().ifPresent(list -> list.forEach(s -> suffixes.add(s.toLowerCase(Locale.ROOT))));
         String bare = name.startsWith("*.") ? name.substring(2) : name;
         for (String suffix : suffixes) {
-            if (bare.equals(suffix) || bare.endsWith("." + suffix)) {
+            if (DomainNames.isWithin(bare, suffix)) {
                 return true;
             }
         }
@@ -300,10 +301,5 @@ public class TlsCertificateManager implements Resettable {
         } finally {
             Files.deleteIfExists(tmp);
         }
-    }
-
-    private static String resolveFlociVersion() {
-        String env = System.getenv("FLOCI_VERSION");
-        return env == null || env.isBlank() ? "dev" : env;
     }
 }

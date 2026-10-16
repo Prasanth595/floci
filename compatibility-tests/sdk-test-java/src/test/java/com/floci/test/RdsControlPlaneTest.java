@@ -18,22 +18,34 @@ import software.amazon.awssdk.services.rds.model.CreateDbProxyResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbSubnetGroupResponse;
 import software.amazon.awssdk.services.rds.model.CreateOptionGroupResponse;
 import software.amazon.awssdk.services.rds.model.DBCluster;
+import software.amazon.awssdk.services.rds.model.DBClusterAssociatedRole;
 import software.amazon.awssdk.services.rds.model.DBClusterEndpoint;
+import software.amazon.awssdk.services.rds.model.DBClusterRole;
 import software.amazon.awssdk.services.rds.model.DBClusterSnapshot;
+import software.amazon.awssdk.services.rds.model.DBEngineVersion;
 import software.amazon.awssdk.services.rds.model.DBInstance;
+import software.amazon.awssdk.services.rds.model.DBInstanceRole;
 import software.amazon.awssdk.services.rds.model.DBProxyTarget;
 import software.amazon.awssdk.services.rds.model.DBSnapshot;
 import software.amazon.awssdk.services.rds.model.DbClusterEndpointAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbClusterEndpointNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbClusterRoleAlreadyExistsException;
+import software.amazon.awssdk.services.rds.model.DbClusterRoleNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbClusterSnapshotNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbInstanceRoleAlreadyExistsException;
+import software.amazon.awssdk.services.rds.model.DbInstanceRoleNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbLogFileNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotNotFoundException;
+import software.amazon.awssdk.services.rds.model.DescribeDBLogFilesDetails;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxiesResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxyTargetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxyTargetsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbSubnetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOptionGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOrderableDbInstanceOptionsResponse;
+import software.amazon.awssdk.services.rds.model.DownloadDbLogFilePortionResponse;
+import software.amazon.awssdk.services.rds.model.EngineDefaults;
 import software.amazon.awssdk.services.rds.model.InvalidDbInstanceStateException;
 import software.amazon.awssdk.services.rds.model.InvalidOptionGroupStateException;
 import software.amazon.awssdk.services.rds.model.InvalidRestoreException;
@@ -48,7 +60,10 @@ import software.amazon.awssdk.services.rds.model.OptionGroupNotFoundException;
 import software.amazon.awssdk.services.rds.model.OptionSetting;
 import software.amazon.awssdk.services.rds.model.RdsException;
 import software.amazon.awssdk.services.rds.model.RegisterDbProxyTargetsResponse;
+import software.amazon.awssdk.services.rds.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.rds.model.Tag;
+import software.amazon.awssdk.services.rds.model.UpgradeTarget;
+import software.amazon.awssdk.services.rds.model.ValidStorageOptions;
 
 import java.time.Instant;
 import java.util.List;
@@ -750,6 +765,165 @@ class RdsControlPlaneTest {
             } catch (Exception e) {
                 LOG.log(Level.WARNING, "Failed to clean up RDS cluster " + clusterName, e);
             }
+        }
+    }
+
+    @Test
+    @DisplayName("Data API endpoint: enable, describe and disable on an Aurora cluster")
+    void sdkTogglesTheDataApiEndpoint() {
+        String clusterName = TestFixtures.uniqueName("rds-data-api");
+        try {
+            String arn = rds.createDBCluster(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .engine("aurora-postgresql")
+                    .engineVersion("16.3")
+                    .masterUsername("admin")
+                    .masterUserPassword("data-api-secret")).dbCluster().dbClusterArn();
+            assertThat(rds.enableHttpEndpoint(b -> b.resourceArn(arn)).httpEndpointEnabled()).isTrue();
+            assertThat(rds.describeDBClusters(b -> b.dbClusterIdentifier(clusterName))
+                    .dbClusters().get(0).httpEndpointEnabled()).isTrue();
+            assertThat(rds.disableHttpEndpoint(b -> b.resourceArn(arn)).httpEndpointEnabled()).isFalse();
+            assertThatThrownBy(() -> rds.enableHttpEndpoint(b -> b.resourceArn(arn + "-missing")))
+                    .isInstanceOf(ResourceNotFoundException.class);
+        } finally {
+            try {
+                rds.deleteDBCluster(b -> b.dbClusterIdentifier(clusterName).skipFinalSnapshot(true));
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Failed to clean up RDS cluster " + clusterName, e);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Log files: list an instance's log files and download a block")
+    void sdkReadsInstanceLogFiles() {
+        String instanceName = TestFixtures.uniqueName("rds-log-files");
+        try {
+            createDbInstance(rds, instanceName, "log-files-secret");
+            List<DescribeDBLogFilesDetails> files =
+                    rds.describeDBLogFiles(b -> b.dbInstanceIdentifier(instanceName)).describeDBLogFiles();
+            assertThat(files).isNotEmpty();
+            assertThat(files).allSatisfy(f -> {
+                assertThat(f.logFileName()).startsWith("error/postgresql.log.");
+                assertThat(f.size()).isPositive();
+                assertThat(f.lastWritten()).isPositive();
+            });
+            String name = files.get(0).logFileName();
+            DownloadDbLogFilePortionResponse portion = rds.downloadDBLogFilePortion(b -> b
+                    .dbInstanceIdentifier(instanceName).logFileName(name).marker("0").numberOfLines(1));
+            assertThat(portion.logFileData()).isNotEmpty();
+            assertThat(portion.marker()).isEqualTo("1");
+            assertThatThrownBy(() -> rds.downloadDBLogFilePortion(b -> b
+                    .dbInstanceIdentifier(instanceName).logFileName("error/no-such.log")))
+                    .isInstanceOf(DbLogFileNotFoundException.class);
+        } finally {
+            deleteDbInstance(rds, instanceName);
+        }
+    }
+
+    @Test
+    @DisplayName("IAM role associations: add, describe and remove for a cluster and an instance")
+    void sdkRoundTripsIamRoleAssociations() {
+        String clusterName = TestFixtures.uniqueName("rds-roles-cluster");
+        String instanceName = TestFixtures.uniqueName("rds-roles-db");
+        String s3Role = "arn:aws:iam::000000000000:role/rds-s3-import";
+        String lambdaRole = "arn:aws:iam::000000000000:role/rds-lambda";
+        try {
+            CreateDbClusterResponse created = rds.createDBCluster(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .engine("aurora-postgresql")
+                    .engineVersion("16.3")
+                    .masterUsername("admin")
+                    .masterUserPassword("roles-secret")
+                    .associatedRoles(DBClusterAssociatedRole.builder().roleArn(s3Role).featureName("s3Import").build()));
+            assertThat(created.dbCluster().associatedRoles())
+                    .extracting(DBClusterRole::roleArn, DBClusterRole::featureName, DBClusterRole::status)
+                    .containsExactly(tuple(s3Role, "s3Import", "ACTIVE"));
+
+            rds.addRoleToDBCluster(b -> b.dbClusterIdentifier(clusterName).roleArn(lambdaRole));
+            assertThat(rds.describeDBClusters(b -> b.dbClusterIdentifier(clusterName))
+                    .dbClusters().get(0).associatedRoles())
+                    .extracting(DBClusterRole::roleArn)
+                    .containsExactly(s3Role, lambdaRole);
+            assertThatThrownBy(() -> rds.addRoleToDBCluster(b -> b.dbClusterIdentifier(clusterName).roleArn(s3Role)))
+                    .isInstanceOf(DbClusterRoleAlreadyExistsException.class);
+            // A feature the engine does not list in SupportedFeatureNames is refused.
+            assertThatThrownBy(() -> rds.addRoleToDBCluster(b -> b.dbClusterIdentifier(clusterName)
+                    .roleArn("arn:aws:iam::000000000000:role/rds-sqlserver-s3").featureName("S3_INTEGRATION")))
+                    .isInstanceOfSatisfying(RdsException.class,
+                            e -> assertThat(e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterValue"));
+
+            rds.removeRoleFromDBCluster(b -> b.dbClusterIdentifier(clusterName).roleArn(s3Role));
+            assertThatThrownBy(() -> rds.removeRoleFromDBCluster(b -> b
+                    .dbClusterIdentifier(clusterName).roleArn(s3Role)))
+                    .isInstanceOf(DbClusterRoleNotFoundException.class);
+
+            createDbInstance(rds, instanceName, "roles-secret");
+            rds.addRoleToDBInstance(b -> b.dbInstanceIdentifier(instanceName).roleArn(s3Role).featureName("s3Import"));
+            assertThat(rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
+                    .dbInstances().get(0).associatedRoles())
+                    .extracting(DBInstanceRole::roleArn, DBInstanceRole::featureName, DBInstanceRole::status)
+                    .containsExactly(tuple(s3Role, "s3Import", "ACTIVE"));
+            assertThatThrownBy(() -> rds.addRoleToDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName).roleArn(lambdaRole).featureName("s3Import")))
+                    .isInstanceOf(DbInstanceRoleAlreadyExistsException.class);
+
+            rds.removeRoleFromDBInstance(b -> b.dbInstanceIdentifier(instanceName).roleArn(s3Role).featureName("s3Import"));
+            assertThatThrownBy(() -> rds.removeRoleFromDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName).roleArn(s3Role).featureName("s3Import")))
+                    .isInstanceOf(DbInstanceRoleNotFoundException.class);
+        } finally {
+            deleteDbInstance(rds, instanceName);
+            try {
+                rds.deleteDBCluster(b -> b.dbClusterIdentifier(clusterName).skipFinalSnapshot(true));
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Failed to clean up RDS cluster " + clusterName, e);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Catalogue reads: engine versions, engine defaults and valid instance modifications")
+    void sdkReadsTheEngineCatalogue() {
+        DBEngineVersion postgres = rds.describeDBEngineVersions(b -> b
+                .engine("postgres").engineVersion("16.3")).dbEngineVersions().get(0);
+        assertThat(postgres.dbParameterGroupFamily()).isEqualTo("postgres16");
+        assertThat(postgres.validUpgradeTarget()).extracting(UpgradeTarget::engineVersion).contains("17.4");
+        assertThat(postgres.supportedEngineModes()).containsExactly("provisioned");
+        assertThat(postgres.exportableLogTypes()).containsExactly("postgresql", "upgrade");
+        assertThat(postgres.supportsLogExportsToCloudwatchLogs()).isTrue();
+        assertThat(postgres.supportsReadReplica()).isTrue();
+        assertThat(postgres.supportedFeatureNames()).containsExactly("s3Import", "s3Export", "Lambda");
+        assertThat(postgres.supportsParallelQuery()).isFalse();
+        assertThat(postgres.supportsGlobalDatabases()).isFalse();
+        assertThat(postgres.supportsBabelfish()).isFalse();
+
+        assertThat(rds.describeDBEngineVersions(b -> b.engine("mysql").defaultOnly(true)).dbEngineVersions())
+                .extracting(DBEngineVersion::engineVersion).containsExactly("8.0.36");
+        DBEngineVersion auroraMysql = rds.describeDBEngineVersions(b -> b
+                .engine("aurora-mysql").defaultOnly(true)).dbEngineVersions().get(0);
+        assertThat(auroraMysql.engineVersion()).isEqualTo("8.0.mysql_aurora.3.05.2");
+        assertThat(auroraMysql.supportsGlobalDatabases()).isTrue();
+        assertThat(auroraMysql.supportedFeatureNames()).isEmpty();
+
+        EngineDefaults defaults = rds.describeEngineDefaultParameters(b -> b
+                .dbParameterGroupFamily("postgres16")).engineDefaults();
+        assertThat(defaults.dbParameterGroupFamily()).isEqualTo("postgres16");
+        assertThat(rds.describeEngineDefaultClusterParameters(b -> b
+                .dbParameterGroupFamily("aurora-postgresql16")).engineDefaults().dbParameterGroupFamily())
+                .isEqualTo("aurora-postgresql16");
+
+        String instanceName = TestFixtures.uniqueName("rds-valid-mods");
+        try {
+            createDbInstance(rds, instanceName, "catalogue-secret");
+            ValidStorageOptions storage = rds.describeValidDBInstanceModifications(b -> b
+                    .dbInstanceIdentifier(instanceName)).validDBInstanceModificationsMessage().storage().get(0);
+            assertThat(storage.storageType()).isEqualTo("gp2");
+            // 20 GiB stays as it is, and any increase stores at least 10% more (22 GiB).
+            assertThat(storage.storageSize()).extracting(r -> r.from() + "-" + r.to())
+                    .containsExactly("20-20", "22-65536");
+        } finally {
+            deleteDbInstance(rds, instanceName);
         }
     }
 
