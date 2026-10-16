@@ -894,7 +894,7 @@ class ResourceArnBuilderTest {
     void secretsManagerResolvesASecretNamedByItsNameToItsStoredArn() {
         String storedArn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:app/core-AbC123";
         SecretsManagerService secrets = mock(SecretsManagerService.class);
-        when(secrets.findArnByName("111122223333", "app/core", "us-east-1")).thenReturn(Optional.of(storedArn));
+        when(secrets.findArn("111122223333", "app/core", "us-east-1")).thenReturn(Optional.of(storedArn));
         setJsonBody("{\"SecretId\":\"app/core\"}");
 
         List<String> arns = backedBy(secrets).buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx,
@@ -906,13 +906,31 @@ class ResourceArnBuilderTest {
     @Test
     void secretsManagerKeepsTheNameOfASecretThatIsNotStored() {
         SecretsManagerService secrets = mock(SecretsManagerService.class);
-        when(secrets.findArnByName(ACCOUNT, "app/missing", "us-east-1")).thenReturn(Optional.empty());
+        when(secrets.findArn(ACCOUNT, "app/missing", "us-east-1")).thenReturn(Optional.empty());
         setJsonBody("{\"SecretId\":\"app/missing\"}");
 
         List<String> arns = backedBy(secrets).buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx,
                 "us-east-1", ACCOUNT, "aws");
 
         assertEquals(List.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/missing"), arns);
+    }
+
+    @Test
+    void secretsManagerResolvesAPartialArnToTheStoredArnAndKeepsAnArnThatIsNotStored() {
+        String partialArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app/core";
+        String storedArn = partialArn + "-AbC123";
+        String missingArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app/missing";
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        when(secrets.findArn(ACCOUNT, partialArn, "us-east-1")).thenReturn(Optional.of(storedArn));
+        when(secrets.findArn(ACCOUNT, missingArn, "us-east-1")).thenReturn(Optional.empty());
+        ResourceArnBuilder backed = backedBy(secrets);
+
+        setJsonBody("{\"SecretId\":\"" + partialArn + "\"}");
+        assertEquals(List.of(storedArn), backed.buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx,
+                "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"SecretId\":\"" + missingArn + "\"}");
+        assertEquals(List.of(missingArn), backed.buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx,
+                "us-east-1", ACCOUNT, "aws"));
     }
 
     @Test
@@ -926,7 +944,7 @@ class ResourceArnBuilderTest {
     @Test
     void secretsManagerTargetsTheFieldTheServingOperationReads() {
         SecretsManagerService secrets = mock(SecretsManagerService.class);
-        when(secrets.findArnByName(ACCOUNT, "app/existing", "us-east-1"))
+        when(secrets.findArn(ACCOUNT, "app/existing", "us-east-1"))
                 .thenReturn(Optional.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/existing-AbC123"));
         ResourceArnBuilder backed = backedBy(secrets);
 

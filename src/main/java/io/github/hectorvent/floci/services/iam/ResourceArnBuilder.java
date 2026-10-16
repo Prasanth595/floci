@@ -62,7 +62,7 @@ public class ResourceArnBuilder {
      * which IamService itself does not depend on, and a direct injection would close that loop.
      */
     private final Instance<IamService> iamService;
-    /** Looked up lazily for the same reason, to resolve a secret named by its name. */
+    /** Looked up lazily for the same reason, to resolve a secret named by its name or a partial ARN. */
     private final Instance<SecretsManagerService> secretsManagerService;
 
     @Inject
@@ -963,9 +963,9 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * A secret named by its name is authorized against its full ARN, random suffix included, so a
-     * {@code secret:<name>-??????} policy matches it as it does on AWS. The suffix of the secret
-     * {@code CreateSecret} is making is not assigned until it is created.
+     * A secret named by its name or a partial ARN is authorized against its full ARN, random suffix
+     * included, so a {@code secret:<name>-??????} policy matches it as it does on AWS. The suffix of
+     * the secret {@code CreateSecret} is making is not assigned until it is created.
      */
     private String buildSecretsManagerArn(String action, ContainerRequestContext ctx, String region,
                                           String accountId, String partition) {
@@ -981,22 +981,22 @@ public class ResourceArnBuilder {
             } else if (json.hasNonNull("SecretId")) {
                 String secretId = json.get("SecretId").asText().trim();
                 if (!secretId.isEmpty()) {
+                    Optional<String> stored = storedSecretArn(secretId, region, accountId);
                     if (AwsArnUtils.isArnFor(secretId, "secretsmanager")) {
-                        return secretId;
+                        return stored.orElse(secretId);
                     }
-                    return storedSecretArn(secretId, region, accountId)
-                            .orElseGet(() -> secretArn(secretId, region, accountId, partition));
+                    return stored.orElseGet(() -> secretArn(secretId, region, accountId, partition));
                 }
             }
         }
         return secretArn("*", region, accountId, partition);
     }
 
-    private Optional<String> storedSecretArn(String name, String region, String accountId) {
+    private Optional<String> storedSecretArn(String secretId, String region, String accountId) {
         if (secretsManagerService == null) {
             return Optional.empty();
         }
-        return secretsManagerService.get().findArnByName(accountId, name, region);
+        return secretsManagerService.get().findArn(accountId, secretId, region);
     }
 
     private static String secretArn(String name, String region, String accountId, String partition) {

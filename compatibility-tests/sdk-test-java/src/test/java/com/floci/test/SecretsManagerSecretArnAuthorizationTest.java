@@ -122,6 +122,22 @@ class SecretsManagerSecretArnAuthorizationTest {
                 .isInstanceOfSatisfying(SecretsManagerException.class, this::assertDenied);
     }
 
+    @Test
+    @DisplayName("a secret named by a partial ARN is authorized against its full ARN")
+    void secretNamedByAPartialArn() {
+        String arn = root.createSecret(r -> r.name(prefix).secretString("x")).arn();
+        secrets.add(arn);
+        String partialArn = arn.substring(0, arn.length() - "-AbCdEf".length());
+        policy("{\"Effect\":\"Allow\",\"Action\":\"secretsmanager:GetSecretValue\",\"Resource\":\""
+                + TestFixtures.arn("secretsmanager", "000000000000", "secret:" + prefix + "-??????") + "\"},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"secretsmanager:DescribeSecret\",\"Resource\":\"*\"},"
+                + "{\"Effect\":\"Deny\",\"Action\":\"secretsmanager:DescribeSecret\",\"Resource\":\"" + arn + "\"}");
+
+        assertThat(caller.getSecretValue(r -> r.secretId(partialArn)).secretString()).isEqualTo("x");
+        assertThatThrownBy(() -> caller.describeSecret(r -> r.secretId(partialArn)))
+                .isInstanceOfSatisfying(SecretsManagerException.class, this::assertDenied);
+    }
+
     private void policy(String statements) {
         iam.putUserPolicy(r -> r.userName(user).policyName("secrets")
                 .policyDocument("{\"Version\":\"2012-10-17\",\"Statement\":[" + statements + "]}"));

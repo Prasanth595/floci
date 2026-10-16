@@ -1,21 +1,28 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
+import io.github.hectorvent.floci.testing.EnforcementFixtures.Session;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.net.URI;
 import java.util.UUID;
 
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
- * With {@code iam.enforcement-enabled=true}, a request that names a secret by its name is
- * authorized against the secret's ARN, random suffix included, as AWS does. The Secrets Manager
+ * With {@code iam.enforcement-enabled=true}, a request that names a secret by its name or a partial
+ * ARN is authorized against the secret's ARN, random suffix included, as AWS does. The Secrets Manager
  * user guide relies on it: a {@code secret:<name>-??????} resource "enables you to securely grant
  * permissions to a secret that doesn't yet exist".
  */
@@ -26,8 +33,11 @@ class SecretsManagerSecretArnEnforcementIntegrationTest {
     private static final String ACCOUNT = "111111111111";
     private static final String SECRET_ARN_PREFIX = "arn:aws:secretsmanager:us-east-1:" + ACCOUNT + ":secret:";
 
-    private record Session(String accessKeyId, String sessionToken) {
-    }
+    @TestHTTPResource
+    URI baseUri;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -42,6 +52,7 @@ class SecretsManagerSecretArnEnforcementIntegrationTest {
                   {"Effect":"Allow","Action":"secretsmanager:CreateSecret","Resource":"%s%s/*"}]}"""
                 .formatted(SECRET_ARN_PREFIX, prefix));
 
+        deleteSecretAfterTheTest(prefix + "/core");
         secretsCall(session, "CreateSecret", "{\"Name\": \"" + prefix + "/core\", \"SecretString\": \"x\"}")
                 .then().statusCode(200);
         secretsCall(session, "CreateSecret", "{\"Name\": \"other-" + prefix + "\", \"SecretString\": \"x\"}")
@@ -71,6 +82,26 @@ class SecretsManagerSecretArnEnforcementIntegrationTest {
     }
 
     @Test
+    void aSecretNamedByAPartialArnIsAuthorizedAgainstItsFullArn() {
+        String name = "app-" + UUID.randomUUID().toString().substring(0, 8);
+        String arn = createSecret(name);
+        String partialArn = SECRET_ARN_PREFIX + name;
+        Session session = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"%s%s-??????"},
+                  {"Effect":"Allow","Action":"secretsmanager:DescribeSecret","Resource":"*"},
+                  {"Effect":"Deny","Action":"secretsmanager:DescribeSecret","Resource":"%s"}]}"""
+                .formatted(SECRET_ARN_PREFIX, name, arn));
+
+        secretsCall(session, "GetSecretValue", "{\"SecretId\": \"" + partialArn + "\"}")
+                .then().statusCode(200)
+                .body("SecretString", equalTo("x"));
+        secretsCall(session, "DescribeSecret", "{\"SecretId\": \"" + partialArn + "\"}")
+                .then().statusCode(400)
+                .body("__type", equalTo("AccessDeniedException"));
+    }
+
+    @Test
     void createSecretIgnoresASecretIdTheHandlerDoesNotRead() {
         String existing = "app-" + UUID.randomUUID().toString().substring(0, 8);
         createSecret(existing);
@@ -86,34 +117,33 @@ class SecretsManagerSecretArnEnforcementIntegrationTest {
                 .body("__type", equalTo("AccessDeniedException"));
     }
 
-    private static String createSecret(String name) {
-        Response response = given().header("Authorization", auth(ACCOUNT, "secretsmanager"))
-                .header("X-Amz-Target", "secretsmanager.CreateSecret")
-                .contentType("application/x-amz-json-1.1")
-                .body("{\"Name\": \"" + name + "\", \"SecretString\": \"x\"}")
-                .when().post("/");
+    private String createSecret(String name) {
+        deleteSecretAfterTheTest(name);
+        Response response = accountCall("CreateSecret", "{\"Name\": \"" + name + "\", \"SecretString\": \"x\"}");
         response.then().statusCode(200);
         return response.path("ARN");
     }
 
+    private void deleteSecretAfterTheTest(String name) {
+        cleanup.register(() -> accountCall("DeleteSecret",
+                "{\"SecretId\": \"" + name + "\", \"ForceDeleteWithoutRecovery\": true}").then().statusCode(200));
+    }
+
     /** A session of a new role that its own account may assume, with {@code policy} inline. */
-    private static Session assumeRoleWith(String policy) {
-        String role = "secret-arn-" + UUID.randomUUID().toString().substring(0, 8);
-        given().formParam("Action", "CreateRole").formParam("RoleName", role)
-                .formParam("AssumeRolePolicyDocument", """
-                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
-                          "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"sts:AssumeRole"}]}""".formatted(ACCOUNT))
-                .header("Authorization", auth(ACCOUNT, "iam")).when().post("/").then().statusCode(200);
-        given().formParam("Action", "PutRolePolicy").formParam("RoleName", role).formParam("PolicyName", "p")
-                .formParam("PolicyDocument", policy)
-                .header("Authorization", auth(ACCOUNT, "iam")).when().post("/").then().statusCode(200);
-        Response response = given().formParam("Action", "AssumeRole")
-                .formParam("RoleArn", "arn:aws:iam::" + ACCOUNT + ":role/" + role)
-                .formParam("RoleSessionName", "s")
-                .header("Authorization", auth(ACCOUNT, "sts")).when().post("/");
-        response.then().statusCode(200);
-        return new Session(response.path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId"),
-                response.path("AssumeRoleResponse.AssumeRoleResult.Credentials.SessionToken"));
+    private Session assumeRoleWith(String policy) {
+        int port = baseUri.getPort();
+        String roleArn = EnforcementFixtures.createRole(cleanup, port, ACCOUNT, "/",
+                "secret-arn-" + UUID.randomUUID().toString().substring(0, 8), policy);
+        return EnforcementFixtures.assumeRole(port, ACCOUNT, roleArn);
+    }
+
+    /** A call as the account itself, which the cleanup also makes after RestAssured's port is reset. */
+    private Response accountCall(String action, String body) {
+        return given().port(baseUri.getPort()).header("Authorization", auth(ACCOUNT, "secretsmanager"))
+                .header("X-Amz-Target", "secretsmanager." + action)
+                .contentType("application/x-amz-json-1.1")
+                .body(body)
+                .when().post("/");
     }
 
     private static Response secretsCall(Session session, String action, String body) {
@@ -123,10 +153,5 @@ class SecretsManagerSecretArnEnforcementIntegrationTest {
                 .contentType("application/x-amz-json-1.1")
                 .body(body)
                 .when().post("/");
-    }
-
-    private static String auth(String accessKeyId, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20261001/us-east-1/" + service
-                + "/aws4_request, SignedHeaders=host, Signature=abc";
     }
 }
