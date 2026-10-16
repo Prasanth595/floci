@@ -7,7 +7,11 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -418,6 +422,51 @@ class IamIntegrationTest {
                     equalTo("implicitDeny"));
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "ForAllValues:StringLike, allowed",
+            "ForAllValues:StringNotLike, allowed",
+            "ForAnyValue:StringLike, implicitDeny",
+            "ForAnyValue:StringNotLike, implicitDeny"
+    })
+    void simulateCustomPolicyUsesSetOperatorSemanticsForMissingKeys(String operator, String decision) {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+                   "Condition":{"%s":{"dynamodb:LeadingKeys":["USER_alice*"]}}}
+                ]}""".formatted(operator);
+        given()
+            .formParam("Action", "SimulateCustomPolicy")
+            .formParam("PolicyInputList.member.1", policy)
+            .formParam("ActionNames.member.1", "dynamodb:GetItem")
+            .formParam("ResourceArns.member.1", "*")
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then().statusCode(200)
+            .body("SimulateCustomPolicyResponse.SimulateCustomPolicyResult.EvaluationResults.member.EvalDecision",
+                    equalTo(decision));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ForAllValues:StringTypoIfExists", "ForAnyValue:StringTypoIfExists",
+            "StringTypoIfExists", "ForAllValues:Null", "ForAnyValue:Null", "NullIfExists",
+            "ForAllValues:NullIfExists", "ForAnyValue:NullIfExists"})
+    void simulateCustomPolicyRejectsUnsupportedMissingKeyShortcuts(String operator) {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+                   "Condition":{"%s":{"dynamodb:LeadingKeys":["true"]}}}
+                ]}""".formatted(operator);
+        given()
+            .formParam("Action", "SimulateCustomPolicy")
+            .formParam("PolicyInputList.member.1", policy)
+            .formParam("ActionNames.member.1", "dynamodb:GetItem")
+            .formParam("ResourceArns.member.1", "*")
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then().statusCode(200)
+            .body("SimulateCustomPolicyResponse.SimulateCustomPolicyResult.EvaluationResults.member.EvalDecision",
+                    equalTo("implicitDeny"));
+    }
+
     @Test
     @Order(37)
     void simulateCustomPolicyAppliesPermissionsBoundary() {
@@ -642,7 +691,29 @@ class IamIntegrationTest {
             .statusCode(200)
             .contentType("application/xml")
             .body("GetAccessKeyLastUsedResponse.GetAccessKeyLastUsedResult"
-                    + ".AccessKeyLastUsed.ServiceName", equalTo("N/A"));
+                    + ".AccessKeyLastUsed.ServiceName", equalTo("N/A"))
+            .body(not(containsString("<UserName>")));
+    }
+
+    @Test
+    @Order(49)
+    void getAccessKeyLastUsedReturnsOwningUserName() {
+        // Terraform's aws_iam_access_key import resolves the owner from this field.
+        createUser("last-used-owner");
+        String keyId = createAccessKeyFor("last-used-owner");
+        given()
+            .formParam("Action", "GetAccessKeyLastUsed")
+            .formParam("AccessKeyId", keyId)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetAccessKeyLastUsedResponse.GetAccessKeyLastUsedResult.UserName",
+                    equalTo("last-used-owner"))
+            .body("GetAccessKeyLastUsedResponse.GetAccessKeyLastUsedResult"
+                    + ".AccessKeyLastUsed.Region", equalTo("N/A"));
     }
 
     @Test
@@ -1559,5 +1630,114 @@ class IamIntegrationTest {
             .header("Authorization", IAM_AUTH)
         .when().post("/").then()
             .statusCode(404);
+    }
+
+    @Test
+    @Order(86)
+    void createRoleRejectsANameOutsideTheRoleNamePattern() {
+        String pattern = "Member must satisfy regular expression pattern: [\\w+=,.@-]+";
+        Map<String, String> constraints = Map.of(
+                "aws:ec2-instance", pattern,
+                "bad/name", pattern,
+                "x".repeat(65), "Member must have length less than or equal to 64");
+        for (Map.Entry<String, String> entry : constraints.entrySet()) {
+            String name = entry.getKey();
+            given()
+                .formParam("Action", "CreateRole")
+                .formParam("RoleName", name)
+                .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+                .header("Authorization", IAM_AUTH)
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value '" + name
+                        + "' at 'roleName' failed to satisfy constraint: " + entry.getValue()));
+
+            given()
+                .formParam("Action", "GetRole")
+                .formParam("RoleName", name)
+                .header("Authorization", IAM_AUTH)
+            .when().post("/").then()
+                .statusCode(400);
+
+            given()
+                .formParam("Action", "ListRoles")
+                .header("Authorization", IAM_AUTH)
+            .when().post("/").then()
+                .statusCode(200)
+                .body("ListRolesResponse.ListRolesResult.Roles.member.RoleName.flatten()",
+                        not(hasItem(name)));
+        }
+
+        given()
+            .formParam("Action", "CreateRole")
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value null"
+                    + " at 'roleName' failed to satisfy constraint: Member must not be null"));
+
+        given()
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", "")
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value ''"
+                    + " at 'roleName' failed to satisfy constraint: Member must have length greater than or equal to 1"));
+
+        given()
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", "Ok_+=,.@-" + "x".repeat(55))
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(87)
+    void roleActionsRejectANameOutsideTheRoleNamePattern() {
+        String name = "aws:ec2-instance";
+        String message = "1 validation error detected: Value '" + name + "' at 'roleName' failed to satisfy"
+                + " constraint: Member must satisfy regular expression pattern: [\\w+=,.@-]+";
+        Map<String, Map<String, String>> actions = new LinkedHashMap<>();
+        actions.put("GetRole", Map.of());
+        actions.put("DeleteRole", Map.of());
+        actions.put("UpdateRole", Map.of());
+        actions.put("UpdateAssumeRolePolicy", Map.of("PolicyDocument", TRUST_POLICY));
+        actions.put("TagRole", Map.of("Tags.member.1.Key", "k", "Tags.member.1.Value", "v"));
+        actions.put("UntagRole", Map.of("TagKeys.member.1", "k"));
+        actions.put("ListRoleTags", Map.of());
+        actions.put("AttachRolePolicy", Map.of("PolicyArn", "arn:aws:iam::aws:policy/ReadOnlyAccess"));
+        actions.put("DetachRolePolicy", Map.of("PolicyArn", "arn:aws:iam::aws:policy/ReadOnlyAccess"));
+        actions.put("ListAttachedRolePolicies", Map.of());
+        actions.put("PutRolePolicy", Map.of("PolicyName", "p", "PolicyDocument", TRUST_POLICY));
+        actions.put("GetRolePolicy", Map.of("PolicyName", "p"));
+        actions.put("DeleteRolePolicy", Map.of("PolicyName", "p"));
+        actions.put("ListRolePolicies", Map.of());
+        actions.put("ListInstanceProfilesForRole", Map.of());
+        actions.put("PutRolePermissionsBoundary",
+                Map.of("PermissionsBoundary", "arn:aws:iam::aws:policy/ReadOnlyAccess"));
+        actions.put("DeleteRolePermissionsBoundary", Map.of());
+        actions.put("AddRoleToInstanceProfile", Map.of("InstanceProfileName", "ip"));
+        actions.put("RemoveRoleFromInstanceProfile", Map.of("InstanceProfileName", "ip"));
+        actions.put("DeleteServiceLinkedRole", Map.of());
+
+        for (Map.Entry<String, Map<String, String>> action : actions.entrySet()) {
+            given()
+                .formParam("Action", action.getKey())
+                .formParam("RoleName", name)
+                .formParams(action.getValue())
+                .header("Authorization", IAM_AUTH)
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", equalTo(message));
+        }
     }
 }

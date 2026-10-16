@@ -64,4 +64,31 @@ public interface RepositorySidecarManager {
      */
     boolean packageExists(String repositoryContainerId, String domain, String repository, String namespace,
             String packageName);
+
+    /**
+     * {@code true} when this sidecar holds exactly the named version of the named package, for
+     * bridging {@code DescribePackageVersion} when there is no generic-format record to describe:
+     * Maven, npm, and pypi are metadata-free passthroughs straight to their sidecar, so nothing in
+     * {@code CodeArtifactService}'s own package-version store ever records what they hold, the
+     * same reason {@link #fetchPackageVersionAsset} exists. Unlike that method, there is no asset
+     * name to confirm against: real CodeArtifact's own {@code DescribePackageVersion} response has
+     * no asset listing at all, so a cheap existence check is all this needs. {@code namespace}
+     * follows the same convention as {@link #fetchPackageVersionAsset}: {@code null} for a format
+     * that has none. A repository that was never started for this format holds nothing, so this is
+     * {@code false}.
+     */
+    boolean packageVersionExists(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName, String version);
+
+    /**
+     * Deletes every version of the named package from this sidecar's own backing storage. Every
+     * sidecar Floci currently backs (Reposilite, Verdaccio, pypiserver) can do this; the default
+     * throws {@link UnsupportedOperationException} rather than silently leaving the package in place
+     * or claiming a success it cannot back up, for a future format whose sidecar genuinely cannot. An
+     * implementation that can delete overrides this.
+     */
+    default void deletePackage(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName) {
+        throw new UnsupportedOperationException(format() + " packages cannot be deleted through this sidecar");
+    }
 }

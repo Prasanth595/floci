@@ -59,6 +59,11 @@ public interface CfnResourceProvisioner {
         return false;
     }
 
+    /** Whether a prior failed rollback must be retried before even an outputs-only update commits. */
+    default boolean requiresUpdateRecovery(StackResource resource) {
+        return false;
+    }
+
     /**
      * The physical id of the entity this update's replacement displaced, or null when this type
      * owes no replacement cleanup. {@code CloudFormationService} announces it as DELETE_IN_PROGRESS
@@ -79,6 +84,15 @@ public interface CfnResourceProvisioner {
     }
 
     /**
+     * Deletes entities displaced by an unfinished update before the stack itself is deleted.
+     * The default uses normal replacement cleanup. A provisioner may distinguish this operation
+     * from committing an update when it still carries configuration needed for rollback.
+     */
+    default UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
+        return completeUpdate(resource);
+    }
+
+    /**
      * Whether this update replaced the physical entity, so the stack has cleanup pending and enters
      * UPDATE_COMPLETE_CLEANUP_IN_PROGRESS. The default reports no replacement.
      */
@@ -92,6 +106,15 @@ public interface CfnResourceProvisioner {
      */
     default void clearUpdate(StackResource resource) {
         // no-op by default: a type with no replacement cleanup records nothing to clear
+    }
+
+    /**
+     * Drops completed replacement cleanup during stack deletion. The default preserves the normal
+     * cleanup behavior; an override may keep rollback configuration until the managed entity is
+     * successfully deleted.
+     */
+    default void clearDeleteCleanup(StackResource resource) {
+        clearUpdate(resource);
     }
 
     /**
