@@ -936,14 +936,14 @@ public class IotService {
         return document;
     }
 
-    /** The stored document with {@code state} and {@code metadata} objects; one stored before metadata was kept has none. */
+    /** The stored document with {@code state} and {@code metadata} objects; one stored before metadata was kept gets metadata stamped with its stored timestamp. */
     private ObjectNode storedShadowDocument(IotShadow shadow) {
         ObjectNode document = readJson(shadow.getDocument()) instanceof ObjectNode stored ? stored : objectMapper.createObjectNode();
         if (!document.path("state").isObject()) {
             document.putObject("state");
         }
         if (!document.path("metadata").isObject()) {
-            document.putObject("metadata");
+            document.set("metadata", shadowMetadata(document.get("state"), document.path("timestamp").asLong()));
         }
         return document;
     }

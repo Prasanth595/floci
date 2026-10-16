@@ -888,7 +888,7 @@ class IotServiceTest {
     }
 
     @Test
-    void aStoredShadowWithoutMetadataIsUpdatedAsIfItsMetadataWereEmpty() throws Exception {
+    void aStoredShadowWithoutMetadataIsUpdatedWithMetadataFromItsStoredTimestamp() throws Exception {
         storeShadow("sensor-3", "{\"state\":{\"desired\":{\"color\":\"red\"}},\"version\":2,\"timestamp\":1000}");
 
         JsonNode accepted = service.updateThingShadow("sensor-3", null,
@@ -896,12 +896,32 @@ class IotServiceTest {
 
         long timestamp = accepted.get("timestamp").asLong();
         JsonNode documents = recordedPayload("$aws/things/sensor-3/shadow/update/documents");
-        assertEquals(json("{\"state\":{\"desired\":{\"color\":\"red\"}},\"metadata\":{},\"version\":2}"),
-                documents.get("previous"));
+        assertEquals(json("""
+            {"state": {"desired": {"color": "red"}}, "metadata": {"desired": {"color": {"timestamp": 1000}}}, "version": 2}
+            """), documents.get("previous"));
         assertEquals(json("""
             {"state": {"desired": {"color": "red"}, "reported": {"color": "red"}},
-             "metadata": {"reported": {"color": %s}}, "version": 3}
+             "metadata": {"desired": {"color": {"timestamp": 1000}}, "reported": {"color": %s}}, "version": 3}
             """.formatted(leaf(timestamp))), documents.get("current"));
+    }
+
+    @Test
+    void aShadowStoredWithoutMetadataGetsMetadataFromItsStoredTimestamp() throws Exception {
+        storeShadow("sensor-9", """
+            {"state": {"desired": {"color": "red", "n": 1}, "reported": {"color": "blue"}}, "version": 3, "timestamp": 100}
+            """);
+
+        JsonNode shadow = service.getThingShadow("sensor-9", null, REGION);
+
+        assertEquals(json("""
+            {"desired": {"color": {"timestamp": 100}, "n": {"timestamp": 100}}, "reported": {"color": {"timestamp": 100}}}
+            """), reparse(shadow.get("metadata")));
+
+        service.updateThingShadow("sensor-9", null, json("{\"state\":{\"reported\":{\"n\":1}}}"), REGION);
+
+        JsonNode delta = recordedPayload("$aws/things/sensor-9/shadow/update/delta");
+        assertEquals(json("{\"color\":\"red\"}"), delta.get("state"));
+        assertEquals(json("{\"color\":{\"timestamp\":100}}"), delta.get("metadata"));
     }
 
     @Test
