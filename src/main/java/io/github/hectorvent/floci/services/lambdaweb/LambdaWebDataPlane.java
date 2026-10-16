@@ -29,6 +29,7 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -59,6 +60,7 @@ public class LambdaWebDataPlane {
     static final Set<String> DROPPED_RESPONSE_HEADERS = Set.of("connection", "keep-alive", "transfer-encoding",
             "upgrade", "te", "trailer", "trailers", "proxy-authenticate", "proxy-authorization");
     static final String REQUEST_ID_HEADER = "lambda-web-request-id";
+    private static final String IAM_AUTH = "IamAuth";
     private static final Pattern ENDPOINT_DOMAIN = Pattern.compile(
             "[a-z0-9]{16}\\.(?:[0-9]{3}\\.lambda-web\\.[a-z0-9-]+|lambda-web\\.global)\\..+", Pattern.CASE_INSENSITIVE);
     private static final Logger LOG = Logger.getLogger(LambdaWebDataPlane.class);
@@ -70,6 +72,7 @@ public class LambdaWebDataPlane {
 
     private final LambdaWebService service;
     private final LambdaWebEnvironmentManager environments;
+    private final LambdaWebIamAuth iamAuth;
     private final ServiceConfigAccess serviceConfigAccess;
     private final Vertx vertx;
     private final HttpClient client;
@@ -77,9 +80,10 @@ public class LambdaWebDataPlane {
 
     @Inject
     public LambdaWebDataPlane(LambdaWebService service, LambdaWebEnvironmentManager environments,
-                              ServiceConfigAccess serviceConfigAccess, Vertx vertx) {
+                              LambdaWebIamAuth iamAuth, ServiceConfigAccess serviceConfigAccess, Vertx vertx) {
         this.service = service;
         this.environments = environments;
+        this.iamAuth = iamAuth;
         this.serviceConfigAccess = serviceConfigAccess;
         this.vertx = vertx;
         this.client = vertx.createHttpClient(new HttpClientOptions()
@@ -119,12 +123,33 @@ public class LambdaWebDataPlane {
             page(request, LambdaWebErrorPages.ENDPOINT_DISABLED, requestId, false);
             return;
         }
+        if (!IAM_AUTH.equals(target.endpoint().authType)) {
+            admit(request, host, target, requestId);
+            return;
+        }
+        // The signature is checked before the rate limit, so refused requests take no tokens.
+        request.pause();
+        LambdaWebIamAuth.Inbound signed = LambdaWebIamAuth.Inbound.of(request);
+        vertx.<Boolean>executeBlocking(() -> iamAuth.allows(signed, target), false).onComplete(allowed -> {
+            if (allowed.succeeded() && allowed.result()) {
+                admit(request, host, target, requestId);
+                return;
+            }
+            request.resume();
+            page(request, LambdaWebErrorPages.FORBIDDEN, requestId, false);
+        });
+    }
+
+    private void admit(HttpServerRequest request, String host, WebFunctionTarget target, String requestId) {
+        Integer rateLimit = target.endpoint().throttleConfig == null ? null : target.endpoint().throttleConfig.rateLimit;
         if (rateLimit != null && !rateLimiter.tryAcquire(endpointKey(target), rateLimit)) {
+            request.resume();
             page(request, LambdaWebErrorPages.ENDPOINT_REQUEST_THROTTLE, requestId, false);
             return;
         }
         WebFunctionRevision revision = LambdaWebService.pickRevision(target);
         if (revision == null) {
+            request.resume();
             page(request, LambdaWebErrorPages.ORIGIN_REQUEST_ERROR, requestId, false);
             return;
         }
@@ -388,6 +413,12 @@ public class LambdaWebDataPlane {
                 dropped.add(token.trim().toLowerCase(Locale.ROOT));
             }
         }
+        // An AWS signature and its session token never reach the app, whatever the auth type.
+        String authorization = request.getHeader("Authorization");
+        if (authorization != null && authorization.startsWith("AWS4-")) {
+            dropped.add("authorization");
+            dropped.add("x-amz-security-token");
+        }
         MultiMap headers = upstream.headers();
         for (Map.Entry<String, String> header : request.headers()) {
             String name = header.getKey().toLowerCase(Locale.ROOT);
@@ -445,9 +476,14 @@ public class LambdaWebDataPlane {
         response.headers().set("content-type", "text/html");
         response.headers().set("connection", close ? "close" : "keep-alive");
         response.headers().set(REQUEST_ID_HEADER, requestId);
-        response.headers().set("lambda-web-error-type", page.errorType());
+        if (page.errorType() != null) {
+            response.headers().set("lambda-web-error-type", page.errorType());
+        }
         response.headers().set("date", HTTP_DATE.format(Instant.now()));
-        response.end(LambdaWebErrorPages.html(page, requestId)).onComplete(ignored -> {
+        String html = LambdaWebErrorPages.html(page, requestId);
+        // A HEAD request gets the length of the page it does not get, as on AWS.
+        response.headers().set("content-length", String.valueOf(html.getBytes(StandardCharsets.UTF_8).length));
+        response.end(html).onComplete(ignored -> {
             if (close) {
                 response.close();
             }
