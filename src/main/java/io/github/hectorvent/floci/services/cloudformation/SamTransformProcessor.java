@@ -1096,7 +1096,8 @@ class SamTransformProcessor {
      * that applies, as sorted compact JSON with characters outside printable ASCII as lowercase hex
      * escapes, apart from JSON's short escapes such as a newline's; that is the id SAM gives. Under
      * {@code AutoPublishAliasAllProperties} the hash covers all the properties this transform gives
-     * the function, plus its {@code SnapStart}, which makes the id floci's own. A string
+     * the function, the code's parameter references still resolved, plus its {@code SnapStart},
+     * which makes the id floci's own. A string
      * {@code AutoPublishCodeSha256} names the version itself, by its first ten characters. A change
      * to the hashed input is a new logical id, so a new version resource, which publishes when the
      * function's code or configuration changed since its last version. Unchanged, the id and the
