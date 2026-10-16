@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.lifecycle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.DockerClientProducer;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -10,6 +11,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -35,7 +37,8 @@ public class DockerAvailabilityReport {
     /** Run a container per request and fail that request (or its build, task, job) without Docker. */
     static final List<String> FAIL_ON_USE = List.of(
             "lambda", "ecs", "ec2", "codebuild", "batch", "sagemaker", "appsync", "pipes", "mwaa",
-            "amazonmq", "kinesisanalytics", "redshift", "ecr", "codeartifact", "verifiedpermissions");
+            "amazonmq", "kinesisanalytics", "redshift", "redshift-serverless", "rds-data", "athena", "ecr",
+            "codeartifact", "verifiedpermissions");
 
     private final ContainerLifecycleManager lifecycleManager;
     private final ServiceRegistry serviceRegistry;
@@ -58,7 +61,7 @@ public class DockerAvailabilityReport {
     void report() {
         Set<String> enabled = Set.copyOf(serviceRegistry.getEnabledServices());
         List<String> metadataOnly = METADATA_ONLY.stream().filter(enabled::contains).toList();
-        List<String> failOnUse = FAIL_ON_USE.stream().filter(enabled::contains).toList();
+        List<String> failOnUse = failOnUse(enabled);
         if (metadataOnly.isEmpty() && failOnUse.isEmpty()) {
             return;
         }
@@ -69,7 +72,30 @@ public class DockerAvailabilityReport {
         LOG.warnv("Docker is not reachable at {0} ({1}). Without it these services keep their control plane but"
                         + " run no containers: {2}; and these fail when asked to run one: {3}."
                         + " Everything else works without Docker.",
-                config.docker().dockerHost(), reason, metadataOnly, failOnUse);
+                DockerClientProducer.resolveDockerConnection(config.docker(), System::getenv).host(), reason,
+                metadataOnly, failOnUse);
+    }
+
+    List<String> failOnUse(Set<String> enabled) {
+        return FAIL_ON_USE.stream()
+                .filter(enabled::contains)
+                .filter(service -> !runsWithoutLocalDocker(service))
+                .map(service -> "pipes".equals(service) ? "pipes (Kafka sources)" : service)
+                .toList();
+    }
+
+    /** A service whose container work goes somewhere other than the local daemon. */
+    boolean runsWithoutLocalDocker(String service) {
+        return switch (service) {
+            case "lambda" -> "kubernetes".equalsIgnoreCase(config.services().lambda().executor().trim());
+            case "athena" -> isSet(config.services().duck().url());
+            case "verifiedpermissions" -> isSet(config.services().verifiedpermissions().cedarUrl());
+            default -> false;
+        };
+    }
+
+    private static boolean isSet(Optional<String> url) {
+        return url.isPresent() && !url.get().isBlank();
     }
 
     /** @return why Docker is unreachable, or {@code null} when it answers */

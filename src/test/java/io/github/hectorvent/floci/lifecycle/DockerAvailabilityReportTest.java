@@ -8,8 +8,11 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.is;
@@ -55,6 +58,7 @@ class DockerAvailabilityReportTest {
     @Test
     void affectedServicesAreProbed() {
         when(registry.getEnabledServices()).thenReturn(List.of("sqs", "lambda", "rds"));
+        when(config.services().lambda().executor()).thenReturn("docker");
         when(lifecycle.getDockerClient()).thenReturn(docker);
 
         report.report();
@@ -67,5 +71,28 @@ class DockerAvailabilityReportTest {
         assertThat(DockerAvailabilityReport.METADATA_ONLY.stream()
                 .filter(DockerAvailabilityReport.FAIL_ON_USE::contains).toList(), is(empty()));
         assertThat(DockerAvailabilityReport.FAIL_ON_USE, not(empty()));
+    }
+
+    @Test
+    void servicesBackedByADockerRuntimeFailOnUse() {
+        when(config.services().lambda().executor()).thenReturn("docker");
+        when(config.services().duck().url()).thenReturn(Optional.empty());
+
+        assertThat(report.failOnUse(Set.of("redshift-serverless", "rds-data", "athena", "lambda", "sqs")),
+                contains("lambda", "redshift-serverless", "rds-data", "athena"));
+    }
+
+    @Test
+    void servicesPointedElsewhereAreNotReported() {
+        when(config.services().lambda().executor()).thenReturn(" Kubernetes ");
+        when(config.services().duck().url()).thenReturn(Optional.of("http://duck:8080"));
+        when(config.services().verifiedpermissions().cedarUrl()).thenReturn(Optional.of("http://cedar:8080"));
+
+        assertThat(report.failOnUse(Set.of("lambda", "athena", "verifiedpermissions", "ecs")), contains("ecs"));
+    }
+
+    @Test
+    void pipesIsQualifiedToItsKafkaSources() {
+        assertThat(report.failOnUse(Set.of("pipes")), contains("pipes (Kafka sources)"));
     }
 }
