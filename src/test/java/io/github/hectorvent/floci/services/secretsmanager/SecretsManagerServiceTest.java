@@ -551,6 +551,20 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void findArnByNameReadsALegacyEntryOnlyForTheDefaultAccount() {
+        InMemoryStorage<String, Secret> raw = new InMemoryStorage<>();
+        SecretsManagerService svc = new SecretsManagerService(
+                new AccountAwareStorageBackend<>(raw, null, "000000000000"), 30);
+        Secret legacy = new Secret();
+        legacy.setName("app/legacy");
+        legacy.setArn("arn:aws:secretsmanager:" + REGION + ":000000000000:secret:app/legacy-AbCdEf");
+        raw.put(REGION + "::app/legacy", legacy);
+
+        assertEquals(legacy.getArn(), svc.findArnByName("000000000000", "app/legacy", REGION).orElseThrow());
+        assertTrue(svc.findArnByName("111122223333", "app/legacy", REGION).isEmpty());
+    }
+
+    @Test
     void ordinarySecretNamedLikeAnRdsSecretStillNeedsALambdaArn() {
         // Ownership is a property of the secret, not of its name: anyone may create a secret
         // called rds!something, and that must not grant it service-managed rotation.

@@ -70,6 +70,22 @@ class SecretsManagerSecretArnEnforcementIntegrationTest {
                 .body("__type", equalTo("AccessDeniedException"));
     }
 
+    @Test
+    void createSecretIgnoresASecretIdTheHandlerDoesNotRead() {
+        String existing = "app-" + UUID.randomUUID().toString().substring(0, 8);
+        createSecret(existing);
+        Session session = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"secretsmanager:CreateSecret","Resource":"%s%s-??????"}]}"""
+                .formatted(SECRET_ARN_PREFIX, existing));
+
+        // A grant on the existing secret does not authorize creating another one beside it.
+        secretsCall(session, "CreateSecret", "{\"Name\": \"other-" + existing + "\", \"SecretId\": \""
+                + existing + "\", \"SecretString\": \"x\"}")
+                .then().statusCode(400)
+                .body("__type", equalTo("AccessDeniedException"));
+    }
+
     private static String createSecret(String name) {
         Response response = given().header("Authorization", auth(ACCOUNT, "secretsmanager"))
                 .header("X-Amz-Target", "secretsmanager.CreateSecret")

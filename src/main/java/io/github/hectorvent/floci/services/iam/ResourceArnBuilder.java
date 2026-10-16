@@ -73,7 +73,7 @@ public class ResourceArnBuilder {
         this.secretsManagerService = secretsManagerService;
     }
 
-    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService) {
+    ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService) {
         this(objectMapper, iamService, null);
     }
 
@@ -104,7 +104,6 @@ public class ResourceArnBuilder {
             case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
-            case "secretsmanager" -> List.of(buildSecretsManagerArn(ctx, region, accountId));
             case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
             case "kms"            -> List.of(buildKmsArn(path, region, accountId));
             case "iam"            -> buildIamArns(ctx, region, accountId);
@@ -951,32 +950,46 @@ public class ResourceArnBuilder {
     }
 
     // ── Secrets Manager ──────────────────────────────────────────────────────────
+
+    /**
+     * Uses the serving operation, as {@link #buildLogStreamResources} does: {@code CreateSecret}
+     * names the secret in {@code Name} and every other operation in {@code SecretId}, so a field the
+     * handler does not read cannot choose the resource. A minted ARN takes the request's partition,
+     * the one the secret is created in, which a region Floci does not know cannot be mapped to.
+     */
+    public List<String> buildSecretsManagerResources(String action, ContainerRequestContext ctx,
+                                                     String region, String accountId, String partition) {
+        return List.of(buildSecretsManagerArn(action, ctx, region, accountId, partition));
+    }
+
     /**
      * A secret named by its name is authorized against its full ARN, random suffix included, so a
-     * {@code secret:<name>-??????} policy matches it as it does on AWS. {@code CreateSecret} names
-     * the secret in {@code Name}, and the suffix is not assigned until the secret is created.
+     * {@code secret:<name>-??????} policy matches it as it does on AWS. The suffix of the secret
+     * {@code CreateSecret} is making is not assigned until it is created.
      */
-    private String buildSecretsManagerArn(ContainerRequestContext ctx, String region, String accountId) {
+    private String buildSecretsManagerArn(String action, ContainerRequestContext ctx, String region,
+                                          String accountId, String partition) {
         JsonNode json = readJsonBody(ctx);
         if (json != null && json.isObject()) {
-            if (json.hasNonNull("SecretId")) {
+            if ("secretsmanager:CreateSecret".equals(action)) {
+                if (json.hasNonNull("Name")) {
+                    String name = json.get("Name").asText().trim();
+                    if (!name.isEmpty()) {
+                        return secretArn(name + UNASSIGNED_SECRET_SUFFIX, region, accountId, partition);
+                    }
+                }
+            } else if (json.hasNonNull("SecretId")) {
                 String secretId = json.get("SecretId").asText().trim();
                 if (!secretId.isEmpty()) {
                     if (AwsArnUtils.isArnFor(secretId, "secretsmanager")) {
                         return secretId;
                     }
                     return storedSecretArn(secretId, region, accountId)
-                            .orElseGet(() -> secretArn(secretId, region, accountId));
-                }
-            }
-            if (json.hasNonNull("Name")) {
-                String name = json.get("Name").asText().trim();
-                if (!name.isEmpty()) {
-                    return secretArn(name + UNASSIGNED_SECRET_SUFFIX, region, accountId);
+                            .orElseGet(() -> secretArn(secretId, region, accountId, partition));
                 }
             }
         }
-        return secretArn("*", region, accountId);
+        return secretArn("*", region, accountId, partition);
     }
 
     private Optional<String> storedSecretArn(String name, String region, String accountId) {
@@ -986,8 +999,8 @@ public class ResourceArnBuilder {
         return secretsManagerService.get().findArnByName(accountId, name, region);
     }
 
-    private static String secretArn(String name, String region, String accountId) {
-        return AwsArnUtils.Arn.of("secretsmanager", region, accountId, "secret:" + name).toString();
+    private static String secretArn(String name, String region, String accountId, String partition) {
+        return new AwsArnUtils.Arn(partition, "secretsmanager", region, accountId, "secret:" + name).toString();
     }
 
     // ── SSM ──────────────────────────────────────────────────────────────────────

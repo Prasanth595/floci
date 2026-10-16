@@ -885,8 +885,9 @@ class ResourceArnBuilderTest {
     @Test
     void secretsManagerBuildsArnFromSecretId() {
         setJsonBody("{\"SecretId\":\"app/prod/database\"}");
-        String arn = builder.build("secretsmanager", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/prod/database", arn);
+        assertEquals(List.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/prod/database"),
+                builder.buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx, "us-east-1",
+                        "000000000000", "aws"));
     }
 
     @Test
@@ -896,9 +897,10 @@ class ResourceArnBuilderTest {
         when(secrets.findArnByName("111122223333", "app/core", "us-east-1")).thenReturn(Optional.of(storedArn));
         setJsonBody("{\"SecretId\":\"app/core\"}");
 
-        String arn = backedBy(secrets).build("secretsmanager", ctx, "us-east-1", "111122223333");
+        List<String> arns = backedBy(secrets).buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx,
+                "us-east-1", "111122223333", "aws");
 
-        assertEquals(storedArn, arn);
+        assertEquals(List.of(storedArn), arns);
     }
 
     @Test
@@ -907,16 +909,46 @@ class ResourceArnBuilderTest {
         when(secrets.findArnByName(ACCOUNT, "app/missing", "us-east-1")).thenReturn(Optional.empty());
         setJsonBody("{\"SecretId\":\"app/missing\"}");
 
-        String arn = backedBy(secrets).build("secretsmanager", ctx, "us-east-1", ACCOUNT);
+        List<String> arns = backedBy(secrets).buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx,
+                "us-east-1", ACCOUNT, "aws");
 
-        assertEquals("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/missing", arn);
+        assertEquals(List.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/missing"), arns);
     }
 
     @Test
     void secretsManagerCreateSecretBuildsArnFromNameWithAnUnassignedSuffix() {
         setJsonBody("{\"Name\":\"app/core\",\"SecretString\":\"x\"}");
-        String arn = builder.build("secretsmanager", ctx, "us-east-1", ACCOUNT);
-        assertEquals("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/core-??????", arn);
+        assertEquals(List.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/core-??????"),
+                builder.buildSecretsManagerResources("secretsmanager:CreateSecret", ctx, "us-east-1", ACCOUNT,
+                        "aws"));
+    }
+
+    @Test
+    void secretsManagerTargetsTheFieldTheServingOperationReads() {
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        when(secrets.findArnByName(ACCOUNT, "app/existing", "us-east-1"))
+                .thenReturn(Optional.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/existing-AbC123"));
+        ResourceArnBuilder backed = backedBy(secrets);
+
+        setJsonBody("{\"Name\":\"app/new\",\"SecretId\":\"app/existing\",\"SecretString\":\"x\"}");
+        assertEquals(List.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/new-??????"),
+                backed.buildSecretsManagerResources("secretsmanager:CreateSecret", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"Name\":\"app/new\"}");
+        assertEquals(List.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:*"),
+                backed.buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx, "us-east-1", ACCOUNT,
+                        "aws"));
+    }
+
+    @Test
+    void secretsManagerMintsArnsInTheRequestPartition() {
+        setJsonBody("{\"Name\":\"app/core\"}");
+        assertEquals(List.of("arn:aws-cn:secretsmanager:polygondwanaland-west-1:000000000000:secret:app/core-??????"),
+                builder.buildSecretsManagerResources("secretsmanager:CreateSecret", ctx, "polygondwanaland-west-1",
+                        ACCOUNT, "aws-cn"));
+        setJsonBody("{\"SecretId\":\"app/core\"}");
+        assertEquals(List.of("arn:aws-us-gov:secretsmanager:polygondwanaland-west-1:000000000000:secret:app/core"),
+                builder.buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx, "polygondwanaland-west-1",
+                        ACCOUNT, "aws-us-gov"));
     }
 
     // ── SSM ──────────────────────────────────────────────────────────────────────

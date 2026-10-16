@@ -416,9 +416,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         List<String> resources = resolveResourceArns(credentialScope,
-                "logs".equals(credentialScope)
-                        ? arnBuilder.buildLogStreamResources(action, ctx, region, accountId, requestPartition())
-                        : arnBuilder.buildResources(credentialScope, ctx, region, accountId));
+                targetResources(credentialScope, action, ctx, region, accountId));
 
         Optional<PresignedScope> presignedScope = iamService.presignedScope(akid);
         if (presignedScope.isPresent()) {
@@ -1139,6 +1137,18 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             case "s3:DeleteObjectTagging" -> "DeleteObjectTagging";
             default -> null;
         };
+    }
+
+    /** Logs and Secrets Manager targets depend on the serving operation and the request's partition. */
+    private List<String> targetResources(String credentialScope, String action, ContainerRequestContext ctx,
+                                         String region, String accountId) {
+        if ("logs".equals(credentialScope)) {
+            return arnBuilder.buildLogStreamResources(action, ctx, region, accountId, requestPartition());
+        }
+        if ("secretsmanager".equals(credentialScope)) {
+            return arnBuilder.buildSecretsManagerResources(action, ctx, region, accountId, requestPartition());
+        }
+        return arnBuilder.buildResources(credentialScope, ctx, region, accountId);
     }
 
     /**

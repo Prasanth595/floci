@@ -425,7 +425,7 @@ public class SecretsManagerService implements ResourceProvider {
     public Optional<String> findArnByName(String accountId, String name, String region) {
         String key = regionKey(region, name);
         Optional<Secret> secret = store instanceof AccountAwareStorageBackend<Secret> aware
-                ? aware.getForAccount(accountId, key)
+                ? aware.getForAccount(accountId, key).or(() -> aware.getLegacyForAccount(accountId, key))
                 : store.get(key);
         return secret.map(Secret::getArn);
     }
