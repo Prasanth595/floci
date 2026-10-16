@@ -11,7 +11,6 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
-import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -52,11 +51,34 @@ class CloudFormationLaunchConfigurationMetadataValidationIntegrationTest {
                         && "CREATE_FAILED".equals(event.get("ResourceStatus")))
                 .map(event -> event.get("ResourceStatusReason"))
                 .toList();
-        assertThat(failures, contains(containsString(message)));
+        assertThat(failures, contains(equalTo(message)));
         given().header("Authorization", AUTH.replace("/cloudformation/", "/autoscaling/"))
                 .formParam("Action", "DescribeLaunchConfigurations")
                 .formParam("LaunchConfigurationNames.member.1", name).post("/").then().statusCode(200)
                 .body("DescribeLaunchConfigurationsResponse.DescribeLaunchConfigurationsResult"
                         + ".LaunchConfigurations.member.size()", equalTo(0));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {"1|1", "64|64", "\"2\"|2", "{\"Ref\":\"Hops\"}|5"})
+    void hopLimitsAtTheBoundsAsStringsOrFromParametersAreAccepted(String hopLimit, String stored) {
+        String name = "cfn-valid-metadata-" + UUID.randomUUID();
+        String template = """
+                {"Parameters":{"Hops":{"Type":"Number","Default":"5"}},
+                "Resources":{"Launch":{"Type":"AWS::AutoScaling::LaunchConfiguration",
+                "Properties":{"LaunchConfigurationName":"%s","ImageId":"ami-amazonlinux2023",
+                "InstanceType":"t3.micro","MetadataOptions":{"HttpPutResponseHopLimit":%s}}}}}
+                """.formatted(name, hopLimit);
+        given().header("Authorization", AUTH).formParam("Action", "CreateStack")
+                .formParam("StackName", name).formParam("TemplateBody", template)
+                .post("/").then().statusCode(200);
+
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(name, AUTH);
+        assertEquals("CREATE_COMPLETE", state.status(), state.reason());
+        given().header("Authorization", AUTH.replace("/cloudformation/", "/autoscaling/"))
+                .formParam("Action", "DescribeLaunchConfigurations")
+                .formParam("LaunchConfigurationNames.member.1", name).post("/").then().statusCode(200)
+                .body("DescribeLaunchConfigurationsResponse.DescribeLaunchConfigurationsResult"
+                        + ".LaunchConfigurations.member.MetadataOptions.HttpPutResponseHopLimit", equalTo(stored));
     }
 }
