@@ -392,6 +392,29 @@ class SamTransformProcessorTest {
                 "an intrinsic function is passed on for CloudFormation to resolve");
     }
 
+    /** SAM's Globals do not take AutoPublishCodeSha256, which would name every function's version. */
+    @Test
+    void expandSamTemplate_globalsRefuseAutoPublishCodeSha256() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {"Function": {"AutoPublishAlias": "live", "AutoPublishCodeSha256": "release1234"}},
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {"Handler": "index.handler", "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({});"}
+                }
+              }
+            }
+            """);
+
+        AwsException refused = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
+        assertEquals("ValidationError", refused.getErrorCode());
+        assertEquals("'Globals' section is invalid. 'AutoPublishCodeSha256' is not a supported property of "
+                + "'Function'.", refused.getMessage());
+    }
+
     /**
      * SAM retains each version it publishes unless the function sets a {@code DeletionPolicy}, which
      * the version and alias both take, or a {@code VersionDeletionPolicy}; a function on a capacity

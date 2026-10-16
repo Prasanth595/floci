@@ -94,6 +94,12 @@ class SamTransformProcessor {
         // (including the early return below when Resources is absent or not an object).
         JsonNode globals = expanded.path("Globals");
         expanded.remove("Globals");
+        // SAM refuses any Globals property it does not list for a section. AutoPublishCodeSha256 is
+        // one of them: one value there would name every function's version.
+        if (globals.path("Function").has("AutoPublishCodeSha256")) {
+            throw new AwsException("ValidationError", "'Globals' section is invalid. 'AutoPublishCodeSha256' "
+                    + "is not a supported property of 'Function'.", 400);
+        }
 
         JsonNode resources = expanded.path("Resources");
         if (!resources.isObject()) {
