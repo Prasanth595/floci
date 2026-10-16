@@ -932,6 +932,11 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
                                                     String nextToken, String region) {
         int maxEvents = Math.min(limit > 0 ? limit : Integer.MAX_VALUE,
                 maxEventsPerQuery);
+        // The filter pattern syntax metric and subscription filters use: terms, quoted phrases,
+        // ?alternatives, -exclusions, JSON and space-delimited patterns. Parsed before the scan,
+        // so an invalid pattern is refused whatever the group holds.
+        FilterPattern pattern = filterPattern == null || filterPattern.isBlank()
+                ? null : requireFilterPattern(filterPattern);
 
         String groupPrefix = groupKeyPrefix(region) + groupName + "::";
         List<String> requested = streamNames == null ? List.of() : streamNames;
@@ -957,8 +962,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         List<FilteredEvent> matches = all.stream()
                 .filter(f -> (startTime == null || f.event().getTimestamp() >= startTime)
                         && (endTime == null || f.event().getTimestamp() <= endTime))
-                .filter(f -> filterPattern == null || filterPattern.isBlank()
-                        || f.event().getMessage().contains(filterPattern))
+                .filter(f -> pattern == null || pattern.match(f.event().getMessage()).matched())
                 .sorted(Comparator.comparing(FilteredEvent::event, EVENT_ORDER))
                 .toList();
 
