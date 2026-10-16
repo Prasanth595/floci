@@ -41,7 +41,7 @@ The `Lambda Web` service model (apiVersion 2025-03-07, `aws lambda-web` in the A
 - **ARNs** given as identifiers must name the request's region and the caller's account, as on AWS. A revision or endpoint ARN resolves by its id or name only.
 - **Page tokens** are base64 cursors that carry the request and the position of the page, not the UUIDs AWS issues. A token reused with other parameters gets the AWS "does not match the request" error, and any other token the "invalid or has expired" error.
 - **Domain names** take the form `<id>.001.lambda-web.<region>.<floci host>` and `<id>.lambda-web.global.<floci host>`, with the host and port of `floci.base-url`. A `PerRegion` endpoint gets one domain per region in `regionalEndpoints`.
-- **Not implemented yet:** invoking a function through its endpoint domain, execution environments, `IamAuth` on requests, and the automatic deletion of revisions past 50. The endpoint domain does not answer requests yet.
+- **Not implemented yet:** `IamAuth` on requests, the automatic deletion of revisions past 50, the scaling limits (`maxConcurrencyPerEnvironment`, `maxEnvironments`, a `rateLimit` other than 0), the metadata API, the logs and metrics, and serving a `MultiRegion` or `PerRegion` endpoint in its other regions.
 
 ### `aws lambda-web deploy`
 
@@ -51,7 +51,36 @@ The CLI's `deploy` command works against Floci with `AWS_ENDPOINT_URL` set:
 AWS_ENDPOINT_URL=http://localhost:4566 aws lambda-web deploy --name my-app --hello-world --create
 ```
 
-The command passes `--endpoint-url` only to the Lambda Web client. Its STS, S3 and IAM calls use the default endpoints, so the environment variable is what routes them to Floci. The `endpointUrl` it prints is the Floci domain name behind `https://`, which Floci does not serve yet.
+The command passes `--endpoint-url` only to the Lambda Web client. Its STS, S3 and IAM calls use the default endpoints, so the environment variable is what routes them to Floci. The `endpointUrl` it prints is the Floci domain name behind `https://`. Floci serves it over `http://`, as below.
+
+## Invoking an endpoint
+
+A request whose `Host` is an endpoint's `domainName` goes to the function. The domain carries the host and port of `floci.base-url`, so either address works:
+
+```bash
+curl http://<domainName>/
+curl -H "Host: <domainName>" http://localhost:4566/
+```
+
+The `Host` must match the domain exactly, as on AWS: another case or another port is `404` with `lambda-web-error-type: Platform.InvalidEndpoint`.
+
+Floci runs each revision in one execution environment, a `public.ecr.aws/lambda/nodejs:24` container started by the first request. The code is the revision's S3 object unpacked into `/var/task`, the entry file is `index.js` or the file `AWS_LAMBDA_NODEJS_ENTRYPOINT` names, and node runs with the flags AWS uses. The app sees `AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:3000`, `AWS_LAMBDA_INITIALIZATION_TYPE=native-http`, `AWS_EXECUTION_ENV`, `AWS_LAMBDA_FUNCTION_MEMORY_SIZE=2048`, `AWS_LAMBDA_LOG_LEVEL`, `AWS_ACCOUNT_ID`, `AWS_REGION`, credentials and `AWS_ENDPOINT_URL` for Floci, `NODE_PATH`, and its own variables. The server has 10 seconds to listen. An environment that sees no request for `floci.services.lambda.container-idle-timeout-seconds` is stopped with `SIGTERM` and one second, as on scale to zero. A process that exits between requests is replaced by a fresh environment on the next request.
+
+Requests are forwarded over HTTP/1.1 with the headers AWS adds and drops: `lambda-web-request-id`, `lambda-web-endpoint-name`, `x-forwarded-proto`, `x-forwarded-port` and `Connection: close` are set, the client address is appended as an `X-Forwarded-For` line, and `Connection`, `Keep-Alive`, `Upgrade`, `Expect`, `Trailer`, the `Proxy-*` headers, `X-Real-IP`, the method override headers and any `lambda-web-*` header the client sent are dropped. Responses carry `lambda-web-request-id` and `lambda-web-logstream`, lose their connection headers and trailers, and stream as the app writes them. Requests with two revisions in `revisionWeights` are split by weight.
+
+The platform answers these cases itself, with the AWS HTML pages and `lambda-web-error-type`:
+
+| Status | Error type | When |
+| --- | --- | --- |
+| 400 | `Platform.MalformedRequest` | A method other than `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `OPTIONS`, `DELETE` |
+| 404 | `Platform.InvalidEndpoint` | The `Host` is a `lambda-web` domain Floci did not mint |
+| 502 | `Application.TimeoutListenError`, `Application.InitCodeError`, `Runtime.Exit` | The server did not listen within 10 seconds, threw at import, or exited at start |
+| 503 | `Platform.EndpointDisabled` | The endpoint's `rateLimit` is 0 |
+| 503 | `Runtime.OriginRequestError` | The process died while handling the request |
+| 504 | `Runtime.RequestTimeout` | No response within the revision's `timeoutSeconds` |
+| 505 | `Platform.UnsupportedHttpVersion` | HTTP/1.0 |
+
+A request head over 128 KiB is refused with `431`, without the AWS page. A request without a `Host` header cannot be told apart from one for another Floci service, so it does not get `Platform.MissingHostHeader`.
 
 ## CloudFormation
 

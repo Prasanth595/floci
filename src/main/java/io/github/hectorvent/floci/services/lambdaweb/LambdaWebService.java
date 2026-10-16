@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
@@ -41,6 +42,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.regex.Matcher;
@@ -162,6 +164,46 @@ public class LambdaWebService implements Resettable {
     @Override
     public void clear() {
         functions.clear();
+    }
+
+    /** Where a request to an endpoint domain goes. Domains are unique across accounts and regions. */
+    public record WebFunctionTarget(String accountId, String region, WebFunction function, WebFunctionEndpoint endpoint) {
+    }
+
+    public Optional<WebFunctionTarget> locate(String host) {
+        List<WebFunction> all = functions instanceof AccountAwareStorageBackend<WebFunction> aware
+                ? aware.scanAllAccounts()
+                : functions.scan(key -> true);
+        for (WebFunction stored : all) {
+            for (WebFunctionEndpoint endpoint : stored.endpoints.values()) {
+                if (host.equals(endpoint.domainName) || endpoint.regionalDomainNames.containsValue(host)) {
+                    AwsArnUtils.Arn arn = AwsArnUtils.parse(stored.functionArn);
+                    synchronized (lockFor(arn.region(), stored.functionName)) {
+                        WebFunction fn = copy(stored, WebFunction.class);
+                        return Optional.of(new WebFunctionTarget(arn.accountId(), arn.region(), fn,
+                                fn.endpoints.get(endpoint.endpointName)));
+                    }
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** The revision a request goes to, drawn by the endpoint's weights. */
+    public static WebFunctionRevision pickRevision(WebFunctionTarget target) {
+        List<WebFunctionEndpoint.RevisionWeight> weights = target.endpoint().revisionWeights;
+        if (weights.isEmpty()) {
+            return null;
+        }
+        int draw = ThreadLocalRandom.current().nextInt(100);
+        int cumulative = 0;
+        for (WebFunctionEndpoint.RevisionWeight weight : weights) {
+            cumulative += weight.weight;
+            if (draw < cumulative) {
+                return target.function().revisions.get(weight.revisionId);
+            }
+        }
+        return target.function().revisions.get(weights.get(weights.size() - 1).revisionId);
     }
 
     /** An endpoint before and after an update. The update response shows both. */
