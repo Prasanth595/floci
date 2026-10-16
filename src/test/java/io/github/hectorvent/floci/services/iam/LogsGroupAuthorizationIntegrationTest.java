@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
@@ -66,6 +67,40 @@ class LogsGroupAuthorizationIntegrationTest {
                 () -> assertUnchanged(action, other));
         operation(caller, action, selected).statusCode(200);
         assertChanged(action, selected);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CreateLogGroup", "DeleteLogGroup", "PutRetentionPolicy", "DeleteRetentionPolicy"})
+    void bareGroupPermissionAllowsOnlyTheSelectedGroup(String action) {
+        String selected = group(action);
+        String other = group(action);
+        String caller = user(policy("Allow", action, bareArn(selected)));
+        Response denied = operation(caller, action, other).extract().response();
+        assertAll("bare group grant denies unrelated state changes",
+                () -> denied.then().statusCode(400).body(containsString("AccessDeniedException")),
+                () -> assertUnchanged(action, other));
+        operation(caller, action, selected).statusCode(200);
+        assertChanged(action, selected);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"CreateLogGroup,false", "CreateLogGroup,true", "DeleteLogGroup,false", "DeleteLogGroup,true",
+            "PutRetentionPolicy,false", "PutRetentionPolicy,true", "DeleteRetentionPolicy,false",
+            "DeleteRetentionPolicy,true"})
+    void oppositeGroupArnFormDenyOverridesExactAllow(String action, boolean bareAllow) {
+        String selected = group(action);
+        String other = group(action);
+        String selectedAllow = bareAllow ? bareArn(selected) : arn(selected);
+        String otherAllow = bareAllow ? bareArn(other) : arn(other);
+        String selectedDeny = bareAllow ? arn(selected) : bareArn(selected);
+        String caller = user(policy("Allow", action, selectedAllow) + ","
+                + policy("Allow", action, otherAllow) + "," + policy("Deny", action, selectedDeny));
+        Response denied = operation(caller, action, selected).extract().response();
+        assertAll("equivalent group ARN deny preserves the selected group",
+                () -> denied.then().statusCode(400).body(containsString("AccessDeniedException")),
+                () -> assertUnchanged(action, selected));
+        operation(caller, action, other).statusCode(200);
+        assertChanged(action, other);
     }
 
     @ParameterizedTest
@@ -156,15 +191,16 @@ class LogsGroupAuthorizationIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"TagResource", "TagLogGroup"})
-    void createTagAlternativesUseTheirOwnArnAndConditions(String taggingAction) {
+    @CsvSource({"TagResource,false,false", "TagResource,true,false", "TagLogGroup,false,false",
+            "TagLogGroup,true,false", "TagLogGroup,false,true", "TagLogGroup,true,true"})
+    void createTagAlternativesUseTheirOwnArnAndConditions(String taggingAction, boolean primaryBare,
+                                                          boolean taggingBare) {
         String selected = group("CreateLogGroup");
         String otherAction = taggingAction.equals("TagResource") ? "TagLogGroup" : "TagResource";
-        String resource = taggingAction.equals("TagResource")
-                ? arn(selected).substring(0, arn(selected).length() - 2) : arn(selected);
+        String resource = taggingAction.equals("TagResource") || taggingBare ? bareArn(selected) : arn(selected);
         String condition = ",\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"blue\"},"
                 + "\"ForAllValues:StringEquals\":{\"aws:TagKeys\":[\"team\"]}}";
-        String caller = user(policy("Allow", "CreateLogGroup", arn(selected)) + ","
+        String caller = user(policy("Allow", "CreateLogGroup", primaryBare ? bareArn(selected) : arn(selected)) + ","
                 + policy("Allow", taggingAction, resource, condition) + "," + policy("Deny", otherAction, "*"));
         for (Map<String, String> rejected : List.of(Map.of("team", "red"), Map.of("team", "blue", "extra", "value"))) {
             Response denied = call(endpoint.getPort(), caller, "CreateLogGroup",
@@ -281,8 +317,12 @@ class LogsGroupAuthorizationIntegrationTest {
                 + "\",\"Resource\":\"" + resource + "\"" + condition + "}";
     }
 
+    private static String bareArn(String group) {
+        return "arn:aws:logs:" + REGION + ":" + ACCOUNT + ":log-group:" + group;
+    }
+
     private static String arn(String group) {
-        return "arn:aws:logs:" + REGION + ":" + ACCOUNT + ":log-group:" + group + ":*";
+        return bareArn(group) + ":*";
     }
 
     private ValidatableResponse operation(String caller, String action, String group) {

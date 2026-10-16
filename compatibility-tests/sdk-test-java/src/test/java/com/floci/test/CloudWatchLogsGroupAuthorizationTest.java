@@ -39,6 +39,18 @@ class CloudWatchLogsGroupAuthorizationTest extends CloudWatchLogsAuthorizationFi
 
     @ParameterizedTest
     @ValueSource(strings = {"CreateLogGroup", "DeleteLogGroup", "PutRetentionPolicy", "DeleteRetentionPolicy"})
+    void bareGroupGrant(String action) {
+        prepare(action);
+        policy(statement("Allow", action, TestFixtures.arn("logs", "000000000000", "log-group:" + protectedGroup)));
+        assertThatThrownBy(() -> invoke(action, otherGroup))
+                .isInstanceOfSatisfying(CloudWatchLogsException.class, this::assertDenied);
+        assertState(action, otherGroup, false);
+        invoke(action, protectedGroup);
+        assertState(action, protectedGroup, true);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CreateLogGroup", "DeleteLogGroup", "PutRetentionPolicy", "DeleteRetentionPolicy"})
     void exactGroupDenyOverridesWildcard(String action) {
         prepare(action);
         policy(statement("Allow", action, "*") + "," + statement("Deny", action, groupArn(protectedGroup)));

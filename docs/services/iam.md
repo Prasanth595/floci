@@ -1271,10 +1271,12 @@ These checks also apply to deletion: legacy streams with names containing `:` or
 deleted through `DeleteLogStream`. Existing stored names are not automatically migrated.
 
 **CloudWatch Logs groups.** `CreateLogGroup`, `DeleteLogGroup`, `PutRetentionPolicy` and
-`DeleteRetentionPolicy` evaluate the selected group ARN ending in `:*`. The three operations on
+`DeleteRetentionPolicy` accept policy resources naming the selected group with a bare ARN
+or its legacy `:*` form. Both forms participate in each statement, including explicit denies
+and `NotResource`, without bypassing session, boundary or SCP ceilings. The three operations on
 existing groups read that group's resource tags; creation uses the request's `tags` for
 `aws:RequestTag/<key>` and `aws:TagKeys`. Tagged creation additionally requires either
-`logs:TagResource` on the bare group ARN or `logs:TagLogGroup` on the group ARN ending in `:*`.
+`logs:TagResource` on the bare group ARN or `logs:TagLogGroup` on either group ARN form.
 The group name constraints apply before mutation, and deletion preserves streams and filters
 whose stored group identity belongs to another historical group. These four operations reject `:`
 or `*` in a group name. Historical names remain taggable through the ARN tagging APIs below;
