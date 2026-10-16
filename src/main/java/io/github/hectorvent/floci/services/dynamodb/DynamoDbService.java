@@ -2082,7 +2082,7 @@ public class DynamoDbService {
         String pkName = table.getPartitionKeyName();
         JsonNode origPk = key.get(pkName);
         JsonNode newPk = item.get(pkName);
-        if (origPk != null && newPk != null && !origPk.equals(newPk)) {
+        if (origPk != null && newPk != null && !attributeValuesEqual(origPk, newPk)) {
             throw new AwsException("ValidationException",
                     "One or more parameter values were invalid: Cannot update attribute " + pkName
                     + ". This attribute is part of the key", 400);
@@ -2091,7 +2091,7 @@ public class DynamoDbService {
         if (skName != null) {
             JsonNode origSk = key.get(skName);
             JsonNode newSk = item.get(skName);
-            if (origSk != null && newSk != null && !origSk.equals(newSk)) {
+            if (origSk != null && newSk != null && !attributeValuesEqual(origSk, newSk)) {
                 throw new AwsException("ValidationException",
                         "One or more parameter values were invalid: Cannot update attribute " + skName
                         + ". This attribute is part of the key", 400);
