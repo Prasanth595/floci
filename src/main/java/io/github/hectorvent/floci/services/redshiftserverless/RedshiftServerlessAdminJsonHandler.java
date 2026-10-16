@@ -198,6 +198,10 @@ public class RedshiftServerlessAdminJsonHandler {
     private ObjectNode customDomainNode(CustomDomainAssociation association) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("customDomainCertificateArn", association.getCustomDomainCertificateArn());
+        if (association.getCustomDomainCertificateExpiryTime() != null) {
+            node.put("customDomainCertificateExpiryTime",
+                    ServerlessSupport.ISO_8601.format(association.getCustomDomainCertificateExpiryTime()));
+        }
         node.put("customDomainName", association.getCustomDomainName());
         node.put("workgroupName", association.getWorkgroupName());
         return node;

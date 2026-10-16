@@ -693,11 +693,18 @@ class RedshiftServerlessIntegrationTest {
                 + "\"customDomainCertificateArn\":\"" + certificate + "\"}")
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"));
+        call("GetWorkgroup", "{\"workgroupName\":\"domain-wg\"}")
+                .statusCode(200)
+                .body("workgroup.customDomainName", equalTo("db.example.com"))
+                .body("workgroup.customDomainCertificateArn", equalTo(certificate));
         call("ListCustomDomainAssociations", "{\"customDomainName\":\"db.example.com\"}")
                 .statusCode(200)
                 .body("associations", hasSize(1));
         call("DeleteCustomDomainAssociation",
                 "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\"}").statusCode(200);
+        call("GetWorkgroup", "{\"workgroupName\":\"domain-wg\"}")
+                .statusCode(200)
+                .body("workgroup.customDomainName", nullValue());
     }
 
     private static io.restassured.response.ValidatableResponse call(String action, String body) {

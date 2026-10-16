@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.acm.AcmService;
+import io.github.hectorvent.floci.services.acm.model.Certificate;
 import io.github.hectorvent.floci.services.redshift.RedshiftIamDbUserResolver;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import jakarta.ws.rs.core.Response;
@@ -14,6 +16,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.time.Instant;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -35,6 +38,8 @@ class RedshiftServerlessAdministrationHandlerTest {
     private static final String ACCOUNT_ID = "123456789012";
     private static final String CERTIFICATE_ARN =
             "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555";
+    private static final String REPLACEMENT_CERTIFICATE_ARN =
+            "arn:aws:acm:us-east-1:123456789012:certificate/99999999-2222-3333-4444-555555555555";
 
     private final ObjectMapper mapper = new ObjectMapper();
     private RedshiftServerlessJsonHandler handler;
@@ -67,8 +72,19 @@ class RedshiftServerlessAdministrationHandlerTest {
         when(config.storage().persistentPath()).thenReturn(System.getProperty("java.io.tmpdir"));
         serverlessService =
                 new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config);
+
+        AcmService acmService = mock(AcmService.class);
+        Certificate testCert = new Certificate();
+        testCert.setArn(CERTIFICATE_ARN);
+        testCert.setNotAfter(Instant.parse("2028-06-15T12:00:00Z"));
+        when(acmService.describeCertificate(eq(CERTIFICATE_ARN), any())).thenReturn(testCert);
+        Certificate replacementCert = new Certificate();
+        replacementCert.setArn(REPLACEMENT_CERTIFICATE_ARN);
+        replacementCert.setNotAfter(Instant.parse("2029-01-01T00:00:00Z"));
+        when(acmService.describeCertificate(eq(REPLACEMENT_CERTIFICATE_ARN), any())).thenReturn(replacementCert);
+
         RedshiftServerlessCustomDomainService customDomains =
-                new RedshiftServerlessCustomDomainService(storageFactory, serverlessService);
+                new RedshiftServerlessCustomDomainService(storageFactory, serverlessService, acmService);
         handler = new RedshiftServerlessJsonHandler(serverlessService, mapper, mock(RedshiftIamDbUserResolver.class),
                 new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, serverlessService),
                 new RedshiftServerlessAdminJsonHandler(mapper,
@@ -278,6 +294,7 @@ class RedshiftServerlessAdministrationHandlerTest {
         JsonNode wgBefore = ok("GetWorkgroup", "{\"workgroupName\":\"domain-wg\"}").get("workgroup");
         assertFalse(wgBefore.has("customDomainName"));
         assertFalse(wgBefore.has("customDomainCertificateArn"));
+        assertFalse(wgBefore.has("customDomainCertificateExpiryTime"));
 
         String request = "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\","
                 + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}";
@@ -286,10 +303,12 @@ class RedshiftServerlessAdministrationHandlerTest {
         assertEquals("db.example.com", created.get("customDomainName").textValue());
         assertEquals("domain-wg", created.get("workgroupName").textValue());
         assertEquals(CERTIFICATE_ARN, created.get("customDomainCertificateArn").textValue());
+        assertEquals("2028-06-15T12:00:00.000Z", created.get("customDomainCertificateExpiryTime").textValue());
 
         JsonNode wgWithDomain = ok("GetWorkgroup", "{\"workgroupName\":\"domain-wg\"}").get("workgroup");
         assertEquals("db.example.com", wgWithDomain.get("customDomainName").textValue());
         assertEquals(CERTIFICATE_ARN, wgWithDomain.get("customDomainCertificateArn").textValue());
+        assertEquals("2028-06-15T12:00:00.000Z", wgWithDomain.get("customDomainCertificateExpiryTime").textValue());
 
         JsonNode listWg = ok("ListWorkgroups", "{}").get("workgroups");
         boolean foundInList = false;
@@ -297,45 +316,60 @@ class RedshiftServerlessAdministrationHandlerTest {
             if ("domain-wg".equals(wg.get("workgroupName").textValue())) {
                 assertEquals("db.example.com", wg.get("customDomainName").textValue());
                 assertEquals(CERTIFICATE_ARN, wg.get("customDomainCertificateArn").textValue());
+                assertEquals("2028-06-15T12:00:00.000Z", wg.get("customDomainCertificateExpiryTime").textValue());
                 foundInList = true;
             }
         }
         assertTrue(foundInList);
 
         assertEquals("ConflictException", errorType("CreateCustomDomainAssociation", request));
+        assertEquals("ConflictException", errorType("CreateCustomDomainAssociation",
+                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"other.example.com\","
+                        + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}"));
+        assertTrue(errorMessage("CreateCustomDomainAssociation",
+                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"other.example.com\","
+                        + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}")
+                .contains("already has a custom domain"));
+
         assertEquals("ValidationException", errorType("CreateCustomDomainAssociation",
                 "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"-bad\","
                         + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}"));
         assertEquals("ValidationException", errorType("CreateCustomDomainAssociation",
-                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"other.example.com\","
+                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"third.example.com\","
                         + "\"customDomainCertificateArn\":\"not-an-arn\"}"));
         assertEquals("ResourceNotFoundException", errorType("CreateCustomDomainAssociation",
                 "{\"workgroupName\":\"nope\",\"customDomainName\":\"x.example.com\","
                         + "\"customDomainCertificateArn\":\"" + CERTIFICATE_ARN + "\"}"));
 
-        String replacement = CERTIFICATE_ARN.replace("11111111", "99999999");
-        assertEquals(replacement, ok("UpdateCustomDomainAssociation", "{\"workgroupName\":\"domain-wg\","
-                + "\"customDomainName\":\"db.example.com\",\"customDomainCertificateArn\":\"" + replacement + "\"}")
-                .get("customDomainCertificateArn").textValue());
-        assertEquals(replacement, ok("GetCustomDomainAssociation",
-                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\"}")
-                .get("customDomainCertificateArn").textValue());
+        String replacement = REPLACEMENT_CERTIFICATE_ARN;
+        JsonNode updated = ok("UpdateCustomDomainAssociation", "{\"workgroupName\":\"domain-wg\","
+                + "\"customDomainName\":\"db.example.com\",\"customDomainCertificateArn\":\"" + replacement + "\"}");
+        assertEquals(replacement, updated.get("customDomainCertificateArn").textValue());
+        assertEquals("2029-01-01T00:00:00.000Z", updated.get("customDomainCertificateExpiryTime").textValue());
+
+        JsonNode got = ok("GetCustomDomainAssociation",
+                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\"}");
+        assertEquals(replacement, got.get("customDomainCertificateArn").textValue());
+        assertEquals("2029-01-01T00:00:00.000Z", got.get("customDomainCertificateExpiryTime").textValue());
 
         JsonNode wgUpdated = ok("GetWorkgroup", "{\"workgroupName\":\"domain-wg\"}").get("workgroup");
         assertEquals("db.example.com", wgUpdated.get("customDomainName").textValue());
         assertEquals(replacement, wgUpdated.get("customDomainCertificateArn").textValue());
+        assertEquals("2029-01-01T00:00:00.000Z", wgUpdated.get("customDomainCertificateExpiryTime").textValue());
 
-        assertEquals(1, ok("ListCustomDomainAssociations", "{\"customDomainName\":\"db.example.com\"}")
-                .get("associations").size());
+        JsonNode associationsList = ok("ListCustomDomainAssociations", "{\"customDomainName\":\"db.example.com\"}")
+                .get("associations");
+        assertEquals(1, associationsList.size());
+        assertEquals("2029-01-01T00:00:00.000Z", associationsList.get(0).get("customDomainCertificateExpiryTime").textValue());
         assertEquals(0, ok("ListCustomDomainAssociations", "{\"customDomainName\":\"x.example.com\"}")
                 .get("associations").size());
         assertEquals("ValidationException", errorType("UpdateCustomDomainAssociation",
                 "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\"}"));
         assertEquals("ValidationException", errorType("ListCustomDomainAssociations", "{\"maxResults\":0}"));
         assertEquals("ValidationException", errorType("ListCustomDomainAssociations", "{\"maxResults\":101}"));
-        assertEquals("ValidationException", errorType("ListCustomDomainAssociations", "{\"nextToken\":\"bad-token\"}"));
+        assertEquals("InvalidPaginationException", errorType("ListCustomDomainAssociations", "{\"nextToken\":\"bad-token\"}"));
         JsonNode trackToken = ok("ListTracks", "{\"maxResults\":1}");
-        assertEquals("ValidationException", errorType("ListCustomDomainAssociations",
+        assertEquals("InvalidPaginationException", errorType("ListCustomDomainAssociations",
                 "{\"nextToken\":\"" + trackToken.get("nextToken").textValue() + "\"}"));
 
         assertEquals(0, ok("DeleteCustomDomainAssociation",
@@ -346,6 +380,7 @@ class RedshiftServerlessAdministrationHandlerTest {
         JsonNode wgAfterDelete = ok("GetWorkgroup", "{\"workgroupName\":\"domain-wg\"}").get("workgroup");
         assertFalse(wgAfterDelete.has("customDomainName"));
         assertFalse(wgAfterDelete.has("customDomainCertificateArn"));
+        assertFalse(wgAfterDelete.has("customDomainCertificateExpiryTime"));
     }
 
     @Test

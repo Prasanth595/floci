@@ -431,7 +431,7 @@ public class RedshiftServerlessJsonHandler {
 
     /**
      * Members the emulator does not model ({@code workgroupVersion}, {@code patchVersion},
-     * {@code crossAccountVpcs}, the custom domain certificate expiry time and {@code endpoint.vpcEndpoints}) are
+     * {@code crossAccountVpcs} and {@code endpoint.vpcEndpoints}) are
      * omitted rather than invented; all of them are optional in the API model.
      */
     private ObjectNode workgroupNode(Workgroup workgroup, String region) {
@@ -445,6 +445,10 @@ public class RedshiftServerlessJsonHandler {
             customDomains.findForWorkgroup(workgroup.getWorkgroupName(), region).ifPresent(association -> {
                 node.put("customDomainName", association.getCustomDomainName());
                 node.put("customDomainCertificateArn", association.getCustomDomainCertificateArn());
+                if (association.getCustomDomainCertificateExpiryTime() != null) {
+                    node.put("customDomainCertificateExpiryTime",
+                            ServerlessSupport.ISO_8601.format(association.getCustomDomainCertificateExpiryTime()));
+                }
             });
         }
         if (workgroup.getBaseCapacity() != null) {

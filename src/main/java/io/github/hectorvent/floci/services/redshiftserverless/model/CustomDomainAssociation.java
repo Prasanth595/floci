@@ -3,9 +3,11 @@ package io.github.hectorvent.floci.services.redshiftserverless.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.time.Instant;
+
 /**
- * A custom domain bound to a Redshift Serverless workgroup. Floci records the certificate ARN but
- * does not read the certificate, so it reports no expiry time.
+ * A custom domain bound to a Redshift Serverless workgroup. The certificate expiry time is read from
+ * ACM when the certificate exists in the emulator.
  */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -14,6 +16,7 @@ public class CustomDomainAssociation {
     private String workgroupName;
     private String customDomainName;
     private String customDomainCertificateArn;
+    private Instant customDomainCertificateExpiryTime;
     private String ownerId;
 
     public CustomDomainAssociation() {
@@ -24,6 +27,7 @@ public class CustomDomainAssociation {
         this.workgroupName = other.workgroupName;
         this.customDomainName = other.customDomainName;
         this.customDomainCertificateArn = other.customDomainCertificateArn;
+        this.customDomainCertificateExpiryTime = other.customDomainCertificateExpiryTime;
     }
 
     public String getWorkgroupName() {
@@ -48,6 +52,14 @@ public class CustomDomainAssociation {
 
     public void setCustomDomainCertificateArn(String customDomainCertificateArn) {
         this.customDomainCertificateArn = customDomainCertificateArn;
+    }
+
+    public Instant getCustomDomainCertificateExpiryTime() {
+        return customDomainCertificateExpiryTime;
+    }
+
+    public void setCustomDomainCertificateExpiryTime(Instant customDomainCertificateExpiryTime) {
+        this.customDomainCertificateExpiryTime = customDomainCertificateExpiryTime;
     }
 
     public String getOwnerId() {
