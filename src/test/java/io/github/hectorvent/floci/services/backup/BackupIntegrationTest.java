@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.backup;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -1452,7 +1453,7 @@ class BackupIntegrationTest {
             .formParam("Action", "CreateTopic").formParam("Name", name)
         .when().post("/").then().statusCode(200)
             .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
-        var subscribe = given().contentType("application/x-www-form-urlencoded")
+        RequestSpecification subscribe = given().contentType("application/x-www-form-urlencoded")
             .formParam("Action", "Subscribe").formParam("TopicArn", topicArn)
             .formParam("Protocol", "sqs").formParam("Endpoint", queueUrl);
         if (filterPolicy != null) {
