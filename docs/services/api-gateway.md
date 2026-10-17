@@ -226,7 +226,8 @@ placements AWS accepts are honoured: an `Authorization` header and a presigned q
 (`X-Amz-Algorithm=AWS4-HMAC-SHA256`). The credential must be scoped to the `execute-api` service.
 
 Temporary credentials must also present the session token they were issued with, as
-`X-Amz-Security-Token` (a header, or a query parameter on a presigned request). The token is
+`X-Amz-Security-Token` (a header, or a query parameter on a presigned request). As on AWS, the
+token is read only from where the signature is, and an empty one counts as sent. The token is
 compared against the value recorded when STS minted the credential, so a missing or fabricated one
 is rejected: the secret alone is not the whole credential. A long-term key must come with no
 token, as on AWS. Whether the token is covered by `SignedHeaders` is not required either way, since
@@ -239,7 +240,7 @@ Rejections are `403`, and never reach the integration:
 | No SigV4 credentials at all | `Missing Authentication Token` / `MissingAuthenticationTokenException` | `Forbidden` |
 | Credentials present but incomplete, or scoped to another service | `Incomplete Signature` / `IncompleteSignatureException` | `Forbidden` |
 | Access key the emulator never issued | `The security token included in the request is invalid.` / `UnrecognizedClientException` | `Forbidden` |
-| Temporary credential presenting no `X-Amz-Security-Token` | `The security token included in the request is invalid.` / `UnrecognizedClientException` | `Forbidden` |
+| Temporary credential presenting no `X-Amz-Security-Token`, or an empty one with any key | `The security token included in the request is invalid.` / `UnrecognizedClientException` | `Forbidden` |
 | `X-Amz-Security-Token` that is not the token the key was issued with, or any token with a long-term key | `The security token included in the request is invalid` / `UnrecognizedClientException` | `Forbidden` |
 | `X-Amz-Date` outside the 5-minute window, or a presigned URL past `X-Amz-Expires` | `Signature expired` / `InvalidSignatureException` | `Forbidden` |
 | Signature mismatch | `The request signature we calculated does not match…` / `InvalidSignatureException` | `Forbidden` |

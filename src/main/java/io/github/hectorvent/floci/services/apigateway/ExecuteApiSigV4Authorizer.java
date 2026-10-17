@@ -165,7 +165,9 @@ public class ExecuteApiSigV4Authorizer {
             return Result.rejected(Failure.UNKNOWN_KEY, "access key is not registered");
         }
 
-        Result sessionToken = checkSessionToken(scope.accessKeyId(), headers, queryParameters);
+        Result sessionToken = checkSessionToken(scope.accessKeyId(), presigned
+                ? queryParameters.getFirst(SECURITY_TOKEN)
+                : headers == null ? null : headers.getHeaderString(SECURITY_TOKEN));
         if (sessionToken != null) {
             return sessionToken;
         }
@@ -244,20 +246,16 @@ public class ExecuteApiSigV4Authorizer {
 
     /**
      * Rejects a session token that does not fit the access key, returning {@code null} when there
-     * is nothing to object to.
+     * is nothing to object to. AWS reads the token from where the signature is, the header or the
+     * presigned query, and ignores it in the other place.
      */
-    private Result checkSessionToken(String accessKeyId, HttpHeaders headers,
-                                     MultivaluedMap<String, String> queryParameters) {
+    private Result checkSessionToken(String accessKeyId, String presented) {
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             return null;
         }
-        String presented = queryParameters.getFirst(SECURITY_TOKEN);
-        if (isBlank(presented) && headers != null) {
-            presented = headers.getHeaderString(SECURITY_TOKEN);
-        }
         return switch (SessionTokenCheck.of(iamService, accessKeyId, presented)) {
             case VALID -> null;
-            case MISSING -> Result.rejected(Failure.UNKNOWN_KEY, "temporary credential presents no session token");
+            case MISSING -> Result.rejected(Failure.UNKNOWN_KEY, "session token is missing or empty");
             case INVALID -> Result.rejected(Failure.INVALID_TOKEN, "session token was not issued with the access key");
         };
     }

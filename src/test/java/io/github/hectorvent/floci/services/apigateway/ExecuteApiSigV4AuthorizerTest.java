@@ -229,10 +229,31 @@ class ExecuteApiSigV4AuthorizerTest {
         assertEquals(ExecuteApiSigV4Authorizer.Failure.INVALID_TOKEN,
                 authorizer.authorize("GET", headers(signed), uriInfo(PATH, null), null, null).failure());
 
+        signed.put("X-Amz-Security-Token", "");
+        assertEquals(ExecuteApiSigV4Authorizer.Failure.UNKNOWN_KEY,
+                authorizer.authorize("GET", headers(signed), uriInfo(PATH, null), null, null).failure());
+
         String presigned = ExecuteApiRequestSigner.presignedQueryString(
                 "GET", PATH, HOST, "AKIALONGTERM", "s3cr3t", REGION, Instant.now(), 900, "bogus");
         assertEquals(ExecuteApiSigV4Authorizer.Failure.INVALID_TOKEN,
                 authorizer.authorize("GET", headers(Map.of()), uriInfo(PATH, presigned), null, null).failure());
+    }
+
+    @Test
+    void theTokenIsReadOnlyFromWhereTheSignatureIs() throws Exception {
+        when(iamService.findSecretKey("AKIALONGTERM")).thenReturn(Optional.of("s3cr3t"));
+        when(iamService.resolveAccountId("AKIALONGTERM")).thenReturn(Optional.of("111122223333"));
+
+        Map<String, String> query = Map.of("X-Amz-Security-Token", "bogus");
+        Map<String, String> signed = ExecuteApiRequestSigner.signedHeaders(
+                "GET", PATH, query, HOST, null, "AKIALONGTERM", "s3cr3t", REGION, Instant.now());
+        assertTrue(authorizer.authorize("GET", headers(signed),
+                uriInfo(PATH, "X-Amz-Security-Token=bogus"), null, null).authorized());
+
+        String presigned = ExecuteApiRequestSigner.presignedQueryString(
+                "GET", PATH, HOST, "AKIALONGTERM", "s3cr3t", REGION, Instant.now(), 900);
+        assertTrue(authorizer.authorize("GET", headers(Map.of("X-Amz-Security-Token", "bogus")),
+                uriInfo(PATH, presigned), null, null).authorized());
     }
 
     private void liveSession(String accessKeyId, String issuedToken) {

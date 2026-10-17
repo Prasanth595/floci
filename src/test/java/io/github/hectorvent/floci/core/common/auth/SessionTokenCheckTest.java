@@ -15,7 +15,7 @@ class SessionTokenCheckTest {
     void aLongTermKeyComesWithoutAToken() {
         IamService iam = mock(IamService.class);
         assertEquals(SessionTokenCheck.VALID, SessionTokenCheck.of(iam, "AKIAEXAMPLE", null));
-        assertEquals(SessionTokenCheck.VALID, SessionTokenCheck.of(iam, "AKIAEXAMPLE", " "));
+        assertEquals(SessionTokenCheck.MISSING, SessionTokenCheck.of(iam, "AKIAEXAMPLE", ""));
         assertEquals(SessionTokenCheck.INVALID, SessionTokenCheck.of(iam, "AKIAEXAMPLE", "bogus"));
     }
 
@@ -24,6 +24,7 @@ class SessionTokenCheckTest {
         IamService iam = mock(IamService.class);
         when(iam.findSessionToken("ASIAEXAMPLE")).thenReturn(Optional.of("issued"));
         assertEquals(SessionTokenCheck.MISSING, SessionTokenCheck.of(iam, "ASIAEXAMPLE", null));
+        assertEquals(SessionTokenCheck.MISSING, SessionTokenCheck.of(iam, "ASIAEXAMPLE", ""));
         assertEquals(SessionTokenCheck.VALID, SessionTokenCheck.of(iam, "ASIAEXAMPLE", "issued"));
         assertEquals(SessionTokenCheck.INVALID, SessionTokenCheck.of(iam, "ASIAEXAMPLE", "bogus"));
     }
