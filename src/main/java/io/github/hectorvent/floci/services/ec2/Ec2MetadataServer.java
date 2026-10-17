@@ -136,6 +136,9 @@ public class Ec2MetadataServer {
 
         Router router = Router.router(vertx);
         router.route().handler(BodyHandler.create());
+        // Ahead of every route, so a path IMDS does not serve also answers 401 when the instance
+        // requires tokens, as on AWS.
+        router.get().handler(this::refuseTokenlessReadsWhenTokensAreRequired);
 
         // IMDSv2 token endpoint
         router.put("/latest/api/token").handler(this::handleToken);
@@ -496,6 +499,22 @@ public class Ec2MetadataServer {
         return containerIpToInstance.get(remoteIp);
     }
 
+    /**
+     * An instance whose HttpTokens is required refuses IMDSv1: as AWS does, a read without a token
+     * gets 401 before any data is looked up, whatever the path.
+     */
+    private void refuseTokenlessReadsWhenTokensAreRequired(RoutingContext ctx) {
+        String token = ctx.request().getHeader("x-aws-ec2-metadata-token");
+        if (token == null || token.isBlank()) {
+            Instance inst = resolveInstanceByIp(ctx);
+            if (inst != null && "required".equals(inst.effectiveMetadataOptions().getHttpTokens())) {
+                ctx.response().setStatusCode(401).end();
+                return;
+            }
+        }
+        ctx.next();
+    }
+
     private Instance resolveInstance(RoutingContext ctx) {
         String remoteIp = ctx.request().remoteAddress().host();
         Instance inst = containerIpToInstance.get(remoteIp);
@@ -503,8 +522,8 @@ public class Ec2MetadataServer {
         // IMDSv2: a presented token must be valid; an invalid or expired one gets 401 so the
         // caller fetches a new token. A token is not valid on another instance, so a caller whose
         // IP maps to a different instance also gets 401; an unregistered IP defers to the token.
-        // Requests without a token fall back to IMDSv1 unless the instance's HttpTokens is
-        // required, which answers them 401 as AWS does.
+        // Requests without a token fall back to IMDSv1; one whose instance requires tokens has
+        // already been refused before routing.
         String token = ctx.request().getHeader("x-aws-ec2-metadata-token");
         if (token != null && !token.isBlank()) {
             SessionToken session = tokens.get(token);
@@ -530,9 +549,6 @@ public class Ec2MetadataServer {
             ctx.response().setStatusCode(404)
                     .putHeader("content-type", "text/plain")
                     .end(message);
-        } else if ("required".equals(inst.effectiveMetadataOptions().getHttpTokens())) {
-            ctx.response().setStatusCode(401).end();
-            return null;
         }
         return inst;
     }

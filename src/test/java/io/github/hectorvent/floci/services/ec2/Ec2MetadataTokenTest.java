@@ -122,6 +122,25 @@ class Ec2MetadataTokenTest {
         assertEquals("", response.body());
     }
 
+    /** AWS refuses the request before looking at the path, so a listing IMDS does not serve is 401 too. */
+    @ParameterizedTest
+    @ValueSource(strings = {"/latest/meta-data/", "/latest/meta-data/no-such-item", "/latest/"})
+    void requiredTokenRefusesPathsImdsDoesNotServe(String path) throws Exception {
+        setTokenRequirement("required");
+
+        assertEquals(401, getWithoutToken(path).statusCode());
+    }
+
+    @Test
+    void aPathImdsDoesNotServeIsStillNotFoundWithAToken() throws Exception {
+        setTokenRequirement("required");
+        String token = fixture.putToken("60").body();
+
+        assertEquals(404, fixture.get("/latest/meta-data/no-such-item", token).statusCode());
+        setTokenRequirement("optional");
+        assertEquals(404, getWithoutToken("/latest/meta-data/no-such-item").statusCode());
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"", " "})
     void blankTokenDoesNotBypassRequiredTokens(String token) throws Exception {
