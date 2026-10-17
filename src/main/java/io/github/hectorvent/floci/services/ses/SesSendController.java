@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.ses.address.SesAddressSyntax;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
@@ -587,19 +588,8 @@ public class SesSendController {
 
     private static AwsException constraintViolation(String value, String path, String constraint) {
         String subject = value == null ? "Value" : "Value '" + value + "'";
-        return new AwsException("BadRequestException",
-                "1 validation error detected: " + subject + " at '" + path
-                        + "' failed to satisfy constraint: " + constraint, 400);
-    }
-
-    /**
-     * A request's validation failures, one or more, reported together the way SES's Smithy layer
-     * does: each entry reads "Value at 'path' failed to satisfy constraint: ...", in the order SES
-     * lists them.
-     */
-    private static AwsException validationErrors(List<String> violations) {
-        return new AwsException("BadRequestException", violations.size() + " validation error"
-                + (violations.size() > 1 ? "s" : "") + " detected: " + String.join("; ", violations), 400);
+        return SmithyValidationErrors.exception("BadRequestException",
+                List.of(subject + " at '" + path + "' failed to satisfy constraint: " + constraint));
     }
 
     private static AwsException missingHeaderMember(String location, int index, String member) {
@@ -624,7 +614,7 @@ public class SesSendController {
             violations.add(trackingViolation("openTrackingEnabled"));
         }
         if (!violations.isEmpty()) {
-            throw validationErrors(violations);
+            throw SmithyValidationErrors.exception("BadRequestException", violations);
         }
     }
 
