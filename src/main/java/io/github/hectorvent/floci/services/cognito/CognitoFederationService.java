@@ -105,25 +105,28 @@ public class CognitoFederationService {
     private IdentityProvider transactionProvider(CognitoAuthorizationTransaction transaction) {
         IdentityProvider stored = cognitoService.describeIdentityProvider(transaction.userPoolId(),
                 transaction.providerName());
-        if (!"Google".equals(stored.getProviderType()) && !OIDC_PROVIDER_TYPE.equals(stored.getProviderType())) {
+        if ("Google".equals(stored.getProviderType())) {
+            if (transaction.providerDetails() != null && !transaction.providerDetails().isEmpty()) {
+                Map<String, String> details = new LinkedHashMap<>(stored.getProviderDetails());
+                details.putAll(transaction.providerDetails());
+                IdentityProvider resolved = new IdentityProvider();
+                resolved.setUserPoolId(stored.getUserPoolId());
+                resolved.setProviderName(stored.getProviderName());
+                resolved.setProviderType(stored.getProviderType());
+                resolved.setProviderDetails(details);
+                resolved.setAttributeMapping(stored.getAttributeMapping());
+                resolved.setIdpIdentifiers(stored.getIdpIdentifiers());
+                resolved.setCreationDate(stored.getCreationDate());
+                resolved.setLastModifiedDate(stored.getLastModifiedDate());
+                return resolved;
+            }
+            return oidcClient.googleProvider(stored);
+        }
+        if (!OIDC_PROVIDER_TYPE.equals(stored.getProviderType())) {
             throw new AwsException("InvalidParameterException", "Identity provider " + stored.getProviderName()
                     + " must have ProviderType OIDC or Google", 400);
         }
-        if (transaction.providerDetails() != null && !transaction.providerDetails().isEmpty()) {
-            Map<String, String> details = new LinkedHashMap<>(stored.getProviderDetails());
-            details.putAll(transaction.providerDetails());
-            IdentityProvider resolved = new IdentityProvider();
-            resolved.setUserPoolId(stored.getUserPoolId());
-            resolved.setProviderName(stored.getProviderName());
-            resolved.setProviderType(stored.getProviderType());
-            resolved.setProviderDetails(details);
-            resolved.setAttributeMapping(stored.getAttributeMapping());
-            resolved.setIdpIdentifiers(stored.getIdpIdentifiers());
-            resolved.setCreationDate(stored.getCreationDate());
-            resolved.setLastModifiedDate(stored.getLastModifiedDate());
-            return resolved;
-        }
-        return federationProvider(transaction.userPoolId(), transaction.providerName());
+        return stored;
     }
 
     private Map<String, String> mapAttributes(IdentityProvider provider, JsonNode claims) {
@@ -152,6 +155,9 @@ public class CognitoFederationService {
     }
 
     private String optionalText(JsonNode json, String fieldName) {
+        if (json == null) {
+            return null;
+        }
         JsonNode value = json.get(fieldName);
         if (value == null || value.isNull() || !value.isValueNode() || value.asText().isBlank()) {
             return null;
