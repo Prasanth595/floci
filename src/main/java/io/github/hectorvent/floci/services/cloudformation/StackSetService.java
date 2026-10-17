@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -649,9 +650,12 @@ public class StackSetService {
                 ss.getTemplateBody(), null, ss.getParameters(), ss.getCapabilities(), ss.getTags(), region, account);
         // An instance whose stack already has what the stack set describes is left as it is, as on
         // AWS: executing its change set, which has nothing to change, would update the stack anyway.
+        // That change set is the engine's own and is not left behind.
         boolean nothingToChange = changeSet != null && "FAILED".equals(changeSet.getStatus())
                 && CloudFormationService.NO_CHANGES_REASON.equals(changeSet.getStatusReason());
-        if (!nothingToChange) {
+        if (nothingToChange) {
+            RequestScopes.runAs(account, region, () -> cfnService.deleteChangeSet(stackName, changeSetName, region));
+        } else {
             await(cfnService.executeChangeSet(stackName, changeSetName, region, account));
         }
 
@@ -666,8 +670,12 @@ public class StackSetService {
         String stackStatus = stacks.isEmpty() ? null : stacks.get(0).getStatus();
         // Only a clean create/update is a success. A failed resource rolls the stack back, so its
         // terminal status is ROLLBACK_COMPLETE (not *_FAILED) — treat anything that is not COMPLETE
-        // as a failed instance so the operation status reflects it.
-        if (!"CREATE_COMPLETE".equals(stackStatus) && !"UPDATE_COMPLETE".equals(stackStatus)) {
+        // as a failed instance so the operation status reflects it. A stack with nothing to change
+        // accepted the preflight and already has what the stack set describes, whatever status an
+        // earlier rolled-back update left it in.
+        if (nothingToChange) {
+            inst.setDetailedStatus("SUCCEEDED");
+        } else if (!"CREATE_COMPLETE".equals(stackStatus) && !"UPDATE_COMPLETE".equals(stackStatus)) {
             inst.setStatus("INOPERABLE");
             inst.setDetailedStatus("FAILED");
             inst.setStatusReason(stacks.isEmpty() ? null : stacks.get(0).getStatusReason());

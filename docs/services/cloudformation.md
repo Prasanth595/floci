@@ -403,13 +403,19 @@ as CloudFormation processes it: `AWS::Include` fragments are read again and merg
 transform is applied with the stack's parameter values. The same comparison decides which resources
 a change set modifies.
 
+What each dynamic reference resolved to is kept on the stack when an operation completes, as an
+HMAC-SHA256 under a random key of the stack's own, so no resolved value is stored. An update that
+fails and rolls back keeps the values of the last deployment. A stack set instance whose stack has
+nothing to change is left as it is and succeeds, and the change set that found it so is not kept.
+
 A `CreateChangeSet` for such an update is created `FAILED`, `UNAVAILABLE`, with `The submitted
 information didn't contain changes. Submit different information to create a change set.`, which is
 what the AWS CLI's `deploy` and the CDK read as "no changes".
 
 The CDK then deletes that change set, and before its next deploy deletes it again by name. A
 `DeleteChangeSet` for a change set the stack does not have succeeds, as on AWS, whatever the stack's
-status; a stack that does not exist is still a `ValidationError`.
+status, named with its stack or by its ARN alone; a `StackName` that names no stack is still a
+`ValidationError`.
 
 ## Lambda Stack Updates
 

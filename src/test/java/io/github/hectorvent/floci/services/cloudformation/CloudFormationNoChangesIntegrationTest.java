@@ -213,6 +213,100 @@ class CloudFormationNoChangesIntegrationTest {
     }
 
     /**
+     * A dynamic reference inside an Fn::Sub that reads a resource compares as the value it resolves
+     * to, the resource read left as written: unchanged, the template is no update; once the stored
+     * value moved, it is one.
+     */
+    @Test
+    void aDynamicReferenceBesideAResourceReadComparesByItsValue() {
+        String source = "/no-change/beside-" + suffix;
+        ssmService.putParameter(source, "first", "String", null, true, "us-east-1");
+        parametersToDelete.add(source);
+        String template = """
+                {"Resources": {
+                   "A": {"Type": "AWS::SSM::Parameter", "Properties": {"Type": "String", "Value": "a"}},
+                   "B": {"Type": "AWS::SSM::Parameter", "Properties": {"Type": "String",
+                     "Value": {"Fn::Sub": "${A}-{{resolve:ssm:%s}}"}}}}}""".formatted(source);
+        String stackName = name("beside-resource");
+        create(stackName, template);
+
+        update(stackName, template)
+                .statusCode(400)
+                .body(containsString("No updates are to be performed."));
+
+        ssmService.putParameter(source, "second", "String", null, true, "us-east-1");
+        update(stackName, template).statusCode(200);
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+    }
+
+    /**
+     * An update that fails rolls back to what the stack had, the dynamic reference values it was
+     * deployed with included: retried after a stored value moved, it is still an update.
+     */
+    @Test
+    void aFailedUpdateLeavesTheDeployedDynamicReferenceValues() {
+        String source = "/no-change/rolled-back-" + suffix;
+        ssmService.putParameter(source, "first", "String", null, true, "us-east-1");
+        parametersToDelete.add(source);
+        String copy = """
+                "Copy": {"Type": "AWS::SSM::Parameter",
+                   "Properties": {"Type": "String", "Value": "{{resolve:ssm:%s}}"}}""".formatted(source);
+        String template = "{\"Resources\": {" + copy + "}}";
+        // A nested stack without a TemplateURL fails once Copy took the new value.
+        String failing = "{\"Resources\": {" + copy + ", \"Nested\": {\"Type\": \"AWS::CloudFormation::Stack\","
+                + " \"DependsOn\": \"Copy\", \"Properties\": {}}}}";
+        String stackName = name("rolled-back");
+        create(stackName, template);
+
+        ssmService.putParameter(source, "second", "String", null, true, "us-east-1");
+        update(stackName, failing).statusCode(200);
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+
+        update(stackName, template).statusCode(200);
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+    }
+
+    /**
+     * What reads a resource is compared as written, an AWS::NoValue in it included: an Fn::Join that
+     * drops one is an update.
+     */
+    @Test
+    void aNoValueInsideAResourceReadIsPartOfWhatIsWritten() {
+        String template = """
+                {"Resources": {
+                   "A": {"Type": "AWS::SSM::Parameter", "Properties": {"Type": "String", "Value": "a"}},
+                   "B": {"Type": "AWS::SSM::Parameter", "Properties": {"Type": "String",
+                     "Value": {"Fn::Join": ["-", [{"Ref": "A"}, "x", {"Ref": "AWS::NoValue"}]]}}}}}""";
+        String stackName = name("novalue-written");
+        create(stackName, template);
+
+        update(stackName, template.replace(", {\"Ref\": \"AWS::NoValue\"}", "")).statusCode(200);
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+    }
+
+    /**
+     * The array form of an Fn::Sub that reads a resource has its other variables replaced by their
+     * values too, those its own map defines left as written: an AWS::Region written as its value is
+     * no update.
+     */
+    @Test
+    void anFnSubArrayReadingAResourceComparesItsOtherVariablesByValue() {
+        String template = """
+                {"Resources": {
+                   "A": {"Type": "AWS::SSM::Parameter", "Properties": {"Type": "String", "Value": "a"}},
+                   "B": {"Type": "AWS::SSM::Parameter", "Properties": {"Type": "String",
+                     "Value": {"Fn::Sub": ["${A}-${AWS::Region}-${X}", {"X": "x"}]}}}}}""";
+        String stackName = name("sub-array");
+        create(stackName, template);
+
+        update(stackName, template.replace("${AWS::Region}", "us-east-1"))
+                .statusCode(400)
+                .body(containsString("No updates are to be performed."));
+        update(stackName, template.replace("{\"X\": \"x\"}", "{\"X\": \"y\"}")).statusCode(200);
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+    }
+
+    /**
      * A transformed template is compared as CloudFormation processes it: the SAM transform applied,
      * so resubmitting an unchanged SAM template is not an update either.
      */
@@ -395,6 +489,10 @@ class CloudFormationNoChangesIntegrationTest {
                 .statusCode(200)
                 .body(containsString("<DeleteChangeSetResult/>"));
         deleteChangeSet(stackName, id).statusCode(200);
+        // By its ARN alone too, with no StackName (measured 2026-10-17).
+        deleteChangeSet(null, id)
+                .statusCode(200)
+                .body(containsString("<DeleteChangeSetResult/>"));
         deleteChangeSet(name("delete-again-missing"), "cdk-deploy-change-set")
                 .statusCode(400)
                 .body(containsString("<Code>ValidationError</Code>"));
@@ -402,12 +500,15 @@ class CloudFormationNoChangesIntegrationTest {
         assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
     }
 
+    /** {@code stackName} null sends none: the change set is named by its ARN alone. */
     private static ValidatableResponse deleteChangeSet(String stackName, String changeSetName) {
-        return given().contentType("application/x-www-form-urlencoded")
+        RequestSpecification request = given().contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "DeleteChangeSet")
-                .formParam("StackName", stackName)
-                .formParam("ChangeSetName", changeSetName)
-                .when().post("/").then();
+                .formParam("ChangeSetName", changeSetName);
+        if (stackName != null) {
+            request.formParam("StackName", stackName);
+        }
+        return request.when().post("/").then();
     }
 
     /** A name unique to this run, so a rerun in the same JVM never meets a stack of an earlier one. */

@@ -340,6 +340,92 @@ class CloudFormationStackSetsIntegrationTest {
         .then().statusCode(200)
             .body(containsString("<Action>UPDATE</Action>"))
             .body(not(containsString("<Status>FAILED</Status>")));
+        // The change set that found nothing to change is not left on the instance's stack.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListChangeSets")
+            .formParam("StackName", "StackSet-" + setName + "-" + ACCOUNT_B)
+            .header("Authorization", auth(ACCOUNT_B, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(not(containsString("<Status>FAILED</Status>")));
+    }
+
+    /**
+     * An update that failed rolls the instance's stack back to its template. Updating the stack set
+     * back to that template has nothing to change, and the instance succeeds.
+     */
+    @Test
+    void anUpdateStackSetBackToARolledBackInstancesTemplateSucceeds() {
+        String setName = "back-" + UUID.randomUUID().toString().substring(0, 8);
+        String queue = "back-" + UUID.randomUUID().toString().substring(0, 8);
+        String failing = """
+            {"Resources":{"Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"%s"}},
+              "Nested":{"Type":"AWS::CloudFormation::Stack","Properties":{}}}}
+            """.formatted(queue);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", queueTemplate(queue))
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackInstances")
+            .formParam("StackSetName", setName)
+            .formParam("Accounts.member.1", ACCOUNT_B)
+            .formParam("Regions.member.1", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", failing)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "StackSet-" + setName + "-" + ACCOUNT_B)
+            .header("Authorization", auth(ACCOUNT_B, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_ROLLBACK_COMPLETE</StackStatus>"));
+
+        String operationId = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", queueTemplate(queue))
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("UpdateStackSetResponse.UpdateStackSetResult.OperationId");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackSetOperation")
+            .formParam("StackSetName", setName)
+            .formParam("OperationId", operationId)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<Status>SUCCEEDED</Status>"));
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackInstance")
+            .formParam("StackSetName", setName)
+            .formParam("StackInstanceAccount", ACCOUNT_B)
+            .formParam("StackInstanceRegion", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<DetailedStatus>SUCCEEDED</DetailedStatus>"));
     }
 
     @Test

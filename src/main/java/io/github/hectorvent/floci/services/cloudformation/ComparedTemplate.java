@@ -83,7 +83,7 @@ final class ComparedTemplate {
             for (String key : keys) {
                 JsonNode value = definition.get(key);
                 if (value != null) {
-                    compared.set(key, compared(value));
+                    compared.set(key, compared(value, false));
                 }
             }
             section.set(entry.getKey(), compared);
@@ -91,15 +91,19 @@ final class ComparedTemplate {
         return section;
     }
 
-    private JsonNode compared(JsonNode node) {
+    /**
+     * @param asWritten whether {@code node} is inside a function compared as written, where an
+     *                  {@code AWS::NoValue} is part of what is written rather than an absent value
+     */
+    private JsonNode compared(JsonNode node, boolean asWritten) {
         if (node.isTextual()) {
             return dynamicReferencesIn(node);
         }
         if (node.isArray()) {
             ArrayNode array = objectMapper.createArrayNode();
             node.forEach(element -> {
-                JsonNode compared = compared(element);
-                if (!isNoValue(compared)) {
+                JsonNode compared = compared(element, asWritten);
+                if (asWritten || !isNoValue(compared)) {
                     array.add(compared);
                 }
             });
@@ -113,7 +117,7 @@ final class ComparedTemplate {
             JsonNode argument = node.get(function);
             if ("Fn::If".equals(function) && argument.isArray() && argument.size() == 3) {
                 return compared(conditions.getOrDefault(argument.get(0).asText(), false)
-                        ? argument.get(1) : argument.get(2));
+                        ? argument.get(1) : argument.get(2), asWritten);
             }
             if (isNoValue(node)) {
                 return node;
@@ -123,17 +127,25 @@ final class ComparedTemplate {
             }
             if ("Fn::Sub".equals(function) && argument.isTextual()) {
                 ObjectNode sub = objectMapper.createObjectNode();
-                sub.put("Fn::Sub", substituteStaticVariables(argument.asText()));
+                sub.put("Fn::Sub", substituteStaticVariables(argument.asText(), objectMapper.createObjectNode()));
+                return sub;
+            }
+            if ("Fn::Sub".equals(function) && argument.isArray() && argument.size() == 2
+                    && argument.get(0).isTextual()) {
+                ObjectNode sub = objectMapper.createObjectNode();
+                sub.putArray("Fn::Sub")
+                        .add(substituteStaticVariables(argument.get(0).asText(), argument.get(1)))
+                        .add(compared(argument.get(1), true));
                 return sub;
             }
             ObjectNode kept = objectMapper.createObjectNode();
-            kept.set(function, compared(argument));
+            kept.set(function, compared(argument, true));
             return kept;
         }
         ObjectNode object = objectMapper.createObjectNode();
         node.fields().forEachRemaining(field -> {
-            JsonNode compared = compared(field.getValue());
-            if (!isNoValue(compared)) {
+            JsonNode compared = compared(field.getValue(), asWritten);
+            if (asWritten || !isNoValue(compared)) {
                 object.set(field.getKey(), compared);
             }
         });
@@ -198,9 +210,10 @@ final class ComparedTemplate {
 
     /**
      * An {@code Fn::Sub} string that reads a resource, with every other variable (a parameter, a
-     * pseudo parameter) replaced by its value, so only the resource reads remain as written.
+     * pseudo parameter) replaced by its value, so only the resource reads remain as written. A
+     * variable its own map defines stays as written: the map is compared beside it.
      */
-    private String substituteStaticVariables(String text) {
+    private String substituteStaticVariables(String text, JsonNode variables) {
         Matcher matcher = SUB_VARIABLE.matcher(text);
         StringBuilder result = new StringBuilder();
         while (matcher.find()) {
@@ -208,7 +221,7 @@ final class ComparedTemplate {
             int dot = name.indexOf('.');
             boolean readsResource = !name.startsWith("!")
                     && resourceIds.contains(dot < 0 ? name : name.substring(0, dot));
-            String replacement = name.startsWith("!") || readsResource
+            String replacement = name.startsWith("!") || readsResource || variables.has(name)
                     ? matcher.group()
                     : engine.resolve(objectMapper.createObjectNode().put("Ref", name));
             matcher.appendReplacement(result, Matcher.quoteReplacement(replacement));
