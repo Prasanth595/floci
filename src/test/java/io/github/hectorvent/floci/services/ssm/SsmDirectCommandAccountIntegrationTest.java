@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ssm.model.Command;
 import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -387,8 +388,7 @@ class SsmDirectCommandAccountIntegrationTest {
 
     private Response call(String account, String region, String action, Map<String, Object> body) {
         return given().port(endpoint.getPort()).contentType("application/x-amz-json-1.1")
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + account
-                        + "/20261013/" + region + "/ssm/aws4_request")
+                .header("Authorization", EnforcementFixtures.auth(account, region, "ssm"))
                 .header("X-Amz-Target", action).body(body).post("/")
                 .then().statusCode(200).extract().response();
     }
