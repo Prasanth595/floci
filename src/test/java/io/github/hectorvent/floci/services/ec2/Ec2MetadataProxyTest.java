@@ -2,42 +2,30 @@ package io.github.hectorvent.floci.services.ec2;
 
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.sun.net.httpserver.HttpServer;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
-import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class Ec2MetadataProxyTest {
-
-    /** What an application image can carry into a {@code docker exec}, plus one setting the shells must keep. */
-    private static final Map<String, String> APPLICATION_ENVIRONMENT = Map.of(
-            "LD_LIBRARY_PATH", "/fixture/application/lib",
-            "PYTHONPATH", "/fixture/application/modules",
-            "PYTHONHOME", "/fixture/application/python",
-            "KEEP_SETTING", "fixture-value");
-    /** Lets curl reach the loopback endpoints even when the build host sets a proxy. */
-    private static final Map<String, String> LOOPBACK_WITHOUT_PROXY = Map.of(
-            "NO_PROXY", "127.0.0.1", "no_proxy", "127.0.0.1");
 
     @Test
     void installCommandContainsSupportedPackageManagers() {
@@ -122,12 +110,13 @@ class Ec2MetadataProxyTest {
         Path bin = Files.createDirectory(directory.resolve("bin"));
         Path record = directory.resolve("tools");
         Path arguments = directory.resolve("arguments");
-        writeTool(bin, "dnf", checkedToolEnvironment()
+        HelperShellFixture.writeTool(bin, "dnf", HelperShellFixture.checkedToolEnvironment()
                 + "printf '%s\\n' \"$*\" > \"$TEST_ARGUMENTS\"\n");
 
-        assertEquals(0, runShell(Ec2MetadataProxy.installCommand(), directory, applicationEnvironment(Map.of(
-                "PATH", bin.toString(), "TEST_RECORD", record.toString(),
-                "TEST_ARGUMENTS", arguments.toString()))), shellOutput(directory));
+        assertEquals(0, HelperShellFixture.run(Ec2MetadataProxy.installCommand(), directory,
+                HelperShellFixture.applicationEnvironment(Map.of("PATH", bin.toString(),
+                        "TEST_RECORD", record.toString(), "TEST_ARGUMENTS", arguments.toString()))),
+                HelperShellFixture.output(directory));
 
         assertEquals("dnf\n", Files.readString(record));
         assertEquals("install -y --allowerasing iproute socat curl ca-certificates\n",
@@ -140,9 +129,11 @@ class Ec2MetadataProxyTest {
         Path bin = Files.createDirectory(directory.resolve("bin"));
         Path record = directory.resolve("tools");
         Path proxyReady = directory.resolve("proxy-ready");
-        writeTool(bin, "ip", checkedToolEnvironment() + "printf '127.0.0.1/32\\n'\n");
-        writeTool(bin, "socat", checkedToolEnvironment() + ": > \"$TEST_PROXY_READY\"\n");
-        writeTool(bin, "curl", checkedToolEnvironment()
+        HelperShellFixture.writeTool(bin, "ip", HelperShellFixture.checkedToolEnvironment()
+                + "printf '127.0.0.1/32\\n'\n");
+        HelperShellFixture.writeTool(bin, "socat", HelperShellFixture.checkedToolEnvironment()
+                + ": > \"$TEST_PROXY_READY\"\n");
+        HelperShellFixture.writeTool(bin, "curl", HelperShellFixture.checkedToolEnvironment()
                 + "for attempt in 1 2 3 4 5 6 7 8 9 10; do\n"
                 + "  [ -f \"$TEST_PROXY_READY\" ] && exit 0\n"
                 + "  /bin/sleep 0.1\n"
@@ -151,14 +142,13 @@ class Ec2MetadataProxyTest {
         try {
             String[] command = Ec2MetadataProxy.startCommand(
                     name, "127.0.0.1", 80, "127.0.0.1", 9169, "curl fixture && exit 0");
-            assertEquals(0, runShell(command, directory, applicationEnvironment(Map.of(
-                    "PATH", bin + ":" + System.getenv("PATH"),
-                    "TEST_RECORD", record.toString(), "TEST_PROXY_READY", proxyReady.toString()))),
-                    shellOutput(directory));
+            assertEquals(0, HelperShellFixture.run(command, directory,
+                    HelperShellFixture.applicationEnvironment(Map.of("PATH", bin + ":" + System.getenv("PATH"),
+                            "TEST_RECORD", record.toString(), "TEST_PROXY_READY", proxyReady.toString()))),
+                    HelperShellFixture.output(directory));
             assertEquals(Set.of("ip", "socat", "curl"), Set.copyOf(Files.readAllLines(record)));
         } finally {
-            Files.deleteIfExists(Path.of("/tmp/floci-" + name + "-proxy.pid"));
-            Files.deleteIfExists(Path.of("/tmp/floci-" + name + "-proxy.log"));
+            deleteProxyFiles(name);
         }
     }
 
@@ -167,12 +157,37 @@ class Ec2MetadataProxyTest {
             throws Exception {
         try (Ec2MetadataTestFixture fixture = new Ec2MetadataTestFixture()) {
             fixture.start();
-            LaunchTemplateData.MetadataOptions options = LaunchTemplateData.MetadataOptions.launchDefaults();
-            options.setHttpTokens("required");
-            fixture.instance().setMetadataOptions(options);
+            requireTokens(fixture.instance());
 
-            assertEquals(0, runShell(new String[]{"sh", "-c", Ec2MetadataProxy.imdsProbeCommand(fixture.endpoint())},
-                    directory, LOOPBACK_WITHOUT_PROXY), shellOutput(directory));
+            assertEquals(0, HelperShellFixture.run(probe(fixture.endpoint()), directory, Map.of()),
+                    HelperShellFixture.output(directory));
+        }
+    }
+
+    /** An image's proxy settings are for its application; the probe checks the link-local path itself. */
+    @Test
+    void readinessProbeIgnoresTheImagesHttpProxy(@TempDir Path directory) throws Exception {
+        List<String> proxied = new CopyOnWriteArrayList<>();
+        HttpServer proxy = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        proxy.createContext("/", exchange -> {
+            proxied.add(exchange.getRequestMethod() + " " + exchange.getRequestURI());
+            exchange.sendResponseHeaders(502, -1);
+            exchange.close();
+        });
+        proxy.start();
+        try (Ec2MetadataTestFixture fixture = new Ec2MetadataTestFixture()) {
+            fixture.start();
+            requireTokens(fixture.instance());
+            String proxyUrl = "http://127.0.0.1:" + proxy.getAddress().getPort();
+
+            int result = HelperShellFixture.run(probe(fixture.endpoint()), directory, Map.of(
+                    "http_proxy", proxyUrl, "HTTP_PROXY", proxyUrl, "all_proxy", proxyUrl,
+                    "ALL_PROXY", proxyUrl, "no_proxy", "", "NO_PROXY", ""));
+
+            assertEquals(0, result, HelperShellFixture.output(directory));
+            assertEquals(List.of(), proxied);
+        } finally {
+            proxy.stop(0);
         }
     }
 
@@ -185,74 +200,94 @@ class Ec2MetadataProxyTest {
     void readinessProbeNeverFallsBackToATokenlessRead(int tokenStatus, String tokenBody, @TempDir Path directory)
             throws Exception {
         List<String> requests = new CopyOnWriteArrayList<>();
-        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/latest/api/token", exchange -> {
-            requests.add(exchange.getRequestMethod() + " token "
-                    + exchange.getRequestHeaders().getFirst(Ec2MetadataTestFixture.TTL_HEADER));
-            byte[] body = tokenBody.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(tokenStatus, body.length == 0 ? -1 : body.length);
-            exchange.getResponseBody().write(body);
-            exchange.close();
-        });
-        server.createContext("/latest/meta-data/instance-id", exchange -> {
-            requests.add(exchange.getRequestMethod() + " metadata "
-                    + exchange.getRequestHeaders().getFirst(Ec2MetadataTestFixture.TOKEN_HEADER));
-            byte[] body = "i-fixture".getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, body.length);
-            exchange.getResponseBody().write(body);
-            exchange.close();
-        });
-        server.start();
+        HttpServer server = metadataStandIn(requests, attempt -> tokenStatus, tokenBody);
         try {
-            String probe = Ec2MetadataProxy.imdsProbeCommand("http://127.0.0.1:" + server.getAddress().getPort());
+            int result = HelperShellFixture.run(probe("http://127.0.0.1:" + server.getAddress().getPort()),
+                    directory, Map.of());
 
-            int result = runShell(new String[]{"sh", "-c", probe}, directory, LOOPBACK_WITHOUT_PROXY);
-
-            assertNotEquals(0, result, shellOutput(directory));
-            assertEquals(List.of("PUT token 60"), requests, shellOutput(directory));
+            assertNotEquals(0, result, HelperShellFixture.output(directory));
+            assertEquals(List.of("PUT token 60"), requests, HelperShellFixture.output(directory));
         } finally {
             server.stop(0);
         }
     }
 
-    private static String checkedToolEnvironment() {
-        return "[ -z \"${LD_LIBRARY_PATH+x}\" ] || exit 91\n"
-                + "[ -z \"${PYTHONPATH+x}\" ] || exit 92\n"
-                + "[ -z \"${PYTHONHOME+x}\" ] || exit 93\n"
-                + "[ \"$KEEP_SETTING\" = fixture-value ] || exit 94\n"
-                + "printf '%s\\n' \"${0##*/}\" >> \"$TEST_RECORD\"\n";
-    }
-
-    private static Map<String, String> applicationEnvironment(Map<String, String> settings) {
-        Map<String, String> environment = new HashMap<>(APPLICATION_ENVIRONMENT);
-        environment.putAll(settings);
-        return environment;
-    }
-
-    private static void writeTool(Path bin, String name, String script) throws IOException {
-        Path tool = bin.resolve(name);
-        Files.writeString(tool, "#!/bin/sh\nset -eu\n" + script);
-        assertTrue(tool.toFile().setExecutable(true));
-    }
-
-    /** Runs a generated helper shell with {@code /bin/sh}, its output going to {@link #shellOutput}. */
-    private static int runShell(String[] command, Path directory, Map<String, String> environment)
-            throws Exception {
-        List<String> arguments = new ArrayList<>(List.of(command));
-        arguments.set(0, "/bin/sh");
-        ProcessBuilder builder = new ProcessBuilder(arguments);
-        builder.environment().putAll(environment);
-        builder.redirectErrorStream(true).redirectOutput(directory.resolve("shell-output").toFile());
-        Process process = builder.start();
+    /**
+     * The proxy's first probes run before socat listens, so a refused token has to end only that
+     * attempt: the generated start script, under {@code set -eu}, retries until a token is issued.
+     */
+    @Test
+    void startScriptRetriesTheTokenProbeUntilATokenIsIssued(@TempDir Path directory) throws Exception {
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        HelperShellFixture.writeTool(bin, "ip", "printf '127.0.0.1/32\\n'\n");
+        HelperShellFixture.writeTool(bin, "socat", "exit 0\n");
+        List<String> requests = new CopyOnWriteArrayList<>();
+        HttpServer server = metadataStandIn(requests, attempt -> attempt == 1 ? 403 : 200, "fixture-token");
+        String name = "unit-" + UUID.randomUUID();
         try {
-            assertTrue(process.waitFor(5, TimeUnit.SECONDS), "Generated helper shell exceeded its bound");
-            return process.exitValue();
+            String[] command = Ec2MetadataProxy.startCommand(name, "127.0.0.1", 80, "127.0.0.1", 9169,
+                    Ec2MetadataProxy.imdsProbeCommand("http://127.0.0.1:" + server.getAddress().getPort()));
+
+            int result = HelperShellFixture.run(command, directory,
+                    Map.of("PATH", bin + ":" + System.getenv("PATH")));
+
+            assertEquals(0, result, HelperShellFixture.output(directory));
+            assertEquals(List.of("PUT token 60", "PUT token 60", "GET metadata fixture-token"), requests,
+                    HelperShellFixture.output(directory));
         } finally {
-            process.destroyForcibly();
+            server.stop(0);
+            deleteProxyFiles(name);
         }
     }
 
-    private static String shellOutput(Path directory) throws IOException {
-        return Files.readString(directory.resolve("shell-output"));
+    /**
+     * Answers token requests with the status {@code tokenStatus} picks for each attempt, serves the
+     * instance ID to the issued token and, as an instance allowing IMDSv1 would, to a tokenless
+     * read, and records what it was sent.
+     */
+    private static HttpServer metadataStandIn(List<String> requests, TokenStatus tokenStatus, String tokenBody)
+            throws Exception {
+        AtomicInteger tokenRequests = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/latest/api/token", exchange -> {
+            requests.add(exchange.getRequestMethod() + " token "
+                    + exchange.getRequestHeaders().getFirst(Ec2MetadataTestFixture.TTL_HEADER));
+            byte[] body = tokenBody.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(tokenStatus.forAttempt(tokenRequests.incrementAndGet()),
+                    body.length == 0 ? -1 : body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.createContext("/latest/meta-data/instance-id", exchange -> {
+            String token = exchange.getRequestHeaders().getFirst(Ec2MetadataTestFixture.TOKEN_HEADER);
+            requests.add(exchange.getRequestMethod() + " metadata " + token);
+            byte[] body = "i-fixture".getBytes(StandardCharsets.UTF_8);
+            boolean accepted = token == null || !tokenBody.isEmpty() && tokenBody.equals(token);
+            exchange.sendResponseHeaders(accepted ? 200 : 401, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+        return server;
+    }
+
+    @FunctionalInterface
+    private interface TokenStatus {
+        int forAttempt(int attempt);
+    }
+
+    private static String[] probe(String endpoint) {
+        return new String[]{"sh", "-c", Ec2MetadataProxy.imdsProbeCommand(endpoint)};
+    }
+
+    private static void requireTokens(Instance instance) {
+        LaunchTemplateData.MetadataOptions options = LaunchTemplateData.MetadataOptions.launchDefaults();
+        options.setHttpTokens("required");
+        instance.setMetadataOptions(options);
+    }
+
+    private static void deleteProxyFiles(String name) throws Exception {
+        Files.deleteIfExists(Path.of("/tmp/floci-" + name + "-proxy.pid"));
+        Files.deleteIfExists(Path.of("/tmp/floci-" + name + "-proxy.log"));
     }
 }

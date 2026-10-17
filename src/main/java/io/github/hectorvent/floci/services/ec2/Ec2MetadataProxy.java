@@ -58,13 +58,14 @@ public final class Ec2MetadataProxy {
     /**
      * Ready once an IMDSv2 token reads the instance ID, which also holds on an instance whose
      * HttpTokens is required. A refused or empty token ends the attempt rather than falling back to
-     * a tokenless read, which an empty token header would otherwise become.
+     * a tokenless read, which an empty token header would otherwise become. Both requests bypass
+     * any HTTP proxy the image configures: the check is of the link-local path itself.
      */
     static String imdsProbeCommand(String endpoint) {
-        return "token=$(curl -fsS --max-time 1 -X PUT "
+        return "token=$(curl -fsS --noproxy '*' --max-time 1 -X PUT "
                 + "-H 'X-aws-ec2-metadata-token-ttl-seconds: 60' " + endpoint + "/latest/api/token)"
                 + " && [ -n \"$token\" ]"
-                + " && curl -fsS --max-time 1 -H \"X-aws-ec2-metadata-token: $token\" "
+                + " && curl -fsS --noproxy '*' --max-time 1 -H \"X-aws-ec2-metadata-token: $token\" "
                 + endpoint + "/latest/meta-data/instance-id >/dev/null && exit 0";
     }
 
