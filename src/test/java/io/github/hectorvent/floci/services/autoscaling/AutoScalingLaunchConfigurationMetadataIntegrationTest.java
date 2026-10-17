@@ -133,12 +133,18 @@ class AutoScalingLaunchConfigurationMetadataIntegrationTest {
                 .formParam("InstanceType", "t3.micro")
                 .formParam("MetadataOptions.HttpTokens", "invalid")
                 .formParam("MetadataOptions.HttpPutResponseHopLimit", "65")
+                .formParam("MetadataOptions.HttpEndpoint", "invalid")
                 .post("/").then().statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-                .body("ErrorResponse.Error.Message", equalTo("2 validation errors detected: Value 'invalid' at"
+                .body("ErrorResponse.Error.Message", equalTo("3 validation errors detected: Value 'invalid' at"
                         + " 'metadataOptions.httpTokens' failed to satisfy constraint: Member must satisfy enum value"
                         + " set: [optional, required]; Value '65' at 'metadataOptions.httpPutResponseHopLimit' failed"
-                        + " to satisfy constraint: Member must have value less than or equal to 64"));
+                        + " to satisfy constraint: Member must have value less than or equal to 64; Value 'invalid' at"
+                        + " 'metadataOptions.httpEndpoint' failed to satisfy constraint: Member must satisfy enum value"
+                        + " set: [disabled, enabled]"));
+        request("autoscaling", "DescribeLaunchConfigurations")
+                .formParam("LaunchConfigurationNames.member.1", name).post("/").then().statusCode(200)
+                .body(LAUNCH_CONFIGURATION + ".size()", equalTo(0));
     }
 
     @ParameterizedTest
