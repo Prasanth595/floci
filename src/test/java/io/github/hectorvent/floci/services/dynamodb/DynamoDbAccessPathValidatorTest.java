@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -492,6 +493,24 @@ class DynamoDbAccessPathValidatorTest {
                                  "createdAt": {"S": "a"}, "sequence": {"S": "a"}, "alternate": {"S": ""}}
                                 """), table, gsiPath));
         assertEquals("The provided starting key is invalid", error.getMessage());
+    }
+
+    @Test
+    void anEmptyIndexKeyGetsTheKeyWordingFromQueryAndTheIndexWordingFromScan() throws Exception {
+        JsonNode startKey = mapper.readTree("""
+                {"pk": {"S": "a"}, "sk": {"S": "a"}, "alternate": {"S": ""}}
+                """);
+
+        AwsException query = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateExclusiveStartKey(startKey, table, lsiPath));
+        assertEquals("One or more parameter values are not valid. The AttributeValue for a key attribute "
+                + "cannot contain an empty string value. Key: alternate", query.getMessage());
+
+        AwsException scan = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateScanExclusiveStartKey(startKey, table, lsiPath));
+        assertEquals("One or more parameter values are not valid. A value specified for a secondary index key "
+                + "is not supported. The AttributeValue for a key attribute cannot contain an empty string value. "
+                + "IndexName: alternate-index, IndexKey: alternate", scan.getMessage());
     }
 
     @Test

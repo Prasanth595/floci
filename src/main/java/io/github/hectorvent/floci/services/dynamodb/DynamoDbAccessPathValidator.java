@@ -467,7 +467,9 @@ final class DynamoDbAccessPathValidator {
     // only that index. With several bad values AWS reports one in no fixed order.
     static void validateScanExclusiveStartKey(JsonNode exclusiveStartKey, TableDefinition table,
                                               DynamoDbAccessPath accessPath) {
-        if (exclusiveStartKey == null || exclusiveStartKey.isNull()) return;
+        if (exclusiveStartKey == null || exclusiveStartKey.isNull()) {
+            return;
+        }
         List<DynamoDbAccessPath> indexes = accessPath.isIndex()
                 ? List.of(accessPath)
                 : secondaryIndexNames(table).stream()
