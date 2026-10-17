@@ -449,9 +449,7 @@ final class DynamoDbAccessPathValidator {
             }
             String expectedType = startKeyAttributeType(table, attribute);
             if (isEmptyKeyValue(value, expectedType)) {
-                throw validationException("One or more parameter values are not valid. "
-                        + "The AttributeValue for a key attribute cannot contain an "
-                        + emptyValueKind(expectedType) + ". Key: " + attribute);
+                throw DynamoDbKeyValueErrors.emptyKeyValue(expectedType, attribute);
             }
             if (expectedType == null || hasInvalidScalarValue(value, expectedType)) {
                 throw invalidStartingKey();
@@ -482,20 +480,15 @@ final class DynamoDbAccessPathValidator {
                 String expectedType = startKeyAttributeType(table, attribute);
                 if (value != null && value.isObject() && !value.isEmpty()
                         && expectedType != null && !value.has(expectedType)) {
-                    throw validationException("One or more parameter values were invalid: Type mismatch for Index Key "
-                            + attribute + " Expected: " + expectedType + " Actual: " + value.fieldNames().next()
-                            + " IndexName: " + index.indexName());
+                    throw DynamoDbKeyValueErrors.indexKeyTypeMismatch(attribute, expectedType,
+                            value.fieldNames().next(), index.indexName());
                 }
             }
             for (String attribute : attributes) {
                 JsonNode value = exclusiveStartKey.get(attribute);
                 String expectedType = startKeyAttributeType(table, attribute);
                 if (value != null && isEmptyKeyValue(value, expectedType)) {
-                    throw validationException("One or more parameter values are not valid. "
-                            + "A value specified for a secondary index key is not supported. "
-                            + "The AttributeValue for a key attribute cannot contain an "
-                            + emptyValueKind(expectedType) + ". IndexName: " + index.indexName()
-                            + ", IndexKey: " + attribute);
+                    throw DynamoDbKeyValueErrors.emptyIndexKeyValue(expectedType, index.indexName(), attribute);
                 }
             }
         }
@@ -540,10 +533,6 @@ final class DynamoDbAccessPathValidator {
         return ("S".equals(expectedType) || "B".equals(expectedType))
                 && value.isObject() && value.size() == 1
                 && value.path(expectedType).isTextual() && value.get(expectedType).textValue().isEmpty();
-    }
-
-    private static String emptyValueKind(String type) {
-        return "B".equals(type) ? "empty binary value" : "empty string value";
     }
 
     private static boolean hasInvalidScalarValue(JsonNode value, String expectedType) {
