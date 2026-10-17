@@ -21,6 +21,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -221,14 +222,6 @@ class EcsServiceDeleteDeploymentsTest {
             assertTrue(!t.isAlive(), "worker thread finished");
         }
         assertTrue(workerFailures.isEmpty(), "workers threw: " + workerFailures);
-    }
-
-    private static void awaitBlockedOrDone(Thread t) throws InterruptedException {
-        for (int i = 0; i < 2000 && t.isAlive() && t.getState() != Thread.State.BLOCKED; i++) {
-            Thread.sleep(5);
-        }
-        assertTrue(!t.isAlive() || t.getState() == Thread.State.BLOCKED,
-                "worker blocked or finished before timeout");
     }
 
     private static ServiceDeployment onlyDeployment(EcsService service, String serviceName) {
