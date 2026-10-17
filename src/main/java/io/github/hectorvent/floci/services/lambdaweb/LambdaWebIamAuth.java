@@ -25,6 +25,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -87,19 +88,17 @@ public class LambdaWebIamAuth {
                           Long expiresSeconds, String sessionToken, boolean presigned) {
     }
 
-    /** Whether the request may invoke the target endpoint. Blocks on IAM storage. */
+    /**
+     * Whether the request may invoke the target endpoint. A failure inside Floci, such as in IAM
+     * storage, is thrown rather than taken for a refusal. Blocks on IAM storage.
+     */
     public boolean allows(Inbound request, WebFunctionTarget target) {
-        try {
-            String accessKeyId = authenticate(request, target.region());
-            return accessKeyId != null && authorize(accessKeyId, target);
-        } catch (Exception e) {
-            LOG.debugv(e, "Could not verify the signature of a request to {0}", target.endpoint().endpointArn);
-            return false;
-        }
+        String accessKeyId = authenticate(request, target.region());
+        return accessKeyId != null && authorize(accessKeyId, target);
     }
 
     /** The access key that signed the request, or null when the signature does not hold. */
-    private String authenticate(Inbound request, String region) throws Exception {
+    private String authenticate(Inbound request, String region) {
         Signed signed = signed(request);
         // Lambda takes this header as the payload hash and never reads the body.
         String payloadHash = request.headers().get("X-Amz-Content-SHA256");
@@ -107,10 +106,11 @@ public class LambdaWebIamAuth {
             return null;
         }
         CredentialScope scope = CredentialScope.parse(signed.credential());
+        Instant signedAt = signedAt(signed.amzDate());
         if (scope == null || !SERVICE.equals(scope.service()) || !region.equals(scope.region())
                 || !signed.amzDate().startsWith(scope.date())
                 || !SigV4RequestValidator.containsHeader(signed.signedHeaders(), "host")
-                || !fresh(Instant.from(AMZ_DATE.parse(signed.amzDate())), signed)) {
+                || signedAt == null || !fresh(signedAt, signed)) {
             return null;
         }
         String secretKey = secretKey(scope.accessKeyId(), signed.sessionToken());
@@ -121,11 +121,32 @@ public class LambdaWebIamAuth {
         }
         String canonicalHeaders = SigV4Canonicalization.canonicalHeaders(signed.signedHeaders(),
                 name -> String.join(",", request.headers().getAll(name)));
-        String canonicalQuery = SigV4Canonicalization.canonicalQueryString(request.query(), signed.presigned());
-        boolean matches = SigV4Canonicalization.signatureMatches(request.method(), signedPath(request.path()),
-                canonicalQuery, canonicalHeaders, signed.signedHeaders(), payloadHash, signed.amzDate(), scope,
-                secretKey, signed.signature());
+        String canonicalQuery;
+        try {
+            canonicalQuery = SigV4Canonicalization.canonicalQueryString(request.query(), signed.presigned());
+        } catch (IllegalArgumentException e) {
+            LOG.debugv("A request to a Lambda Web endpoint has a query that does not decode: {0}", e.getMessage());
+            return null;
+        }
+        boolean matches;
+        try {
+            matches = SigV4Canonicalization.signatureMatches(request.method(), signedPath(request.path()),
+                    canonicalQuery, canonicalHeaders, signed.signedHeaders(), payloadHash, signed.amzDate(), scope,
+                    secretKey, signed.signature());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not compute a SigV4 signature", e);
+        }
         return matches ? scope.accessKeyId() : null;
+    }
+
+    private static Instant signedAt(String amzDate) {
+        try {
+            return Instant.from(AMZ_DATE.parse(amzDate));
+        } catch (DateTimeException e) {
+            LOG.debugv("A request to a Lambda Web endpoint has a malformed date {0}",
+                    SigV4RequestValidator.sanitizeForLog(amzDate));
+            return null;
+        }
     }
 
     /**

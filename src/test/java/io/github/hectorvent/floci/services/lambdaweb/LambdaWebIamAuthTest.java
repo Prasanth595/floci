@@ -25,6 +25,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -151,6 +152,19 @@ class LambdaWebIamAuthTest {
     }
 
     @Test
+    void aMalformedDateOrQueryIsRefused() {
+        assertFalse(allows(signer().sign("GET", HOST, "/").withHeader("X-Amz-Date", "20261017T99")));
+        assertFalse(allows(signer().sign("GET", HOST, "/q?x=1").withPathAndQuery("/q?x=%zz")));
+    }
+
+    @Test
+    void aFailureInsideFlociIsNotTakenForARefusal() {
+        when(iamService.findSecretKeyInAnyAccount(USER_KEY, null)).thenThrow(new IllegalStateException("storage"));
+        assertThrows(IllegalStateException.class,
+                () -> allows(signer().credentials(USER_KEY, USER_SECRET, null).sign("GET", HOST, "/")));
+    }
+
+    @Test
     void underEnforcementTheCallerNeedsInvokeOnTheEndpoint() {
         enforceFor(ACCOUNT);
         assertTrue(allowsUserWith(allow(ENDPOINT_ARN, "")));
@@ -241,7 +255,11 @@ class LambdaWebIamAuthTest {
         MultiMap headers = MultiMap.caseInsensitiveMultiMap().add("Host", HOST);
         signed.headers().forEach(headers::add);
         MultiMap params = MultiMap.caseInsensitiveMultiMap();
-        new QueryStringDecoder(pathAndQuery).parameters().forEach(params::add);
+        try {
+            new QueryStringDecoder(pathAndQuery).parameters().forEach(params::add);
+        } catch (IllegalArgumentException expected) {
+            // The data plane keeps going with no parameters when the query does not decode.
+        }
         return iamAuth.allows(new Inbound(signed.method(), path, query, headers, params),
                 new WebFunctionTarget(ACCOUNT, "us-east-1", function, endpoint));
     }

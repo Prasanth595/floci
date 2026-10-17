@@ -136,6 +136,11 @@ public class LambdaWebDataPlane {
                 return;
             }
             request.resume();
+            if (allowed.failed()) {
+                LOG.errorv(allowed.cause(), "Could not check the caller of {0}", host);
+                internalError(request, requestId);
+                return;
+            }
             page(request, LambdaWebErrorPages.FORBIDDEN, requestId, false);
         });
     }
