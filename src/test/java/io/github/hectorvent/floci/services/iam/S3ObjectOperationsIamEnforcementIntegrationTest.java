@@ -12,13 +12,21 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.List;
+import java.util.Map;
 
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Each S3 operation is checked as the action AWS documents for it: the multipart upload operations
@@ -188,7 +196,9 @@ class S3ObjectOperationsIamEnforcementIntegrationTest {
                 .body(retention("2031-01-01T00:00:00Z"))
                 .when().put(f.path("a/governed")).then().statusCode(200);
 
+        // Extending the lock overrides nothing, so the header asks for nothing more; shortening it does.
         f.policy(f.allow("s3:PutObjectRetention"));
+        f.putRetention("a/governed", "2032-01-01T00:00:00Z", true).statusCode(200);
         denied(f.putRetention("a/governed", "2030-01-01T00:00:00Z", true), "s3:BypassGovernanceRetention");
 
         f.policy(f.allow("s3:PutObjectRetention", "s3:BypassGovernanceRetention"));
@@ -196,24 +206,67 @@ class S3ObjectOperationsIamEnforcementIntegrationTest {
     }
 
     @Test
-    void deletingWithTheBypassNeedsBypassGovernanceRetention() {
-        // The DeleteObject API reference: "To use this header, you must have the
-        // s3:BypassGovernanceRetention permission", whether or not the request names a version.
+    void deletingWithTheBypassNeedsBypassGovernanceRetentionOnlyToRemoveALockedVersion() {
+        // The permissions table: s3:BypassGovernanceRetention is "Required if you want to delete an
+        // object that's protected by governance mode", so the header on a delete that removes no
+        // locked version asks for nothing more.
         Fixture f = new Fixture("delete-bypass", true);
         String versionId = f.seedVersion("a/governed");
+        String free = f.seedVersion("a/free");
         f.admin().queryParam("retention", "").queryParam("versionId", versionId)
                 .body(retention("2031-01-01T00:00:00Z"))
                 .when().put(f.path("a/governed")).then().statusCode(200);
 
         f.policy(f.allow("s3:DeleteObject", "s3:DeleteObjectVersion"));
-        denied(f.user().header("x-amz-bypass-governance-retention", "true")
-                .when().delete(f.path("a/governed")).then(), "s3:BypassGovernanceRetention");
+        // An unlocked version, and a delete that only adds a delete marker over the locked one.
+        f.user().header("x-amz-bypass-governance-retention", "true").queryParam("versionId", free)
+                .when().delete(f.path("a/free")).then().statusCode(204);
+        f.user().header("x-amz-bypass-governance-retention", "true")
+                .when().delete(f.path("a/governed")).then().statusCode(204);
         denied(f.user().header("x-amz-bypass-governance-retention", "true").queryParam("versionId", versionId)
                 .when().delete(f.path("a/governed")).then(), "s3:BypassGovernanceRetention");
 
         f.policy(f.allow("s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"));
         f.user().header("x-amz-bypass-governance-retention", "true").queryParam("versionId", versionId)
                 .when().delete(f.path("a/governed")).then().statusCode(204);
+    }
+
+    @Test
+    void theBypassIsDecidedOnTheKeyARequestNamesEvenWithALeadingSlash() {
+        // A key that starts with "/" travels as "//" after the bucket, which JAX-RS collapses to the
+        // key without it. The lock is looked up on the key the request names, so a governance lock on
+        // "/governed" still needs s3:BypassGovernanceRetention to shorten or delete.
+        Fixture f = new Fixture("slash-bypass", true);
+        HttpResponse<String> put = f.raw("PUT", "/governed", null, ADMIN, Map.of(), "version");
+        assertEquals(200, put.statusCode(), put.body());
+        String versionId = put.headers().firstValue("x-amz-version-id").orElseThrow();
+        String version = "versionId=" + versionId;
+        assertEquals(200, f.raw("PUT", "/governed", "retention&" + version, ADMIN, Map.of(),
+                retention("2031-01-01T00:00:00Z")).statusCode());
+        Map<String, String> bypass = Map.of("x-amz-bypass-governance-retention", "true");
+
+        f.policy(f.allow("s3:PutObjectRetention", "s3:DeleteObjectVersion"));
+        rawDenied(f.raw("PUT", "/governed", "retention&" + version, f.accessKeyId, bypass,
+                retention("2030-01-01T00:00:00Z")), "s3:BypassGovernanceRetention");
+        rawDenied(f.raw("DELETE", "/governed", version, f.accessKeyId, bypass, null),
+                "s3:BypassGovernanceRetention");
+
+        f.policy(f.allow("s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"));
+        assertEquals(204, f.raw("DELETE", "/governed", version, f.accessKeyId, bypass, null).statusCode());
+    }
+
+    @Test
+    void anExistingObjectTagConditionReadsTheTagsOfTheKeyARequestNames() {
+        // "/doc" and "doc" are two objects; a read of "/doc" is authorized against its own tags.
+        Fixture f = new Fixture("slash-tags", true);
+        assertEquals(200, f.raw("PUT", "/doc", null, ADMIN, Map.of("x-amz-tagging", "env=a"), "slash").statusCode());
+        f.admin().header("x-amz-tagging", "env=b").body("plain").when().put(f.path("doc")).then().statusCode(200);
+
+        f.policy(f.allowWhen("{\"StringEquals\":{\"s3:ExistingObjectTag/env\":\"a\"}}", "s3:GetObject"));
+        HttpResponse<String> slash = f.raw("GET", "/doc", null, f.accessKeyId, Map.of(), null);
+        assertEquals(200, slash.statusCode(), slash.body());
+        assertEquals("slash", slash.body());
+        denied(f.user().when().get(f.path("doc")).then(), "s3:GetObject");
     }
 
     @Test
@@ -268,6 +321,10 @@ class S3ObjectOperationsIamEnforcementIntegrationTest {
                 .when().put(f.path("a/grant")).then(), "s3:PutObjectAcl");
         denied(f.user().header("x-amz-tagging", "env=a").queryParam("uploads", "")
                 .when().post(f.path("a/upload")).then(), "s3:PutObjectTagging");
+        // A multipart upload ignores x-amz-copy-source and applies its own tags, so the header does not
+        // make it a copy whose tags come from a source.
+        denied(f.user().header("x-amz-tagging", "env=a").header("x-amz-copy-source", f.bucket + "/a/source")
+                .queryParam("uploads", "").when().post(f.path("a/upload")).then(), "s3:PutObjectTagging");
         denied(f.user().header("x-amz-acl", "private").queryParam("uploads", "")
                 .when().post(f.path("a/upload")).then(), "s3:PutObjectAcl");
         denied(f.copy().header("x-amz-tagging-directive", "REPLACE").header("x-amz-tagging", "env=a")
@@ -575,6 +632,11 @@ class S3ObjectOperationsIamEnforcementIntegrationTest {
                 .body(containsString(action));
     }
 
+    private static void rawDenied(HttpResponse<String> response, String action) {
+        assertEquals(403, response.statusCode(), response.body());
+        assertTrue(response.body().contains("AccessDenied") && response.body().contains(action), response.body());
+    }
+
     private static String retention(String until) {
         return """
                 <Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
@@ -616,6 +678,28 @@ class S3ObjectOperationsIamEnforcementIntegrationTest {
 
         String path(String key) {
             return "/" + bucket + "/" + key;
+        }
+
+        /**
+         * Sends a request on {@code key} with the path as written, signed as {@code accessKeyId}:
+         * RestAssured, like JAX-RS, collapses the double slash a key starting with "/" travels as.
+         */
+        HttpResponse<String> raw(String method, String key, String query, String accessKeyId,
+                                 Map<String, String> headers, String body) {
+            URI uri = URI.create("http://localhost:" + baseUri.getPort() + path(key) + (query == null ? "" : "?" + query));
+            HttpRequest.Builder request = HttpRequest.newBuilder(uri)
+                    .header("Authorization", auth(accessKeyId, "s3"))
+                    .method(method, body == null
+                            ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofString(body));
+            headers.forEach(request::header);
+            try (HttpClient client = HttpClient.newHttpClient()) {
+                return client.send(request.build(), HttpResponse.BodyHandlers.ofString());
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
         }
 
         String allowOnBucket(String... actions) {
@@ -782,6 +866,11 @@ class S3ObjectOperationsIamEnforcementIntegrationTest {
                 List<String> keys = versions.getList("ListVersionsResult." + entry + ".Key", String.class);
                 List<String> ids = versions.getList("ListVersionsResult." + entry + ".VersionId", String.class);
                 for (int i = 0; i < keys.size(); i++) {
+                    if (keys.get(i).startsWith("/")) {
+                        assertEquals(204, raw("DELETE", keys.get(i), "versionId=" + ids.get(i), ADMIN,
+                                Map.of("x-amz-bypass-governance-retention", "true"), null).statusCode());
+                        continue;
+                    }
                     admin().header("x-amz-bypass-governance-retention", "true")
                             .queryParam("versionId", ids.get(i))
                             .when().delete(path(keys.get(i))).then().statusCode(204);

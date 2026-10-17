@@ -1227,7 +1227,8 @@ An S3 object operation is checked as the action the S3 documentation gives it:
   - `s3:PutObjectLegalHold` for `x-amz-object-lock-legal-hold`.
 
   S3's own access check under `floci.services.s3.enforce-auth`, which evaluates bucket policies
-  and ACLs, checks only `s3:PutObject` for these operations.
+  and ACLs, checks the same actions, and offers the bucket policy the tag and Object Lock keys the
+  request sets.
 - **Restore and select:** `RestoreObject` is checked as `s3:RestoreObject`, and
   `SelectObjectContent` as `s3:GetObject`, or `s3:GetObjectVersion` when it names a version.
 - **Attributes:** `GetObjectAttributes` needs `s3:GetObject` and `s3:GetObjectAttributes`, as its
@@ -1238,10 +1239,16 @@ An S3 object operation is checked as the action the S3 documentation gives it:
 - **Object lock:**
   - Object retention and legal hold use their own actions: `s3:GetObjectRetention`,
     `s3:PutObjectRetention`, `s3:GetObjectLegalHold` and `s3:PutObjectLegalHold`.
-  - A `PutObjectRetention` or `DeleteObject` that sends `x-amz-bypass-governance-retention: true`
-    also needs `s3:BypassGovernanceRetention`, as their API references say. The S3 user guide says
-    the permission does not apply to annotation operations, so deleting an annotation does not
-    need it.
+  - A request that sends `x-amz-bypass-governance-retention: true` and overrides a governance-mode
+    retention also needs `s3:BypassGovernanceRetention`: a `PutObjectRetention` that shortens or
+    removes one, or a `DeleteObject` or `DeleteObjects` entry that removes a version under one. The
+    S3 user guide's permissions table requires it "if you want to delete an object that's
+    protected by governance mode" and to "bypass the governance mode of an Object Lock retention
+    configuration", so the header on a request that overrides no lock asks for nothing more. A
+    delete that names no version on a versioned bucket only adds a delete marker, and overrides
+    none. The request bypasses only a lock the check found: one set after the check is refused. The
+    user guide also says the permission does not apply to annotation operations, so deleting an
+    annotation does not need it.
 - **Annotations:** object annotations use the `s3:*ObjectAnnotation` actions, and
   `s3:ListObjectAnnotations` when no annotation name is given.
 - **Versions:** a `versionId` selects the version action AWS checks.
@@ -1252,9 +1259,7 @@ An S3 object operation is checked as the action the S3 documentation gives it:
   - A version's ACL, tags and annotations use `s3:GetObjectVersionAcl`, `s3:PutObjectVersionAcl`,
     the `s3:*ObjectVersionTagging` actions and the `s3:*ObjectVersionAnnotation(s)` actions.
   - S3's own access check under `floci.services.s3.enforce-auth`, which evaluates bucket policies
-    and ACLs, checks reading, selecting from or deleting a version as `s3:GetObjectVersion` or
-    `s3:DeleteObjectVersion`, but a version's ACL, tagging and annotation requests as the base
-    actions, and offers no `s3:versionid`.
+    and ACLs, checks the same version actions, but offers no `s3:versionid`.
   - Deleting a version with an `If-Match` ETag also needs `s3:GetObject`, as a plain conditional
     delete does: the S3 user guide says the condition is evaluated against the current version.
 - **Bucket configurations:**
@@ -1585,8 +1590,8 @@ floci populates:
 - `s3:RequestObjectTag/<key>`: a tag the request asks to attach. `s3:PutObject` reads these
   from the `x-amz-tagging` header, or its query parameter when the header is absent,
   and `s3:PutObjectTagging` from the `<Tagging>` body. A `CopyObject` offers them only with
-  `x-amz-tagging-directive: REPLACE`: under the default `COPY` the copy keeps the source's tags and
-  ignores the header. Any pair
+  `x-amz-tagging-directive: REPLACE`, from the same header or query source the copy then applies:
+  under the default `COPY` the copy keeps the source's tags and ignores both. Any pair
   that does not decode is dropped, so a policy conditioned on the key denies such a request. Where
   enforcement lets it through, the handler still answers a malformed header with
   `400 InvalidTag`.

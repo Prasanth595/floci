@@ -1311,21 +1311,25 @@ class S3AuthEnforcementIntegrationTest {
 
     @Test
     @Order(42)
-    void deleteObjectDoesNotBypassGovernanceRetentionWithoutDistinctPermission() {
-        given().filter(LOCAL_SIGNER).when().put("/" + BYPASS_BUCKET).then().statusCode(200);
-
-        given()
-            .filter(LOCAL_SIGNER)
+    void deleteObjectNeedsTheBypassPermissionOnlyToRemoveAGovernanceLockedVersion() {
+        // The permissions table requires s3:BypassGovernanceRetention "if you want to delete an object
+        // that's protected by governance mode", so the header alone asks for nothing more.
+        given().filter(LOCAL_SIGNER).header("x-amz-bucket-object-lock-enabled", "true")
+            .when().put("/" + BYPASS_BUCKET).then().statusCode(200);
+        String free = given().filter(LOCAL_SIGNER).body("unlocked")
+            .when().put("/" + BYPASS_BUCKET + "/free.txt")
+            .then().statusCode(200).extract().header("x-amz-version-id");
+        String locked = given().filter(LOCAL_SIGNER)
+            .header("x-amz-object-lock-mode", "GOVERNANCE")
+            .header("x-amz-object-lock-retain-until-date", "2031-01-01T00:00:00Z")
             .body("locked candidate")
-        .when()
-            .put("/" + BYPASS_BUCKET + "/" + BYPASS_KEY)
-        .then()
-            .statusCode(200);
+            .when().put("/" + BYPASS_BUCKET + "/" + BYPASS_KEY)
+            .then().statusCode(200).extract().header("x-amz-version-id");
 
         given()
             .filter(LOCAL_SIGNER)
             .contentType("application/json")
-            .body(publicObjectActionPolicy(BYPASS_BUCKET, "s3:DeleteObject"))
+            .body(publicObjectActionPolicy(BYPASS_BUCKET, "s3:DeleteObjectVersion"))
         .when()
             .put("/" + BYPASS_BUCKET + "?policy")
         .then()
@@ -1333,6 +1337,14 @@ class S3AuthEnforcementIntegrationTest {
 
         given()
             .header("x-amz-bypass-governance-retention", "true")
+            .queryParam("versionId", free)
+        .when()
+            .delete("/" + BYPASS_BUCKET + "/free.txt")
+        .then()
+            .statusCode(204);
+        given()
+            .header("x-amz-bypass-governance-retention", "true")
+            .queryParam("versionId", locked)
         .when()
             .delete("/" + BYPASS_BUCKET + "/" + BYPASS_KEY)
         .then()
@@ -1350,6 +1362,7 @@ class S3AuthEnforcementIntegrationTest {
 
         given()
             .header("x-amz-bypass-governance-retention", "true")
+            .queryParam("versionId", locked)
         .when()
             .delete("/" + BYPASS_BUCKET + "/" + BYPASS_KEY)
         .then()
@@ -1363,7 +1376,7 @@ class S3AuthEnforcementIntegrationTest {
                   "Statement": {
                     "Effect": "Allow",
                     "Principal": "*",
-                    "Action": ["s3:DeleteObject", "s3:BypassGovernanceRetention"],
+                    "Action": ["s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"],
                     "Resource": "arn:aws:s3:::%s/*"
                   }
                 }

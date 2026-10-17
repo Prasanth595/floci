@@ -2031,6 +2031,46 @@ class IamEnforcementFilterTest {
                 "x-amz-object-attributes", "ETag", "s3:GetObject", "s3:GetObjectAttributes"));
     }
 
+    @Test
+    void theGovernanceBypassDecisionIsRecordedForS3ToHonour() {
+        // S3Controller lets a delete bypass a lock only as far as this check approved it, so a lock set
+        // after the check is refused rather than bypassed without the permission.
+        assertEquals(Boolean.FALSE, governanceBypassDecision(false));
+        assertEquals(Boolean.TRUE, governanceBypassDecision(true));
+    }
+
+    /** Runs an allowed versioned delete sending the bypass header and returns the decision recorded. */
+    private Boolean governanceBypassDecision(boolean overrides) {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        UriInfo uriInfo = mock(UriInfo.class);
+        MultivaluedHashMap<String, String> query = new MultivaluedHashMap<>();
+        query.putSingle("versionId", "v1");
+        when(uriInfo.getPath()).thenReturn("/bucket/object");
+        when(uriInfo.getQueryParameters()).thenReturn(query);
+        when(containerRequest.getUriInfo()).thenReturn(uriInfo);
+        when(containerRequest.getMethod()).thenReturn("DELETE");
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIABYPASS/20260706/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("222233334444");
+        requestContext.setRegion("us-east-1");
+        requestContext.setIamGovernanceBypass(null);
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIABYPASS");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getHeaderString("x-amz-bypass-governance-retention")).thenReturn("true");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:DeleteObjectVersion");
+        when(iamService.resolveCallerContext(eq("AKIABYPASS"), any())).thenReturn(CallerContext.of(List.of()));
+        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+                .thenReturn(List.of("arn:aws:s3:::bucket/object"));
+        when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), any(), any(), any()))
+                .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
+        when(conditionContextResolver.s3OverridesGovernanceRetention(any(), any())).thenReturn(overrides);
+
+        newFilter(mock(CurrentVertxRequest.class), mock(CloudTrailService.class)).filter(containerRequest);
+
+        verify(containerRequest, never()).abortWith(any());
+        return requestContext.getIamGovernanceBypass();
+    }
+
     /**
      * Runs an S3 request whose own action is allowed and whose extra action is denied, asserts the
      * denial names the extra action, and returns the event name CloudTrail recorded for it.
@@ -2058,6 +2098,8 @@ class IamEnforcementFilterTest {
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
         when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), eq(deniedAction), any(), any()))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
+        // A bypass header counts only on a request that overrides a governance lock.
+        when(conditionContextResolver.s3OverridesGovernanceRetention(any(), any())).thenReturn(true);
         CloudTrailService cloudTrail = mock(CloudTrailService.class);
 
         newFilter(mock(CurrentVertxRequest.class), cloudTrail).filter(containerRequest);

@@ -90,7 +90,8 @@ class IamConditionContextResolverTest {
         config = mock(EmulatorConfig.class);
         when(config.defaultRegion()).thenReturn("us-east-1");
         resolver = new IamConditionContextResolver(
-                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, requestContext, config);
+                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, requestContext, config,
+                null);
     }
 
     @Test
@@ -359,7 +360,7 @@ class IamConditionContextResolverTest {
     @SuppressWarnings("unchecked")
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), requestContext, config, Clock.fixed(now, ZoneOffset.UTC));
+                mock(Instance.class), requestContext, config, null, Clock.fixed(now, ZoneOffset.UTC));
     }
 
     @Test

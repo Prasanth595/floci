@@ -93,6 +93,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.LongConsumer;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -1221,7 +1222,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 : RequestAuthorization.unsigned();
         if (requestAuthorization.signed()) {
             String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName);
-            authorizeSignedBucketPolicy(bucketName, null, action, bucketArn, requestAuthorization);
+            authorizeSignedBucketPolicy(bucketName, null, action, bucketArn, requestAuthorization, null);
             return;
         }
 
@@ -1247,9 +1248,14 @@ public class S3Service implements Resettable, ResourceProvider {
         throw accessDeniedException(bucketName, null);
     }
 
+    /**
+     * Authorizes a read of one object, or of the version {@code versionId} names, which is checked as
+     * the action's version counterpart (see {@link S3ObjectActions#forVersion}), as IAM checks it.
+     */
     void authorizeObjectRead(String bucketName, String key, String versionId, String action, RequestAuthorization authorization) {
         String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
-        authorizeS3Read(bucketName, key, versionId, action, objectArn, authorization);
+        authorizeS3Read(bucketName, key, versionId, S3ObjectActions.forVersion(action, versionId), objectArn,
+                authorization);
     }
 
     void authorizePutObject(String bucketName, String key, RequestAuthorization authorization) {
@@ -1262,17 +1268,51 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     void authorizeObjectWrite(String bucketName, String key, String action, RequestAuthorization authorization) {
+        authorizeObjectWrite(bucketName, key, null, action, authorization, null);
+    }
+
+    /**
+     * Authorizes a write of one object, or of the version {@code versionId} names, which is checked as
+     * the action's version counterpart (see {@link S3ObjectActions#forVersion}), as IAM checks it. A
+     * signed request's bucket policy is evaluated with {@code requestConditions}, the condition keys
+     * the request itself offers, such as the tags and Object Lock settings it applies, besides the
+     * ones that say who is calling. An anonymous request's public-policy check has no condition
+     * context.
+     */
+    void authorizeObjectWrite(String bucketName, String key, String versionId, String requestedAction,
+                              RequestAuthorization authorization, Map<String, List<String>> requestConditions) {
+        authorizeObjectWrite(bucketName, key, versionId, requestedAction, authorization, requestConditions, false);
+    }
+
+    /**
+     * Authorizes a setting an object creation applies besides creating the object, its ACL, tags,
+     * retention or legal hold (see {@link S3ObjectActions#objectCreationActions}), as
+     * {@link #authorizeObjectWrite} authorizes the creation. A public bucket policy that decides the
+     * setting's action decides it for an anonymous request. Where none does, the public bucket ACL's
+     * WRITE grant that admits an anonymous creation admits the settings it is created with, as it did
+     * before they were checked: an ACL grant names no actions to tell them apart by.
+     */
+    void authorizeObjectCreationSetting(String bucketName, String key, String action,
+                                        RequestAuthorization authorization,
+                                        Map<String, List<String>> requestConditions) {
+        authorizeObjectWrite(bucketName, key, null, action, authorization, requestConditions, true);
+    }
+
+    private void authorizeObjectWrite(String bucketName, String key, String versionId, String requestedAction,
+                                      RequestAuthorization authorization, Map<String, List<String>> requestConditions,
+                                      boolean creationSetting) {
         if (!enforceAuth) {
             return;
         }
 
+        String action = S3ObjectActions.forVersion(requestedAction, versionId);
         authorizeSignedRequest(authorization);
         RequestAuthorization requestAuthorization = authorization != null
                 ? authorization
                 : RequestAuthorization.unsigned();
         if (requestAuthorization.signed()) {
             String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
-            authorizeSignedBucketPolicy(bucketName, key, action, objectArn, requestAuthorization);
+            authorizeSignedBucketPolicy(bucketName, key, action, objectArn, requestAuthorization, requestConditions);
             return;
         }
 
@@ -1295,7 +1335,7 @@ public class S3Service implements Resettable, ResourceProvider {
             }
             return;
         }
-        if (!blockPublicAccess.ignorePublicAcls() && isObjectCreationAction(action)
+        if (!blockPublicAccess.ignorePublicAcls() && (creationSetting || isObjectCreationAction(action))
                 && !readableObjectExists(bucketName, key) && publicBucketAclAllowsWrite(bucket)) {
             return;
         }
@@ -1344,7 +1384,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 : RequestAuthorization.unsigned();
 
         if (requestAuthorization.signed()) {
-            authorizeSignedBucketPolicy(bucketName, key, action, resourceArn, requestAuthorization);
+            authorizeSignedBucketPolicy(bucketName, key, action, resourceArn, requestAuthorization, null);
             return;
         }
 
@@ -1395,7 +1435,8 @@ public class S3Service implements Resettable, ResourceProvider {
             String key,
             String action,
             String resourceArn,
-            RequestAuthorization authorization) {
+            RequestAuthorization authorization,
+            Map<String, List<String>> requestConditions) {
         if (!isKnownAccessKey(authorization)) {
             throw new AwsException("InvalidAccessKeyId",
                     "The AWS Access Key Id you provided does not exist in our records.", 403);
@@ -1437,7 +1478,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 RequestPrincipal.caller(caller),
                 action,
                 resourceArn,
-                bucketPolicyContext(caller));
+                bucketPolicyContext(caller, requestConditions));
 
         if (decision == ResourcePolicyDecision.EXPLICIT_DENY) {
             throw accessDeniedException(bucketName, key);
@@ -1478,10 +1519,15 @@ public class S3Service implements Resettable, ResourceProvider {
      * never a service, and the keys that say who is calling are the ones
      * {@link CallerArns#putPrincipalKeys} writes, so a bucket policy sees the same principal
      * whether S3 evaluates it or the enforcement filter does. For a role session
-     * {@code aws:PrincipalArn} is the role's ARN.
+     * {@code aws:PrincipalArn} is the role's ARN. {@code requestConditions}, when present, are the keys
+     * the request itself offers, such as an object creation's tags and Object Lock settings.
      */
-    private static Map<String, List<String>> bucketPolicyContext(CallerArns caller) {
+    private static Map<String, List<String>> bucketPolicyContext(CallerArns caller,
+                                                                 Map<String, List<String>> requestConditions) {
         Map<String, List<String>> context = new HashMap<>();
+        if (requestConditions != null) {
+            context.putAll(requestConditions);
+        }
         context.put("aws:PrincipalIsAWSService", List.of("false"));
         if (caller != null) {
             caller.putPrincipalKeys(context);
@@ -1535,7 +1581,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         RequestPrincipal.caller(caller.get()),
                         action,
                         resourceArn,
-                        bucketPolicyContext(caller.get()));
+                        bucketPolicyContext(caller.get(), null));
         return new SignedPrincipalResourcePolicyEvaluation(decision, ownedBucket.account());
     }
 
@@ -1640,6 +1686,51 @@ public class S3Service implements Resettable, ResourceProvider {
         if (legalHoldStatus != null) {
             object.setLegalHoldStatus(legalHoldStatus);
         }
+    }
+
+    /**
+     * Whether deleting the version {@code versionId} names, the current version when it is null,
+     * would remove an object under active governance-mode retention: the deletes the user guide's
+     * permissions table requires {@code s3:BypassGovernanceRetention} for ("Required if you want to
+     * delete an object that's protected by governance mode"). It follows where
+     * {@link #deleteObjectLocked} checks the lock, so a delete that only adds a delete marker over a
+     * versioned object overrides nothing.
+     */
+    public boolean deleteOverridesGovernanceRetention(String bucketName, String key, String versionId) {
+        Optional<AccountAwareStorageBackend.OwnedEntry<Bucket>> bucket = resolveBucketEntry(bucketName);
+        if (bucket.isEmpty()) {
+            return false;
+        }
+        if (versionId == null && bucket.get().value().isVersioningEnabled()) {
+            boolean currentIsVersioned = objectStore.get(objectKey(bucketName, key))
+                    .map(current -> current.getVersionId() != null)
+                    .orElse(true);
+            if (currentIsVersioned) {
+                return false;
+            }
+        }
+        return isGovernanceRetentionActive(bucketName, key, versionId);
+    }
+
+    /**
+     * Whether setting {@code retainUntil} on the version {@code versionId} names would shorten or
+     * remove its active governance-mode retention, the change {@link #putObjectRetention} refuses
+     * without a bypass and the permissions table requires {@code s3:BypassGovernanceRetention} for
+     * ("Required if you want to bypass the governance mode of an Object Lock retention
+     * configuration"). A null {@code retainUntil} removes the retention.
+     */
+    public boolean retentionChangeOverridesGovernance(String bucketName, String key, String versionId,
+                                                      Instant retainUntil) {
+        // A missing bucket, object or version has no retention to override, and the change itself
+        // reports it missing.
+        return resolveBucketEntry(bucketName)
+                .flatMap(bucket -> findStoredObject(bucket, bucketName, key, versionId))
+                .filter(object -> !object.isDeleteMarker())
+                .filter(object -> "GOVERNANCE".equals(object.getObjectLockMode()))
+                .map(S3Object::getRetainUntilDate)
+                .filter(lockedUntil -> Instant.now().isBefore(lockedUntil))
+                .filter(lockedUntil -> retainUntil == null || retainUntil.isBefore(lockedUntil))
+                .isPresent();
     }
 
     private void checkLockProtection(S3Object obj, boolean bypassGovernance) {
@@ -1904,8 +1995,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
 
-        S3Object object = resolveObjectForAccount(ownedBucket.account(), versionStoreKey(bucketName, key, versionId))
-                .filter(existing -> isNamedVersion(existing, versionId))
+        S3Object object = findStoredObject(ownedBucket, bucketName, key, versionId)
                 .orElseThrow(() -> versionId != null
                         ? new AwsException("NoSuchVersion", "The specified version does not exist.", 404)
                         : new AwsException("NoSuchKey", "The specified key does not exist.", 404));
@@ -1913,6 +2003,13 @@ public class S3Service implements Resettable, ResourceProvider {
             throw new AwsException("NoSuchKey", "The specified key does not exist.", 404);
         }
         return new AccountAwareStorageBackend.OwnedEntry<>(ownedBucket.account(), object);
+    }
+
+    /** The stored version {@code versionId} names, the current one when it is null, delete markers included. */
+    private Optional<S3Object> findStoredObject(AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket,
+                                                String bucketName, String key, String versionId) {
+        return resolveObjectForAccount(ownedBucket.account(), versionStoreKey(bucketName, key, versionId))
+                .filter(existing -> isNamedVersion(existing, versionId));
     }
 
     /**
@@ -2824,13 +2921,19 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public DeleteObjectsResult deleteObjects(String bucketName, List<XmlParser.KeyVersion> entries,
                                              boolean bypassGovernance) {
+        return deleteObjects(bucketName, entries, entry -> bypassGovernance);
+    }
+
+    /** Deletes each entry, bypassing governance retention only for the entries {@code bypassGovernance} names. */
+    public DeleteObjectsResult deleteObjects(String bucketName, List<XmlParser.KeyVersion> entries,
+                                             Predicate<XmlParser.KeyVersion> bypassGovernance) {
         ensureBucketExists(bucketName);
         List<DeleteResult> deleted = new ArrayList<>();
         List<DeleteError> errors = new ArrayList<>();
         for (XmlParser.KeyVersion entry : entries) {
             try {
-                S3Object result = deleteObject(bucketName, entry.key(), entry.versionId(), bypassGovernance,
-                        entry.eTag());
+                S3Object result = deleteObject(bucketName, entry.key(), entry.versionId(),
+                        bypassGovernance.test(entry), entry.eTag());
                 if (result != null && result.isDeleteMarker()) {
                     deleted.add(new DeleteResult(entry.key(), entry.versionId(), true, result.getVersionId()));
                 } else {

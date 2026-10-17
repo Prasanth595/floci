@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import org.jboss.logging.Logger;
 
 import java.net.URLDecoder;
@@ -57,6 +58,16 @@ public final class S3ObjectActions {
         return versionId == null ? action : VERSION_ACTIONS.getOrDefault(action, action);
     }
 
+    /**
+     * Whether an object creation is a CopyObject: a PUT naming a source in {@code x-amz-copy-source},
+     * as S3Controller runs it. A CreateMultipartUpload ignores that header and applies its own tags, so
+     * the header alone does not make a request a copy.
+     */
+    public static boolean isCopy(String method, Function<String, String> header) {
+        String copySource = header.apply("x-amz-copy-source");
+        return "PUT".equalsIgnoreCase(method) && copySource != null && !copySource.isEmpty();
+    }
+
     /** True for an action AWS checks only for a request naming a version, which carries {@code s3:versionid}. */
     public static boolean isVersionAction(String action) {
         return VERSION_ACTIONS.containsValue(action);
@@ -73,13 +84,15 @@ public final class S3ObjectActions {
      * @param header  reads one request header, null when it is absent
      * @param tagging the request's {@code x-amz-tagging}, from its header or, for a presigned URL, its
      *                query string
+     * @param copy    whether the request is a CopyObject (see {@link #isCopy})
      */
-    public static List<String> objectCreationActions(Function<String, String> header, String tagging) {
+    public static List<String> objectCreationActions(Function<String, String> header, String tagging,
+                                                     boolean copy) {
         List<String> actions = new ArrayList<>();
         if (header.apply("x-amz-acl") != null || GRANT_HEADERS.stream().anyMatch(name -> header.apply(name) != null)) {
             actions.add("s3:PutObjectAcl");
         }
-        if (tagging != null && !tagging.isBlank() && appliesRequestTags(header)) {
+        if (tagging != null && !tagging.isBlank() && appliesRequestTags(header, copy)) {
             actions.add("s3:PutObjectTagging");
         }
         if (header.apply("x-amz-object-lock-mode") != null
@@ -101,12 +114,13 @@ public final class S3ObjectActions {
      *
      * @param header  reads one request header, null when it is absent
      * @param tagging the request's {@code x-amz-tagging}, as {@link #objectCreationActions} takes it
+     * @param copy    whether the request is a CopyObject (see {@link #isCopy})
      * @param now     the moment {@code s3:object-lock-remaining-retention-days} counts from
      */
     public static Map<String, List<String>> objectCreationConditions(Function<String, String> header, String tagging,
-                                                                     Instant now) {
+                                                                     boolean copy, Instant now) {
         Map<String, List<String>> conditions = new LinkedHashMap<>();
-        Map<String, List<String>> tags = appliesRequestTags(header) ? requestObjectTagConditions(tagging) : null;
+        Map<String, List<String>> tags = appliesRequestTags(header, copy) ? requestObjectTagConditions(tagging) : null;
         if (tags != null) {
             conditions.putAll(tags);
         }
@@ -124,9 +138,8 @@ public final class S3ObjectActions {
      * CreateMultipartUpload's always, a CopyObject's only under {@code x-amz-tagging-directive:
      * REPLACE}. Under the default {@code COPY} a copy keeps the source's tags and ignores the header.
      */
-    private static boolean appliesRequestTags(Function<String, String> header) {
-        return header.apply("x-amz-copy-source") == null
-                || "REPLACE".equalsIgnoreCase(header.apply("x-amz-tagging-directive"));
+    private static boolean appliesRequestTags(Function<String, String> header, boolean copy) {
+        return !copy || "REPLACE".equalsIgnoreCase(header.apply("x-amz-tagging-directive"));
     }
 
     /**
@@ -156,6 +169,36 @@ public final class S3ObjectActions {
             conditions.put(IamConditionContextResolver.REQUEST_OBJECT_TAG_KEYS, new ArrayList<>(requestedKeys));
         }
         return conditions.isEmpty() ? null : conditions;
+    }
+
+    /**
+     * {@code s3:RequestObjectTag/<key>} and {@code s3:RequestObjectTagKeys} from the {@code <Tagging>}
+     * XML body of a PutObjectTagging. Null when it names no tag.
+     */
+    public static Map<String, List<String>> taggingBodyConditions(String body) {
+        if (body == null || body.isEmpty()) {
+            return null;
+        }
+        Map<String, String> tags = XmlParser.extractPairs(body, "Tag", "Key", "Value");
+        if (tags.isEmpty()) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        tags.forEach((name, value) -> conditions.put(
+                IamConditionContextResolver.REQUEST_OBJECT_TAG_PREFIX + name, List.of(value)));
+        conditions.put(IamConditionContextResolver.REQUEST_OBJECT_TAG_KEYS, new ArrayList<>(tags.keySet()));
+        return conditions;
+    }
+
+    /** The Object Lock keys a PutObjectRetention's {@code <Retention>} body sets (see {@link #objectLockConditions}). */
+    public static Map<String, List<String>> retentionBodyConditions(String body, Instant now) {
+        return objectLockConditions(XmlParser.extractFirst(body, "Mode", null),
+                XmlParser.extractFirst(body, "RetainUntilDate", null), null, now);
+    }
+
+    /** The Object Lock key a PutObjectLegalHold's {@code <LegalHold>} body sets (see {@link #objectLockConditions}). */
+    public static Map<String, List<String>> legalHoldBodyConditions(String body, Instant now) {
+        return objectLockConditions(null, null, XmlParser.extractFirst(body, "Status", null), now);
     }
 
     /**

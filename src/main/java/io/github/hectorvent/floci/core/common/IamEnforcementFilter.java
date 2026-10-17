@@ -460,7 +460,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             // permissions to the scoped session.
             if ("s3:PutObject".equals(action) && isObjectCreation(ctx)) {
                 List<String> creationActions =
-                        S3ObjectActions.objectCreationActions(ctx::getHeaderString, requestTagging(ctx));
+                        S3ObjectActions.objectCreationActions(ctx::getHeaderString, requestTagging(ctx),
+                                S3ObjectActions.isCopy(ctx.getMethod(), ctx::getHeaderString));
                 if (!creationActions.isEmpty()) {
                     ctx.abortWith(accessDeniedForRequest(creationActions.getFirst(), credentialScope, ctx));
                     return;
@@ -565,14 +566,21 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                         withoutObjectTags(targetContexts), region, accountId, akid)) {
             return;
         }
-        // Asking to bypass governance-mode retention on a retention change or a delete takes
-        // s3:BypassGovernanceRetention as well, as the API reference says for both. The user guide
-        // says the permission does not apply to annotation operations.
+        // A retention change or a delete that overrides governance-mode retention takes
+        // s3:BypassGovernanceRetention as well. The user guide's permissions table requires it "if you
+        // want to delete an object that's protected by governance mode" and to "bypass the governance
+        // mode of an Object Lock retention configuration", so the header on a request that overrides
+        // no lock asks for nothing more. The user guide says the permission does not apply to
+        // annotation operations. The decision is recorded for S3Controller, which lets the operation
+        // bypass a lock only when this approved it, so a lock set after this check is not bypassed.
         if (GOVERNANCE_BYPASS_ACTIONS.contains(action)
-                && "true".equalsIgnoreCase(ctx.getHeaderString("x-amz-bypass-governance-retention"))
-                && abortIfDenied(ctx, caller, principal, "s3:BypassGovernanceRetention", action, credentialScope,
-                        resources, targetContexts, region, accountId, akid)) {
-            return;
+                && "true".equalsIgnoreCase(ctx.getHeaderString("x-amz-bypass-governance-retention"))) {
+            boolean overrides = conditionContextResolver.s3OverridesGovernanceRetention(action, ctx);
+            if (overrides && abortIfDenied(ctx, caller, principal, "s3:BypassGovernanceRetention", action,
+                    credentialScope, resources, targetContexts, region, accountId, akid)) {
+                return;
+            }
+            requestContext.setIamGovernanceBypass(overrides);
         }
         // An object created with an ACL, tags, a retention period or a legal hold also needs that
         // setting's own action, as the permissions table says for PutObject, CopyObject and
@@ -580,7 +588,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // request's tags and Object Lock settings.
         if ("s3:PutObject".equals(action) && isObjectCreation(ctx)) {
             for (String creationAction
-                    : S3ObjectActions.objectCreationActions(ctx::getHeaderString, requestTagging(ctx))) {
+                    : S3ObjectActions.objectCreationActions(ctx::getHeaderString, requestTagging(ctx),
+                                S3ObjectActions.isCopy(ctx.getMethod(), ctx::getHeaderString))) {
                 if (abortIfDenied(ctx, caller, principal, creationAction, action, credentialScope, resources,
                         targetContexts, region, accountId, akid)) {
                     return;

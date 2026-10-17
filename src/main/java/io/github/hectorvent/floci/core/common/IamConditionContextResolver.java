@@ -13,7 +13,10 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
+import io.github.hectorvent.floci.services.s3.S3ObjectKeys;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -29,6 +32,8 @@ import java.net.URLDecoder;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -82,6 +87,7 @@ public class IamConditionContextResolver {
     private final Instance<CloudWatchLogsService> logsService;
     private final RequestContext requestContext;
     private final EmulatorConfig config;
+    private final CurrentVertxRequest currentVertxRequest;
     private final Clock clock;
 
     /**
@@ -94,8 +100,10 @@ public class IamConditionContextResolver {
                                        Instance<S3Service> s3Service,
                                        Instance<CloudWatchLogsService> logsService,
                                        RequestContext requestContext,
-                                       EmulatorConfig config) {
-        this(dynamoDbFacade, ec2Service, s3Service, logsService, requestContext, config, Clock.systemUTC());
+                                       EmulatorConfig config,
+                                       CurrentVertxRequest currentVertxRequest) {
+        this(dynamoDbFacade, ec2Service, s3Service, logsService, requestContext, config, currentVertxRequest,
+                Clock.systemUTC());
     }
 
     IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
@@ -104,6 +112,7 @@ public class IamConditionContextResolver {
                                 Instance<CloudWatchLogsService> logsService,
                                 RequestContext requestContext,
                                 EmulatorConfig config,
+                                CurrentVertxRequest currentVertxRequest,
                                 Clock clock) {
         this.dynamoDbFacade = dynamoDbFacade;
         this.ec2Service = ec2Service;
@@ -111,6 +120,7 @@ public class IamConditionContextResolver {
         this.logsService = logsService;
         this.requestContext = requestContext;
         this.config = config;
+        this.currentVertxRequest = currentVertxRequest;
         this.clock = clock;
     }
 
@@ -313,17 +323,13 @@ public class IamConditionContextResolver {
                  "s3:DeleteObjectVersionAnnotation" -> s3ExistingObjectTagConditionContext(ctx);
             // The Object Lock keys come from what the request sets: an object creation's headers, the
             // retention and legal-hold bodies.
-            case "s3:PutObject" -> S3ObjectActions.objectCreationConditions(
-                    ctx::getHeaderString, s3RequestTagging(ctx), clock.instant());
-            case "s3:PutObjectRetention" -> {
-                String body = bodyText(ctx);
-                yield S3ObjectActions.objectLockConditions(XmlParser.extractFirst(body, "Mode", null),
-                        XmlParser.extractFirst(body, "RetainUntilDate", null), null, clock.instant());
-            }
-            case "s3:PutObjectLegalHold" -> S3ObjectActions.objectLockConditions(null, null,
-                    XmlParser.extractFirst(bodyText(ctx), "Status", null), clock.instant());
+            case "s3:PutObject" -> S3ObjectActions.objectCreationConditions(ctx::getHeaderString,
+                    s3RequestTagging(ctx), S3ObjectActions.isCopy(ctx.getMethod(), ctx::getHeaderString),
+                    clock.instant());
+            case "s3:PutObjectRetention" -> S3ObjectActions.retentionBodyConditions(bodyText(ctx), clock.instant());
+            case "s3:PutObjectLegalHold" -> S3ObjectActions.legalHoldBodyConditions(bodyText(ctx), clock.instant());
             case "s3:PutObjectTagging", "s3:PutObjectVersionTagging" -> merge(
-                    s3ExistingObjectTagConditionContext(ctx), s3PutObjectTaggingBodyConditionContext(ctx));
+                    s3ExistingObjectTagConditionContext(ctx), S3ObjectActions.taggingBodyConditions(bodyText(ctx)));
             default -> null;
         };
     }
@@ -331,6 +337,38 @@ public class IamConditionContextResolver {
     private static String bodyText(ContainerRequestContext ctx) {
         byte[] body = bufferEntity(ctx);
         return body == null ? null : new String(body, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Whether an S3 delete or retention change that sends {@code x-amz-bypass-governance-retention}
+     * overrides governance-mode retention, which is when AWS requires {@code s3:BypassGovernanceRetention}
+     * for it: a delete that removes a version under a governance lock, or a retention change that
+     * shortens or removes one (see {@link S3Service#deleteOverridesGovernanceRetention} and
+     * {@link S3Service#retentionChangeOverridesGovernance}). A retention date that does not parse
+     * overrides nothing, since the change is refused as malformed.
+     */
+    boolean s3OverridesGovernanceRetention(String action, ContainerRequestContext ctx) {
+        if (ctx.getUriInfo() == null || !s3Service.isResolvable()) {
+            return false;
+        }
+        String bucket = s3BucketName(ctx.getUriInfo().getPath());
+        String key = s3RequestObjectKey(ctx, bucket);
+        if (key == null) {
+            return false;
+        }
+        String versionId = ctx.getUriInfo().getQueryParameters().getFirst("versionId");
+        if (!"s3:PutObjectRetention".equals(action)) {
+            return s3Service.get().deleteOverridesGovernanceRetention(bucket, key, versionId);
+        }
+        String date = XmlParser.extractFirst(bodyText(ctx), "RetainUntilDate", null);
+        Instant retainUntil;
+        try {
+            retainUntil = date == null ? null : Instant.parse(date);
+        } catch (DateTimeParseException e) {
+            LOG.debugv("Retention date {0} does not parse, so the change overrides no lock", date);
+            return false;
+        }
+        return s3Service.get().retentionChangeOverridesGovernance(bucket, key, versionId, retainUntil);
     }
 
     /**
@@ -346,10 +384,9 @@ public class IamConditionContextResolver {
         if (ctx.getUriInfo() == null || !s3Service.isResolvable()) {
             return null;
         }
-        String path = ctx.getUriInfo().getPath();
-        String bucket = s3BucketName(path);
-        String key = s3ObjectKey(path);
-        if (bucket == null || key == null) {
+        String bucket = s3BucketName(ctx.getUriInfo().getPath());
+        String key = s3RequestObjectKey(ctx, bucket);
+        if (key == null) {
             return null;
         }
         String versionId = ctx.getUriInfo().getQueryParameters().getFirst("versionId");
@@ -382,23 +419,6 @@ public class IamConditionContextResolver {
         return header;
     }
 
-    /** {@code s3:RequestObjectTag/<key>} from the {@code <Tagging>} XML body of PutObjectTagging. */
-    private Map<String, List<String>> s3PutObjectTaggingBodyConditionContext(ContainerRequestContext ctx) {
-        byte[] body = bufferEntity(ctx);
-        if (body == null || body.length == 0) {
-            return null;
-        }
-        Map<String, String> tags = XmlParser.extractPairs(
-                new String(body, StandardCharsets.UTF_8), "Tag", "Key", "Value");
-        if (tags.isEmpty()) {
-            return null;
-        }
-        Map<String, List<String>> conditions = new LinkedHashMap<>();
-        tags.forEach((k, v) -> conditions.put(REQUEST_OBJECT_TAG_PREFIX + k, List.of(v)));
-        conditions.put(REQUEST_OBJECT_TAG_KEYS, new ArrayList<>(tags.keySet()));
-        return conditions;
-    }
-
     private static Map<String, List<String>> merge(Map<String, List<String>> a, Map<String, List<String>> b) {
         if (a == null) {
             return b;
@@ -411,8 +431,29 @@ public class IamConditionContextResolver {
         return merged;
     }
 
+    /**
+     * The object key an S3 request names, null for a bucket-level request. It is read from the path
+     * as it arrived, as {@code S3Controller} reads it, since the normalized path drops a key's
+     * leading slash and so names another object. Without a current Vert.x request, as in a unit
+     * test, the request URI's raw path stands in for it.
+     */
+    private String s3RequestObjectKey(ContainerRequestContext ctx, String bucket) {
+        if (bucket == null) {
+            return null;
+        }
+        String requestUriPath = ctx.getUriInfo().getRequestUri() == null
+                ? null : ctx.getUriInfo().getRequestUri().getRawPath();
+        RoutingContext current = currentVertxRequest == null ? null : currentVertxRequest.getCurrent();
+        String rawPath = current != null && current.request() != null ? current.request().path() : requestUriPath;
+        String key = rawPath == null ? null : S3ObjectKeys.fromRawPath(rawPath, requestUriPath, bucket);
+        if (key == null) {
+            key = s3PathObjectKey(ctx.getUriInfo().getPath());
+        }
+        return key == null || key.isEmpty() ? null : key;
+    }
+
     /** The object key of a path-style (or filter-rewritten) S3 path, null for a bucket-level one. */
-    private static String s3ObjectKey(String path) {
+    private static String s3PathObjectKey(String path) {
         String stripped = path.startsWith("/") ? path.substring(1) : path;
         int slash = stripped.indexOf('/');
         if (slash < 0 || slash == stripped.length() - 1) {
