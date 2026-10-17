@@ -1302,6 +1302,24 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void scanReportsACountProjectionBeforeTheSegmentPairingOnAMissingTable() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Missing", "Select": "COUNT", "ProjectionExpression": "a", "Segment": 1}
+                """));
+        assertEquals("1 validation error detected: "
+                + "Cannot specify the ProjectionExpression when choosing to get only the Count", ex.getMessage());
+    }
+
+    @Test
+    void scanReportsAllProjectedWithoutAnIndexBeforeAMissingSegment() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Missing", "Select": "ALL_PROJECTED_ATTRIBUTES", "TotalSegments": 2}
+                """));
+        assertEquals("1 validation error detected: "
+                + "ALL_PROJECTED_ATTRIBUTES can be used only when Querying using an IndexName", ex.getMessage());
+    }
+
+    @Test
     void scanAcceptsSegmentsAtTheBounds() throws Exception {
         createUsersTable("eu-west-1");
 

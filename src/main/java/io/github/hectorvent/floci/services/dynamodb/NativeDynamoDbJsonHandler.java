@@ -1139,7 +1139,8 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbAccessPath queryAccessPath = DynamoDbAccessPath.resolve(queryTable, indexName);
         DynamoDbAccessPathValidator.validateQuery(queryTable, queryAccessPath, keyConditions,
                 keyConditionExpr, filterExpr, queryFilter, exprAttrNames, exprAttrValues);
-        DynamoDbAccessPathValidator.validateSelection(queryTable, queryAccessPath, select,
+        DynamoDbAccessPathValidator.validateSelection(select, indexName, projectionExpression, attributesToGet);
+        DynamoDbAccessPathValidator.validateGsiProjection(queryTable, queryAccessPath, select,
                 projectionExpression, attributesToGet, exprAttrNames);
         rejectConsistentReadOnGsi(request, queryAccessPath);
 
@@ -1282,6 +1283,8 @@ public class NativeDynamoDbJsonHandler {
             throw new AwsException("ValidationException",
                     "1 validation error detected: " + SELECT_NEEDS_PROJECTION, 400);
         }
+        DynamoDbAccessPathValidator.validateSelection(select, indexNameScan,
+                projectionExpressionScan, attributesToGetScan);
         if (segment != null && totalSegments == null) {
             throw new AwsException("ValidationException",
                     "The TotalSegments parameter is required but was not present in the request when Segment parameter is present", 400);
@@ -1297,7 +1300,7 @@ public class NativeDynamoDbJsonHandler {
 
         TableDefinition scanTable = dynamoDbService.requireTableForItemCall(tableName, region);
         DynamoDbAccessPath scanAccessPath = DynamoDbAccessPath.resolve(scanTable, indexNameScan);
-        DynamoDbAccessPathValidator.validateSelection(scanTable, scanAccessPath, select,
+        DynamoDbAccessPathValidator.validateGsiProjection(scanTable, scanAccessPath, select,
                 projectionExpressionScan, attributesToGetScan, exprAttrNames);
         rejectConsistentReadOnGsi(request, scanAccessPath);
 
