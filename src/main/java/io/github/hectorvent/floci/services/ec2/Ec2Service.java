@@ -4711,9 +4711,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return result;
     }
 
+    /**
+     * Whether a cluster's provider serves this instance. It stays a cluster node after an action has
+     * stored EC2's copy of it, because IMDS and the cluster keep serving the provider's record.
+     */
     private boolean isExternalInstance(String region, String instanceId) {
-        return instances.get(key(region, instanceId)).isEmpty()
-                && findExternalInstance(callerAccountId(), region, instanceId).isPresent();
+        return findExternalInstance(callerAccountId(), region, instanceId).isPresent();
     }
 
     private Instance getRequiredInstance(String region, String instanceId) {

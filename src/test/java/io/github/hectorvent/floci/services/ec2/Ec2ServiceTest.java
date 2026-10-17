@@ -6537,6 +6537,44 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void clusterNodeStaysRefusedAfterAnotherActionStoredACopyOfIt() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Instance nodeInstance = new Instance();
+        nodeInstance.setInstanceId("i-node1234567890abc");
+        nodeInstance.setRegion("us-east-1");
+        nodeInstance.setPlacement(new Placement("us-east-1a"));
+        nodeInstance.setState(InstanceState.running());
+        nodeInstance.setInstanceType("m5.large");
+        service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
+            @Override
+            public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
+                return "i-node1234567890abc".equals(instanceId) && ("us-east-1".equals(region) || region == null)
+                        ? Optional.of(nodeInstance) : Optional.empty();
+            }
+
+            @Override
+            public List<Instance> listInstances(String accountId, String region) {
+                return "us-east-1".equals(region) || region == null ? List.of(nodeInstance) : List.of();
+            }
+        });
+        // ModifyInstanceAttribute writes EC2's copy of the node into the instance store; the node is
+        // still the cluster's, so the actions refused for it stay refused.
+        service.modifyInstanceAttribute("us-east-1", "i-node1234567890abc", "sourceDestCheck", "false");
+        LaunchTemplateData.MetadataOptions required = new LaunchTemplateData.MetadataOptions();
+        required.setHttpTokens("required");
+
+        assertEquals("OperationNotPermitted", assertThrows(AwsException.class, () ->
+                service.modifyInstanceMetadataOptions("us-east-1", "i-node1234567890abc", required))
+                .getErrorCode());
+        assertEquals("OperationNotPermitted", assertThrows(AwsException.class, () ->
+                service.terminateInstances("us-east-1", List.of("i-node1234567890abc"))).getErrorCode());
+        assertEquals("OperationNotPermitted", assertThrows(AwsException.class, () ->
+                service.stopInstances("us-east-1", List.of("i-node1234567890abc"))).getErrorCode());
+    }
+
+    @Test
     void ordinaryEc2InstancesUnaffectedByClusterNodeInstanceProvider() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
