@@ -364,8 +364,25 @@ class RedshiftServerlessTest {
                         .customDomainName("db.example.com").customDomainCertificateArn(certificate));
                 assertThat(client.listCustomDomainAssociations(request -> request.customDomainName("db.example.com"))
                         .associations()).hasSize(1);
+
+                GetCredentialsResponse credentials = client.getCredentials(request -> request
+                        .customDomainName("db.example.com")
+                        .dbName("dev"));
+                assertThat(credentials.dbUser()).isNotBlank();
+                assertThat(credentials.dbPassword()).isNotBlank();
+                assertThat(credentials.expiration()).isAfter(Instant.now());
+
+                assertThatThrownBy(() -> client.getCredentials(request -> request
+                        .customDomainName("db.example.com")
+                        .workgroupName(workgroupName)))
+                        .isInstanceOf(ValidationException.class);
+
                 client.deleteCustomDomainAssociation(request -> request.workgroupName(workgroupName)
                         .customDomainName("db.example.com"));
+
+                assertThatThrownBy(() -> client.getCredentials(request -> request
+                        .customDomainName("db.example.com")))
+                        .isInstanceOf(ResourceNotFoundException.class);
             } finally {
                 deleteWorkgroupBestEffort(client, workgroupName);
                 deleteBestEffort(client, namespaceName);
