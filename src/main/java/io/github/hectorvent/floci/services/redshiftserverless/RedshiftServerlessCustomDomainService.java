@@ -50,11 +50,6 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
         this.acmService = acmService;
     }
 
-    RedshiftServerlessCustomDomainService(StorageFactory storageFactory,
-                                          RedshiftServerlessService serverless) {
-        this(storageFactory, serverless, null);
-    }
-
     public synchronized CustomDomainAssociation createCustomDomainAssociation(
             String workgroupName, String customDomainName, String certificateArn, String region) {
         Workgroup workgroup = serverless.findWorkgroup(workgroupName, region)
@@ -78,24 +73,20 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
         association.setOwnerId(workgroup.getWorkgroupId());
         association.setCustomDomainName(customDomainName);
         association.setCustomDomainCertificateArn(certificateArn);
-        association.setCustomDomainCertificateExpiryTime(certificateExpiryTime(certificateArn, region));
         associations.put(storageKey(region, workgroupName, customDomainName), association);
-        return new CustomDomainAssociation(association);
+        return withCertificateExpiry(association, region);
     }
 
     public synchronized CustomDomainAssociation getCustomDomainAssociation(
             String workgroupName, String customDomainName, String region) {
-        CustomDomainAssociation association = require(workgroupName, customDomainName, region);
-        populateCertificateExpiry(association, region);
-        return new CustomDomainAssociation(association);
+        return withCertificateExpiry(require(workgroupName, customDomainName, region), region);
     }
 
     public synchronized Optional<CustomDomainAssociation> findForWorkgroup(String workgroupName, String region) {
         return live(region).stream()
                 .filter(association -> association.getWorkgroupName().equals(workgroupName))
                 .findFirst()
-                .map(association -> populateCertificateExpiry(association, region))
-                .map(CustomDomainAssociation::new);
+                .map(association -> withCertificateExpiry(association, region));
     }
 
     public synchronized PaginatedResult<CustomDomainAssociation> listCustomDomainAssociations(
@@ -111,8 +102,7 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
                         || certificateArn.equals(association.getCustomDomainCertificateArn()))
                 .sorted(Comparator.comparing(CustomDomainAssociation::getWorkgroupName)
                         .thenComparing(CustomDomainAssociation::getCustomDomainName))
-                .map(association -> populateCertificateExpiry(association, region))
-                .map(CustomDomainAssociation::new)
+                .map(association -> withCertificateExpiry(association, region))
                 .toList();
         return Pagination.paginate(matching,
                 association -> association.getWorkgroupName() + "|" + association.getCustomDomainName(),
@@ -125,9 +115,9 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
             String workgroupName, String customDomainName, String certificateArn, String region) {
         CustomDomainAssociation updated = new CustomDomainAssociation(require(workgroupName, customDomainName, region));
         updated.setCustomDomainCertificateArn(certificateArn);
-        updated.setCustomDomainCertificateExpiryTime(certificateExpiryTime(certificateArn, region));
+        updated.setCustomDomainCertificateExpiryTime(null);
         associations.put(storageKey(region, workgroupName, customDomainName), updated);
-        return new CustomDomainAssociation(updated);
+        return withCertificateExpiry(updated, region);
     }
 
     public synchronized void deleteCustomDomainAssociation(String workgroupName, String customDomainName,
@@ -184,7 +174,7 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
     }
 
     private Instant certificateExpiryTime(String certificateArn, String region) {
-        if (acmService == null || certificateArn == null || certificateArn.isBlank()) {
+        if (certificateArn == null || certificateArn.isBlank()) {
             return null;
         }
         String certRegion = region;
@@ -198,21 +188,15 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
             Certificate certificate = acmService.describeCertificate(certificateArn, certRegion);
             return certificate != null ? certificate.getNotAfter() : null;
         } catch (AwsException ignored) {
+            // A missing certificate in ACM leaves the expiry time unknown.
             return null;
         }
     }
 
-    private CustomDomainAssociation populateCertificateExpiry(CustomDomainAssociation association, String region) {
-        if (association == null) {
-            return null;
-        }
-        if (association.getCustomDomainCertificateExpiryTime() == null && acmService != null) {
-            Instant expiry = certificateExpiryTime(association.getCustomDomainCertificateArn(), region);
-            if (expiry != null) {
-                association.setCustomDomainCertificateExpiryTime(expiry);
-            }
-        }
-        return association;
+    private CustomDomainAssociation withCertificateExpiry(CustomDomainAssociation association, String region) {
+        CustomDomainAssociation copy = new CustomDomainAssociation(association);
+        copy.setCustomDomainCertificateExpiryTime(certificateExpiryTime(copy.getCustomDomainCertificateArn(), region));
+        return copy;
     }
 
     private static String storageKey(String region, String workgroupName, String customDomainName) {

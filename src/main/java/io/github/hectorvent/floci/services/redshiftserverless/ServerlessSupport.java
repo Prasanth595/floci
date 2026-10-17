@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.redshiftserverless;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.services.redshiftserverless.model.CustomDomainAssociation;
 
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -24,6 +26,15 @@ final class ServerlessSupport {
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     private ServerlessSupport() {
+    }
+
+    static void populateCustomDomain(ObjectNode node, CustomDomainAssociation association) {
+        node.put("customDomainCertificateArn", association.getCustomDomainCertificateArn());
+        if (association.getCustomDomainCertificateExpiryTime() != null) {
+            node.put("customDomainCertificateExpiryTime",
+                    ISO_8601.format(association.getCustomDomainCertificateExpiryTime()));
+        }
+        node.put("customDomainName", association.getCustomDomainName());
     }
 
     static AwsException validation(String message) {

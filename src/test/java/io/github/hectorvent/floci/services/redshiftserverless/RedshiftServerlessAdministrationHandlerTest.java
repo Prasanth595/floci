@@ -44,6 +44,7 @@ class RedshiftServerlessAdministrationHandlerTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private RedshiftServerlessJsonHandler handler;
     private RedshiftServerlessService serverlessService;
+    private Certificate testCert;
 
     @BeforeEach
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -74,7 +75,7 @@ class RedshiftServerlessAdministrationHandlerTest {
                 new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config);
 
         AcmService acmService = mock(AcmService.class);
-        Certificate testCert = new Certificate();
+        testCert = new Certificate();
         testCert.setArn(CERTIFICATE_ARN);
         testCert.setNotAfter(Instant.parse("2028-06-15T12:00:00Z"));
         when(acmService.describeCertificate(eq(CERTIFICATE_ARN), any())).thenReturn(testCert);
@@ -321,6 +322,12 @@ class RedshiftServerlessAdministrationHandlerTest {
             }
         }
         assertTrue(foundInList);
+
+        testCert.setNotAfter(Instant.parse("2030-01-01T00:00:00Z"));
+        JsonNode renewed = ok("GetCustomDomainAssociation",
+                "{\"workgroupName\":\"domain-wg\",\"customDomainName\":\"db.example.com\"}");
+        assertEquals("2030-01-01T00:00:00.000Z", renewed.get("customDomainCertificateExpiryTime").textValue());
+        testCert.setNotAfter(Instant.parse("2028-06-15T12:00:00Z"));
 
         assertEquals("ConflictException", errorType("CreateCustomDomainAssociation", request));
         assertEquals("ConflictException", errorType("CreateCustomDomainAssociation",

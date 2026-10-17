@@ -441,16 +441,8 @@ public class RedshiftServerlessJsonHandler {
         node.put("workgroupArn", workgroup.getWorkgroupArn());
         node.put("namespaceName", workgroup.getNamespaceName());
         node.put("status", workgroup.getStatus());
-        if (customDomains != null) {
-            customDomains.findForWorkgroup(workgroup.getWorkgroupName(), region).ifPresent(association -> {
-                node.put("customDomainName", association.getCustomDomainName());
-                node.put("customDomainCertificateArn", association.getCustomDomainCertificateArn());
-                if (association.getCustomDomainCertificateExpiryTime() != null) {
-                    node.put("customDomainCertificateExpiryTime",
-                            ServerlessSupport.ISO_8601.format(association.getCustomDomainCertificateExpiryTime()));
-                }
-            });
-        }
+        customDomains.findForWorkgroup(workgroup.getWorkgroupName(), region)
+                .ifPresent(association -> ServerlessSupport.populateCustomDomain(node, association));
         if (workgroup.getBaseCapacity() != null) {
             node.put("baseCapacity", workgroup.getBaseCapacity());
         }
