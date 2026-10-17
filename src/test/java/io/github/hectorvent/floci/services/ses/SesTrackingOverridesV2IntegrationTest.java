@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ses;
 
+import io.github.hectorvent.floci.testutil.SesMailbox;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeEach;
@@ -15,6 +16,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@code ConfigurationOverrides.Tracking} on SendEmail and SendBulkEmail. Floci has no open or click
@@ -73,12 +75,14 @@ class SesTrackingOverridesV2IntegrationTest {
 
     @Test
     void sendEmail_refusesAValueOutsideTheEnum_reportingBothClickFirst() {
-        sendWith("{\"Tracking\": {\"OpenTrackingEnabled\": \"disabled\"}}").statusCode(400)
+        String recipient = "refused-send@tracking.test";
+        sendWith("{\"Tracking\": {\"OpenTrackingEnabled\": \"disabled\"}}", recipient).statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
                 .body("message", equalTo("1 validation error detected: " + OPEN_ENUM));
-        sendWith("{\"Tracking\": {\"OpenTrackingEnabled\": \"\", \"ClickTrackingEnabled\": \"yes\"}}")
+        sendWith("{\"Tracking\": {\"OpenTrackingEnabled\": \"\", \"ClickTrackingEnabled\": \"yes\"}}", recipient)
                 .statusCode(400)
                 .body("message", equalTo("2 validation errors detected: " + CLICK_ENUM + "; " + OPEN_ENUM));
+        assertNothingSentTo(recipient);
     }
 
     @Test
@@ -112,21 +116,36 @@ class SesTrackingOverridesV2IntegrationTest {
         send(BULK, bulkBody("{\"Tracking\": {\"OpenTrackingEnabled\": \"DISABLED\"}}")).statusCode(200)
                 .body("BulkEmailEntryResults", hasSize(2))
                 .body("BulkEmailEntryResults[0].Status", equalTo("SUCCESS"));
-        send(BULK, bulkBody("{\"Tracking\": {\"ClickTrackingEnabled\": \"on\"}}")).statusCode(400)
+        String recipient = "refused-bulk@tracking.test";
+        send(BULK, bulkBody("{\"Tracking\": {\"ClickTrackingEnabled\": \"on\"}}", recipient)).statusCode(400)
                 .body("message", equalTo("1 validation error detected: " + CLICK_ENUM));
+        assertNothingSentTo(recipient);
     }
 
     private static ValidatableResponse sendWith(String overrides) {
+        return sendWith(overrides, "alice@example.com");
+    }
+
+    private static ValidatableResponse sendWith(String overrides, String recipient) {
         return send(SEND, "{\"FromEmailAddress\": \"" + SENDER + "\", \"Destination\": {\"ToAddresses\": "
-                + "[\"alice@example.com\"]}, " + SIMPLE + ", \"ConfigurationOverrides\": " + overrides + "}");
+                + "[\"" + recipient + "\"]}, " + SIMPLE + ", \"ConfigurationOverrides\": " + overrides + "}");
     }
 
     private static String bulkBody(String overrides) {
+        return bulkBody(overrides, "bob@example.com");
+    }
+
+    private static String bulkBody(String overrides, String secondRecipient) {
         return "{\"FromEmailAddress\": \"" + SENDER + "\", \"DefaultContent\": {\"Template\": "
                 + "{\"TemplateContent\": {\"Subject\": \"s\", \"Text\": \"b\"}, \"TemplateData\": \"{}\"}}, "
                 + "\"BulkEmailEntries\": [{\"Destination\": {\"ToAddresses\": [\"alice@example.com\"]}}, "
-                + "{\"Destination\": {\"ToAddresses\": [\"bob@example.com\"]}}], "
+                + "{\"Destination\": {\"ToAddresses\": [\"" + secondRecipient + "\"]}}], "
                 + "\"ConfigurationOverrides\": " + overrides + "}";
+    }
+
+    // The check runs before the send reaches the service, so a refused request records nothing.
+    private static void assertNothingSentTo(String recipient) {
+        assertTrue(SesMailbox.messagesTo(recipient).isEmpty(), "a refused send recorded a message to " + recipient);
     }
 
     private static ValidatableResponse send(String path, String body) {
