@@ -370,7 +370,7 @@ class RedshiftInterceptingBridgeTest {
         startBridge(interceptor);
         PostgresWireDecoder.ParseMessage parse = new PostgresWireDecoder.ParseMessage("ddl", sql, List.of());
         testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeParse(parse, sql));
-        testClientEnd.getOutputStream().write(backendFrame('D', concat(new byte[]{'S'}, cString("ddl"))));
+        testClientEnd.getOutputStream().write(frame('D', concat(new byte[]{'S'}, cString("ddl"))));
         testClientEnd.getOutputStream().flush();
         InputStream response = testClientEnd.getInputStream();
         assertEquals('1', response.read());
