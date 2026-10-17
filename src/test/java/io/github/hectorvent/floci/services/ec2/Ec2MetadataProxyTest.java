@@ -14,9 +14,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
@@ -26,6 +29,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class Ec2MetadataProxyTest {
 
+    /** What an application image can carry into a {@code docker exec}, plus one setting the shells must keep. */
+    private static final Map<String, String> APPLICATION_ENVIRONMENT = Map.of(
+            "LD_LIBRARY_PATH", "/fixture/application/lib",
+            "PYTHONPATH", "/fixture/application/modules",
+            "PYTHONHOME", "/fixture/application/python",
+            "KEEP_SETTING", "fixture-value");
     /** Lets curl reach the loopback endpoints even when the build host sets a proxy. */
     private static final Map<String, String> LOOPBACK_WITHOUT_PROXY = Map.of(
             "NO_PROXY", "127.0.0.1", "no_proxy", "127.0.0.1");
@@ -108,6 +117,52 @@ class Ec2MetadataProxyTest {
     }
 
     @Test
+    void installCommandClearsApplicationPathsBeforeThePackageManagerRuns(@TempDir Path directory)
+            throws Exception {
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        Path record = directory.resolve("tools");
+        Path arguments = directory.resolve("arguments");
+        writeTool(bin, "dnf", checkedToolEnvironment()
+                + "printf '%s\\n' \"$*\" > \"$TEST_ARGUMENTS\"\n");
+
+        assertEquals(0, runShell(Ec2MetadataProxy.installCommand(), directory, applicationEnvironment(Map.of(
+                "PATH", bin.toString(), "TEST_RECORD", record.toString(),
+                "TEST_ARGUMENTS", arguments.toString()))), shellOutput(directory));
+
+        assertEquals("dnf\n", Files.readString(record));
+        assertEquals("install -y --allowerasing iproute socat curl ca-certificates\n",
+                Files.readString(arguments));
+    }
+
+    @Test
+    void startCommandClearsApplicationPathsBeforeAddressProxyAndProbeTools(@TempDir Path directory)
+            throws Exception {
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        Path record = directory.resolve("tools");
+        Path proxyReady = directory.resolve("proxy-ready");
+        writeTool(bin, "ip", checkedToolEnvironment() + "printf '127.0.0.1/32\\n'\n");
+        writeTool(bin, "socat", checkedToolEnvironment() + ": > \"$TEST_PROXY_READY\"\n");
+        writeTool(bin, "curl", checkedToolEnvironment()
+                + "for attempt in 1 2 3 4 5 6 7 8 9 10; do\n"
+                + "  [ -f \"$TEST_PROXY_READY\" ] && exit 0\n"
+                + "  /bin/sleep 0.1\n"
+                + "done\nexit 1\n");
+        String name = "unit-" + UUID.randomUUID();
+        try {
+            String[] command = Ec2MetadataProxy.startCommand(
+                    name, "127.0.0.1", 80, "127.0.0.1", 9169, "curl fixture && exit 0");
+            assertEquals(0, runShell(command, directory, applicationEnvironment(Map.of(
+                    "PATH", bin + ":" + System.getenv("PATH"),
+                    "TEST_RECORD", record.toString(), "TEST_PROXY_READY", proxyReady.toString()))),
+                    shellOutput(directory));
+            assertEquals(Set.of("ip", "socat", "curl"), Set.copyOf(Files.readAllLines(record)));
+        } finally {
+            Files.deleteIfExists(Path.of("/tmp/floci-" + name + "-proxy.pid"));
+            Files.deleteIfExists(Path.of("/tmp/floci-" + name + "-proxy.log"));
+        }
+    }
+
+    @Test
     void readinessProbeReadsTheInstanceIdWithATokenWhenTheInstanceRequiresOne(@TempDir Path directory)
             throws Exception {
         try (Ec2MetadataTestFixture fixture = new Ec2MetadataTestFixture()) {
@@ -158,6 +213,26 @@ class Ec2MetadataProxyTest {
         } finally {
             server.stop(0);
         }
+    }
+
+    private static String checkedToolEnvironment() {
+        return "[ -z \"${LD_LIBRARY_PATH+x}\" ] || exit 91\n"
+                + "[ -z \"${PYTHONPATH+x}\" ] || exit 92\n"
+                + "[ -z \"${PYTHONHOME+x}\" ] || exit 93\n"
+                + "[ \"$KEEP_SETTING\" = fixture-value ] || exit 94\n"
+                + "printf '%s\\n' \"${0##*/}\" >> \"$TEST_RECORD\"\n";
+    }
+
+    private static Map<String, String> applicationEnvironment(Map<String, String> settings) {
+        Map<String, String> environment = new HashMap<>(APPLICATION_ENVIRONMENT);
+        environment.putAll(settings);
+        return environment;
+    }
+
+    private static void writeTool(Path bin, String name, String script) throws IOException {
+        Path tool = bin.resolve(name);
+        Files.writeString(tool, "#!/bin/sh\nset -eu\n" + script);
+        assertTrue(tool.toFile().setExecutable(true));
     }
 
     /** Runs a generated helper shell with {@code /bin/sh}, its output going to {@link #shellOutput}. */

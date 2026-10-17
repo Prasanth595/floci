@@ -119,7 +119,11 @@ CloudFormation `AWS::EC2::VPCEndpoint` resolves `IpAddressType` on create and up
 Floci runs an IMDS-compatible HTTP server on port `9169` of the host. Each launched container receives the environment variable `AWS_EC2_METADATA_SERVICE_ENDPOINT` pointing to this server.
 
 Inside each launched container, the link-local address `169.254.169.254` is a proxy to this
-server. The proxy is ready once an IMDSv2 token request with a 60-second TTL succeeds and that
+server. The helper shells that install and start the proxy clear `LD_LIBRARY_PATH`,
+`PYTHONPATH` and `PYTHONHOME` before running system tools, so an application's bundled libraries
+or Python installation cannot replace the system libraries that the package manager, `socat` and
+`curl` load. The container's configured environment and the application's processes keep these
+variables. The proxy is ready once an IMDSv2 token request with a 60-second TTL succeeds and that
 token reads the instance ID. A failed or empty token response does not fall back to a tokenless
 request, and the check passes on an instance that requires tokens.
 

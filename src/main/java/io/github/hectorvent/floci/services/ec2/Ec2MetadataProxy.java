@@ -11,11 +11,20 @@ import java.util.Optional;
  */
 public final class Ec2MetadataProxy {
 
+    /**
+     * Run first in every helper shell. {@code docker exec} hands the shell the image's environment,
+     * so an application's bundled libraries or Python installation would otherwise be what the
+     * package manager, {@code socat} and {@code curl} load. Only the helper shell changes; the
+     * container's configured environment and its processes keep these variables.
+     */
+    private static final String CLEAR_APPLICATION_PATHS = "unset LD_LIBRARY_PATH PYTHONPATH PYTHONHOME";
+
     private Ec2MetadataProxy() {}
 
     public static String[] installCommand() {
         return new String[]{"sh", "-c", String.join("\n",
                 "set -eu",
+                CLEAR_APPLICATION_PATHS,
                 "if command -v ip >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then exit 0; fi",
                 "if command -v apt-get >/dev/null 2>&1; then",
                 "  apt-get update -qq >/dev/null",
@@ -70,6 +79,7 @@ public final class Ec2MetadataProxy {
         String logFile = "/tmp/floci-" + name + "-proxy.log";
         return new String[]{"sh", "-c", String.join("\n",
                 "set -eu",
+                CLEAR_APPLICATION_PATHS,
                 "ip addr show dev lo | grep -q '" + bindIp + "/32' || ip addr add " + bindIp + "/32 dev lo",
                 "if [ -f " + pidFile + " ] && kill -0 \"$(cat " + pidFile + ")\" 2>/dev/null; then",
                 "  exit 0",
