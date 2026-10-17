@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -88,10 +89,13 @@ final class DynamoDbAccessPathValidator {
         Set<String> projectedAttributes = accessPath.projectedAttributeNames(table);
         requestedAttributes.removeAll(projectedAttributes);
         if (!requestedAttributes.isEmpty()) {
-            throw validationException("One or more parameter values were invalid: Global secondary index "
-                    + accessPath.indexName() + " does not project ["
-                    + String.join(", ", requestedAttributes) + "]");
+            throw unprojectedGsiAttributes(accessPath.indexName(), requestedAttributes);
         }
+    }
+
+    static AwsException unprojectedGsiAttributes(String indexName, Collection<String> attributes) {
+        return validationException("One or more parameter values were invalid: Global secondary index "
+                + indexName + " does not project [" + String.join(", ", attributes) + "]");
     }
 
     private static void rejectWithSelect(String parameter, boolean present, String select) {

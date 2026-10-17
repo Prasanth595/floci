@@ -79,10 +79,7 @@ class DynamoDbPartiQLHandler {
                     .filter(c -> !projected.contains(c))
                     .toList();
             if (!unprojected.isEmpty()) {
-                throw new AwsException("ValidationException",
-                        "One or more parameter values were invalid: Global secondary index "
-                                + accessPath.indexName() + " does not project ["
-                                + String.join(", ", unprojected) + "]", 400);
+                throw DynamoDbAccessPathValidator.unprojectedGsiAttributes(accessPath.indexName(), unprojected);
             }
         }
 
