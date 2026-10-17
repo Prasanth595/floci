@@ -234,6 +234,31 @@ class DmsServiceTest {
     }
 
     @Test
+    void rejectedCreateNamingDefaultNeverReadsTheRegionsSubnets() {
+        useDefaultVpc();
+        ObjectNode first = instanceRequest("default");
+        first.remove("ReplicationSubnetGroupIdentifier");
+        service.createReplicationInstance(first, REGION);
+
+        ObjectNode duplicate = instanceRequest("default");
+        ObjectNode badResourceId = instanceRequest("default");
+        badResourceId.put("ReplicationInstanceIdentifier", "bad-resource-id");
+        badResourceId.put("ResourceIdentifier", "1-starts-with-a-digit");
+        ObjectNode badTag = instanceRequest("default");
+        badTag.put("ReplicationInstanceIdentifier", "bad-tag");
+        badTag.putArray("Tags").addObject().put("Key", "aws:reserved").put("Value", "v");
+
+        assertEquals("ResourceAlreadyExistsFault", assertThrows(AwsException.class,
+                () -> service.createReplicationInstance(duplicate, REGION)).getErrorCode());
+        assertEquals("InvalidParameterValueException", assertThrows(AwsException.class,
+                () -> service.createReplicationInstance(badResourceId, REGION)).getErrorCode());
+        assertEquals("InvalidParameterValueException", assertThrows(AwsException.class,
+                () -> service.createReplicationInstance(badTag, REGION)).getErrorCode());
+        // Reading the region's subnets is what seeds its default VPC in the real Ec2Service.
+        verify(ec2Service, never()).describeSubnets(eq(REGION), eq(List.of()), anyMap());
+    }
+
+    @Test
     void describeOfMissingGroupFaults() {
         AwsException notFound = assertThrows(AwsException.class,
                 () -> service.describeReplicationSubnetGroups(filterRequest("absent"), REGION));
