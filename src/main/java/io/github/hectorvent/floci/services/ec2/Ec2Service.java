@@ -3982,7 +3982,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             instances.scan(k -> true).stream()
                     .filter(i -> i.getRegion().equals(region) && "pending".equals(i.getState().getName()))
                     .forEach(i -> {
-                        i.setState(InstanceState.running());
+                        completeMockLaunch(i);
                         instances.put(key(i.getRegion(), i.getInstanceId()), i);
                     });
         }
@@ -4010,6 +4010,37 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             reservationMap.put(inst.getInstanceId(), res);
         }
         return new ArrayList<>(reservationMap.values());
+    }
+
+    private void completeMockLaunch(Instance instance) {
+        synchronized (instance) {
+            assignMockPublicAddress(instance);
+            instance.setState(InstanceState.running());
+        }
+    }
+
+    private static void assignMockPublicAddress(Instance instance) {
+        if (instance.isAssociatePublicIp() && instance.getPublicIpAddress() == null) {
+            Random random = new Random();
+            String publicIp = "54." + random.nextInt(256) + "."
+                    + random.nextInt(256) + "." + random.nextInt(256);
+            instance.setPublicIpAddress(publicIp);
+            instance.setPublicDnsName(publicIp);
+        }
+    }
+
+    /** A stopped mock instance keeps an associated Elastic IP and loses an automatic address. */
+    private void releaseMockPublicAddress(String region, Instance instance) {
+        boolean elastic = addresses.scan(k -> k.startsWith(region + "::")).stream()
+                .anyMatch(address -> instance.getInstanceId().equals(address.getInstanceId()));
+        if (!elastic) {
+            clearPublicAddress(instance);
+        }
+    }
+
+    private static void clearPublicAddress(Instance instance) {
+        instance.setPublicIpAddress(null);
+        instance.setPublicDnsName(null);
     }
 
     public String platformDetailsForInstance(Instance instance) {
@@ -4041,7 +4072,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             InstanceState prev = inst.getState();
             if (config.services().ec2().mock()) {
-                inst.setState(InstanceState.terminated());
+                // Under the instance's lock, so a concurrent Elastic IP write sees the new state.
+                synchronized (inst) {
+                    inst.setState(InstanceState.terminated());
+                    // Termination also disassociates an Elastic IP, so nothing public is left.
+                    clearPublicAddress(inst);
+                }
                 inst.setTerminatedAt(System.currentTimeMillis());
             } else {
                 // Also attempt the reclaim once this container is really gone. The synchronous
@@ -4153,7 +4189,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             InstanceState prev = inst.getState();
             if (config.services().ec2().mock()) {
-                inst.setState(InstanceState.stopped());
+                synchronized (inst) {
+                    inst.setState(InstanceState.stopped());
+                    releaseMockPublicAddress(region, inst);
+                }
             } else {
                 containerManager.stop(inst);
             }
@@ -4185,7 +4224,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             InstanceState prev = inst.getState();
             if (config.services().ec2().mock()) {
-                inst.setState(InstanceState.running());
+                completeMockLaunch(inst);
             } else {
                 restoreInstanceFirewall(inst);
                 String accountId = callerAccountId();
@@ -4240,7 +4279,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     .filter(i -> i.getRegion().equals(region) && "pending".equals(i.getState().getName()))
                     .filter(i -> instanceIds.isEmpty() || instanceIds.contains(i.getInstanceId()))
                     .forEach(i -> {
-                        i.setState(InstanceState.running());
+                        completeMockLaunch(i);
                         instances.put(key(i.getRegion(), i.getInstanceId()), i);
                     });
         }
@@ -9819,6 +9858,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (addr.getAssociationId() != null) {
                 disassociateAddress(region, addr.getAssociationId());
             }
+            // "If you associate an Elastic IP address with an instance that has an existing Elastic IP
+            // address, the existing address is disassociated from the instance" (AssociateAddress),
+            // including one a retained interface carried onto this instance as its primary.
+            if (instanceId != null) {
+                String primaryInterfaceId = instances.get(key(region, instanceId))
+                        .filter(inst -> inst.getNetworkInterfaces() != null && !inst.getNetworkInterfaces().isEmpty())
+                        .map(inst -> inst.getNetworkInterfaces().get(0).getNetworkInterfaceId())
+                        .orElse(null);
+                for (Address existing : addresses.scan(k -> k.startsWith(region + "::"))) {
+                    boolean onInstance = instanceId.equals(existing.getInstanceId())
+                            || primaryInterfaceId != null && primaryInterfaceId.equals(existing.getNetworkInterfaceId());
+                    if (onInstance && existing.getAssociationId() != null
+                            && !allocationId.equals(existing.getAllocationId())) {
+                        disassociateAddress(region, existing.getAssociationId());
+                    }
+                }
+            }
             addr.setInstanceId(instanceId);
             addr.setAssociationId("eipassoc-" + randomHex(17));
             pointAddressAtInstance(addr, region, instanceId);
@@ -9866,6 +9922,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             inst.setPublicIpAddress(reachable);
             inst.setPublicDnsName("127.0.0.1".equals(reachable) ? "localhost" : reachable);
             instances.put(key(region, instanceId), inst);
+        } else if (config.services().ec2().mock()) {
+            // With no container to reach, the allocated address replaces any automatic one. A
+            // terminated instance keeps none, and an unchanged address is not written again.
+            boolean changed = false;
+            synchronized (inst) {
+                String state = inst.getState() == null ? null : inst.getState().getName();
+                if (!"terminated".equals(state) && !"shutting-down".equals(state)
+                        && !Objects.equals(addr.getPublicIp(), inst.getPublicIpAddress())) {
+                    inst.setPublicIpAddress(addr.getPublicIp());
+                    inst.setPublicDnsName(addr.getPublicIp());
+                    changed = true;
+                }
+            }
+            if (changed) {
+                instances.put(key(region, instanceId), inst);
+            }
         }
         addr.setPrivateIpAddress(inst.getPrivateIpAddress());
         if (inst.getNetworkInterfaces() != null && !inst.getNetworkInterfaces().isEmpty()) {
@@ -9927,6 +9999,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                 + " belongs to a NAT gateway and cannot be disassociated; delete the NAT gateway.",
                                 400);
                     }
+                    String instanceId = addr.getInstanceId();
+                    String associatedPublicIp = addr.getPublicIp();
                     addr.setInstanceId(null);
                     addr.setAssociationId(null);
                     updateStoredAddressAssociation(addr);
@@ -9938,10 +10012,32 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         addr.setPublicIp(addr.getAllocatedPublicIp());
                     }
                     addresses.put(key(region, addr.getAllocationId()), addr);
+                    if (config.services().ec2().mock() && instanceId != null) {
+                        releaseMockElasticAddress(region, instanceId, associatedPublicIp);
+                    }
                     return;
                 }
             }
         }
+    }
+
+    /**
+     * A running mock instance whose Elastic IP is disassociated gets a new automatic address when
+     * its launch assigned one, as on AWS; otherwise it is left without a public address.
+     */
+    private void releaseMockElasticAddress(String region, String instanceId, String elasticPublicIp) {
+        instances.get(key(region, instanceId)).ifPresent(inst -> {
+            synchronized (inst) {
+                if (!Objects.equals(elasticPublicIp, inst.getPublicIpAddress())) {
+                    return;
+                }
+                clearPublicAddress(inst);
+                if ("running".equals(inst.getState().getName())) {
+                    assignMockPublicAddress(inst);
+                }
+            }
+            instances.put(key(region, instanceId), inst);
+        });
     }
 
     /**
