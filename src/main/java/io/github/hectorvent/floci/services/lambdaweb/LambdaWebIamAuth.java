@@ -4,9 +4,10 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.auth.CredentialScope;
-import io.github.hectorvent.floci.core.common.auth.SigV4AuthorizationHeader;
 import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
+import io.github.hectorvent.floci.core.common.auth.SigV4SignedRequest;
+import io.github.hectorvent.floci.core.common.auth.SigV4SignedRequest.Freshness;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
@@ -25,10 +26,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.time.DateTimeException;
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -46,14 +44,9 @@ public class LambdaWebIamAuth {
 
     private static final String ACTION = "lambda:InvokeWebFunctionEndpoint";
     private static final Logger LOG = Logger.getLogger(LambdaWebIamAuth.class);
-    private static final String ALGORITHM = "AWS4-HMAC-SHA256";
     private static final String SERVICE = "lambda";
     private static final String SECURITY_TOKEN = "X-Amz-Security-Token";
-    private static final long MAX_CLOCK_SKEW_SECONDS = 300;
-    private static final long MAX_PRESIGNED_EXPIRY_SECONDS = 604800;
     private static final String TEST_ACCESS_KEY = "test";
-    private static final DateTimeFormatter AMZ_DATE =
-            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
 
     private final EmulatorConfig config;
     private final IamService iamService;
@@ -84,8 +77,8 @@ public class LambdaWebIamAuth {
         }
     }
 
-    private record Signed(String credential, String signedHeaders, String signature, String amzDate,
-                          Long expiresSeconds, String sessionToken, boolean presigned) {
+    /** A signature and the session token that came with it. */
+    private record Signed(SigV4SignedRequest request, String sessionToken) {
     }
 
     /**
@@ -99,21 +92,21 @@ public class LambdaWebIamAuth {
 
     /** The access key that signed the request, or null when the signature does not hold. */
     private String authenticate(Inbound request, String region) {
-        Signed signed = signed(request);
+        Signed found = signed(request);
         // Lambda takes this header as the payload hash and never reads the body.
         String payloadHash = request.headers().get("X-Amz-Content-SHA256");
-        if (signed == null || isBlank(payloadHash)) {
+        if (found == null || isBlank(payloadHash)) {
             return null;
         }
+        SigV4SignedRequest signed = found.request();
         CredentialScope scope = CredentialScope.parse(signed.credential());
-        Instant signedAt = signedAt(signed.amzDate());
         if (scope == null || !SERVICE.equals(scope.service()) || !region.equals(scope.region())
                 || !signed.amzDate().startsWith(scope.date())
                 || !SigV4RequestValidator.containsHeader(signed.signedHeaders(), "host")
-                || signedAt == null || !fresh(signedAt, signed)) {
+                || signed.freshness(Instant.now()) != Freshness.FRESH) {
             return null;
         }
-        String secretKey = secretKey(scope.accessKeyId(), signed.sessionToken());
+        String secretKey = secretKey(scope.accessKeyId(), found.sessionToken());
         if (secretKey == null) {
             LOG.debugv("A request to a Lambda Web endpoint names an unknown access key {0}",
                     SigV4RequestValidator.sanitizeForLog(scope.accessKeyId()));
@@ -139,16 +132,6 @@ public class LambdaWebIamAuth {
         return matches ? scope.accessKeyId() : null;
     }
 
-    private static Instant signedAt(String amzDate) {
-        try {
-            return Instant.from(AMZ_DATE.parse(amzDate));
-        } catch (DateTimeException e) {
-            LOG.debugv("A request to a Lambda Web endpoint has a malformed date {0}",
-                    SigV4RequestValidator.sanitizeForLog(amzDate));
-            return null;
-        }
-    }
-
     /**
      * The path as signers sign it, with dot segments resolved and empty segments dropped. Lambda
      * refuses a signature over the path as sent when the two differ.
@@ -169,45 +152,22 @@ public class LambdaWebIamAuth {
         return first + String.join("/", segments) + last;
     }
 
-    /** The header signature, or the presigned query when there is no {@code Authorization} header. */
+    /**
+     * The header signature, or the presigned query when there is no {@code Authorization} header.
+     * The header wins over the query, as on AWS.
+     */
     private static Signed signed(Inbound request) {
         String authorization = request.headers().get("Authorization");
         if (isBlank(authorization)) {
             MultiMap params = request.params();
-            if (!ALGORITHM.equals(params.get("X-Amz-Algorithm"))) {
+            if (!SigV4SignedRequest.ALGORITHM.equals(params.get("X-Amz-Algorithm"))) {
                 return null;
             }
-            String expires = params.get("X-Amz-Expires");
-            Signed presigned = new Signed(params.get("X-Amz-Credential"), params.get("X-Amz-SignedHeaders"),
-                    params.get("X-Amz-Signature"), params.get("X-Amz-Date"),
-                    expires == null || !expires.matches("\\d{1,9}") ? null : Long.valueOf(expires),
-                    params.get(SECURITY_TOKEN), true);
-            return complete(presigned) && presigned.expiresSeconds() != null ? presigned : null;
+            SigV4SignedRequest presigned = SigV4SignedRequest.fromQuery(params::get);
+            return presigned == null ? null : new Signed(presigned, params.get(SECURITY_TOKEN));
         }
-        SigV4AuthorizationHeader header = SigV4AuthorizationHeader.parse(authorization);
-        if (header == null) {
-            return null;
-        }
-        Signed signed = new Signed(header.credential(), header.signedHeaders(), header.signature(),
-                request.headers().get("X-Amz-Date"), null, request.headers().get(SECURITY_TOKEN), false);
-        return complete(signed) ? signed : null;
-    }
-
-    private static boolean complete(Signed signed) {
-        return !isBlank(signed.credential()) && !isBlank(signed.signedHeaders()) && !isBlank(signed.signature())
-                && !isBlank(signed.amzDate());
-    }
-
-    private static boolean fresh(Instant signedAt, Signed signed) {
-        Instant now = Instant.now();
-        if (signedAt.isAfter(now.plusSeconds(MAX_CLOCK_SKEW_SECONDS))) {
-            return false;
-        }
-        if (signed.presigned()) {
-            long expires = signed.expiresSeconds();
-            return 1 <= expires && expires <= MAX_PRESIGNED_EXPIRY_SECONDS && !now.isAfter(signedAt.plusSeconds(expires));
-        }
-        return !signedAt.isBefore(now.minusSeconds(MAX_CLOCK_SKEW_SECONDS));
+        SigV4SignedRequest header = SigV4SignedRequest.fromHeader(authorization, request.headers().get("X-Amz-Date"));
+        return header == null ? null : new Signed(header, request.headers().get(SECURITY_TOKEN));
     }
 
     /**
