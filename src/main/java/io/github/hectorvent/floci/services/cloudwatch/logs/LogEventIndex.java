@@ -32,7 +32,7 @@ final class LogEventIndex {
     private final Map<String, NavigableSet<Entry>> byGroup = new HashMap<>();
     private final Map<String, Entry> byKey = new HashMap<>();
 
-    /** Indexes the event under {@code group}, its {@code region::group::}; keys alone cannot tell. */
+    /** Indexes the event under {@code group}, its {@code region::group::}. */
     void add(String key, String group, LogEvent event) {
         if (byKey.containsKey(key)) {
             return;
@@ -117,14 +117,5 @@ final class LogEventIndex {
                 byGroup.remove(entry.group());
             }
         }
-    }
-
-    /** Whether {@code key} is the stream's: its {@code region::group::stream::}, then only timestamp and id. */
-    static boolean isOfStream(String key, String streamPrefix) {
-        if (!key.startsWith(streamPrefix)) {
-            return false;
-        }
-        int separator = key.indexOf("::", streamPrefix.length());
-        return separator >= 0 && separator == key.lastIndexOf("::");
     }
 }

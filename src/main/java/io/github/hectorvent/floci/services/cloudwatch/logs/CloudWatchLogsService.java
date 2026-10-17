@@ -43,9 +43,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Function;
 import java.util.function.LongSupplier;
-import java.util.function.Predicate;
 
 import static io.github.hectorvent.floci.services.cloudwatch.logs.MetricFilterRules.invalid;
 
@@ -326,7 +324,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
                         400);
             }
 
-            // Cascade: delete the group's streams, events and filters; each record's own group decides.
+            // Cascade: delete all streams, events and filters before removing the group.
             String streamPrefix = streamKeyPrefix(region, name);
             List<String> streamKeys = streamStore.keys().stream()
                     .filter(k -> k.startsWith(streamPrefix))
@@ -508,9 +506,8 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
     public void deleteLogStream(String groupName, String streamName, String region) {
         String streamKey = streamKey(region, groupName, streamName);
         streamStore.get(streamKey)
-                .filter(ofGroup(groupName, LogStream::getLogGroupName))
-                .filter(stored -> stored.getLogStreamName() == null
-                        || streamName.equals(stored.getLogStreamName()))
+                .filter(stored -> groupName.equals(stored.getLogGroupName())
+                        && streamName.equals(stored.getLogStreamName()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log stream does not exist: " + streamName, 400));
 
@@ -561,7 +558,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         }
 
         String storagePrefix = streamKeyPrefix(region, groupName);
-        List<LogStream> result = new ArrayList<>(streamStore.scan(k -> {
+        List<LogStream> result = streamStore.scan(k -> {
             if (!k.startsWith(storagePrefix)) {
                 return false;
             }
@@ -570,7 +567,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
             }
             String streamName = k.substring(storagePrefix.length());
             return streamName.startsWith(prefix);
-        }).stream().filter(ofGroup(groupName, LogStream::getLogGroupName)).toList());
+        });
         // Streams that never received events have no lastEventTimestamp; sort them oldest,
         // with the name as tie-break so the order stays deterministic.
         Comparator<LogStream> base = byLastEventTime
@@ -668,7 +665,6 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
             List<Map<String, Object>> events, String region) {
         String streamKey = streamKey(region, groupName, streamName);
         getForAccount(streamStore, accountId, streamKey)
-                .filter(ofGroup(groupName, LogStream::getLogGroupName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log stream does not exist: " + streamName, 400));
 
@@ -704,7 +700,6 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
             // Again under the lock: DeleteLogStream removes the stream and its events while holding it,
             // and the stream's metadata is written here too, so a put can't bring a deleted stream back.
             LogStream stream = getForAccount(streamStore, accountId, streamKey)
-                    .filter(ofGroup(groupName, LogStream::getLogGroupName))
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                             "The specified log stream does not exist: " + streamName, 400));
             boolean done = false;
@@ -795,39 +790,11 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
             return;
         }
         index.startRefill();
-        List<String> orphans = new ArrayList<>();
         for (String key : keysForAccount(eventStore, accountId)) {
-            String group = groupOfEventKey(accountId, key);
-            if (group == null) {
-                orphans.add(key);
-                continue;
-            }
-            getForAccount(eventStore, accountId, key).ifPresent(event -> index.add(key, group, event));
-        }
-        // An event whose stream is gone, as an older Floci could leave from a put racing a delete. AWS
-        // deletes a stream's events with it, and with no stream there is no telling its group.
-        for (String key : orphans) {
-            deleteForAccount(eventStore, accountId, key);
+            getForAccount(eventStore, accountId, key)
+                    .ifPresent(event -> index.add(key, groupPrefixFromEventKey(key), event));
         }
         index.markFilled();
-    }
-
-    /** The group an event key was written under, found by its stream; null when no such stream exists. */
-    private String groupOfEventKey(String accountId, String key) {
-        int afterRegion = key.indexOf("::") + 2;
-        int beforeId = key.lastIndexOf("::");
-        int beforeTimestamp = key.lastIndexOf("::", beforeId - 1);
-        String region = key.substring(0, afterRegion - 2);
-        for (int split = key.lastIndexOf("::", beforeTimestamp - 1); split >= afterRegion;
-             split = key.lastIndexOf("::", split - 1)) {
-            String group = key.substring(afterRegion, split);
-            String stream = key.substring(split + 2, beforeTimestamp);
-            if (getForAccount(streamStore, accountId, streamKey(region, group, stream))
-                    .filter(ofGroup(group, LogStream::getLogGroupName)).isPresent()) {
-                return streamKeyPrefix(region, group);
-            }
-        }
-        return null;
     }
 
     /** The partition {@code accountId} writes to, or the request's when null; "" for a plain store. */
@@ -1379,13 +1346,15 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
      */
     private void deleteStreamAndEvents(String region, String groupName, String streamName, String streamKey) {
         String eventPrefix = eventKeyPrefix(region, groupName, streamName);
+        String groupPrefix = streamKeyPrefix(region, groupName);
         LogEventIndex index = eventIndex(indexAccount(null));
         synchronized (index) {
             boolean done = false;
             try {
                 streamStore.delete(streamKey);
                 List<String> keys = eventStore.keys().stream()
-                        .filter(k -> LogEventIndex.isOfStream(k, eventPrefix))
+                        .filter(k -> k.startsWith(eventPrefix)
+                                && streamName.equals(streamNameFromEventKey(k, groupPrefix)))
                         .toList();
                 keys.forEach(eventStore::delete);
                 keys.forEach(index::remove);
@@ -1400,14 +1369,6 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
 
     public String buildArn(String groupName, String region) {
         return regionResolver.buildArn("logs", region, "log-group:" + groupName);
-    }
-
-    /** Whether a record found by key is the group's; keys are not escaped. Null counts as the caller's. */
-    private static <T> Predicate<T> ofGroup(String groupName, Function<T, String> groupOf) {
-        return found -> {
-            String recorded = groupOf.apply(found);
-            return recorded == null || recorded.equals(groupName);
-        };
     }
 
     private static String groupKeyPrefix(String region) {
@@ -1449,6 +1410,17 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         return timestampSeparator < groupPrefix.length()
                 ? eventKey.substring(groupPrefix.length())
                 : eventKey.substring(groupPrefix.length(), timestampSeparator);
+    }
+
+    /**
+     * The {@code <region>::<group>::} an event key starts with. AWS allows no ':' in a stream name,
+     * and the timestamp and uuid are generated here, so the prefix ends at the third "::" from the right.
+     */
+    private static String groupPrefixFromEventKey(String eventKey) {
+        int uuidSeparator = eventKey.lastIndexOf("::");
+        int timestampSeparator = eventKey.lastIndexOf("::", uuidSeparator - 1);
+        int streamSeparator = eventKey.lastIndexOf("::", timestampSeparator - 1);
+        return eventKey.substring(0, streamSeparator + 2);
     }
 
     static String subscriptionFilterKeyPrefix(String region, String logGroupName) {
