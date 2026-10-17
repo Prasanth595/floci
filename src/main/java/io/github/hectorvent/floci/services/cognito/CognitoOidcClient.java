@@ -33,18 +33,28 @@ public class CognitoOidcClient {
 
     @Inject
     public CognitoOidcClient(ObjectMapper objectMapper, EmulatorConfig config) {
-        this(HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build(), objectMapper,
-                config.services().cognito().googleIssuer());
+        this(defaultHttpClient(), objectMapper, config.services().cognito().googleIssuer());
     }
 
     CognitoOidcClient(ObjectMapper objectMapper) {
-        this(HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build(), objectMapper, GOOGLE_ISSUER);
+        this(defaultHttpClient(), objectMapper, GOOGLE_ISSUER);
+    }
+
+    CognitoOidcClient(ObjectMapper objectMapper, String googleIssuer) {
+        this(defaultHttpClient(), objectMapper, googleIssuer);
     }
 
     CognitoOidcClient(HttpClient httpClient, ObjectMapper objectMapper, String googleIssuer) {
         this.httpClient = httpClient;
         this.objectMapper = objectMapper;
         this.googleIssuer = googleIssuer;
+    }
+
+    private static HttpClient defaultHttpClient() {
+        return HttpClient.newBuilder()
+                .connectTimeout(CONNECT_TIMEOUT)
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .build();
     }
 
     IdentityProvider googleProvider(IdentityProvider provider) {

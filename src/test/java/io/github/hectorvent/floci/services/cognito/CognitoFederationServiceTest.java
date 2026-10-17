@@ -35,6 +35,12 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -478,6 +484,141 @@ class CognitoFederationServiceTest {
     }
 
     @Test
+    void googleSignInFollowsDiscoveryRedirect() throws Exception {
+        createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
+        oidcServer.createContext("/.well-known/openid-configuration", exchange -> {
+            exchange.getResponseHeaders().set("Location", endpoint("/redirected-discovery"));
+            exchange.sendResponseHeaders(302, -1);
+            exchange.close();
+        });
+        oidcServer.createContext("/redirected-discovery", exchange -> writeResponse(exchange, 200, discovery()));
+        CognitoFederationService googleFederation = new CognitoFederationService(cognitoService, stateStore,
+                new CognitoOidcClient(MAPPER, endpoint("")), CLOCK);
+
+        String redirect = googleFederation.beginAuthorization(pool.getId(), "cognito-client",
+                "https://application.example.test/callback", List.of("openid"), null, "Google");
+
+        assertTrue(redirect.startsWith(endpoint("/authorize") + "?"), redirect);
+    }
+
+    @Test
+    void googleCallbackSucceedsWhenDiscoveryOutageOccursAfterAuthorization() throws Exception {
+        createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
+        CognitoFederationService googleFederation = googleFederation(discovery(), 200);
+
+        String redirect = googleFederation.beginAuthorization(pool.getId(), "cognito-client",
+                "https://application.example.test/callback", List.of("openid"), "nonce-value", "Google");
+        assertTrue(redirect.startsWith(endpoint("/authorize") + "?"), redirect);
+
+        // Simulate a discovery outage after the authorization transaction has begun.
+        oidcServer.removeContext("/.well-known/openid-configuration");
+
+        String code = googleFederation.completeAuthorization(queryValue(redirect, "state"), "provider-code");
+        CognitoAuthorizationCode storedCode = stateStore.consumeAuthorizationCode(code).orElseThrow();
+        CognitoUser user = cognitoService.adminGetUser(pool.getId(), storedCode.userId());
+
+        assertEquals("Google_provider-subject", user.getUsername());
+        assertNotNull(tokenRequest.get());
+        assertNotNull(claimsRequest.get());
+    }
+
+    @Test
+    void googleProvisioningReconcilesUserLinkedViaAdminLinkProviderForUser() throws Exception {
+        IdentityProvider provider = createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
+        cognitoService.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.test"), "Password123!");
+        cognitoService.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-subject");
+
+        CognitoUser reconciled = cognitoService.provisionFederatedUser(pool.getId(), provider, "google-subject", null,
+                Map.of("email", "updated@example.test"));
+
+        assertEquals("alice", reconciled.getUsername());
+        assertEquals("updated@example.test", reconciled.getAttributes().get("email"));
+        JsonNode identity = MAPPER.readTree(reconciled.getAttributes().get("identities")).get(0);
+        assertEquals("Google", identity.path("providerName").asText());
+        assertEquals("google-subject", identity.path("userId").asText());
+
+        // Verify no duplicate user was created.
+        assertTrue(cognitoService.listUsers(pool.getId(), null).stream()
+                .noneMatch(u -> "Google_google-subject".equals(u.getUsername())));
+    }
+
+    @Test
+    void googleProvisioningReconcilesUserLinkedWithGeneratedUsername() throws Exception {
+        IdentityProvider provider = createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
+        cognitoService.adminCreateUser(pool.getId(), "Google_google-subject",
+                Map.of("email", "pre-created@example.test"), "Password123!");
+        cognitoService.adminLinkProviderForUser(pool.getId(), "Google_google-subject", "Google", "google-subject");
+
+        CognitoUser reconciled = cognitoService.provisionFederatedUser(pool.getId(), provider, "google-subject", null,
+                Map.of("email", "reconciled@example.test"));
+
+        assertEquals("Google_google-subject", reconciled.getUsername());
+        assertEquals("reconciled@example.test", reconciled.getAttributes().get("email"));
+        assertEquals("reconciled@example.test", cognitoService.adminGetUser(pool.getId(), "Google_google-subject")
+                .getAttributes().get("email"));
+    }
+
+    @Test
+    void googleProvisioningRacesSafelyWithAdminCreateUser() throws Exception {
+        IdentityProvider provider = createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
+        String targetUsername = "Google_concurrent-subject";
+
+        for (int i = 0; i < 10; i++) {
+            UserPool racePool = cognitoService.createUserPool(Map.of("PoolName", "race-pool-" + i), "us-east-1");
+            cognitoService.createIdentityProvider(racePool.getId(), provider.getProviderName(),
+                    provider.getProviderType(), provider.getProviderDetails(), provider.getAttributeMapping(), List.of());
+
+            ExecutorService executor = Executors.newFixedThreadPool(2);
+            CountDownLatch start = new CountDownLatch(1);
+            AtomicInteger successes = new AtomicInteger();
+            AtomicInteger usernameExistsExceptions = new AtomicInteger();
+
+            Future<?> federatedTask = executor.submit(() -> {
+                try {
+                    start.await();
+                    cognitoService.provisionFederatedUser(racePool.getId(), provider, "concurrent-subject", null,
+                            Map.of("email", "federated@example.test"));
+                    successes.incrementAndGet();
+                } catch (AwsException e) {
+                    if ("UsernameExistsException".equals(e.getErrorCode())) {
+                        usernameExistsExceptions.incrementAndGet();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+
+            Future<?> adminTask = executor.submit(() -> {
+                try {
+                    start.await();
+                    cognitoService.adminCreateUser(racePool.getId(), targetUsername,
+                            Map.of("email", "admin@example.test"), "Password123!");
+                    successes.incrementAndGet();
+                } catch (AwsException e) {
+                    if ("UsernameExistsException".equals(e.getErrorCode())) {
+                        usernameExistsExceptions.incrementAndGet();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+
+            start.countDown();
+            federatedTask.get(5, TimeUnit.SECONDS);
+            adminTask.get(5, TimeUnit.SECONDS);
+            executor.shutdown();
+
+            assertEquals(1, successes.get(), "Exactly one creation should succeed");
+            assertEquals(1, usernameExistsExceptions.get(), "Exactly one operation should receive UsernameExistsException");
+
+            CognitoUser user = cognitoService.adminGetUser(racePool.getId(), targetUsername);
+            assertNotNull(user);
+            String email = user.getAttributes().get("email");
+            assertTrue("federated@example.test".equals(email) || "admin@example.test".equals(email));
+        }
+    }
+
+    @Test
     void completeAuthorizationStoresAwsCompatibleIdentityFields() throws Exception {
         createDefaultProvider();
 
@@ -548,7 +689,7 @@ class CognitoFederationServiceTest {
     private CognitoFederationService googleFederation(String discovery, int status) {
         oidcServer.createContext("/.well-known/openid-configuration", exchange -> writeResponse(exchange, status, discovery));
         return new CognitoFederationService(cognitoService, stateStore,
-                new CognitoOidcClient(HttpClient.newHttpClient(), MAPPER, endpoint("")), CLOCK);
+                new CognitoOidcClient(MAPPER, endpoint("")), CLOCK);
     }
 
     private void handleToken(HttpExchange exchange) throws IOException {
