@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.restassured.path.xml.XmlPath;
+import io.restassured.path.xml.element.Node;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 
+import java.util.List;
 import java.util.Set;
 
 import static io.restassured.RestAssured.given;
@@ -29,6 +31,8 @@ final class CfnStackWaits {
             "CREATE_COMPLETE", "CREATE_FAILED", "ROLLBACK_COMPLETE", "ROLLBACK_FAILED",
             "UPDATE_COMPLETE", "UPDATE_FAILED", "UPDATE_ROLLBACK_COMPLETE", "UPDATE_ROLLBACK_FAILED",
             "DELETE_COMPLETE", "DELETE_FAILED");
+
+    private static final Set<String> OPERATION_STARTS = Set.of("CREATE_IN_PROGRESS", "UPDATE_IN_PROGRESS");
 
     /**
      * Waits until DescribeStacks reports a terminal status for a create or update and returns
@@ -110,6 +114,51 @@ final class CfnStackWaits {
         }
         fail("Stack " + stackName + " did not reach " + expectedStatus + " within ten seconds, last: " + last);
         return last;
+    }
+
+    /**
+     * The reason on the first resource event that failed a create or update in the stack's latest
+     * operation, the one its last stack-level CREATE_IN_PROGRESS or UPDATE_IN_PROGRESS began. The
+     * stack's own reason only names the failed resource, as on AWS, so the failure's message is read
+     * here. Fails when DescribeStackEvents is not 200 or no resource failed in that operation.
+     */
+    static String failedResourceReason(String stackName) {
+        return failedResourceReason(stackName, null);
+    }
+
+    static String failedResourceReason(String stackName, String authorization) {
+        RequestSpecification request = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stackName);
+        if (authorization != null) {
+            request.header("Authorization", authorization);
+        }
+        Response response = request.when().post("/");
+        if (response.statusCode() != 200) {
+            fail("DescribeStackEvents " + stackName + " answered " + response.statusCode() + ": " + response.asString());
+        }
+        List<Node> newestFirst = response.xmlPath().getList("**.findAll { it.name() == 'member' }", Node.class);
+        String reason = null;
+        for (Node event : newestFirst) {
+            String status = text(event, "ResourceStatus");
+            if (text(event, "StackName").equals(text(event, "LogicalResourceId"))) {
+                if (OPERATION_STARTS.contains(status)) {
+                    break;
+                }
+            } else if ("CREATE_FAILED".equals(status) || "UPDATE_FAILED".equals(status)) {
+                reason = text(event, "ResourceStatusReason");
+            }
+        }
+        if (reason == null) {
+            fail("Stack " + stackName + " has no failed resource event in its latest operation: " + response.asString());
+        }
+        return reason;
+    }
+
+    private static String text(Node event, String name) {
+        Node child = event.getNode(name);
+        return child == null ? "" : child.value();
     }
 
     /**

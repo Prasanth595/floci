@@ -295,8 +295,9 @@ class CloudFormationSecretTargetAttachmentIntegrationTest {
             String describeXml = describeStack(stackName);
             assertTrue(describeXml.contains("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"),
                     "stack should be ROLLBACK_COMPLETE: " + describeXml);
-            assertTrue(describeXml.contains("already attached"),
-                    "stack should report the duplicate attachment: " + describeXml);
+            String failure = CfnStackWaits.failedResourceReason(stackName, CFN_AUTH);
+            assertTrue(failure.contains("already attached"),
+                    "the attachment should report the duplicate: " + failure);
 
             JsonNode rolledBack = getSecretJson(secretName);
             assertEquals("admin", rolledBack.path("username").asText());

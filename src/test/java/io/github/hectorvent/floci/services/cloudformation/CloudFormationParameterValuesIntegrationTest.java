@@ -435,7 +435,8 @@ class CloudFormationParameterValuesIntegrationTest {
             .then()
                 .statusCode(200);
             CfnStackWaits.StackState state = CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE");
-            assertEquals("Parameters: [Env] must have values", state.reason());
+            assertEquals("The following resource(s) failed to create: [Child]. Rollback requested by user.",
+                    state.reason());
             request("DescribeStackEvents", stackName)
             .when()
                 .post("/")

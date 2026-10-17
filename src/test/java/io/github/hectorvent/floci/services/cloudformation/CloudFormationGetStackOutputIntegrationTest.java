@@ -112,7 +112,7 @@ class CloudFormationGetStackOutputIntegrationTest {
 
         CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(consumer);
         assertEquals("ROLLBACK_COMPLETE", state.status());
-        assertThat(state.reason(), containsString("TemplateError: Fn::GetStackOutput references output Nope from stack "
+        assertThat(CfnStackWaits.failedResourceReason(consumer), containsString("TemplateError: Fn::GetStackOutput references output Nope from stack "
                 + producer + ", but this output was not found. The output may have been deleted."));
         parameterValue(DEFAULT_ACCOUNT, US_EAST_1, parameter("missing-output")).statusCode(400);
     }
@@ -126,9 +126,9 @@ class CloudFormationGetStackOutputIntegrationTest {
 
         CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(consumer);
         assertEquals("ROLLBACK_COMPLETE", state.status());
-        assertThat(state.reason(), containsString("Stack with id " + missing + " does not exist (Service:"
+        assertThat(CfnStackWaits.failedResourceReason(consumer), containsString("Stack with id " + missing + " does not exist (Service:"
                 + " AmazonCloudFormation; Status Code: 400; Error Code: ValidationError; Request ID: "));
-        assertThat(state.reason(), endsWith("; Proxy: null)"));
+        assertThat(CfnStackWaits.failedResourceReason(consumer), endsWith("; Proxy: null)"));
         parameterValue(DEFAULT_ACCOUNT, US_EAST_1, parameter("missing-stack")).statusCode(400);
     }
 
@@ -173,11 +173,12 @@ class CloudFormationGetStackOutputIntegrationTest {
 
         assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(consumer).status());
         parameterValue(DEFAULT_ACCOUNT, US_EAST_1, parameter("account")).body("Parameter.Value", equalTo("vpc-other-account"));
-        assertThat(CfnStackWaits.awaitTerminal(noRole).reason(),
+        assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(noRole).status());
+        assertThat(CfnStackWaits.failedResourceReason(noRole),
                 containsString("Stack with id " + producer + " does not exist"));
         CfnStackWaits.StackState missingRoleState = CfnStackWaits.awaitTerminal(missingRole);
         assertEquals("ROLLBACK_COMPLETE", missingRoleState.status());
-        assertThat(missingRoleState.reason(), containsString("is not authorized to perform: sts:AssumeRole on resource: "
+        assertThat(CfnStackWaits.failedResourceReason(missingRole), containsString("is not authorized to perform: sts:AssumeRole on resource: "
                 + nobodyArn + " (Service: AWSSecurityTokenService; Status Code: 403;"
                 + " Error Code: AccessDenied; Request ID: "));
     }
@@ -243,7 +244,7 @@ class CloudFormationGetStackOutputIntegrationTest {
 
         CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(consumer);
         assertEquals("ROLLBACK_COMPLETE", state.status());
-        assertThat(state.reason(), containsString("1 validation error detected: Value '" + reference + "'"
+        assertThat(CfnStackWaits.failedResourceReason(consumer), containsString("1 validation error detected: Value '" + reference + "'"
                 + " at 'stackName' failed to satisfy constraint: Member must satisfy regular expression pattern:"
                 + " [a-zA-Z][-a-zA-Z0-9]*|arn:[-a-zA-Z0-9:/._+]* (Service: AmazonCloudFormation; Status Code: 400;"
                 + " Error Code: ValidationError; Request ID: "));
@@ -268,7 +269,7 @@ class CloudFormationGetStackOutputIntegrationTest {
 
             CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(consumer);
             assertEquals("ROLLBACK_COMPLETE", state.status());
-            assertThat(state.reason(), containsString("1 validation error detected: Value '" + reference
+            assertThat(CfnStackWaits.failedResourceReason(consumer), containsString("1 validation error detected: Value '" + reference
                     + "' at 'stackName' failed to satisfy constraint"));
         } finally {
             ssmService.deleteParameter(producerName, US_EAST_1);
@@ -284,7 +285,7 @@ class CloudFormationGetStackOutputIntegrationTest {
 
         CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(consumer);
         assertEquals("ROLLBACK_COMPLETE", state.status());
-        assertThat(state.reason(), containsString("The security token included in the request is invalid (Service:"
+        assertThat(CfnStackWaits.failedResourceReason(consumer), containsString("The security token included in the request is invalid (Service:"
                 + " AmazonCloudFormation; Status Code: 403; Error Code: InvalidClientTokenId; Request ID: "));
     }
 
@@ -450,7 +451,7 @@ class CloudFormationGetStackOutputIntegrationTest {
 
             CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(parent);
             assertEquals("ROLLBACK_COMPLETE", state.status());
-            assertThat(state.reason(), containsString("Template error: Cannot use Fn::GetStackOutput in Conditions."));
+            assertThat(CfnStackWaits.failedResourceReason(parent), containsString("Template error: Cannot use Fn::GetStackOutput in Conditions."));
         } finally {
             s3Service.deleteObject(bucket, "child.json");
             s3Service.deleteBucket(bucket);

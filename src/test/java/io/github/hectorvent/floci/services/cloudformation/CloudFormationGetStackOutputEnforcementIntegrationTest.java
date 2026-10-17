@@ -119,10 +119,12 @@ class CloudFormationGetStackOutputEnforcementIntegrationTest {
         String producer = producer("vpc-" + base);
         String roleArn = role(base, trustPolicy, DESCRIBE_STACKS);
 
-        CfnStackWaits.StackState state = awaitConsumer(consume(base, producer, roleArn));
+        String consumer = consume(base, producer, roleArn);
+        CfnStackWaits.StackState state = awaitConsumer(consumer);
 
         assertEquals("ROLLBACK_COMPLETE", state.status());
-        assertThat(state.reason(), containsString("User: arn:aws:iam::" + CONSUMER + ":root is not authorized to"
+        String failure = CfnStackWaits.failedResourceReason(consumer, auth(CONSUMER, REGION, "cloudformation"));
+        assertThat(failure, containsString("User: arn:aws:iam::" + CONSUMER + ":root is not authorized to"
                 + " perform: sts:AssumeRole on resource: " + roleArn + " (Service: AWSSecurityTokenService; Status"
                 + " Code: 403; Error Code: AccessDenied; Request ID: "));
     }
@@ -131,13 +133,15 @@ class CloudFormationGetStackOutputEnforcementIntegrationTest {
         String producer = producer("vpc-" + base);
         String roleArn = role(base, allow("{\"AWS\":\"arn:aws:iam::" + CONSUMER + ":root\"}"), policy);
 
-        CfnStackWaits.StackState state = awaitConsumer(consume(base, producer, roleArn));
+        String consumer = consume(base, producer, roleArn);
+        CfnStackWaits.StackState state = awaitConsumer(consumer);
 
         assertEquals("ROLLBACK_COMPLETE", state.status());
-        assertThat(state.reason(), containsString("User: arn:aws:sts::" + OWNER + ":assumed-role/" + name(base)
+        String failure = CfnStackWaits.failedResourceReason(consumer, auth(CONSUMER, REGION, "cloudformation"));
+        assertThat(failure, containsString("User: arn:aws:sts::" + OWNER + ":assumed-role/" + name(base)
                 + "/GetStackOutput is not authorized to perform: cloudformation:DescribeStacks on resource:"
                 + " arn:aws:cloudformation:" + REGION + ":" + OWNER + ":stack/" + producer + "/"));
-        assertThat(state.reason(), containsString(" " + reason + " (Service: AmazonCloudFormation; Status Code: 403;"
+        assertThat(failure, containsString(" " + reason + " (Service: AmazonCloudFormation; Status Code: 403;"
                 + " Error Code: AccessDenied; Request ID: "));
     }
 

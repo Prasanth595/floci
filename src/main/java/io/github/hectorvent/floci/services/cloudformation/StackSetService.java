@@ -678,7 +678,7 @@ public class StackSetService {
         } else if (!"CREATE_COMPLETE".equals(stackStatus) && !"UPDATE_COMPLETE".equals(stackStatus)) {
             inst.setStatus("INOPERABLE");
             inst.setDetailedStatus("FAILED");
-            inst.setStatusReason(stacks.isEmpty() ? null : stacks.get(0).getStatusReason());
+            inst.setStatusReason(stacks.isEmpty() ? null : CloudFormationService.failureCause(stacks.get(0)));
         } else {
             inst.setDetailedStatus("SUCCEEDED");
         }

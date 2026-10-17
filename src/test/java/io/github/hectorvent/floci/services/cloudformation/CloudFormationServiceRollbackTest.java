@@ -139,7 +139,8 @@ class CloudFormationServiceRollbackTest {
         assertEquals(List.of("ROLLBACK_IN_PROGRESS", "ROLLBACK_COMPLETE"), stack.statuses());
         assertEquals(List.of("ROLLBACK_IN_PROGRESS", "ROLLBACK_COMPLETE"), stackEventStatuses(stack));
         stack.assertEachStatusFollowsItsEvent();
-        assertEquals("simulated create failure", stack.writes().getFirst().reason());
+        assertEquals("The following resource(s) failed to create: [FailingResource]. Rollback requested by user.",
+                stack.writes().getFirst().reason());
     }
 
     /**
@@ -167,7 +168,80 @@ class CloudFormationServiceRollbackTest {
         assertEquals(List.of("UPDATE_ROLLBACK_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE"), stack.statuses());
         assertEquals(List.of("UPDATE_ROLLBACK_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE"), stackEventStatuses(stack));
         stack.assertEachStatusFollowsItsEvent();
-        assertEquals("already exists", stack.writes().getFirst().reason());
+        assertEquals("The following resource(s) failed to create: [Dup].", stack.writes().getFirst().reason());
+    }
+
+    /**
+     * The stack's rollback event names the resource that failed, as AWS does; the resource's own
+     * message stays on the resource's event. An update rollback carries no "Rollback requested by
+     * user." suffix.
+     */
+    @Test
+    void updateRollback_reasonSummarizesTheResourceThatFailedToUpdate() {
+        Stack stack = new Stack();
+        stack.setStackName("update-rollback-reason");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_IN_PROGRESS");
+        StackResource failed = resource("MyDB", "db-1", "AWS::RDS::DBInstance", "UPDATE_FAILED");
+        failed.setStatusReason("Size cannot be less than current size; requested: 5; current: 10");
+        stack.getResources().put(failed.getLogicalId(), failed);
+        StackUpdateSnapshot previousState = new StackUpdateSnapshot(
+                "previous-template", "previous-original", Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of());
+
+        service.rollbackFailedExecution(stack, REGION, false, failed, previousState,
+                new LinkedHashSet<>(List.of("MyDB")));
+
+        StackEvent rollbackEvent = stack.getEvents().stream()
+                .filter(event -> "UPDATE_ROLLBACK_IN_PROGRESS".equals(event.getResourceStatus()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("The following resource(s) failed to update: [MyDB].", rollbackEvent.getResourceStatusReason());
+        assertEquals("Size cannot be less than current size; requested: 5; current: 10", failed.getStatusReason());
+    }
+
+    /**
+     * The stack's own reason is the summary; the cause a nested stack's parent and a stack set
+     * instance report is the failed resource's message, from the operation that rolled back.
+     */
+    @Test
+    void failureCause_afterACreateRollback_isTheFailedResourcesMessage() {
+        Stack stack = new Stack();
+        stack.setStackName("failure-cause");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.getEvents().add(event(stack, "failure-cause", "CREATE_IN_PROGRESS", null));
+        stack.getEvents().add(event(stack, "FailingResource", "CREATE_FAILED", "simulated create failure"));
+        StackResource failed = resource("FailingResource", null, "AWS::Test::Failure", "CREATE_FAILED");
+        failed.setStatusReason("simulated create failure");
+        stack.getResources().put(failed.getLogicalId(), failed);
+
+        service.rollbackFailedExecution(stack, REGION, true, failed, null, Set.of());
+
+        assertEquals("ROLLBACK_COMPLETE", stack.getStatus());
+        assertEquals("simulated create failure", CloudFormationService.failureCause(stack));
+    }
+
+    /** A reason that is not the rollback summary, such as a failed rollback's, is the cause as is. */
+    @Test
+    void failureCause_afterAFailedRollback_isTheStacksReason() {
+        Stack stack = new Stack();
+        stack.setStackName("failure-cause-rollback-failed");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        StackResource created = resource("Queue", "queue-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource failed = resource("FailingResource", null, "AWS::Test::Failure", "CREATE_FAILED");
+        failed.setStatusReason("simulated create failure");
+        stack.getResources().put(created.getLogicalId(), created);
+        stack.getResources().put(failed.getLogicalId(), failed);
+        stack.getEvents().add(event(stack, "FailingResource", "CREATE_FAILED", "simulated create failure"));
+        doThrow(new IllegalStateException("cannot delete")).when(provisioner).delete(eq(created), eq(REGION));
+
+        service.rollbackFailedExecution(stack, REGION, true, failed, null, Set.of());
+
+        assertEquals("ROLLBACK_FAILED", stack.getStatus());
+        assertEquals("The following resource(s) failed to roll back: [Queue].", CloudFormationService.failureCause(stack));
     }
 
     @Test
@@ -873,6 +947,15 @@ class CloudFormationServiceRollbackTest {
                 assertEquals(write.status(), write.latestStackEvent(), "event published after " + write.status());
             }
         }
+    }
+
+    private static StackEvent event(Stack stack, String logicalId, String status, String reason) {
+        StackEvent event = new StackEvent();
+        event.setStackName(stack.getStackName());
+        event.setLogicalResourceId(logicalId);
+        event.setResourceStatus(status);
+        event.setResourceStatusReason(reason);
+        return event;
     }
 
     private static StackResource resource(String logicalId, String physicalId, String resourceType, String status) {

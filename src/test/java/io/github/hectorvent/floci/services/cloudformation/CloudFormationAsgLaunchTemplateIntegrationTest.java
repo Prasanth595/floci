@@ -327,7 +327,8 @@ class CloudFormationAsgLaunchTemplateIntegrationTest {
                 }
                 """.formatted(suffix, ltName));
 
-        assertThat(describeStacks(stackName),
+        assertThat(describeStacks(stackName), containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+        assertThat(CfnStackWaits.failedResourceReason(stackName, CFN_AUTH),
                 containsString("Value of property OnDemandBaseCapacity must be an integer."));
     }
 
