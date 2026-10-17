@@ -8,6 +8,7 @@ import jakarta.inject.Inject;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
+import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
@@ -149,6 +150,108 @@ public class BagetterSidecarClient implements RepositorySidecarManager {
                     throw new IllegalStateException("Could not delete " + packageName + " " + version + " from the "
                             + "BaGetter sidecar: upstream returned " + response.statusCode());
                 }
+            }
+        }
+    }
+
+    /**
+     * NuGet's one asset per version is deterministically named (AWS's own normalization rule,
+     * already relied on by {@link #fetchPackageVersionAsset}), so enumerating it for {@code
+     * CopyPackageVersions} needs only confirm the version exists and name it the same way; empty
+     * when it doesn't.
+     */
+    @Override
+    public List<String> listPackageVersionAssetNames(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version) {
+        String lowerId = packageName.toLowerCase(Locale.ROOT);
+        Optional<String> normalizedVersion = matchVersion(repositoryContainerId, lowerId, version);
+        return normalizedVersion.map(v -> List.of(lowerId + "." + v + ".nupkg")).orElse(List.of());
+    }
+
+    /**
+     * Pushes {@code content} (the whole {@code .nupkg}, NuGet's one asset per version) through
+     * the real push wire shape {@code CodeArtifactNuGetController#push} already forwards
+     * unmodified, confirmed against a live BaGetter container: a {@code multipart/form-data}
+     * {@code PUT} to {@code /api/v2/package} whose first (only, here) part is the raw package
+     * bytes — no separate {@code name}/{@code version} form field, since BaGetter reads both from
+     * the {@code .nuspec} embedded in the package itself, not from {@code assetName} or this
+     * method's own {@code packageName}/{@code version} parameters.
+     *
+     * <p>Rejected outright with a real {@code 409} ("a package with this id and version already
+     * exists") if this exact id/version already exists, confirmed live, even for byte-identical
+     * content: unlike Maven's Reposilite, BaGetter has no idempotent-retry short-circuit of its
+     * own ({@code CodeArtifactNuGetController#push} does its own pre-check precisely because of
+     * this). The caller ({@code CodeArtifactService#copyContainerBackedPackageVersions}) already
+     * short-circuits an identical-content version as a no-op before ever reaching here, and is
+     * expected to have deleted a conflicting, differing existing version first for a genuine
+     * overwrite, the same reason {@code ReposiliteSidecarClient#storePackageVersionAsset}
+     * documents for Maven.
+     *
+     * <p>Runs inside {@link #lockFor}, the same lock {@link #deletePackage} and {@code
+     * CodeArtifactNuGetController#push} both already take for this repository: without it, a
+     * native push racing this exact id/version could interleave with this call's own write.
+     */
+    @Override
+    public void storePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName, byte[] content) {
+        synchronized (lockFor(repositoryContainerId)) {
+            String baseUrl = ensureReady(repositoryContainerId, null);
+            String boundary = "flociNuGetCopyBoundary" + System.nanoTime();
+            byte[] head = ("--" + boundary + "\r\n"
+                    + "Content-Disposition: form-data; name=\"package\"; filename=\"" + assetName + "\"\r\n"
+                    + "Content-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8);
+            byte[] tail = ("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8);
+            byte[] body = new byte[head.length + content.length + tail.length];
+            System.arraycopy(head, 0, body, 0, head.length);
+            System.arraycopy(content, 0, body, head.length, content.length);
+            System.arraycopy(tail, 0, body, head.length + content.length, tail.length);
+
+            HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl),
+                            "/api/v2/package"))
+                    .timeout(Duration.ofSeconds(30))
+                    .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                    .PUT(BodyPublishers.ofByteArray(body))
+                    .build();
+            HttpResponse<String> response;
+            try {
+                response = httpClient.send(request, BodyHandlers.ofString());
+            } catch (Exception e) {
+                throw new IllegalStateException("Could not reach the BaGetter sidecar to push " + assetName, e);
+            }
+            if (response.statusCode() != 200 && response.statusCode() != 201 && response.statusCode() != 202) {
+                throw new IllegalStateException("Could not push " + assetName + " to the BaGetter sidecar: "
+                        + "upstream returned " + response.statusCode());
+            }
+        }
+    }
+
+    /**
+     * Deletes the one version this asset belongs to, confirmed against a live container: NuGet
+     * has exactly one asset per version, so there is no finer grain to delete at than {@link
+     * #deletePackage}'s own per-version {@code DELETE /api/v2/package/<id>/<version>} already
+     * uses. Runs inside the same {@link #lockFor} lock {@link #storePackageVersionAsset} and
+     * {@link #deletePackage} both take, for the same reason.
+     */
+    @Override
+    public void deletePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName) {
+        synchronized (lockFor(repositoryContainerId)) {
+            String lowerId = packageName.toLowerCase(Locale.ROOT);
+            String normalizedVersion = NuGetVersions.normalize(version);
+            String baseUrl = ensureReady(repositoryContainerId, null);
+            URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/api/v2/package/"
+                    + SidecarUriUtils.encodeSegment(lowerId) + "/" + SidecarUriUtils.encodeSegment(normalizedVersion));
+            HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).DELETE().build();
+            HttpResponse<Void> response;
+            try {
+                response = httpClient.send(request, BodyHandlers.discarding());
+            } catch (Exception e) {
+                throw new IllegalStateException("Could not reach the BaGetter sidecar to delete " + packageName
+                        + " " + version + "'s asset " + assetName, e);
+            }
+            if (response.statusCode() != 204 && response.statusCode() != 404) {
+                throw new IllegalStateException("Could not delete " + packageName + " " + version + "'s asset "
+                        + assetName + " from the BaGetter sidecar: upstream returned " + response.statusCode());
             }
         }
     }

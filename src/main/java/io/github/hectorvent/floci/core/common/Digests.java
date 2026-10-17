@@ -19,9 +19,14 @@ public final class Digests {
         }
     }
 
+    /** The SHA-1 digest of {@code data} as lowercase hex. */
+    public static String sha1Hex(byte[] data) {
+        return HexFormat.of().formatHex(sha1(data));
+    }
+
     /** The SHA-1 digest of the UTF-8 bytes of {@code text} as lowercase hex. */
     public static String sha1Hex(String text) {
-        return HexFormat.of().formatHex(sha1(text.getBytes(StandardCharsets.UTF_8)));
+        return sha1Hex(text.getBytes(StandardCharsets.UTF_8));
     }
 
     public static byte[] sha256(byte[] data) {

@@ -458,6 +458,151 @@ class CodeArtifactPypiDockerIntegrationTest {
     }
 
     /**
+     * The real-world gap this closes: {@code CopyPackageVersions} used to support only generic
+     * and maven; pypi keeps its uploaded files straight on pypiserver's own flat storage rather
+     * than a {@code packageVersions} record. Confirms the bridge reads the file from the real
+     * sidecar (not a mock) and republishes it to the destination repository's own pypiserver
+     * instance, byte for byte. {@code other-repo} is the empty repository {@link
+     * #repositoriesAreIsolatedFromEachOther} already created.
+     */
+    @Test
+    @Order(15)
+    void copyPackageVersionsBridgesToTheRealPypiserverSidecar() {
+        String packageName = "copyme-pypi-pkg";
+        String filename = "copyme_pypi_pkg-1.0.0.tar.gz";
+        byte[] content = "copy-me-pypi-sdist-bytes".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename, content, "Copy me description"))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"]}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + REPO
+                        + "&destination-repository=other-repo&format=pypi&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0));
+
+        byte[] copied = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/pypi/" + DOMAIN + "/other-repo/packages/" + filename)
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("copy-me-pypi-sdist-bytes", new String(copied, StandardCharsets.UTF_8));
+
+        // The real-world gap this proves closed: pypiserver parses only a distribution's
+        // filename, never its embedded description (see GetPackageVersionReadme's own javadoc),
+        // so this bridge has no way to read it from the destination sidecar after copying the
+        // file; it must be propagated from this service's own captured-at-upload-time record.
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/readme?domain=" + DOMAIN + "&repository=other-repo&format=pypi&package="
+                        + packageName + "&version=1.0.0")
+                .then().statusCode(200).body("readme", equalTo("Copy me description"));
+    }
+
+    /**
+     * The real-world bug this would otherwise hit: pypiserver rejects a plain republish of an
+     * already-uploaded filename with a real {@code 409} (confirmed live, this container is
+     * started without pypiserver's own {@code --overwrite} flag, same as production), even though
+     * {@code reuploadingTheSameFileIsRejectedAndTheOriginalContentSurvives} already proves that
+     * for the native upload path; this confirms the bridge's own delete-then-republish ({@code
+     * remove_pkg}, then re-upload, both confirmed live) actually clears the way.
+     */
+    @Test
+    @Order(16)
+    void copyPackageVersionsOverwritesAnExistingPypiFileWithDifferentContentAtTheRealSidecar() {
+        String packageName = "copyover-pypi-pkg";
+        String filename = "copyover_pypi_pkg-1.0.0.tar.gz";
+        byte[] oldContent = "old-overwrite-pypi-sdist".getBytes(StandardCharsets.UTF_8);
+        byte[] newContent = "new-overwrite-pypi-sdist".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename, oldContent))
+                .post("/codeartifact/pypi/" + DOMAIN + "/other-repo/")
+                .then().statusCode(200);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename, newContent))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"],\"allowOverwrite\":true}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + REPO
+                        + "&destination-repository=other-repo&format=pypi&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0));
+
+        byte[] copied = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/pypi/" + DOMAIN + "/other-repo/packages/" + filename)
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("new-overwrite-pypi-sdist", new String(copied, StandardCharsets.UTF_8));
+    }
+
+    /**
+     * The real-world bug this would otherwise hit: pypiserver's own {@code remove_pkg} management
+     * call (confirmed live) deletes every file sharing a release's exact name and version, not just
+     * the one filename it was asked to delete, so a copy that deletes-then-rewrites one asset at a
+     * time mid-loop would wipe a sibling asset of the same release already rewritten earlier in
+     * that same loop — losing it even though the copy as a whole reported success. A real pypi
+     * release commonly carries both an sdist and a wheel for the exact same version, so this is not
+     * a contrived edge case.
+     */
+    @Test
+    @Order(17)
+    void copyPackageVersionsOverwriteKeepsEveryAssetWhenAPypiReleaseHasBothAnSdistAndAWheel() {
+        String packageName = "copyover-multi-pypi-pkg";
+        String sdistFilename = "copyover_multi_pypi_pkg-1.0.0.tar.gz";
+        String wheelFilename = "copyover_multi_pypi_pkg-1.0.0-py3-none-any.whl";
+        byte[] oldSdist = "old-multi-pypi-sdist".getBytes(StandardCharsets.UTF_8);
+        byte[] newSdist = "new-multi-pypi-sdist".getBytes(StandardCharsets.UTF_8);
+        byte[] newWheel = "new-multi-pypi-wheel".getBytes(StandardCharsets.UTF_8);
+
+        // The destination already holds this version (just the sdist, enough to make this a real
+        // overwrite rather than a fresh publish) so the copy below has to delete-and-replace it.
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, sdistFilename, oldSdist))
+                .post("/codeartifact/pypi/" + DOMAIN + "/other-repo/")
+                .then().statusCode(200);
+
+        // The source carries both files for this same release, exactly as a real `twine upload
+        // dist/*` would have left it.
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, sdistFilename, newSdist))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, wheelFilename, newWheel))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"],\"allowOverwrite\":true}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + REPO
+                        + "&destination-repository=other-repo&format=pypi&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0));
+
+        byte[] copiedSdist = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/pypi/" + DOMAIN + "/other-repo/packages/" + sdistFilename)
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("new-multi-pypi-sdist", new String(copiedSdist, StandardCharsets.UTF_8));
+        byte[] copiedWheel = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/pypi/" + DOMAIN + "/other-repo/packages/" + wheelFilename)
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("new-multi-pypi-wheel", new String(copiedWheel, StandardCharsets.UTF_8));
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code PypiserverSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container.

@@ -12,6 +12,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -341,6 +342,85 @@ class CodeArtifactNuGetDockerIntegrationTest {
                 .body(pushBody("boundary123", nupkg))
                 .put("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/api/v2/package")
                 .then().statusCode(201);
+    }
+
+    /**
+     * The real-world gap this closes: {@code CopyPackageVersions} used to support only generic
+     * and maven; nuget keeps its pushed packages straight on BaGetter's own flat storage rather
+     * than a {@code packageVersions} record. Confirms the bridge reads the {@code .nupkg} from
+     * the real sidecar (not a mock) and republishes it to the destination repository's own
+     * BaGetter instance, byte for byte. {@code other-nuget-repo} is the empty repository {@link
+     * #repositoriesAreIsolatedFromEachOther} already created.
+     */
+    @Test
+    @Order(13)
+    void copyPackageVersionsBridgesToTheRealBagetterSidecar() {
+        String packageId = "CopyMe.Package";
+        byte[] nupkg = buildNupkg(packageId, VERSION, "copy-me nuget package", null, null);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(pushBody("boundary123", nupkg))
+                .put("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/api/v2/package")
+                .then().statusCode(201);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"" + VERSION + "\"]}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + REPO
+                        + "&destination-repository=other-nuget-repo&format=nuget&package=" + packageId)
+                .then().statusCode(200)
+                .body("successfulVersions.'" + VERSION + "'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0));
+
+        byte[] copied = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/nuget/" + DOMAIN + "/other-nuget-repo/v3/package/"
+                        + packageId.toLowerCase(Locale.ROOT) + "/" + VERSION + "/"
+                        + packageId.toLowerCase(Locale.ROOT) + "." + VERSION + ".nupkg")
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertArrayEquals(nupkg, copied);
+    }
+
+    /**
+     * The real-world bug this would otherwise hit: BaGetter rejects a plain re-push of an
+     * already-pushed id/version outright (a real {@code 409}, confirmed live and already proven
+     * by {@code repushingTheSameCoordinatesWithDifferentContentIsRejectedAndTheOriginalSurvives}
+     * for the native push path), even for an id/version whose packument entry alone was removed,
+     * since BaGetter's storage is content-addressed by id/version. Confirms the bridge's own
+     * delete-then-republish ({@code DELETE /api/v2/package/<id>/<version>}, then push, both
+     * confirmed live) actually clears the way for different content.
+     */
+    @Test
+    @Order(14)
+    void copyPackageVersionsOverwritesAnExistingNuGetVersionWithDifferentContentAtTheRealSidecar() {
+        String packageId = "CopyOver.Package";
+        String lowerId = packageId.toLowerCase(Locale.ROOT);
+        byte[] oldNupkg = buildNupkg(packageId, VERSION, "old overwrite content", null, null);
+        byte[] newNupkg = buildNupkg(packageId, VERSION, "new overwrite content", null, null);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(pushBody("boundary123", oldNupkg))
+                .put("/codeartifact/nuget/" + DOMAIN + "/other-nuget-repo/api/v2/package")
+                .then().statusCode(201);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(pushBody("boundary123", newNupkg))
+                .put("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/api/v2/package")
+                .then().statusCode(201);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"" + VERSION + "\"],\"allowOverwrite\":true}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + REPO
+                        + "&destination-repository=other-nuget-repo&format=nuget&package=" + packageId)
+                .then().statusCode(200)
+                .body("successfulVersions.'" + VERSION + "'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0));
+
+        byte[] copied = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/nuget/" + DOMAIN + "/other-nuget-repo/v3/package/" + lowerId + "/" + VERSION
+                        + "/" + lowerId + "." + VERSION + ".nupkg")
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertArrayEquals(newNupkg, copied);
     }
 
     private static long describeDomainAssetSizeBytes() {

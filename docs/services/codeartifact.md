@@ -45,7 +45,7 @@ behind them yet.
 | `DescribePackageVersion` | Returns a package version's status, revision, and origin. |
 | `GetPackageVersionAsset` | Downloads one asset from a package version by name, optionally pinned to a specific revision. |
 | `GetPackageVersionReadme` | Returns the readme text for a package version; `npm`, `pypi`, and `nuget` only, matching AWS's own restriction for this action. |
-| `CopyPackageVersions` | Copies one or more versions of a package from one repository to another in the same domain; `generic` only. |
+| `CopyPackageVersions` | Copies one or more versions of a package from one repository to another in the same domain. |
 | `TagResource` | Adds or updates tags on a domain or repository ARN. |
 | `UntagResource` | Removes tags by key from a domain or repository ARN. |
 | `ListTagsForResource` | Lists the tags on a domain or repository ARN. |
@@ -257,15 +257,28 @@ state.
   `DisposePackageVersions`, and `UpdatePackageVersionsStatus` don't exist yet; the only way to
   move a version from `Unfinished` to `Published` today is a follow-up `PublishPackageVersion`
   call that omits the `unfinished` flag.
-- **`CopyPackageVersions` only supports the `generic` format, unlike real AWS.** The API
-  reference does not restrict this action's `format` parameter the way it restricts
-  `PublishPackageVersion`'s to `generic` alone; real CodeArtifact copies Maven, npm, pypi, and
-  nuget versions too. This is a Floci implementation gap, not an AWS restriction being mirrored:
-  Maven, npm, pypi, and nuget publish straight to their own sidecar and keep no `packageVersions`
-  record this could read from or write to, so bridging them needs the same per-sidecar
-  fetch-then-republish shape `GetPackageVersionAsset`'s own bridge already uses, not yet built.
-  `includeFromUpstream` is accepted but has no effect, since Floci has no upstream-ingestion path
-  for any format to begin with (see the upstream-resolution limitation below).
+- **`CopyPackageVersions` has no full cross-call rollback on a mid-copy sidecar failure.**
+  (`generic`, `maven`, `npm`, `pypi`, and `nuget` are all supported — matching real AWS, which
+  places no `format` restriction on this action at all, unlike `PublishPackageVersion`'s own
+  restriction to `generic`; `generic` copies through its own `packageVersions` record, while
+  `maven`, `npm`, `pypi`, and `nuget` each bridge straight to their own sidecar's real wire
+  protocol — `mvn deploy`, `npm publish`, `twine upload`, and `nuget push` respectively, confirmed
+  against a live container for each — since none of the four keeps a `packageVersions` record
+  this action could otherwise read from or write to.) A container-backed copy retains byte-for-byte
+  source assets, and a best-effort compensating cleanup restores or removes whatever one version's
+  own write touched if a later step in that same version fails, preserving the original error, but
+  a sidecar outage mid-cleanup can still leave a version in an inconsistent state, the same
+  residual risk the generic path's own write-level failure handling already accepts. A single call
+  also holds every fetched asset in memory until the whole batch's destination writes complete, so
+  a batch of many large assets is bounded by available heap, not disk; the same nominal-quota
+  tradeoff the 5 GB limitation below already accepts elsewhere. A copied `npm` or `pypi` version's
+  readme is propagated to the destination too, from this service's own record captured at publish
+  time, since neither sidecar can answer for one after the fact (`GetPackageVersionReadme`'s own
+  constraint, described earlier in this document); `nuget` needs no equivalent step, since
+  `GetPackageVersionReadme` already answers it live from the `.nupkg` this action already copies
+  in full. `includeFromUpstream` is accepted but has no effect, since Floci has no
+  upstream-ingestion path for any format to begin with (see
+  the upstream-resolution limitation below).
 - **The 5 GB asset size quota is nominal.** `PublishPackageVersion` and the Maven, pypi, and
   nuget repository endpoints all receive the request body as a single byte array before Floci ever
   checks its length, so a request already large enough to exhaust available heap fails before the

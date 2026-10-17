@@ -14,6 +14,7 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -157,6 +158,126 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
         for (PkgNameVersion file : packageFiles(baseUrl, packageName)) {
             removeVersion(baseUrl, file.name(), file.version());
         }
+    }
+
+    /**
+     * Every filename pypiserver's own per-project JSON listing records for exactly {@code
+     * version}, for bridging {@code CopyPackageVersions} when there is no generic-format record
+     * to enumerate assets from. Reuses the same {@code GET /<project>/json} endpoint {@link
+     * #packageFiles} already does, this time keeping the filename itself rather than discarding
+     * it for the recovered raw name {@link #packageFiles} needs.
+     */
+    @Override
+    public List<String> listPackageVersionAssetNames(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version) {
+        String baseUrl = ensureReady(repositoryContainerId, null);
+        String normalized = normalizePackageName(packageName);
+        URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/" + SidecarUriUtils.encodeSegment(normalized)
+                + "/json");
+        HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).GET().build();
+        HttpResponse<String> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.ofString());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the pypiserver sidecar to list versions of "
+                    + packageName, e);
+        }
+        if (response.statusCode() == 404) {
+            return List.of();
+        }
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not list versions of " + packageName + " on the pypiserver "
+                    + "sidecar: upstream returned " + response.statusCode());
+        }
+        JsonNode release;
+        try {
+            release = mapper.readTree(response.body()).path("releases").path(version);
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not parse pypiserver's version listing for " + packageName, e);
+        }
+        List<String> filenames = new ArrayList<>();
+        for (JsonNode file : release) {
+            String url = file.path("url").asText("");
+            String filename = url.substring(url.lastIndexOf('/') + 1);
+            if (!filename.isEmpty()) {
+                filenames.add(filename);
+            }
+        }
+        return filenames;
+    }
+
+    /**
+     * Uploads {@code content} as {@code assetName} the same real {@code twine upload} wire shape
+     * {@code CodeArtifactPypiController#upload} already forwards unmodified, confirmed against a
+     * live pypiserver container: a {@code multipart/form-data} {@code POST} to the repository
+     * root with a {@code :action=file_upload} field (pypiserver rejects the request outright
+     * without it, "Missing ':action' field!", even though neither twine's own real request nor
+     * this sidecar's existing upload-forwarding path ever has to name it explicitly), {@code
+     * name}/{@code version} fields, and the file itself as the {@code content} part. pypiserver
+     * indexes a package by parsing {@code assetName} itself (PEP 427/517 naming), not the
+     * {@code name} field, so a mismatched filename silently publishes under whatever name the
+     * filename itself implies instead of {@code packageName} — the caller is expected to pass a
+     * {@code version}-embedding {@code assetName} the same way {@link #fetchPackageVersionAsset}
+     * already requires one to read it back.
+     *
+     * <p>Rejected outright with a real {@code 409} ("already exists") if {@code assetName}
+     * already exists with different content, confirmed live: this container is started without
+     * pypiserver's own {@code --overwrite} flag, the same as production. The caller ({@code
+     * CodeArtifactService#copyContainerBackedPackageVersions}) is expected to have already
+     * deleted a conflicting existing asset first for an overwrite, the same reason {@code
+     * ReposiliteSidecarClient#storePackageVersionAsset} documents for Maven.
+     */
+    @Override
+    public void storePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName, byte[] content) {
+        String baseUrl = ensureReady(repositoryContainerId, null);
+        String boundary = "flociPypiCopyBoundary" + System.nanoTime();
+        byte[] head = ("--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\":action\"\r\n\r\nfile_upload\r\n"
+                + "--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"name\"\r\n\r\n" + packageName + "\r\n"
+                + "--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"version\"\r\n\r\n" + version + "\r\n"
+                + "--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"content\"; filename=\"" + assetName + "\"\r\n"
+                + "Content-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8);
+        byte[] tail = ("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8);
+        byte[] body = new byte[head.length + content.length + tail.length];
+        System.arraycopy(head, 0, body, 0, head.length);
+        System.arraycopy(content, 0, body, head.length, content.length);
+        System.arraycopy(tail, 0, body, head.length + content.length, tail.length);
+
+        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/"))
+                .timeout(Duration.ofSeconds(30))
+                .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                .POST(BodyPublishers.ofByteArray(body))
+                .build();
+        HttpResponse<String> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.ofString());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the pypiserver sidecar to publish " + assetName, e);
+        }
+        if (response.statusCode() != 200 && response.statusCode() != 201) {
+            throw new IllegalStateException("Could not publish " + assetName + " to the pypiserver sidecar: "
+                    + "upstream returned " + response.statusCode());
+        }
+    }
+
+    /**
+     * Removes one asset via pypiserver's own {@code remove_pkg} management call, confirmed live
+     * to delete by raw name/version rather than by filename: {@link #rawPkgname} recovers the
+     * exact unnormalized name {@code remove_pkg} needs from {@code assetName} itself, the same way
+     * {@link #deletePackage}'s own loop already does per file. A sibling file that happens to
+     * share the exact same raw name and version as {@code assetName} is removed in the same call
+     * (confirmed live for {@link #deletePackage}'s own multi-file case); pypiserver has no finer
+     * grain than that to ask for.
+     */
+    @Override
+    public void deletePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName) {
+        String baseUrl = ensureReady(repositoryContainerId, null);
+        removeVersion(baseUrl, rawPkgname(assetName, version), version);
     }
 
     private record PkgNameVersion(String name, String version) {}
