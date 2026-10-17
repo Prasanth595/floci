@@ -237,7 +237,7 @@ Responses are `application/json` with AWS AppSync wire shapes (`data` / `errors[
 | Unknown `apiId` | 404 | `NotFoundException` |
 | API exists but no executable schema (incl. PROCESSING) | **502** | `GraphQLSchemaException` — `No schema definition exists.` + `x-amzn-errortype` |
 | Unexpected failure | 500 | `InternalFailure` |
-| Missing/invalid/expired credentials, unconfigured mode, Lambda deny | **401** | `UnauthorizedException` — GraphQL does not run; `x-amzn-errortype` is set. Missing headers use message `Missing authorization header`. |
+| Missing/invalid/expired credentials, unconfigured mode, Lambda deny | **401** | `UnauthorizedException` — GraphQL does not run; `x-amzn-errortype` is set. Missing headers use message `Missing authorization header`. An `AWS_IAM` caller whose policies deny `appsync:GraphQL` gets `Permission denied`. |
 | `AWS_IAM` with a `SigV4` header that misses a part or a date, a date not in the ISO-8601 basic format, a credential without 5 parts, or a signed header the request lacks | **403** | `IncompleteSignatureException` with AWS's message. A missing part names a Base64 SHA-256 hash of the `Authorization` header. |
 | `AWS_IAM` signed outside 5 minutes, without `host` in `SignedHeaders`, scoped to another service, terminator or date, or with a signature that does not match | **400** | `BadRequestException` with AWS's message. A mismatch names the canonical request and the string to sign that Floci computed. |
 | `AWS_IAM` with an unknown access key, or a session token that does not fit the key | **403** | `UnrecognizedClientException`: `The security token included in the request is invalid`, ending with a period only when no token or an empty one came |

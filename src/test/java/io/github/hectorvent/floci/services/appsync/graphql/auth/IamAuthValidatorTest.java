@@ -98,6 +98,8 @@ class IamAuthValidatorTest {
         AppSyncTransportException ex = assertThrows(AppSyncTransportException.class,
                 () -> validator.validateRequest(authorization(signed), "api-1", infoWith(signed)));
         assertEquals(401, ex.getHttpStatus());
+        assertEquals("UnauthorizedException", ex.getErrorType());
+        assertEquals("Permission denied", ex.getMessage());
     }
 
     @Test

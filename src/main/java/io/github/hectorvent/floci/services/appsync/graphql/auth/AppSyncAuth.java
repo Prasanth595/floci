@@ -38,6 +38,11 @@ public final class AppSyncAuth {
         return new AppSyncTransportException(403, UNRECOGNIZED_CLIENT_TYPE, INVALID_SECURITY_TOKEN);
     }
 
+    /** An {@code AWS_IAM} caller whose policies do not allow {@code appsync:GraphQL}. */
+    public static AppSyncTransportException permissionDenied() {
+        return new AppSyncTransportException(401, UNAUTHORIZED_TYPE, "Permission denied");
+    }
+
     public static AppSyncTransportException incompleteSignature(String message) {
         return new AppSyncTransportException(403, "IncompleteSignatureException", message);
     }

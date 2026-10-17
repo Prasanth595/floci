@@ -81,7 +81,7 @@ public class IamAuthValidator {
                 IamPolicyEvaluator.Decision decision = iamPolicyEvaluator.evaluate(
                         caller, null, "appsync:GraphQL", resource, null);
                 if (decision == IamPolicyEvaluator.Decision.DENY) {
-                    throw AppSyncAuth.unauthorized();
+                    throw AppSyncAuth.permissionDenied();
                 }
             }
         }
