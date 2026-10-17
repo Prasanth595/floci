@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.lambdaweb;
 
 import com.github.dockerjava.api.DockerClient;
-import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebEnvironmentManager.Environment;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
@@ -19,6 +19,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -198,13 +199,16 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     @Timeout(180)
     void anEnvironmentThatExitsBetweenRequestsIsReplacedUnseen() throws Exception {
         String domain = createFunction(30);
+        String logStream = given().header("Host", domain).when().get("/status/200")
+                .then().statusCode(200).extract().header("lambda-web-logstream");
+        Environment environment = environments.environmentOf(logStream);
 
-        Response exit = given().header("Host", domain).when().get("/exit");
-        exit.then().statusCode(200).body(equalTo("bye"));
-        awaitContainersRemoved();
+        given().header("Host", domain).when().get("/exit").then().statusCode(200).body(equalTo("bye"));
+        environment.awaitExit(Duration.ofSeconds(30)).get();
+        assertTrue(environment.exitedBefore(System.nanoTime()), "Floci did not see the environment exit");
 
         given().header("Host", domain).when().get("/status/200")
-                .then().statusCode(200).header("lambda-web-logstream", not(equalTo(exit.header("lambda-web-logstream"))));
+                .then().statusCode(200).header("lambda-web-logstream", not(equalTo(logStream)));
     }
 
     @Test
@@ -273,16 +277,6 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         assertFalse(limited.isEmpty(), "a burst well past the rate is throttled");
         for (String response : limited) {
             assertTrue(response.contains("\r\nlambda-web-error-type: Platform.EndpointRequestThrottle\r\n"), response);
-        }
-    }
-
-    /** Floci removes the container of an environment once it has seen the process exit. */
-    private void awaitContainersRemoved() throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-        while (!dockerClient.listContainersCmd().withShowAll(true)
-                .withLabelFilter(Map.of(ContainerStorageHelper.RESOURCE_ID_LABEL, functionName)).exec().isEmpty()) {
-            assertTrue(System.nanoTime() < deadline, "Floci did not see the environment exit");
-            Thread.sleep(100);
         }
     }
 

@@ -372,6 +372,14 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         allEnvironments().forEach(this::discard);
     }
 
+    /** The live environment that writes {@code logStream}, the one a response names. */
+    Environment environmentOf(String logStream) {
+        return allEnvironments().stream()
+                .filter(each -> logStream.equals(each.logStream))
+                .findFirst()
+                .orElseThrow();
+    }
+
     private List<Environment> allEnvironments() {
         List<Environment> all = new ArrayList<>();
         for (String key : pools.keySet()) {
