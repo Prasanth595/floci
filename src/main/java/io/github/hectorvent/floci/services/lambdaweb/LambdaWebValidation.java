@@ -1,6 +1,6 @@
 package io.github.hectorvent.floci.services.lambdaweb;
 
-import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -139,7 +139,6 @@ final class LambdaWebValidation {
         if (errors.isEmpty()) {
             return;
         }
-        String head = errors.size() == 1 ? "1 validation error detected: " : errors.size() + " validation errors detected: ";
-        throw new AwsException("ValidationException", head + String.join("; ", errors), 400);
+        throw SmithyValidationErrors.validationException(errors);
     }
 }

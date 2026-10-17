@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration;
@@ -456,8 +457,7 @@ public class IotFleetIndexingService {
 
     private static void rejectViolations(List<String> errors) {
         if (!errors.isEmpty()) {
-            throw invalid(errors.size() + (errors.size() == 1 ? " validation error" : " validation errors")
-                    + " detected: " + String.join("; ", errors));
+            throw invalid(SmithyValidationErrors.message(errors));
         }
     }
 

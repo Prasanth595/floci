@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -1426,10 +1427,7 @@ public class CloudFormationService implements ResourceProvider {
                     + RESOURCE_TO_SKIP.pattern() + "]");
         }
         if (!violations.isEmpty()) {
-            String prefix = violations.size() == 1
-                    ? "1 validation error detected: "
-                    : violations.size() + " validation errors detected: ";
-            throw new AwsException("ValidationError", prefix + String.join("; ", violations), 400);
+            throw SmithyValidationErrors.validationError(violations);
         }
     }
 

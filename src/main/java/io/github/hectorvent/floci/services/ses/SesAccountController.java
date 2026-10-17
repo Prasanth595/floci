@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import jakarta.inject.Inject;
@@ -280,9 +281,9 @@ public class SesAccountController {
         JsonNode node = parent.path(field);
         if (node.isMissingNode() || node.isNull()) {
             if (required) {
-                throw new AwsException("BadRequestException",
-                        "1 validation error detected: Value null at '" + path
-                                + "' failed to satisfy constraint: Member must not be null", 400);
+                throw SmithyValidationErrors.badRequest(
+                        "Value null at '" + path
+                                + "' failed to satisfy constraint: Member must not be null");
             }
             return false;
         }
@@ -295,9 +296,8 @@ public class SesAccountController {
                 return false;
             }
         }
-        throw new AwsException("BadRequestException",
-                "1 validation error detected: Value at '" + path
-                        + "' failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]",
-                400);
+        throw SmithyValidationErrors.badRequest(
+                "Value at '" + path
+                        + "' failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]");
     }
 }

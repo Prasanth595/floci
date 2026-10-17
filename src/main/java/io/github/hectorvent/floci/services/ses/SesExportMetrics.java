@@ -70,7 +70,7 @@ final class SesExportMetrics {
         }
         validateMetrics(metrics.path("Metrics"), violations);
         if (!violations.isEmpty()) {
-            throw SmithyValidationErrors.exception("BadRequestException", violations);
+            throw SmithyValidationErrors.badRequest(violations);
         }
     }
 

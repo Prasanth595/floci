@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import jakarta.inject.Inject;
@@ -284,9 +285,9 @@ public class SesIdentityController {
         JsonNode policyNode = request.path("Policy");
         if (policyNode.isMissingNode() || policyNode.isNull()) {
             // Verified against AWS: a missing/null required member is a Smithy validation error.
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'policy' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'policy' failed to satisfy constraint: "
+                            + "Member must not be null");
         }
         if (!policyNode.isTextual()) {
             // Policy is a String; AWS rejects a non-string with an empty-bodied 400. Don't coerce
@@ -561,9 +562,9 @@ public class SesIdentityController {
         if ("USE_DEFAULT_VALUE".equals(v2)) {
             return "UseDefaultValue";
         }
-        throw new AwsException("BadRequestException",
-                "1 validation error detected: Value at 'behaviorOnMxFailure' failed to satisfy "
-                        + "constraint: Member must satisfy enum value set: [REJECT_MESSAGE, USE_DEFAULT_VALUE]", 400);
+        throw SmithyValidationErrors.badRequest(
+                "Value at 'behaviorOnMxFailure' failed to satisfy "
+                        + "constraint: Member must satisfy enum value set: [REJECT_MESSAGE, USE_DEFAULT_VALUE]");
     }
 
     private ObjectNode buildDkimAttributes(Identity identity, String region) {

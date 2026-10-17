@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.CreateTableRequest;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.GsiThroughputUpdate;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.KinesisDestination;
@@ -573,10 +574,7 @@ public class NativeDynamoDbJsonHandler {
                     + "Member must satisfy enum value set: [NONE, ALL_OLD]");
         }
         if (!validationErrors.isEmpty()) {
-            int n = validationErrors.size();
-            throw new AwsException("ValidationException",
-                    n + " validation error" + (n > 1 ? "s" : "") + " detected: "
-                    + String.join("; ", validationErrors), 400);
+            throw SmithyValidationErrors.validationException(validationErrors);
         }
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(item);
@@ -699,10 +697,7 @@ public class NativeDynamoDbJsonHandler {
                     + "Member must satisfy enum value set: [NONE, ALL_OLD]");
         }
         if (!delValidationErrors.isEmpty()) {
-            int n = delValidationErrors.size();
-            throw new AwsException("ValidationException",
-                    n + " validation error" + (n > 1 ? "s" : "") + " detected: "
-                    + String.join("; ", delValidationErrors), 400);
+            throw SmithyValidationErrors.validationException(delValidationErrors);
         }
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
@@ -2022,10 +2017,7 @@ public class NativeDynamoDbJsonHandler {
         if (validationErrors.isEmpty()) {
             return;
         }
-        int n = validationErrors.size();
-        throw new AwsException("ValidationException",
-                n + " validation error" + (n > 1 ? "s" : "") + " detected: "
-                + String.join("; ", validationErrors), 400);
+        throw SmithyValidationErrors.validationException(validationErrors);
     }
 
     private Response transactWriteCanceled(TransactionCanceledException e) {

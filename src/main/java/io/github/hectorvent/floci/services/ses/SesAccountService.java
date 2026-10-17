@@ -200,7 +200,7 @@ public class SesAccountService {
             }
         }
         if (!errors.isEmpty()) {
-            throw SmithyValidationErrors.exception("BadRequestException", errors);
+            throw SmithyValidationErrors.badRequest(errors);
         }
         if (!isValidUrl(websiteUrl)) {
             throw new AwsException("BadRequestException", "Url contains invalid format", 400);

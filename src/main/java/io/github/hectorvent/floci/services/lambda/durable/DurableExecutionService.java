@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -1121,9 +1122,7 @@ public class DurableExecutionService implements Resettable {
 
     /** AWS reports every invalid member of a request in one ValidationException. */
     static AwsException validationError(List<String> violations) {
-        String count = violations.size() == 1 ? "1 validation error detected: "
-                : violations.size() + " validation errors detected: ";
-        return new AwsException("ValidationException", count + String.join("; ", violations), 400);
+        return SmithyValidationErrors.validationException(violations);
     }
 
     private static AwsException invalidMarker() {

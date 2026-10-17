@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.DashboardOptions;
@@ -464,10 +465,10 @@ public class SesConfigurationSetController {
         if (format == null) {
             format = SIGNATURE_FORMAT_DETACHED;
         } else if (!SIGNATURE_FORMAT_DETACHED.equals(format)) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at "
+            throw SmithyValidationErrors.badRequest(
+                    "Value at "
                             + "'messageSecurityOptions.signingScheme.smimeScheme.signatureFormat' failed to "
-                            + "satisfy constraint: Member must satisfy enum value set: [DETACHED]", 400);
+                            + "satisfy constraint: Member must satisfy enum value set: [DETACHED]");
         }
         return new MessageSecurityOptions(SigningScheme.smime(format));
     }

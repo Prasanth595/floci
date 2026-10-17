@@ -484,7 +484,7 @@ public class SesReceiptRuleService {
         if (violations.isEmpty()) {
             return;
         }
-        throw SmithyValidationErrors.exception("ValidationError", violations);
+        throw SmithyValidationErrors.validationError(violations);
     }
 
     /**
@@ -732,9 +732,9 @@ public class SesReceiptRuleService {
         if (filterName == null) {
             // Probed: an absent FilterName is the one case the wire rejects; deleting a missing
             // or malformed name succeeds without error.
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'filterName' failed to satisfy "
-                            + "constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'filterName' failed to satisfy "
+                            + "constraint: Member must not be null");
         }
         receiptFilterStore.delete(receiptFilterKey(region, filterName));
         LOG.infov("Deleted SES receipt filter: {0} in region {1}", filterName, region);
@@ -751,8 +751,8 @@ public class SesReceiptRuleService {
      */
     private static void validateFilterShape(ReceiptFilter filter) {
         if (filter == null) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: " + notNullViolation("filter"), 400);
+            throw SmithyValidationErrors.validationError(
+                    notNullViolation("filter"));
         }
         List<String> violations = new ArrayList<>();
         if (filter.getName() == null) {
@@ -773,7 +773,7 @@ public class SesReceiptRuleService {
             }
         }
         if (!violations.isEmpty()) {
-            throw SmithyValidationErrors.exception("ValidationError", violations);
+            throw SmithyValidationErrors.validationError(violations);
         }
     }
 
@@ -900,9 +900,9 @@ public class SesReceiptRuleService {
             throw new AwsException("InvalidParameterValue", "RuleSetName is required.", 400);
         }
         if (!RULE_SET_NAME_CHARS.matcher(name).matches()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'ruleSetName' failed to satisfy constraint: "
-                            + "Member must satisfy regular expression pattern: ^[a-zA-Z0-9_.-]+$", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'ruleSetName' failed to satisfy constraint: "
+                            + "Member must satisfy regular expression pattern: ^[a-zA-Z0-9_.-]+$");
         }
         requireValidRuleSetName(name);
     }

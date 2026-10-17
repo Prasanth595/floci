@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -328,9 +329,7 @@ public class LambdaLayerService {
                     "Member must satisfy enum value set: " + COMPATIBLE_ARCHITECTURES));
         }
         if (!errors.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    errors.size() + (errors.size() == 1 ? " validation error" : " validation errors")
-                            + " detected: " + String.join("; ", errors), 400);
+            throw SmithyValidationErrors.validationException(errors);
         }
         return parsed;
     }

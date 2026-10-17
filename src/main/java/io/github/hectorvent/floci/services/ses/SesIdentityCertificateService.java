@@ -349,7 +349,7 @@ public class SesIdentityCertificateService {
         if (violations.isEmpty()) {
             return;
         }
-        throw SmithyValidationErrors.exception("BadRequestException", violations);
+        throw SmithyValidationErrors.badRequest(violations);
     }
 
     private static AwsException badRequest(String message) {

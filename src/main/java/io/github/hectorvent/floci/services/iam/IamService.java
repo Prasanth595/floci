@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.SshPublicKeyException;
 import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import io.github.hectorvent.floci.core.common.Totp;
@@ -3856,18 +3857,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (violations.isEmpty()) {
             return;
         }
-        StringBuilder message = new StringBuilder()
-                .append(violations.size())
-                .append(violations.size() == 1 ? " validation error detected: "
-                                               : " validation errors detected: ");
-        for (int i = 0; i < violations.size(); i++) {
-            if (i > 0) {
-                message.append("; ");
-            }
-            message.append("Value at 'serviceSpecificCredentialId' failed to satisfy constraint: ")
-                    .append(violations.get(i));
-        }
-        throw new AwsException("ValidationError", message.toString(), 400);
+        throw SmithyValidationErrors.validationError(violations.stream()
+                .map(violation -> "Value at 'serviceSpecificCredentialId' failed to satisfy constraint: " + violation)
+                .toList());
     }
 
     /** AWS's wording for an id that matches the pattern and no credential. */

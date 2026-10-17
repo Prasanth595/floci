@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -2070,10 +2071,7 @@ public class CognitoService implements ResourceProvider {
     }
 
     private AwsException validationErrors(List<String> errors) {
-        String header = errors.size() == 1
-                ? "1 validation error detected: "
-                : errors.size() + " validation errors detected: ";
-        return new AwsException("InvalidParameterException", header + String.join("; ", errors), 400);
+        return SmithyValidationErrors.exception("InvalidParameterException", errors);
     }
 
     /** Mirrors the request model's {@code toString}, which AWS embeds in the length-constraint message. */
@@ -3103,10 +3101,7 @@ public class CognitoService implements ResourceProvider {
         if (errors.isEmpty()) {
             return;
         }
-        String header = errors.size() == 1
-                ? "1 validation error detected: "
-                : errors.size() + " validation errors detected: ";
-        throw new AwsException("InvalidParameterException", header + String.join("; ", errors), 400);
+        throw validationErrors(errors);
     }
 
     /** Mirrors the request model's {@code toString}, which AWS embeds in the length-constraint message. */

@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -1320,10 +1321,7 @@ public class EventBridgeService implements ResourceProvider {
                     + "Member must have length less than or equal to 4096");
         }
         if (!violations.isEmpty()) {
-            String header = violations.size() == 1
-                    ? "1 validation error detected: "
-                    : violations.size() + " validation errors detected: ";
-            throw new AwsException("ValidationException", header + String.join("; ", violations), 400);
+            throw SmithyValidationErrors.validationException(violations);
         }
     }
 

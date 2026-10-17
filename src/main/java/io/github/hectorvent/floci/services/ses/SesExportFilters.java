@@ -92,7 +92,7 @@ final class SesExportFilters {
         requireFilterBlock(insights.path("Include"), "include", violations);
         requireFilterBlock(insights.path("Exclude"), "exclude", violations);
         if (!violations.isEmpty()) {
-            throw SmithyValidationErrors.exception("BadRequestException", violations);
+            throw SmithyValidationErrors.badRequest(violations);
         }
     }
 

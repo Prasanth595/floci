@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
 import io.github.hectorvent.floci.services.kms.model.KmsGrant;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
@@ -713,11 +714,11 @@ public class KmsJsonHandler {
         String pattern = "Value '" + keyId + "' at '" + name
                 + "' failed to satisfy constraint: Member must satisfy regular expression pattern: ^\\p{ASCII}+$";
         if (keyId.isEmpty()) {
-            throw new AwsException("ValidationException", "2 validation errors detected: Value '' at '" + name
-                    + "' failed to satisfy constraint: Member must have length greater than or equal to 1; " + pattern, 400);
+            throw SmithyValidationErrors.validationException(List.of("Value '' at '" + name
+                    + "' failed to satisfy constraint: Member must have length greater than or equal to 1", pattern));
         }
         if (!keyId.chars().allMatch(c -> c < 128)) {
-            throw new AwsException("ValidationException", "1 validation error detected: " + pattern, 400);
+            throw SmithyValidationErrors.validationException(pattern);
         }
     }
 

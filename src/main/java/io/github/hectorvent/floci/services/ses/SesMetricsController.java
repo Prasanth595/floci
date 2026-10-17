@@ -371,6 +371,6 @@ public class SesMetricsController {
     }
 
     private static AwsException aggregated(List<String> violations) {
-        return SmithyValidationErrors.exception("BadRequestException", violations);
+        return SmithyValidationErrors.badRequest(violations);
     }
 }

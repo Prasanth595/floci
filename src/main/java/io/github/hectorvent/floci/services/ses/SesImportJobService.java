@@ -470,8 +470,8 @@ public class SesImportJobService implements Resettable {
     }
 
     private static AwsException validationError(String path, String constraint) {
-        return SmithyValidationErrors.exception("BadRequestException",
-                List.of("Value at '" + path + "' failed to satisfy constraint: " + constraint));
+        return SmithyValidationErrors.badRequest(
+                "Value at '" + path + "' failed to satisfy constraint: " + constraint);
     }
 
     static String key(String region, String jobId) {

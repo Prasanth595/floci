@@ -588,8 +588,8 @@ public class SesSendController {
 
     private static AwsException constraintViolation(String value, String path, String constraint) {
         String subject = value == null ? "Value" : "Value '" + value + "'";
-        return SmithyValidationErrors.exception("BadRequestException",
-                List.of(subject + " at '" + path + "' failed to satisfy constraint: " + constraint));
+        return SmithyValidationErrors.badRequest(
+                subject + " at '" + path + "' failed to satisfy constraint: " + constraint);
     }
 
     private static AwsException missingHeaderMember(String location, int index, String member) {
@@ -614,7 +614,7 @@ public class SesSendController {
             violations.add(trackingViolation("openTrackingEnabled"));
         }
         if (!violations.isEmpty()) {
-            throw SmithyValidationErrors.exception("BadRequestException", violations);
+            throw SmithyValidationErrors.badRequest(violations);
         }
     }
 

@@ -218,8 +218,8 @@ public class SesContactService implements SesTaggable {
     // SES V2 surfaces missing/invalid input as Smithy validation errors. Field paths and the
     // enum value order are taken verbatim from real AWS.
     private static AwsException validationError(String fieldPath, String constraint) {
-        return SmithyValidationErrors.exception("BadRequestException",
-                List.of("Value at '" + fieldPath + "' failed to satisfy constraint: " + constraint));
+        return SmithyValidationErrors.badRequest(
+                "Value at '" + fieldPath + "' failed to satisfy constraint: " + constraint);
     }
 
     private static void validateContactListName(String name) {

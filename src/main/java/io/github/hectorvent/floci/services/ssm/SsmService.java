@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.DeadlineCharSequence;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -871,10 +872,7 @@ public class SsmService implements ResourceProvider {
     }
 
     static AwsException validationErrors(List<String> violations) {
-        String count = violations.size() == 1
-                ? "1 validation error detected: "
-                : violations.size() + " validation errors detected: ";
-        return new AwsException("ValidationException", count + String.join("; ", violations), 400);
+        return SmithyValidationErrors.validationException(violations);
     }
 
     private static boolean isValidLabel(String label) {

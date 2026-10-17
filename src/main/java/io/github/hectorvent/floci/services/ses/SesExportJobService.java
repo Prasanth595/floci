@@ -143,9 +143,9 @@ public class SesExportJobService implements Resettable {
             throw notNull("exportDestination.dataFormat");
         }
         if (!DATA_FORMATS.contains(dataFormat)) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'exportDestination.dataFormat' failed to "
-                            + "satisfy constraint: Member must satisfy enum value set: [CSV, JSON]", 400);
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'exportDestination.dataFormat' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: [CSV, JSON]");
         }
         // Probe-confirmed order: the data source and the destination's own constraints are checked
         // first, then the refusal of a caller-chosen destination, then the VDM gate.
@@ -388,16 +388,16 @@ public class SesExportJobService implements Resettable {
     /** Newest first, as SES lists them; the paged list resumes on the same order. */
     public List<ExportJob> listExportJobs(String region, String sourceType, String jobStatus) {
         if (sourceType != null && !SOURCE_TYPES.contains(sourceType)) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'exportSourceType' failed to satisfy "
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'exportSourceType' failed to satisfy "
                             + "constraint: Member must satisfy enum value set: "
-                            + "[METRICS_DATA, MESSAGE_INSIGHTS]", 400);
+                            + "[METRICS_DATA, MESSAGE_INSIGHTS]");
         }
         if (jobStatus != null && !JOB_STATUSES.contains(jobStatus)) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'jobStatus' failed to satisfy "
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'jobStatus' failed to satisfy "
                             + "constraint: Member must satisfy enum value set: "
-                            + "[CREATED, PROCESSING, COMPLETED, FAILED, CANCELLED]", 400);
+                            + "[CREATED, PROCESSING, COMPLETED, FAILED, CANCELLED]");
         }
         return exportJobStore.scan(k -> k.startsWith(keyPrefix(region))).stream()
                 .filter(job -> sourceType == null || sourceType.equals(job.getExportSourceType()))
@@ -540,8 +540,8 @@ public class SesExportJobService implements Resettable {
     }
 
     private static AwsException notNull(String member) {
-        return SmithyValidationErrors.exception("BadRequestException",
-                List.of("Value at '" + member + "' failed to satisfy constraint: Member must not be null"));
+        return SmithyValidationErrors.badRequest(
+                "Value at '" + member + "' failed to satisfy constraint: Member must not be null");
     }
 
     /**
@@ -556,21 +556,21 @@ public class SesExportJobService implements Resettable {
             return;
         }
         if (maxResults < 1 || maxResults > MAX_RESULTS) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at "
+            throw SmithyValidationErrors.badRequest(
+                    "Value at "
                             + "'exportDataSource.messageInsightsDataSource.maxResults' failed to "
                             + "satisfy constraint: Member must be between 1 and " + MAX_RESULTS
-                            + ", inclusive", 400);
+                            + ", inclusive");
         }
     }
 
     private static Instant requireDate(JsonNode source, String field) {
         Instant value = date(source, field);
         if (value == null) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at '" + field.substring(0, 1).toLowerCase(Locale.ROOT)
+            throw SmithyValidationErrors.badRequest(
+                    "Value at '" + field.substring(0, 1).toLowerCase(Locale.ROOT)
                             + field.substring(1) + "' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
+                            + "Member must not be null");
         }
         return value;
     }

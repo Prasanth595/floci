@@ -113,7 +113,7 @@ public enum SesListPaging {
      * default could not be measured and is taken to be the bound.
      */
     V2_LIST_EMAIL_IDENTITY_CERTIFICATES(Namespace.IDENTITY_CERTIFICATE, 1000, 1000,
-            size -> badRequest("1 validation error detected: Value '" + size + "' at 'pageSize' failed to "
+            size -> SmithyValidationErrors.badRequest("Value '" + size + "' at 'pageSize' failed to "
                     + "satisfy constraint: Member must have value "
                     + (size < 1 ? "greater than or equal to 1" : "less than or equal to 1000")),
             token -> badRequest("Invalid NextToken."),
@@ -179,19 +179,19 @@ public enum SesListPaging {
         }
 
         static AwsException pageSizeError(int pageSize) {
-            return SmithyValidationErrors.exception("BadRequestException", List.of(pageSizeViolation(pageSize)));
+            return SmithyValidationErrors.badRequest(pageSizeViolation(pageSize));
         }
 
         static AwsException tokenError(String token) {
             if (token.isEmpty()) {
-                return SmithyValidationErrors.exception("BadRequestException", List.of(EMPTY_TOKEN));
+                return SmithyValidationErrors.badRequest(EMPTY_TOKEN);
             }
             return badRequest("Invalid Next Token");
         }
 
         /** SES lists the token before the page size. */
         static AwsException bothError(int pageSize) {
-            return SmithyValidationErrors.exception("BadRequestException",
+            return SmithyValidationErrors.badRequest(
                     List.of(EMPTY_TOKEN, pageSizeViolation(pageSize)));
         }
     }

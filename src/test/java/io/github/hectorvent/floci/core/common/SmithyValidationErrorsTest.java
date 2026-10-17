@@ -30,6 +30,22 @@ class SmithyValidationErrorsTest {
     }
 
     @Test
+    void namedFactories_carryTheirProtocolsCode() {
+        assertEquals("ValidationException", SmithyValidationErrors.validationException(List.of("v")).getErrorCode());
+        assertEquals("ValidationError", SmithyValidationErrors.validationError(List.of("v")).getErrorCode());
+        assertEquals("BadRequestException", SmithyValidationErrors.badRequest(List.of("v")).getErrorCode());
+    }
+
+    @Test
+    void stringOverloads_reportOneViolation() {
+        String expected = "1 validation error detected: v";
+        assertEquals(expected, SmithyValidationErrors.badRequest("v").getMessage());
+        assertEquals(expected, SmithyValidationErrors.validationError("v").getMessage());
+        assertEquals(expected, SmithyValidationErrors.validationException("v").getMessage());
+        assertEquals(expected, SmithyValidationErrors.exception("InvalidParameterException", "v").getMessage());
+    }
+
+    @Test
     void noViolations_isAProgrammingError() {
         assertThrows(IllegalArgumentException.class, () -> SmithyValidationErrors.message(List.of()));
     }

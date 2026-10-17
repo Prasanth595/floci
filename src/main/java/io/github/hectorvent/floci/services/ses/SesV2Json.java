@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 
 import java.time.Instant;
@@ -198,14 +199,14 @@ final class SesV2Json {
             return Map.of();
         }
         if (!keys.containsAll(filter.keySet())) {
-            throw new AwsException("BadRequestException", "1 validation error detected: Value at 'filter' "
+            throw SmithyValidationErrors.badRequest( "Value at 'filter' "
                     + "failed to satisfy constraint: Map keys must satisfy constraint: "
-                    + "[Member must satisfy enum value set: [" + String.join(", ", keys) + "]]", 400);
+                    + "[Member must satisfy enum value set: [" + String.join(", ", keys) + "]]");
         }
         if (filter.containsValue("")) {
-            throw new AwsException("BadRequestException", "1 validation error detected: Value at 'filter' "
+            throw SmithyValidationErrors.badRequest( "Value at 'filter' "
                     + "failed to satisfy constraint: Map value must satisfy constraint: "
-                    + "[Member must have length greater than or equal to 1]", 400);
+                    + "[Member must have length greater than or equal to 1]");
         }
         Map<String, String> values = new LinkedHashMap<>();
         filter.forEach((key, value) -> {

@@ -85,7 +85,7 @@ final class SesTags {
             }
         }
         if (!lengthErrors.isEmpty()) {
-            throw SmithyValidationErrors.exception("BadRequestException", lengthErrors);
+            throw SmithyValidationErrors.badRequest(lengthErrors);
         }
         // An empty key is rejected with an empty body, matching AWS.
         for (Tag tag : tags) {
