@@ -84,9 +84,9 @@ final class SesExportFilters {
     }
 
     /**
-     * Rejects a filter block that is not an object and a member that is not a list of strings,
-     * rather than reading it as no filter at all and quietly returning rows the caller excluded,
-     * then holds each member to the length the model gives it.
+     * The SES v2 shape check has already rejected a filter block or member of the wrong JSON type.
+     * This rejects a {@code null} element of a member list, which that check leaves to the
+     * operation, then holds each member to the length the model gives it.
      */
     static void validate(JsonNode insights) {
         List<String> violations = new ArrayList<>();
