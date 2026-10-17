@@ -1027,6 +1027,36 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void elasticIpOnASecondaryAddressLeavesAReachableInstancesPublicAddressAlone() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.reachablePublicAddress(any())).thenReturn("192.0.2.10");
+        Ec2Service service = new Ec2Service(mockConfig(true), containerManager,
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String subnetId = service.createSubnet(region, service.createVpc(region, "10.238.0.0/24", false).getVpcId(),
+                "10.238.0.0/26", region + "a").getSubnetId();
+        NetworkInterface eni = service.createNetworkInterface(region, subnetId, null, "10.238.0.10",
+                List.of("10.238.0.11"), List.of(), List.of());
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null,
+                null, eni.getNetworkInterfaceId(), 0).getInstances().getFirst();
+
+        Address secondary = service.allocateAddress(region);
+        service.associateAddress(region, secondary.getAllocationId(), instance.getInstanceId(), "10.238.0.11");
+        assertEquals("10.238.0.11", secondary.getPrivateIpAddress());
+        assertNull(instance.getPublicIpAddress());
+
+        Address primary = service.allocateAddress(region);
+        service.associateAddress(region, primary.getAllocationId(), instance.getInstanceId());
+        assertEquals("10.238.0.10", primary.getPrivateIpAddress());
+        assertEquals("192.0.2.10", instance.getPublicIpAddress());
+        assertNotNull(secondary.getAssociationId());
+        assertEquals("10.238.0.11", service.describeAddresses(region, List.of(secondary.getAllocationId()), Map.of())
+                .getFirst().getPrivateIpAddress());
+    }
+
+    @Test
     void networkInterfaceAssociationFiltersExcludeSecondaryAddressAssociations() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),

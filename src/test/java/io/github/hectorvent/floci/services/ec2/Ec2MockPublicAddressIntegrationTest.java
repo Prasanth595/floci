@@ -204,6 +204,24 @@ class Ec2MockPublicAddressIntegrationTest {
         request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
     }
 
+    @Test
+    void aTerminatedInstanceStaysTerminatedWithoutAnAddress() {
+        String owner = Long.toString(ACCOUNTS.incrementAndGet());
+        String instance = request("RunInstances", owner).formParam("ImageId", "ami-amazonlinux2023")
+                .formParam("InstanceType", "t3.micro").formParam("MinCount", 1).formParam("MaxCount", 1)
+                .post("/").then().statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        assertTrue(publicIp(owner, instance).matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"));
+        request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+
+        // Whatever StopInstances answers, it must not bring the instance back to be started again.
+        request("StopInstances", owner).formParam("InstanceId.1", instance).post("/");
+        request("StartInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("IncorrectInstanceState"));
+        describe(owner, instance).body(INSTANCE + "instanceState.name", equalTo("terminated"));
+        assertEquals("", publicIp(owner, instance));
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void elasticIpReplacesTheAutomaticAddressUntilItIsDisassociated(boolean automatic) {

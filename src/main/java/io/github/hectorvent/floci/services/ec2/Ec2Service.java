@@ -4028,7 +4028,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             synchronized (instance) {
                 String state = instance.getState() == null ? null : instance.getState().getName();
                 boolean settled = restart
-                        ? Set.of("running", "shutting-down", "terminated").contains(state)
+                        ? state == null || Set.of("running", "shutting-down", "terminated").contains(state)
                         : !"pending".equals(state);
                 if (settled) {
                     return false;
@@ -4277,11 +4277,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             InstanceState prev = inst.getState();
             if (config.services().ec2().mock()) {
-                // The allocation lock first, as in completeMockLaunch.
+                // The allocation lock first, as in completeMockLaunch. A terminated or terminating
+                // instance stays so: stopping it must not bring it back to be started again.
                 synchronized (privateIpAllocationLock) {
                     synchronized (inst) {
-                        inst.setState(InstanceState.stopped());
-                        releaseMockPublicAddress(region, inst);
+                        String state = inst.getState() == null ? null : inst.getState().getName();
+                        if (!"terminated".equals(state) && !"shutting-down".equals(state)) {
+                            inst.setState(InstanceState.stopped());
+                            releaseMockPublicAddress(region, inst);
+                        }
                     }
                 }
             } else {
@@ -10024,10 +10028,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (reachable != null) {
             addr.setPublicIp(reachable);
             // An EIP association gives the instance a public address even in a subnet that does
-            // not map one on launch, exactly as on AWS.
-            if (secondary == null) {
+            // not map one on launch, exactly as on AWS. An unchanged address is not written again.
+            String dnsName = "127.0.0.1".equals(reachable) ? "localhost" : reachable;
+            if (secondary == null && (!reachable.equals(inst.getPublicIpAddress())
+                    || !dnsName.equals(inst.getPublicDnsName()))) {
                 inst.setPublicIpAddress(reachable);
-                inst.setPublicDnsName("127.0.0.1".equals(reachable) ? "localhost" : reachable);
+                inst.setPublicDnsName(dnsName);
                 instances.put(key(region, instanceId), inst);
             }
         } else if (config.services().ec2().mock() && secondary == null) {
@@ -10242,14 +10248,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // or association filter must be judged against the address the response will carry, not
         // the one persisted before the restart. This is also the call Terraform refreshes
         // public_ip from, so it is the last chance to be right. Under the lock AssociateAddress and
-        // DisassociateAddress take, so a re-point never writes back an association they changed.
-        synchronized (privateIpAllocationLock) {
-            for (Address addr : candidates) {
-                if (addr.getInstanceId() != null && addr.getAssociationId() != null) {
-                    String before = addr.getPublicIp();
-                    pointAddressAtInstance(addr, region, addr.getInstanceId());
-                    if (!Objects.equals(before, addr.getPublicIp())) {
-                        addresses.put(key(region, addr.getAllocationId()), addr);
+        // DisassociateAddress take, so a re-point never writes back an association they changed;
+        // a call with no address on an instance does not wait for it.
+        if (candidates.stream().anyMatch(addr -> addr.getInstanceId() != null && addr.getAssociationId() != null)) {
+            synchronized (privateIpAllocationLock) {
+                for (Address addr : candidates) {
+                    if (addr.getInstanceId() != null && addr.getAssociationId() != null) {
+                        String before = addr.getPublicIp();
+                        pointAddressAtInstance(addr, region, addr.getInstanceId());
+                        if (!Objects.equals(before, addr.getPublicIp())) {
+                            addresses.put(key(region, addr.getAllocationId()), addr);
+                        }
                     }
                 }
             }

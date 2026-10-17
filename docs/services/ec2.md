@@ -1140,5 +1140,6 @@ describes, a released address is not replaced while a second network interface i
 An Elastic IP associated with the instance's primary private address replaces the automatic
 address and is kept across a stop. Disassociating it from a running instance assigns a new
 automatic address when the launch requested one. An Elastic IP that a retained interface
-carries becomes the public address of the next instance launched on that interface. A
-terminated instance has no public address.
+carries becomes the public address of the next instance launched on that interface, although
+DescribeAddresses does not report that instance as its `InstanceId`. A terminated instance has
+no public address, and stopping it does not bring it back.
