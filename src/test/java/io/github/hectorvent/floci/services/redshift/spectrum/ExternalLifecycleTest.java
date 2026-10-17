@@ -12,6 +12,15 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -125,7 +134,7 @@ class ExternalLifecycleTest {
         SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
                 () -> preparation.prepare("DROP SCHEMA lake", SESSION, backend));
         assertEquals("2BP01", error.sqlState());
-        verifyNoInteractions(backend);
+        verify(backend, never()).execute(startsWith("DROP SCHEMA"));
         verify(registry, never()).unbind(anyString(), anyString(), anyString(), anyString());
     }
 
@@ -209,5 +218,155 @@ class ExternalLifecycleTest {
         }
         verify(glue, never()).createPartition(anyString(), anyString(), any());
         verify(glue, never()).deleteTable(anyString(), anyString());
+    }
+
+    @Test
+    void rejectsCaseVariantsOfTheSamePartitionKey() {
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> preparation.prepare(
+                "ALTER TABLE lake.sales ADD PARTITION (\"DT\"='upper', dt='lower') LOCATION 's3://bucket/day/'",
+                SESSION, backend));
+        assertEquals("42601", error.sqlState());
+        verifyNoInteractions(glue, backend, materializer);
+    }
+
+    @Test
+    void checksSchemaOwnershipBeforeReadingGlueTables() {
+        doThrow(new SpectrumReadException("42501", "not owner")).when(backend).execute(anyString());
+        SpectrumReadException error = assertThrows(SpectrumReadException.class,
+                () -> preparation.prepare("DROP SCHEMA lake RESTRICT", SESSION, backend));
+        assertEquals("42501", error.sqlState());
+        verifyNoInteractions(glue);
+        verify(registry, never()).unbind(anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void dropsLocalSchemaWhenGlueDatabaseIsAlreadyGone() {
+        when(glue.getTables("analytics")).thenThrow(new AwsException("EntityNotFoundException", "gone", 400));
+        assertTrue(preparation.prepare("DROP SCHEMA IF EXISTS lake", SESSION, backend));
+        verify(backend).execute("DROP SCHEMA IF EXISTS \"lake\" RESTRICT; SELECT floci_internal.purge_external_schema('lake')");
+        verify(registry).unbind(SESSION.accountId(), SESSION.clusterKey(), "dev", "lake");
+        verify(materializer).forgetSchema(SESSION.clusterKey(), "dev", "lake");
+    }
+
+    @Test
+    void schemaDropDoesNotSuppressOtherGlueFailures() {
+        when(glue.getTables("analytics")).thenThrow(new AwsException("AccessDeniedException", "denied", 403));
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> preparation.prepare("DROP SCHEMA IF EXISTS lake", SESSION, backend));
+        assertEquals("42501", error.sqlState());
+        verify(backend, never()).execute(startsWith("DROP SCHEMA"));
+        verify(registry, never()).unbind(anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void rollsBackOnlyNewPartitionsWhenLaterWriteFails() {
+        Partition existing = new Partition();
+        existing.setValues(List.of("existing"));
+        when(glue.getPartitions("analytics", "sales")).thenReturn(List.of(existing));
+        doAnswer(invocation -> {
+            Partition partition = invocation.getArgument(2);
+            if (partition.getValues().equals(List.of("fail"))) {
+                throw new AwsException("InternalServiceException", "write failed", 500);
+            }
+            return null;
+        }).when(glue).createPartition(anyString(), anyString(), any());
+        String sql = ADD.replace("ADD PARTITION", "ADD IF NOT EXISTS PARTITION")
+                + " PARTITION (dt='existing') LOCATION 's3://bucket/old/'"
+                + " PARTITION (dt='fail') LOCATION 's3://bucket/fail/'";
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> preparation.prepare(sql, SESSION, backend));
+        assertEquals("write failed", error.getMessage());
+        verify(glue).deletePartition("analytics", "sales", List.of("2026-10-17"));
+        verify(glue, never()).deletePartition("analytics", "sales", List.of("existing"));
+        verify(glue, never()).deletePartition("analytics", "sales", List.of("fail"));
+    }
+
+    @Test
+    void rollsBackPartitionsWhenMetadataRefreshFailsWithoutMaskingTheFailure() {
+        SpectrumReadException failure = new SpectrumReadException("58030", "refresh failed");
+        doThrow(failure).when(metadata).refresh(backend, SESSION.accountId(), BINDING);
+        doThrow(new AwsException("InternalServiceException", "cleanup failed", 500)).when(glue)
+                .deletePartition("analytics", "sales", List.of("2026-10-17"));
+        assertSame(failure, assertThrows(SpectrumReadException.class, () -> preparation.prepare(ADD, SESSION, backend)));
+        verify(glue).deletePartition("analytics", "sales", List.of("2026-10-17"));
+        assertEquals(1, failure.getSuppressed().length);
+        verify(materializer).invalidateTable(SESSION.clusterKey(), "dev", "lake", "sales");
+    }
+
+    @Test
+    void implicitExtendedTransactionTimesOutWhileCatalogMutationIsWaiting() throws Exception {
+        when(backend.permitsCachePublication()).thenReturn(false);
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            ExternalCatalogLocks.Guard mutation = ExternalCatalogLocks.write(BINDING);
+            try {
+                Future<Boolean> read = executor.submit(
+                        () -> preparation.prepare("SELECT * FROM lake.sales", SESSION, backend));
+                ExecutionException failure = assertThrows(ExecutionException.class,
+                        () -> read.get(35, TimeUnit.SECONDS));
+                SpectrumReadException timeout = assertInstanceOf(SpectrumReadException.class, failure.getCause());
+                assertEquals("58030", timeout.sqlState());
+                verifyNoInteractions(materializer, glue);
+            } finally {
+                mutation.close();
+            }
+        }
+    }
+
+    @Test
+    void removesAllNewPartitionsWhenMetadataRefreshFails() {
+        SpectrumReadException failure = new SpectrumReadException("58030", "refresh failed");
+        doThrow(failure).when(metadata).refresh(backend, SESSION.accountId(), BINDING);
+        String sql = ADD + " PARTITION (dt='2026-10-18') LOCATION 's3://bucket/next/'";
+
+        assertSame(failure, assertThrows(SpectrumReadException.class,
+                () -> preparation.prepare(sql, SESSION, backend)));
+
+        verify(glue).deletePartition("analytics", "sales", List.of("2026-10-17"));
+        verify(glue).deletePartition("analytics", "sales", List.of("2026-10-18"));
+        verify(materializer).invalidateTable(SESSION.clusterKey(), "dev", "lake", "sales");
+    }
+
+    @Test
+    void concurrentIfNotExistsAddsShareTheGlueTableLock() throws Exception {
+        List<Partition> stored = new CopyOnWriteArrayList<>();
+        CountDownLatch checking = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger checks = new AtomicInteger();
+        when(glue.getTable("ANALYTICS", "sales")).thenReturn(table);
+        when(glue.getPartitions(anyString(), eq("sales"))).thenAnswer(invocation -> {
+            List<Partition> snapshot = List.copyOf(stored);
+            if (checks.incrementAndGet() == 1) {
+                checking.countDown();
+                assertTrue(release.await(10, TimeUnit.SECONDS));
+            }
+            return snapshot;
+        });
+        doAnswer(invocation -> {
+            stored.add(invocation.getArgument(2));
+            return null;
+        }).when(glue).createPartition(anyString(), anyString(), any());
+        String sql = ADD.replace("ADD PARTITION", "ADD IF NOT EXISTS PARTITION");
+        SpectrumSession otherSession = new SpectrumSession(SESSION.accountId(), SESSION.accountId() + ":other",
+                "dev", List.of(), false);
+        ExternalSchemaBinding alias = new ExternalSchemaBinding(SESSION.accountId(), otherSession.clusterKey(),
+                "dev", "alias", "ANALYTICS", BINDING.iamRoleArn());
+        when(registry.list(SESSION.accountId(), otherSession.clusterKey(), "dev")).thenReturn(List.of(alias));
+        SpectrumQueryPreparation otherPreparation = new SpectrumQueryPreparation(registry, materializer,
+                new ExternalStatementParser(), glue, metadata);
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<Boolean> first = executor.submit(() -> preparation.prepare(sql, SESSION, backend));
+            try {
+                assertTrue(checking.await(10, TimeUnit.SECONDS));
+                Future<Boolean> second = executor.submit(() -> otherPreparation.prepare(
+                        sql.replace("lake.sales", "alias.sales"), otherSession, backend));
+                assertThrows(TimeoutException.class, () -> second.get(300, TimeUnit.MILLISECONDS));
+                release.countDown();
+                assertTrue(first.get(10, TimeUnit.SECONDS));
+                assertTrue(second.get(10, TimeUnit.SECONDS));
+                assertEquals(1, stored.size());
+            } finally {
+                release.countDown();
+            }
+        }
     }
 }

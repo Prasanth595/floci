@@ -33,6 +33,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -40,6 +42,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -791,6 +794,52 @@ class ExternalTableMaterializerTest {
         } finally {
             release.countDown();
             executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void dropWaitsForAnEarlierLoadBeforeDeletingTheMaterializedTable() throws Exception {
+        AtomicReference<Table> stored = new AtomicReference<>(csvTable());
+        AtomicInteger lookups = new AtomicInteger();
+        CountDownLatch reading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(glue.getTable("lake", "events")).thenAnswer(invocation -> {
+            Table snapshot = stored.get();
+            if (lookups.incrementAndGet() == 1) {
+                reading.countDown();
+                assertTrue(release.await(10, TimeUnit.SECONDS));
+            }
+            if (snapshot == null) {
+                throw new AwsException("EntityNotFoundException", "gone", 400);
+            }
+            return snapshot;
+        });
+        doAnswer(invocation -> {
+            stored.set(null);
+            return null;
+        }).when(glue).deleteTable("lake", "events");
+        ExternalCatalogRegistry registry = mock(ExternalCatalogRegistry.class);
+        when(registry.list(ACCOUNT, BINDING.clusterKey(), "dev")).thenReturn(List.of(BINDING));
+        SpectrumQueryPreparation preparation = new SpectrumQueryPreparation(registry, materializer,
+                new ExternalStatementParser(), glue, mock(ExternalMetadataWriter.class));
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<ExternalTableMaterializer.Outcome> load = executor.submit(
+                    () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+            try {
+                assertTrue(reading.await(10, TimeUnit.SECONDS));
+                Future<Boolean> drop = executor.submit(
+                        () -> preparation.prepare("DROP TABLE analytics.events", session(false), backend));
+                assertThrows(TimeoutException.class, () -> drop.get(300, TimeUnit.MILLISECONDS));
+                release.countDown();
+                assertEquals(ExternalTableMaterializer.Outcome.LOADED, load.get(10, TimeUnit.SECONDS));
+                assertTrue(drop.get(10, TimeUnit.SECONDS));
+                assertEquals("DROP TABLE IF EXISTS \"analytics\".\"events\" RESTRICT", backend.statements.getLast());
+                assertEquals(ExternalTableMaterializer.Outcome.NOT_EXTERNAL,
+                        materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+                assertTrue(materializer.loadedTables(BINDING.clusterKey(), "dev", "analytics").isEmpty());
+            } finally {
+                release.countDown();
+            }
         }
     }
 

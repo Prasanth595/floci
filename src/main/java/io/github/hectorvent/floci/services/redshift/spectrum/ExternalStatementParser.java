@@ -302,9 +302,10 @@ public class ExternalStatementParser {
                     throw new SpectrumSqlException("42601", "Malformed partition key list");
                 }
                 String name = identifier(value.group(1));
-                if (values.putIfAbsent(name, value.group(2).replace("''", "'")) != null) {
+                if (values.keySet().stream().anyMatch(existing -> existing.equalsIgnoreCase(name))) {
                     throw new SpectrumSqlException("42601", "Duplicate partition key: " + name);
                 }
+                values.put(name, value.group(2).replace("''", "'"));
                 position = value.end();
                 if (position == keys.length() && keys.endsWith(",")) {
                     throw new SpectrumSqlException("42601", "Malformed partition key list");

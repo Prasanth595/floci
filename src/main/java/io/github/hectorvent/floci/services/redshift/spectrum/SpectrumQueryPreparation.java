@@ -92,8 +92,11 @@ public class SpectrumQueryPreparation {
         }
         if (statement.orElse(null) instanceof ExternalStatement.CreateTable table && bindings.containsKey(table.schemaName())) {
             ExternalSchemaBinding binding = bindings.get(table.schemaName());
-            glue.createTable(binding.glueDatabase(), GlueTableBuilder.toGlueTable(table));
-            metadata.refresh(backend, session.accountId(), binding);
+            try (ExternalCatalogLocks.Guard ignored = ExternalCatalogLocks.write(binding)) {
+                requireCurrentBinding(session, binding);
+                glue.createTable(binding.glueDatabase(), GlueTableBuilder.toGlueTable(table));
+                metadata.refresh(backend, session.accountId(), binding);
+            }
             return true;
         }
         switch (statement.orElse(null)) {
@@ -122,13 +125,17 @@ public class SpectrumQueryPreparation {
         Set<String> refreshed = new HashSet<>();
         for (ExternalReferenceScanner.Reference reference : ExternalReferenceScanner.scan(sql, bindings.keySet())) {
             ExternalSchemaBinding binding = bindings.get(reference.schema());
-            ExternalTableMaterializer.Outcome outcome = materializer.ensureCurrent(backend, session, binding, reference.table());
-            if (outcome == ExternalTableMaterializer.Outcome.NOT_EXTERNAL) {
-                throw new SpectrumSqlException("42P01", "external relation \"" + reference.schema()
-                        + "." + reference.table() + "\" does not exist");
-            }
-            if (outcome == ExternalTableMaterializer.Outcome.LOADED && refreshed.add(binding.schemaName())) {
-                metadata.refresh(backend, session.accountId(), binding);
+            try (ExternalCatalogLocks.Guard ignored = ExternalCatalogLocks.read(binding,
+                    session.inTransaction() || !backend.permitsCachePublication())) {
+                requireCurrentBinding(session, binding);
+                ExternalTableMaterializer.Outcome outcome = materializer.ensureCurrent(backend, session, binding, reference.table());
+                if (outcome == ExternalTableMaterializer.Outcome.NOT_EXTERNAL) {
+                    throw new SpectrumSqlException("42P01", "external relation \"" + reference.schema()
+                            + "." + reference.table() + "\" does not exist");
+                }
+                if (outcome == ExternalTableMaterializer.Outcome.LOADED && refreshed.add(binding.schemaName())) {
+                    metadata.refresh(backend, session.accountId(), binding);
+                }
             }
         }
         return false;
@@ -142,6 +149,14 @@ public class SpectrumQueryPreparation {
 
     private void addPartitions(ExternalStatement.AddPartitions statement, ExternalSchemaBinding binding,
                                SpectrumSession session, BackendSql backend) {
+        try (ExternalCatalogLocks.Guard ignored = ExternalCatalogLocks.write(binding)) {
+            requireCurrentBinding(session, binding);
+            addPartitionsLocked(statement, binding, session, backend);
+        }
+    }
+
+    private void addPartitionsLocked(ExternalStatement.AddPartitions statement, ExternalSchemaBinding binding,
+                                     SpectrumSession session, BackendSql backend) {
         Table table = glue.getTable(binding.glueDatabase(), statement.tableName());
         if (table.getPartitionKeys() == null || table.getPartitionKeys().isEmpty()) {
             throw new SpectrumSqlException("22023", "External table has no partition keys");
@@ -161,19 +176,39 @@ public class SpectrumQueryPreparation {
             }
         }
         requireSchemaOwner(backend, binding.schemaName());
+        List<Partition> created = new ArrayList<>();
         try {
             for (Partition partition : additions) {
                 glue.createPartition(binding.glueDatabase(), statement.tableName(), partition);
+                created.add(partition);
             }
+            metadata.refresh(backend, session.accountId(), binding);
+        } catch (RuntimeException failure) {
+            for (Partition partition : created.reversed()) {
+                try {
+                    glue.deletePartition(binding.glueDatabase(), statement.tableName(), partition.getValues());
+                } catch (RuntimeException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                    LOG.warnv(cleanupFailure, "Unable to undo partition {0} of {1}.{2}",
+                            partition.getValues(), binding.glueDatabase(), statement.tableName());
+                }
+            }
+            throw failure;
         } finally {
-            // A failed catalog write may follow a successful one; never keep the old data fingerprint.
             materializer.invalidateTable(session.clusterKey(), session.databaseName(), binding.schemaName(), statement.tableName());
         }
-        metadata.refresh(backend, session.accountId(), binding);
     }
 
     private void dropTable(ExternalStatement.DropTable statement, ExternalSchemaBinding binding,
                            SpectrumSession session, BackendSql backend) {
+        try (ExternalCatalogLocks.Guard ignored = ExternalCatalogLocks.write(binding)) {
+            requireCurrentBinding(session, binding);
+            dropTableLocked(statement, binding, session, backend);
+        }
+    }
+
+    private void dropTableLocked(ExternalStatement.DropTable statement, ExternalSchemaBinding binding,
+                                 SpectrumSession session, BackendSql backend) {
         boolean exists = true;
         try {
             glue.getTable(binding.glueDatabase(), statement.tableName());
@@ -196,15 +231,36 @@ public class SpectrumQueryPreparation {
 
     private void dropSchema(ExternalStatement.DropSchema statement, ExternalSchemaBinding binding,
                             SpectrumSession session, BackendSql backend) {
-        if (!statement.cascade() && !glue.getTables(binding.glueDatabase()).isEmpty()) {
-            throw new SpectrumSqlException("2BP01", "Cannot drop external schema because it contains external tables");
+        try (ExternalCatalogLocks.Guard ignored = ExternalCatalogLocks.write(binding)) {
+            requireCurrentBinding(session, binding);
+            requireSchemaOwner(backend, binding.schemaName());
+            if (!statement.cascade() && hasGlueTables(binding)) {
+                throw new SpectrumSqlException("2BP01", "Cannot drop external schema because it contains external tables");
+            }
+            // One implicit PostgreSQL transaction keeps the local schema and its SVV metadata in sync.
+            backend.execute("DROP SCHEMA " + (statement.ifExists() ? "IF EXISTS " : "")
+                    + ExternalTableMaterializer.quote(binding.schemaName()) + (statement.cascade() ? " CASCADE" : " RESTRICT")
+                    + "; " + metadata.purgeSql(binding.schemaName()));
+            registry.unbind(session.accountId(), session.clusterKey(), session.databaseName(), binding.schemaName());
+            materializer.forgetSchema(session.clusterKey(), session.databaseName(), binding.schemaName());
         }
-        // One implicit PostgreSQL transaction keeps the local schema and its SVV metadata in sync.
-        backend.execute("DROP SCHEMA " + (statement.ifExists() ? "IF EXISTS " : "")
-                + ExternalTableMaterializer.quote(binding.schemaName()) + (statement.cascade() ? " CASCADE" : " RESTRICT")
-                + "; " + metadata.purgeSql(binding.schemaName()));
-        registry.unbind(session.accountId(), session.clusterKey(), session.databaseName(), binding.schemaName());
-        materializer.forgetSchema(session.clusterKey(), session.databaseName(), binding.schemaName());
+    }
+
+    private boolean hasGlueTables(ExternalSchemaBinding binding) {
+        try {
+            return !glue.getTables(binding.glueDatabase()).isEmpty();
+        } catch (AwsException exception) {
+            if (!"EntityNotFoundException".equals(exception.getErrorCode())) {
+                throw exception;
+            }
+            return false;
+        }
+    }
+
+    private void requireCurrentBinding(SpectrumSession session, ExternalSchemaBinding binding) {
+        if (!binding.equals(bindings(session).get(binding.schemaName()))) {
+            throw new SpectrumSqlException("42P01", "External schema binding changed; retry the statement");
+        }
     }
 
     private static void requireSchemaOwner(BackendSql backend, String schemaName) {

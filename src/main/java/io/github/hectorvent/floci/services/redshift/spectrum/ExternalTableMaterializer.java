@@ -103,6 +103,14 @@ public class ExternalTableMaterializer {
 
     public Outcome ensureCurrent(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
                                  String tableName) {
+        try (ExternalCatalogLocks.Guard ignored = ExternalCatalogLocks.read(binding,
+                session.inTransaction() || !backend.permitsCachePublication())) {
+            return ensureCurrentLocked(backend, session, binding, tableName);
+        }
+    }
+
+    private Outcome ensureCurrentLocked(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
+                                        String tableName) {
         Table table;
         try {
             table = RequestScopes.callAs(session.accountId(), () -> glueService.getTable(binding.glueDatabase(), tableName));
@@ -214,8 +222,15 @@ public class ExternalTableMaterializer {
     /** Reloads data after a catalog change without dropping the table's grants and dependent views. */
     public void invalidateTable(String clusterKey, String databaseName, String schemaName, String tableName) {
         String key = clusterKey + "|" + databaseName + "|" + schemaName + "|" + tableName;
-        fingerprints.remove(key);
-        latestLoads.remove(key);
+        ReentrantLock lock = locks.computeIfAbsent(key, ignored -> new ReentrantLock());
+        lock.lock();
+        try {
+            fingerprints.remove(key);
+            latestLoads.remove(key);
+            pendingLoads.values().forEach(loads -> loads.remove(key));
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Forgets every table of one external schema, so a dropped and recreated schema is reloaded. */
@@ -225,9 +240,19 @@ public class ExternalTableMaterializer {
     }
 
     private void forgetMatching(Predicate<String> matches) {
-        fingerprints.keySet().removeIf(matches);
-        schemaSignatures.keySet().removeIf(matches);
-        latestLoads.keySet().removeIf(matches);
+        locks.forEach((key, lock) -> {
+            if (matches.test(key)) {
+                lock.lock();
+                try {
+                    fingerprints.remove(key);
+                    schemaSignatures.remove(key);
+                    latestLoads.remove(key);
+                    pendingLoads.values().forEach(loads -> loads.remove(key));
+                } finally {
+                    lock.unlock();
+                }
+            }
+        });
         // Keep locks: removing a held lock lets another thread create a second lock for the same table.
     }
 

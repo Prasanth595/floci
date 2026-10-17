@@ -470,7 +470,7 @@ class RedshiftSpectrumIntegrationTest {
             try (Connection reader = DriverManager.getConnection(url, "lifecycle_reader", "Password123");
                  Statement readOnly = reader.createStatement()) {
                 for (String deniedSql : List.of(firstPartition.replace("lake.events", "lake.cold_events"),
-                        "DROP TABLE lake.cold_events")) {
+                        "DROP TABLE lake.cold_events", "DROP SCHEMA lake RESTRICT")) {
                     SQLException denied = assertThrows(SQLException.class, () -> readOnly.execute(deniedSql));
                     assertEquals("42501", denied.getSQLState());
                 }
@@ -536,6 +536,8 @@ class RedshiftSpectrumIntegrationTest {
                     + "' IAM_ROLE '" + ROLE_ARN + "'");
             assertTotal(statement, 30);
             lifecycleDataStatement("DROP TABLE lake.events");
+            glueService.deleteDatabase(glueDatabase);
+            glueDatabase = null;
             statement.execute("DROP SCHEMA lake");
         }
     }

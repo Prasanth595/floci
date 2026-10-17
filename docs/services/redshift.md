@@ -354,6 +354,8 @@ DROP SCHEMA IF EXISTS lake CASCADE;
 `svv_external_partitions`, and invalidates cached rows. Multiple partition clauses are supported.
 The entire partition list is validated before registration. A duplicate partition fails unless
 `IF NOT EXISTS` is specified; that clause keeps the existing partition location unchanged.
+If registration or metadata refresh fails, Floci attempts to remove only the partitions created
+by that statement. A failed cleanup is logged while the original error remains the response.
 
 `DROP TABLE` removes the Glue table and its partitions, drops any materialized PostgreSQL table,
 and refreshes the external catalog views. The default `RESTRICT` preserves the Glue definition
@@ -364,6 +366,7 @@ has already been deleted.
 `DROP SCHEMA` unregisters the local external schema and clears its materializations and catalog
 view rows. It preserves the Glue database, Glue tables and partitions, and S3 objects. The default
 `RESTRICT` refuses a schema containing Glue tables, including tables that have never been queried.
+If the Glue database was already deleted, the remaining local schema can still be dropped.
 `CASCADE` removes the local schema and its dependent objects. `DROP EXTERNAL DATABASE` and
 multi-object DROP statements are outside this implementation.
 
