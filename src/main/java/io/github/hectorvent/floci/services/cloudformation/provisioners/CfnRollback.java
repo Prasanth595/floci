@@ -206,6 +206,14 @@ public final class CfnRollback {
     public static final String REPLACEMENT_CLEANUP_ATTR = "__FlociReplacementCleanup";
 
     /**
+     * Prefixes attributes that name, by physical id, a resource this one uses where none of its
+     * public attributes does, such as a NAT gateway's subnet and Elastic IP. {@code
+     * CloudFormationService} reads every attribute value of a resource the template no longer
+     * names to delete it before what it uses; these keep {@code Fn::GetAtt} to what AWS resolves.
+     */
+    public static final String USES_ATTR_PREFIX = "__FlociUses";
+
+    /**
      * Holds the tags, stream setting and time-to-live setting a DynamoDB table carried before an
      * in-place update changed them, with the account and region that address it, so a failed
      * stack update can put all three back. Written by {@code DynamoDbCfnProvisioner} before its
