@@ -67,7 +67,7 @@ class SsmDirectCommandAccountIntegrationTest {
         AtomicReference<String> workerRegion = new AtomicReference<>();
         AtomicReference<String> workerPartition = new AtomicReference<>();
         when(executor.supports(account, instance, "AWS-RunShellScript")).thenReturn(true);
-        when(executor.executeIfSupported(eq(account), eq(instance), eq("AWS-RunShellScript"), any(), eq(60)))
+        when(executor.executeIfSupported(eq(account), eq(instance), eq("AWS-RunShellScript"), any(), eq(3600)))
                 .thenAnswer(invocation -> {
                     worker.set(Thread.currentThread());
                     workerAccount.set(regionResolver.getAccountId());
@@ -141,7 +141,7 @@ class SsmDirectCommandAccountIntegrationTest {
         AtomicReference<Thread> blockedWorker = new AtomicReference<>();
         AtomicReference<Thread> otherWorker = new AtomicReference<>();
         when(executor.supports(anyString(), eq(instance), eq("AWS-RunShellScript"))).thenReturn(true);
-        when(executor.executeIfSupported(anyString(), eq(instance), eq("AWS-RunShellScript"), any(), eq(60)))
+        when(executor.executeIfSupported(anyString(), eq(instance), eq("AWS-RunShellScript"), any(), eq(3600)))
                 .thenAnswer(invocation -> {
                     assertEquals(invocation.getArgument(0), regionResolver.getAccountId());
                     if (account.equals(regionResolver.getAccountId()) && region.equals(regionResolver.getRegion())) {
@@ -320,7 +320,7 @@ class SsmDirectCommandAccountIntegrationTest {
         CountDownLatch entered = new CountDownLatch(1);
         AtomicReference<Thread> worker = new AtomicReference<>();
         when(executor.supports(account, instance, "AWS-RunShellScript")).thenReturn(true);
-        when(executor.executeIfSupported(eq(account), eq(instance), eq("AWS-RunShellScript"), any(), eq(60)))
+        when(executor.executeIfSupported(eq(account), eq(instance), eq("AWS-RunShellScript"), any(), eq(3600)))
                 .thenAnswer(invocation -> {
                     worker.set(Thread.currentThread());
                     entered.countDown();

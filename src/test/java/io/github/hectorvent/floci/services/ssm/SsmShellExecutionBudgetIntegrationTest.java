@@ -1,0 +1,167 @@
+package io.github.hectorvent.floci.services.ssm;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ssm.model.Command;
+import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.InjectMock;
+import io.quarkus.test.common.http.TestHTTPResource;
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
+import jakarta.inject.Inject;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.net.URI;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+@QuarkusTest
+class SsmShellExecutionBudgetIntegrationTest {
+    private static final String ACCOUNT = "222222222222";
+    private static final String REGION = "us-west-2";
+    @Inject SsmCommandService service;
+    @Inject StorageFactory storageFactory;
+    @Inject ObjectMapper mapper;
+    @InjectMock SsmDirectCommandExecutor executor;
+    @TestHTTPResource URI endpoint;
+
+    @BeforeEach
+    void setup() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+        reset(executor);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"0,3600", "5,5", "172800,172800"})
+    void publicResponseAndActualAgentPayloadKeepSeparateBudgets(int supplied, int execution) throws Exception {
+        String instance = "i-budget-" + UUID.randomUUID();
+        ObjectNode request = request(instance);
+        if (supplied != 0) request.withObject("Parameters").putArray("executionTimeout")
+                .add(Integer.toString(supplied));
+        try {
+            Response response = call("AmazonSSM.SendCommand", request);
+            assertEquals(200, response.statusCode());
+            String id = response.jsonPath().getString("Command.CommandId");
+            assertNotNull(id);
+            Response poll = call("AmazonSSMMessageDeliveryService.GetMessages", mapper.valueToTree(
+                    Map.of("Destination", instance, "MessagesRequestId", "budget")));
+            assertEquals(200, poll.statusCode());
+            assertEquals(1, poll.jsonPath().getList("Messages").size());
+            JsonNode payload = mapper.readTree(Base64.getDecoder().decode(
+                    poll.jsonPath().getString("Messages[0].Payload")));
+            JsonNode command = mapper.readTree(response.asByteArray()).path("Command");
+            assertAll("public metadata and delivered document",
+                    () -> assertEquals(30, command.path("TimeoutSeconds").asInt()),
+                    () -> assertEquals(30 + execution,
+                            command.path("ExpiresAfter").asDouble() - command.path("RequestedDateTime").asDouble(),
+                            0.001),
+                    () -> assertEquals("3600", payload.at("/DocumentContent/parameters/executionTimeout/default")
+                            .asText()),
+                    () -> {
+                        if (supplied != 0) assertEquals(Integer.toString(supplied),
+                                payload.at("/Parameters/executionTimeout/0").asText());
+                    });
+        } finally {
+            cleanup(instance);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "[]", "[\"0\"]", "[\"-1\"]", "[\"172801\"]", "[\"999999999999999999999\"]",
+            "[\"01\"]", "[\"+5\"]", "[\" 5\"]", "[\"5.0\"]", "[\"5\",\"6\"]",
+            "null", "\"5\"", "[5]", "[null]", "{}"
+    })
+    void malformedExplicitBudgetCannotTurnIntoTheDefault(String json) throws Exception {
+        String instance = "i-budget-" + UUID.randomUUID();
+        ObjectNode request = request(instance);
+        request.withObject("Parameters").set("executionTimeout", mapper.readTree(json));
+        try {
+            Response response = call("AmazonSSM.SendCommand", request);
+            List<Command> commands = RequestScopes.callAs(ACCOUNT, REGION,
+                    () -> service.listCommands(null, instance, REGION));
+            assertAll("refuse before any allocation or dispatch",
+                    () -> assertEquals(400, response.statusCode()),
+                    () -> assertEquals("InvalidParameters", response.jsonPath().getString("__type")),
+                    () -> assertTrue(commands.isEmpty()),
+                    () -> verifyNoInteractions(executor));
+            request.withObject("Parameters").putArray("executionTimeout").add("5");
+            Response retry = call("AmazonSSM.SendCommand", request);
+            assertEquals(200, retry.statusCode());
+            JsonNode command = mapper.readTree(retry.asByteArray()).path("Command");
+            assertEquals(35, command.path("ExpiresAfter").asDouble()
+                    - command.path("RequestedDateTime").asDouble(), 0.001);
+        } finally {
+            cleanup(instance);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"bad\":\"shape\"}", "5", "null"})
+    void malformedSiblingCannotEraseAValidExplicitBudget(String commands) throws Exception {
+        String instance = "i-budget-" + UUID.randomUUID();
+        ObjectNode request = request(instance);
+        request.withObject("Parameters").putArray("executionTimeout").add("5");
+        request.withObject("Parameters").set("commands", mapper.readTree(commands));
+        try {
+            Response response = call("AmazonSSM.SendCommand", request);
+            assertAll("parameters conversion must not discard the explicit limit",
+                    () -> assertEquals(400, response.statusCode()),
+                    () -> assertEquals("InvalidParameters", response.jsonPath().getString("__type")),
+                    () -> assertTrue(RequestScopes.callAs(ACCOUNT, REGION,
+                            () -> service.listCommands(null, instance, REGION)).isEmpty()),
+                    () -> verifyNoInteractions(executor));
+        } finally {
+            cleanup(instance);
+        }
+    }
+
+    private ObjectNode request(String instance) {
+        ObjectNode request = mapper.createObjectNode();
+        request.put("DocumentName", "AWS-RunShellScript");
+        request.putArray("InstanceIds").add(instance);
+        request.put("TimeoutSeconds", 30);
+        request.putObject("Parameters").putArray("commands").add("echo budget");
+        return request;
+    }
+
+    private Response call(String target, JsonNode request) {
+        return given().port(endpoint.getPort()).contentType("application/x-amz-json-1.1")
+                .header("Authorization", EnforcementFixtures.auth(ACCOUNT, REGION, "ssm"))
+                .header("X-Amz-Target", target).body(request.toString()).post("/");
+    }
+
+    private void cleanup(String instance) {
+        AccountAwareStorageBackend<Command> commands = storageFactory.create(
+                "ssm", "ssm-commands.json", new TypeReference<>() {});
+        AccountAwareStorageBackend<CommandInvocation> invocations = storageFactory.create(
+                "ssm", "ssm-invocations.json", new TypeReference<>() {});
+        RequestScopes.runAs(ACCOUNT, REGION, () -> {
+            List<Command> owned = service.listCommands(null, instance, REGION);
+            assertAll("remove queued and polled correlations and every owned record",
+                    () -> service.failActiveInvocationsForInstance(REGION, instance, "fixture cleanup"),
+                    () -> assertAll(owned.stream().map(command -> (Executable) () -> {
+                        String key = REGION + "::" + command.getCommandId();
+                        assertAll(() -> invocations.deleteForAccount(ACCOUNT, key + "::" + instance),
+                                () -> commands.deleteForAccount(ACCOUNT, key));
+                    })));
+        });
+    }
+}
