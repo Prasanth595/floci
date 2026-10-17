@@ -201,7 +201,9 @@ jobs:
     name: Build standalone binary (darwin-amd64, Rosetta)
     # native-image cannot cross-compile, and Intel macOS runners queue for hours, so an x86_64
     # GraalVM runs under Rosetta 2 on the Apple Silicon runner (floci-cli's recipe).
-    # setup-graalvm has no architecture override, so the x86_64 JDK is installed by hand.
+    # setup-graalvm has no architecture override, so the x86_64 JDK is installed by hand: GraalVM
+    # Community, like the other binaries, pinned to 25.0.1 (the last release with a macOS x64 build)
+    # and checked against its published SHA-256 before anything built with it is signed.
     runs-on: macos-latest
     timeout-minutes: 90
 
@@ -212,9 +214,12 @@ jobs:
         run: sudo softwareupdate --install-rosetta --agree-to-license
 
       - name: Install x86_64 GraalVM
+        env:
+          GRAALVM_X64_URL: https://github.com/graalvm/graalvm-ce-builds/releases/download/jdk-25.0.1/graalvm-community-jdk-25.0.1_macos-x64_bin.tar.gz
+          GRAALVM_X64_SHA256: a3d895b4cd1c783badbd277ec70409806bd4102fca0d2a60dbaeb0bab41aec30
         run: |
-          curl -fsSL -o "$RUNNER_TEMP/graalvm-x64.tar.gz" \
-            https://download.oracle.com/graalvm/25/latest/graalvm-jdk-25_macos-x64_bin.tar.gz
+          curl -fsSL -o "$RUNNER_TEMP/graalvm-x64.tar.gz" "$GRAALVM_X64_URL"
+          echo "$GRAALVM_X64_SHA256  $RUNNER_TEMP/graalvm-x64.tar.gz" | shasum -a 256 -c -
           mkdir -p "$RUNNER_TEMP/graalvm-x64"
           tar -xzf "$RUNNER_TEMP/graalvm-x64.tar.gz" -C "$RUNNER_TEMP/graalvm-x64" --strip-components 1
           echo "JAVA_HOME=$RUNNER_TEMP/graalvm-x64/Contents/Home" >> "$GITHUB_ENV"
@@ -273,7 +278,8 @@ jobs:
           retention-days: 7
 
   # ── Publish standalone binaries to the GitHub Release ────────────────────
-  # semantic-release created the release (notes only) before pushing this tag. This job adds
+  # semantic-release pushes this tag and then creates the release (notes only); the upload step
+  # waits for the release to exist. This job adds
   # one raw executable per platform, sha256sums.txt, a keyless cosign bundle per file, and a
   # GitHub build-provenance attestation. It is the only job that writes to the release.
   # Verify a download with:
