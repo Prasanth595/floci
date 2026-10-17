@@ -165,9 +165,9 @@ public class CloudWatchLogsSubscriptionDeliveryService {
         String service = arn.service();
 
         if ("lambda".equals(service)) {
-            if (isSelfSubscribedLambda(event.logGroupName(), destinationArn, targetRegion)) {
-                LOG.warnv("Skipping delivery to Lambda destination {0} to prevent recursive loop on its own log group {1}",
-                        destinationArn, event.logGroupName());
+            if (isOwnOutput(event, destinationArn)) {
+                LOG.warnv("Skipping delivery to Lambda destination {0} to prevent recursive loop on its own log stream {1} in {2}",
+                        destinationArn, event.logStreamName(), event.logGroupName());
                 return;
             }
             deliverChunks(filter, event, account, matching, gzipped -> deliverToLambda(destinationArn, gzipped));
@@ -183,31 +183,37 @@ public class CloudWatchLogsSubscriptionDeliveryService {
     }
 
     /**
-     * Whether the destination function writes its own logs to the group, the one its LoggingConfig
-     * names or else {@code /aws/lambda/<name>}, so that delivering to it would feed it its own
-     * output. Floci skips that delivery, for a custom group as for the default one.
+     * Whether the event is the destination function's own output, which delivering would feed back
+     * to it forever. Floci skips only that: the function is the one the destination ARN names, with
+     * its account, Region and version or alias, and its output is in the group its LoggingConfig
+     * names, or else {@code /aws/lambda/<name>}. A named group can be shared, so there only the
+     * function's own streams are skipped, and another function's logs in it still reach it.
      */
-    private boolean isSelfSubscribedLambda(String logGroupName, String functionArn, String region) {
-        if (logGroupName == null || functionArn == null) {
+    private boolean isOwnOutput(LogEventsIngested event, String functionArn) {
+        String logGroupName = event.logGroupName();
+        if (logGroupName == null) {
             return false;
         }
-        String targetFunctionName;
+        String functionName;
         try {
-            targetFunctionName = LambdaArnUtils.resolve(functionArn).name();
-        } catch (RuntimeException e) {
+            functionName = LambdaArnUtils.resolve(functionArn).name();
+        } catch (AwsException e) {
+            // Not a function ARN: invoking it fails as well, so there is no loop to break.
             return false;
         }
         LambdaFunction target = null;
         if (lambdaService != null) {
             try {
-                target = lambdaService.getFunction(region, targetFunctionName);
+                target = lambdaService.getFunctionByArn(functionArn);
             } catch (AwsException e) {
-                LOG.debugv("Destination function {0} not found: {1}", targetFunctionName, e.getMessage());
+                LOG.debugv("Destination function {0} not found: {1}", functionArn, e.getMessage());
             }
         }
-        String ownGroup = target != null
-                ? LambdaLogDestinations.logGroup(target) : LambdaLogDestinations.defaultLogGroup(targetFunctionName);
-        return logGroupName.equals(ownGroup);
+        if (target == null) {
+            return logGroupName.equals(LambdaLogDestinations.defaultLogGroup(functionName));
+        }
+        return logGroupName.equals(LambdaLogDestinations.logGroup(target))
+                && LambdaLogDestinations.isOwnStream(target, event.logStreamName());
     }
 
     @FunctionalInterface

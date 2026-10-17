@@ -29,6 +29,18 @@ public final class LambdaLogDestinations {
         return namesLogGroup(fn) ? fn.getFunctionName() + version : version;
     }
 
+    /**
+     * Whether {@code logStreamName} in the function's log group is the function's own: every stream
+     * of the default group is, and in a group LoggingConfig names, which several functions can
+     * share, the ones that carry its name.
+     */
+    public static boolean isOwnStream(LambdaFunction fn, String logStreamName) {
+        if (!namesLogGroup(fn)) {
+            return true;
+        }
+        return logStreamName != null && logStreamName.contains("/" + fn.getFunctionName() + "[");
+    }
+
     private static boolean namesLogGroup(LambdaFunction fn) {
         return fn.getLogGroup() != null && !fn.getLogGroup().isBlank();
     }

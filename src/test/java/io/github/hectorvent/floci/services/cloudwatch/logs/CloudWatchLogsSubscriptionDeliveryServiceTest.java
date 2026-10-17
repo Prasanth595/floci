@@ -394,7 +394,7 @@ class CloudWatchLogsSubscriptionDeliveryServiceTest {
         LambdaFunction forwarder = new LambdaFunction();
         forwarder.setFunctionName("forwarder");
         forwarder.setLogGroup(shared);
-        when(lambdaService.getFunction(REGION, "forwarder")).thenReturn(forwarder);
+        when(lambdaService.getFunctionByArn(forwarderArn)).thenReturn(forwarder);
         logsService.createLogGroup(shared, null, null, REGION);
         logsService.createLogStream(shared, "2026/10/16/forwarder[$LATEST]abc", REGION);
         logsService.putSubscriptionFilter(shared, "loop-filter", "", forwarderArn, null, REGION);
@@ -407,6 +407,54 @@ class CloudWatchLogsSubscriptionDeliveryServiceTest {
         logsService.putLogEvents(shared, "2026/10/16/forwarder[$LATEST]abc", List.of(
                 Map.of("timestamp", 5001L, "message", "another function's log line")), REGION);
         verify(lambdaService).invokeArn(eq(forwarderArn), any(), eq(InvocationType.Event));
+    }
+
+    /**
+     * A group LoggingConfig names can be shared: the forwarder subscribed to it gets the other
+     * functions' streams, and only its own, the ones carrying its name, are skipped.
+     */
+    @Test
+    void anotherFunctionsLogsInASharedGroupStillReachTheForwarder() {
+        String shared = "/shared/app";
+        String forwarderArn = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":function:forwarder";
+        LambdaFunction forwarder = new LambdaFunction();
+        forwarder.setFunctionName("forwarder");
+        forwarder.setLogGroup(shared);
+        when(lambdaService.getFunctionByArn(forwarderArn)).thenReturn(forwarder);
+        logsService.createLogGroup(shared, null, null, REGION);
+        logsService.createLogStream(shared, "2026/10/17/forwarder[$LATEST]abc", REGION);
+        logsService.createLogStream(shared, "2026/10/17/billing[$LATEST]def", REGION);
+        logsService.putSubscriptionFilter(shared, "forward-filter", "", forwarderArn, null, REGION);
+
+        logsService.putLogEvents(shared, "2026/10/17/forwarder[$LATEST]abc", List.of(
+                Map.of("timestamp", 5000L, "message", "forwarder log line")), REGION);
+        verify(lambdaService, never()).invokeArn(anyString(), any(), any());
+
+        logsService.putLogEvents(shared, "2026/10/17/billing[$LATEST]def", List.of(
+                Map.of("timestamp", 5001L, "message", "billing log line")), REGION);
+        verify(lambdaService).invokeArn(eq(forwarderArn), any(), eq(InvocationType.Event));
+    }
+
+    /**
+     * A destination naming a published version is checked against that version's LoggingConfig,
+     * looked up by the ARN with its account and qualifier, not against {@code $LATEST}'s.
+     */
+    @Test
+    void aPublishedVersionIsCheckedAgainstItsOwnLogGroup() {
+        String versionGroup = "/forwarder/v1";
+        String versionArn = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":function:forwarder:1";
+        LambdaFunction version = new LambdaFunction();
+        version.setFunctionName("forwarder");
+        version.setLogGroup(versionGroup);
+        when(lambdaService.getFunctionByArn(versionArn)).thenReturn(version);
+        logsService.createLogGroup(versionGroup, null, null, REGION);
+        logsService.createLogStream(versionGroup, "2026/10/17/forwarder[$LATEST]abc", REGION);
+        logsService.putSubscriptionFilter(versionGroup, "loop-filter", "", versionArn, null, REGION);
+
+        logsService.putLogEvents(versionGroup, "2026/10/17/forwarder[$LATEST]abc", List.of(
+                Map.of("timestamp", 5000L, "message", "version log line")), REGION);
+
+        verify(lambdaService, never()).invokeArn(anyString(), any(), any());
     }
 
     @Test

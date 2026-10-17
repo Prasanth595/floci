@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Measured on AWS (eu-west-1, 2026-10-16): with no LoggingConfig a stream is
@@ -27,6 +29,22 @@ class LambdaLogDestinationsTest {
 
         assertEquals("/shared/app-logs", LambdaLogDestinations.logGroup(fn));
         assertEquals("orders[$LATEST]1a2b3c4d", LambdaLogDestinations.logStreamSuffix(fn, "1a2b3c4d"));
+    }
+
+    @Test
+    void inASharedGroupOnlyTheStreamsCarryingTheFunctionNameAreItsOwn() {
+        LambdaFunction fn = function();
+        fn.setLogGroup("/shared/app-logs");
+
+        assertTrue(LambdaLogDestinations.isOwnStream(fn, "2026/10/17/orders[$LATEST]1a2b3c4d"));
+        assertFalse(LambdaLogDestinations.isOwnStream(fn, "2026/10/17/orders-archive[$LATEST]1a2b3c4d"));
+        assertFalse(LambdaLogDestinations.isOwnStream(fn, "2026/10/17/billing[$LATEST]1a2b3c4d"));
+        assertFalse(LambdaLogDestinations.isOwnStream(fn, null));
+    }
+
+    @Test
+    void everyStreamOfTheDefaultGroupIsTheFunctionsOwn() {
+        assertTrue(LambdaLogDestinations.isOwnStream(function(), "2026/10/17/[$LATEST]1a2b3c4d"));
     }
 
     @Test
