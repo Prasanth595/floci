@@ -21,8 +21,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Launch-configuration MetadataOptions outside the documented values (HttpTokens optional or
- * required, HttpEndpoint enabled or disabled, HttpPutResponseHopLimit an integer from 1 to 64) fail
- * the resource and roll the stack back without leaving a launch configuration behind.
+ * required, HttpEndpoint enabled or disabled, HttpPutResponseHopLimit an integer from 1 to 64), or
+ * given as a list or an object, fail the resource and roll the stack back without leaving a launch
+ * configuration behind.
  */
 @QuarkusTest
 class CloudFormationLaunchConfigurationMetadataValidationIntegrationTest {
@@ -44,7 +45,10 @@ class CloudFormationLaunchConfigurationMetadataValidationIntegrationTest {
                         + " 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint: Member must have"
                         + " value less than or equal to 64"),
                 Arguments.of("\"HttpPutResponseHopLimit\":\"not-an-integer\"",
-                        "HttpPutResponseHopLimit must be an integer."));
+                        "HttpPutResponseHopLimit must be an integer."),
+                Arguments.of("\"HttpTokens\":[\"required\"]", "HttpTokens must be a string."),
+                Arguments.of("\"HttpEndpoint\":{\"Value\":\"disabled\"}", "HttpEndpoint must be a string."),
+                Arguments.of("\"HttpPutResponseHopLimit\":[2]", "HttpPutResponseHopLimit must be an integer."));
     }
 
     @ParameterizedTest

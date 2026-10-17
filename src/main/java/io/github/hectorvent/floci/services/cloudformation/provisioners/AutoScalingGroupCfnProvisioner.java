@@ -224,9 +224,9 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("ValidationError", "MetadataOptions must be an object.", 400);
         }
         LaunchTemplateData.MetadataOptions options = new LaunchTemplateData.MetadataOptions();
-        options.setHttpTokens(blankToNull(node.path("HttpTokens").asText(null)));
-        options.setHttpEndpoint(blankToNull(node.path("HttpEndpoint").asText(null)));
-        String hops = blankToNull(node.path("HttpPutResponseHopLimit").asText(null));
+        options.setHttpTokens(metadataMember(node, "HttpTokens", "a string"));
+        options.setHttpEndpoint(metadataMember(node, "HttpEndpoint", "a string"));
+        String hops = metadataMember(node, "HttpPutResponseHopLimit", "an integer");
         if (hops != null) {
             try {
                 options.setHttpPutResponseHopLimit(Integer.valueOf(hops));
@@ -235,6 +235,18 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         return options;
+    }
+
+    /**
+     * A MetadataOptions member's text, or null when it is absent or blank. A list or an object fails
+     * rather than reading as absent, which would leave the member at its default.
+     */
+    private String metadataMember(JsonNode metadataOptions, String member, String expected) {
+        JsonNode value = metadataOptions.path(member);
+        if (value.isContainerNode()) {
+            throw new AwsException("ValidationError", member + " must be " + expected + ".", 400);
+        }
+        return blankToNull(value.asText(null));
     }
 
     private LaunchConfiguration requireLaunchConfiguration(String region, String name) {
