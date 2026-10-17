@@ -124,6 +124,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -272,6 +273,8 @@ public class AslExecutor {
     // Null in production, where the ceiling comes from the Step Functions config. Tests pin it.
     private final Integer maxWaitSecondsOverride;
     private final Duration expressMaxExecutionTime;
+    // The monotonic clock every execution and task deadline is measured on. Tests move it forward.
+    private final LongSupplier nanoTime;
     private final Map<String, ActiveMockExecution> activeMocks = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "sfn-executor");
@@ -298,7 +301,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler, serviceRegistry,
-                lambdaTaskAuthorizer, null);
+                lambdaTaskAuthorizer, null, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -314,7 +317,8 @@ public class AslExecutor {
                 CustomResourceLiveness customResourceLiveness,
                 Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride,
                 RedshiftDataJsonHandler redshiftDataHandler, ServiceRegistry serviceRegistry,
-                LambdaTaskAuthorizer lambdaTaskAuthorizer, Duration expressMaxExecutionTimeOverride) {
+                LambdaTaskAuthorizer lambdaTaskAuthorizer, Duration expressMaxExecutionTimeOverride,
+                LongSupplier nanoTimeOverride) {
         this.serviceRegistry = serviceRegistry;
         this.lambdaTaskAuthorizer = lambdaTaskAuthorizer;
         this.customResourceLiveness = customResourceLiveness;
@@ -347,6 +351,7 @@ public class AslExecutor {
         this.clock = clock;
         this.sleeper = sleeper;
         this.maxWaitSecondsOverride = maxWaitSecondsOverride;
+        this.nanoTime = nanoTimeOverride != null ? nanoTimeOverride : System::nanoTime;
         this.expressMaxExecutionTime = expressMaxExecutionTimeOverride != null
                 ? expressMaxExecutionTimeOverride
                 : EXPRESS_MAX_EXECUTION_TIME;
@@ -376,7 +381,7 @@ public class AslExecutor {
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null);
+                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null, null);
     }
 
     // Kept for tests that do not exercise the Redshift Data API integration.
@@ -397,7 +402,7 @@ public class AslExecutor {
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                clock, sleeper, maxWaitSecondsOverride, null, null, null, null);
+                clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -468,7 +473,7 @@ public class AslExecutor {
         // An Express execution has the same maximum execution time however it was started; a
         // Standard one is allowed a year, which the emulator does not enforce.
         long maxExecutionDeadlineNanos = "EXPRESS".equals(sm.getType())
-                ? System.nanoTime() + expressMaxExecutionTime.toNanos()
+                ? nanoTime.getAsLong() + expressMaxExecutionTime.toNanos()
                 : Long.MAX_VALUE;
         executor.submit(() -> {
             try {
@@ -501,11 +506,11 @@ public class AslExecutor {
         registerMocks(exec, mockedTestCase);
         // The execution itself ends at this deadline, as it does at its TimeoutSeconds, so it runs
         // no further state once the caller has been answered TIMED_OUT.
-        long maxExecutionDeadlineNanos = System.nanoTime() + expressMaxExecutionTime.toNanos();
+        long maxExecutionDeadlineNanos = nanoTime.getAsLong() + expressMaxExecutionTime.toNanos();
         try {
             Future<?> f = executor.submit(() -> runUnderExecutionAccount(sm,
                     () -> doExecute(sm, exec, history, onUpdate, maxExecutionDeadlineNanos)));
-            f.get(maxExecutionDeadlineNanos - System.nanoTime(), TimeUnit.NANOSECONDS);
+            f.get(maxExecutionDeadlineNanos - nanoTime.getAsLong(), TimeUnit.NANOSECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
             // The worker ends itself at the same deadline. This answers the caller when it has not
             // yet, and never replaces an outcome the worker already published.
@@ -566,6 +571,7 @@ public class AslExecutor {
     private void doExecute(StateMachine sm, Execution exec, List<HistoryEvent> history,
                            BiConsumer<Execution, List<HistoryEvent>> onUpdate, long maxExecutionDeadlineNanos) {
         HistoryChain chain = HistoryChain.of(history);
+        long executionDeadlineNanos = maxExecutionDeadlineNanos;
         try {
             JsonNode definition = objectMapper.readTree(sm.getDefinition());
             JsonNode states = definition.path("States");
@@ -576,9 +582,10 @@ public class AslExecutor {
             // same instant: the earlier of its TimeoutSeconds and the maximum execution time its
             // workflow type allows. Long.MAX_VALUE stands for neither.
             int timeoutSeconds = definition.path("TimeoutSeconds").asInt(0);
-            long executionDeadlineNanos = timeoutSeconds > 0
-                    ? Math.min(System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds), maxExecutionDeadlineNanos)
-                    : maxExecutionDeadlineNanos;
+            if (timeoutSeconds > 0) {
+                executionDeadlineNanos = Math.min(
+                        nanoTime.getAsLong() + TimeUnit.SECONDS.toNanos(timeoutSeconds), maxExecutionDeadlineNanos);
+            }
             JsonNode execContext = buildContext(exec, sm);
             // Execution-scoped JSONata variables (the Assign field). Mutated in place as states
             // assign, so later states observe earlier assignments.
@@ -586,7 +593,7 @@ public class AslExecutor {
 
             String currentStateName = startAt;
             while (currentStateName != null && !abortedByCaller(exec)) {
-                if (System.nanoTime() >= executionDeadlineNanos) {
+                if (nanoTime.getAsLong() >= executionDeadlineNanos) {
                     throw new ExecutionTimedOutException();
                 }
                 JsonNode stateDef = states.path(currentStateName);
@@ -601,7 +608,7 @@ public class AslExecutor {
                 } catch (FailStateException e) {
                     // A failure that came back after the deadline, like a late success, ends the
                     // execution as timed out.
-                    if (System.nanoTime() >= executionDeadlineNanos) {
+                    if (nanoTime.getAsLong() >= executionDeadlineNanos) {
                         throw new ExecutionTimedOutException();
                     }
                     failExecution(exec, chain, e);
@@ -613,7 +620,7 @@ public class AslExecutor {
             }
             // A last state that outran the deadline, such as an integration call that does not
             // watch it, ends the execution as timed out rather than succeeded.
-            if (System.nanoTime() >= executionDeadlineNanos) {
+            if (nanoTime.getAsLong() >= executionDeadlineNanos) {
                 throw new ExecutionTimedOutException();
             }
 
@@ -627,6 +634,12 @@ public class AslExecutor {
             // StopExecution already wrote ABORTED and sealed the history; the worker only stops.
             onUpdate.accept(exec, history);
         } catch (Exception e) {
+            if (nanoTime.getAsLong() >= executionDeadlineNanos) {
+                // Past the deadline the execution has timed out, whatever broke on the way there.
+                timeOutExecution(exec, chain);
+                onUpdate.accept(exec, history);
+                return;
+            }
             LOG.warnv("ASL execution failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
             // This path previously set only the status, leaving error and cause null forever on an
             // execution DescribeExecution reports as FAILED.
@@ -1038,22 +1051,22 @@ public class AslExecutor {
                 long wakeAtNanos = Math.min(executionDeadlineNanos, Math.min(timeoutDeadlineNanos,
                         heartbeatDeadlineNanos(taskToken, heartbeatSeconds)));
                 try {
-                    return future.get(wakeAtNanos - System.nanoTime(), TimeUnit.NANOSECONDS);
+                    return future.get(wakeAtNanos - nanoTime.getAsLong(), TimeUnit.NANOSECONDS);
                 } catch (java.util.concurrent.TimeoutException e) {
                     // The execution's budget is read first: when it is the clock that ran out, the
                     // execution ends as TIMED_OUT and the task's own timeout never applies.
-                    if (System.nanoTime() >= executionDeadlineNanos) {
+                    if (nanoTime.getAsLong() >= executionDeadlineNanos) {
                         future.cancel(true);
                         throw new ExecutionTimedOutException();
                     }
-                    if (System.nanoTime() >= timeoutDeadlineNanos) {
+                    if (nanoTime.getAsLong() >= timeoutDeadlineNanos) {
                         future.cancel(true);
                         throw new TaskTimedOutException("States.Timeout");
                     }
                     // Read the gap again rather than trusting the one this thread parked on: a
                     // heartbeat that landed meanwhile has already moved it past now, and the task
                     // goes back to waiting on the later deadline.
-                    if (System.nanoTime() >= heartbeatDeadlineNanos(taskToken, heartbeatSeconds)) {
+                    if (nanoTime.getAsLong() >= heartbeatDeadlineNanos(taskToken, heartbeatSeconds)) {
                         future.cancel(true);
                         throw new TaskTimedOutException("States.HeartbeatTimeout");
                     }
@@ -1081,7 +1094,7 @@ public class AslExecutor {
         if (timeoutSeconds <= 0) {
             timeoutSeconds = DEFAULT_TASK_TIMEOUT_SECONDS;
         }
-        return System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+        return nanoTime.getAsLong() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
     }
 
     /**
@@ -2760,7 +2773,7 @@ public class AslExecutor {
      */
     private void sleepOrTimeOutTask(long pauseNanos, long executionDeadlineNanos, long taskDeadlineNanos)
             throws InterruptedException {
-        long remainingNanos = Math.min(executionDeadlineNanos, taskDeadlineNanos) - System.nanoTime();
+        long remainingNanos = Math.min(executionDeadlineNanos, taskDeadlineNanos) - nanoTime.getAsLong();
         if (pauseNanos < remainingNanos) {
             sleeper.sleep(pauseNanos);
             return;
@@ -2768,7 +2781,7 @@ public class AslExecutor {
         sleeper.sleep(Math.max(remainingNanos, 0));
         // The execution's budget wins when it is the clock that was parked on, and also when a late
         // wake finds it spent: the execution ends TIMED_OUT and the Task's own timeout never applies.
-        if (executionDeadlineNanos <= taskDeadlineNanos || System.nanoTime() >= executionDeadlineNanos) {
+        if (executionDeadlineNanos <= taskDeadlineNanos || nanoTime.getAsLong() >= executionDeadlineNanos) {
             throw new ExecutionTimedOutException();
         }
         throw new TaskTimedOutException("States.Timeout");
@@ -2867,7 +2880,7 @@ public class AslExecutor {
 
         int timeoutSeconds = stateDef.path("TimeoutSeconds").asInt(0);
         long stateDeadlineNanos = timeoutSeconds > 0
-                ? System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
+                ? nanoTime.getAsLong() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
                 : Long.MAX_VALUE;
         // Two clocks can end this wait, and the join stops at whichever comes first: the state's
         // own TimeoutSeconds, and the state machine's budget for the whole execution.
@@ -2879,7 +2892,7 @@ public class AslExecutor {
         int current = -1;
         try {
             for (int joined = 0; joined < futures.size(); joined++) {
-                long remainingNanos = joinDeadlineNanos - System.nanoTime();
+                long remainingNanos = joinDeadlineNanos - nanoTime.getAsLong();
                 if (remainingNanos <= 0) {
                     throw parallelJoinExpired(stateDeadlineNanos, timeoutSeconds);
                 }
@@ -2974,7 +2987,7 @@ public class AslExecutor {
      * execution and no Catch sees it.
      */
     private RuntimeException parallelJoinExpired(long stateDeadlineNanos, int timeoutSeconds) {
-        if (System.nanoTime() < stateDeadlineNanos) {
+        if (nanoTime.getAsLong() < stateDeadlineNanos) {
             return new ExecutionTimedOutException();
         }
         return new FailStateException("States.Timeout",
