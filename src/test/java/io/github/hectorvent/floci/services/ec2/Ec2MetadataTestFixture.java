@@ -84,6 +84,11 @@ final class Ec2MetadataTestFixture implements AutoCloseable {
         return instance;
     }
 
+    /** The server's base URL, for a client other than this fixture's own requests. */
+    String endpoint() {
+        return endpoint;
+    }
+
     static Instance instance(String instanceId) {
         Instance instance = new Instance();
         instance.setInstanceId(instanceId);

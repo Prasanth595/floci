@@ -118,6 +118,11 @@ CloudFormation `AWS::EC2::VPCEndpoint` resolves `IpAddressType` on create and up
 
 Floci runs an IMDS-compatible HTTP server on port `9169` of the host. Each launched container receives the environment variable `AWS_EC2_METADATA_SERVICE_ENDPOINT` pointing to this server.
 
+Inside each launched container, the link-local address `169.254.169.254` is a proxy to this
+server. The proxy is ready once an IMDSv2 token request with a 60-second TTL succeeds and that
+token reads the instance ID. A failed or empty token response does not fall back to a tokenless
+request, and the check passes on an instance that requires tokens.
+
 `iam/info` returns the ARN and ID that IAM holds for the attached profile, and 404 when that
 profile is missing, has no role or does not match the attached ARN. An EKS cluster node, whose
 profile Floci synthesizes, reports the synthesized ARN and a stable ID instead while IAM holds no

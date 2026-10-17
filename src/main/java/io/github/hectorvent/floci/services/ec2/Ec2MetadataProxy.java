@@ -43,7 +43,20 @@ public final class Ec2MetadataProxy {
 
     public static String[] startCommand(String flociHost, int imdsPort) {
         return startCommand("imds", "169.254.169.254", 80, flociHost, imdsPort,
-                "curl -fsS --max-time 1 http://169.254.169.254/latest/meta-data/instance-id >/dev/null && exit 0");
+                imdsProbeCommand("http://169.254.169.254"));
+    }
+
+    /**
+     * Ready once an IMDSv2 token reads the instance ID, which also holds on an instance whose
+     * HttpTokens is required. A refused or empty token ends the attempt rather than falling back to
+     * a tokenless read, which an empty token header would otherwise become.
+     */
+    static String imdsProbeCommand(String endpoint) {
+        return "token=$(curl -fsS --max-time 1 -X PUT "
+                + "-H 'X-aws-ec2-metadata-token-ttl-seconds: 60' " + endpoint + "/latest/api/token)"
+                + " && [ -n \"$token\" ]"
+                + " && curl -fsS --max-time 1 -H \"X-aws-ec2-metadata-token: $token\" "
+                + endpoint + "/latest/meta-data/instance-id >/dev/null && exit 0";
     }
 
     public static String[] podIdentityStartCommand(String flociHost, int flociPort) {
