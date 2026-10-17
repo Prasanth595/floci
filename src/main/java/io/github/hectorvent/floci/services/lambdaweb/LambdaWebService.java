@@ -1204,7 +1204,7 @@ public class LambdaWebService implements Resettable {
             }
             for (String value : policyValues(field.getValue())) {
                 Pattern allowed = "Service".equals(field.getKey()) ? PRINCIPAL_SERVICE
-                        : AwsArnUtils.isArn(value) ? PRINCIPAL_AWS_ARN : PRINCIPAL_AWS;
+                        : "AWS".equals(field.getKey()) && AwsArnUtils.isArn(value) ? PRINCIPAL_AWS_ARN : PRINCIPAL_AWS;
                 if (!"*".equals(value) && !allowed.matcher(value).matches()) {
                     throw new AwsException("ValidationException", "The provided input'" + value
                             + "'was invalid. Member must satisfy expression: " + allowed.pattern()

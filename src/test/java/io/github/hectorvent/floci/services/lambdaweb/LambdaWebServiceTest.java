@@ -487,6 +487,9 @@ class LambdaWebServiceTest {
         assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
                 policy(members.formatted("{\"AWS\":\"arn:aws:iam::000000000000:user/path/alice\"}", invoke,
                         "\"" + resource + "\"")))).getErrorCode());
+        assertEquals("ValidationException", error(() -> service.putResourcePolicy(REGION, missing,
+                policy(members.formatted("{\"CanonicalUser\":\"arn:aws:iam::000000000000:foo/bar\"}", invoke,
+                        "\"" + resource + "\"")))).getErrorCode(), "only an AWS principal may carry a path");
         assertEquals("Lambda blocked the creation of this policy because it would grant public access to your function.",
                 message(() -> service.putResourcePolicy(REGION, missing, policy("{\"Statement\":[{\"Effect\":\"Allow\","
                         + "\"Principal\":{\"AWS\":[\"arn:aws:iam::000000000000:root\",\"*\"]},"
