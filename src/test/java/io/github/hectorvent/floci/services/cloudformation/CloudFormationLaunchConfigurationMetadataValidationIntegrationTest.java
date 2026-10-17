@@ -22,8 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * Launch-configuration MetadataOptions outside the documented values (HttpTokens optional or
  * required, HttpEndpoint enabled or disabled, HttpPutResponseHopLimit an integer from 1 to 64), or
- * given as a list or an object, fail the resource and roll the stack back without leaving a launch
- * configuration behind.
+ * of the wrong JSON type, fail the resource and roll the stack back without leaving a launch
+ * configuration behind. A wrong type fails CloudFormation's schema check, a wrong value Auto
+ * Scaling's own validation.
  */
 @QuarkusTest
 class CloudFormationLaunchConfigurationMetadataValidationIntegrationTest {
@@ -32,34 +33,39 @@ class CloudFormationLaunchConfigurationMetadataValidationIntegrationTest {
 
     static Stream<Arguments> invalidMetadataOptions() {
         return Stream.of(
-                Arguments.of("\"HttpTokens\":\"invalid\"", "1 validation error detected: Value 'invalid' at"
+                Arguments.of("{\"HttpTokens\":\"invalid\"}", "1 validation error detected: Value 'invalid' at"
                         + " 'metadataOptions.httpTokens' failed to satisfy constraint: Member must satisfy enum value"
                         + " set: [optional, required]"),
-                Arguments.of("\"HttpEndpoint\":\"invalid\"", "1 validation error detected: Value 'invalid' at"
+                Arguments.of("{\"HttpEndpoint\":\"invalid\"}", "1 validation error detected: Value 'invalid' at"
                         + " 'metadataOptions.httpEndpoint' failed to satisfy constraint: Member must satisfy enum value"
                         + " set: [disabled, enabled]"),
-                Arguments.of("\"HttpPutResponseHopLimit\":0", "1 validation error detected: Value '0' at"
+                Arguments.of("{\"HttpPutResponseHopLimit\":0}", "1 validation error detected: Value '0' at"
                         + " 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint: Member must have"
                         + " value greater than or equal to 1"),
-                Arguments.of("\"HttpPutResponseHopLimit\":65", "1 validation error detected: Value '65' at"
+                Arguments.of("{\"HttpPutResponseHopLimit\":65}", "1 validation error detected: Value '65' at"
                         + " 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint: Member must have"
                         + " value less than or equal to 64"),
-                Arguments.of("\"HttpPutResponseHopLimit\":\"not-an-integer\"",
-                        "HttpPutResponseHopLimit must be an integer."),
-                Arguments.of("\"HttpTokens\":[\"required\"]", "HttpTokens must be a string."),
-                Arguments.of("\"HttpEndpoint\":{\"Value\":\"disabled\"}", "HttpEndpoint must be a string."),
-                Arguments.of("\"HttpPutResponseHopLimit\":[2]", "HttpPutResponseHopLimit must be an integer."));
+                Arguments.of("{\"HttpPutResponseHopLimit\":\"not-an-integer\"}", "Model validation failed"
+                        + " (#/MetadataOptions/HttpPutResponseHopLimit: expected type: Integer, found: String)"),
+                Arguments.of("{\"HttpPutResponseHopLimit\":[2]}", "Model validation failed"
+                        + " (#/MetadataOptions/HttpPutResponseHopLimit: expected type: Integer, found: JSONArray)"),
+                Arguments.of("{\"HttpTokens\":[\"required\"]}", "Model validation failed"
+                        + " (#/MetadataOptions/HttpTokens: expected type: String, found: JSONArray)"),
+                Arguments.of("{\"HttpEndpoint\":{\"Value\":\"disabled\"}}", "Model validation failed"
+                        + " (#/MetadataOptions/HttpEndpoint: expected type: String, found: JSONObject)"),
+                Arguments.of("\"required\"", "Model validation failed"
+                        + " (#/MetadataOptions: expected type: JSONObject, found: String)"));
     }
 
     @ParameterizedTest
     @MethodSource("invalidMetadataOptions")
-    void invalidMetadataOptionsFailTheResourceWithoutCreatingIt(String member, String message) {
+    void invalidMetadataOptionsFailTheResourceWithoutCreatingIt(String metadataOptions, String message) {
         String name = "cfn-invalid-metadata-" + UUID.randomUUID();
         String template = """
                 {"Resources":{"Launch":{"Type":"AWS::AutoScaling::LaunchConfiguration",
                 "Properties":{"LaunchConfigurationName":"%s","ImageId":"ami-amazonlinux2023",
-                "InstanceType":"t3.micro","MetadataOptions":{%s}}}}}
-                """.formatted(name, member);
+                "InstanceType":"t3.micro","MetadataOptions":%s}}}}
+                """.formatted(name, metadataOptions);
         try {
             request("cloudformation", "CreateStack").formParam("StackName", name).formParam("TemplateBody", template)
                     .post("/").then().statusCode(200);

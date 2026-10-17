@@ -221,17 +221,18 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
             return null;
         }
         if (!node.isObject()) {
-            throw new AwsException("ValidationError", "MetadataOptions must be an object.", 400);
+            throw typeMismatch("#/MetadataOptions", "JSONObject", node);
         }
         LaunchTemplateData.MetadataOptions options = new LaunchTemplateData.MetadataOptions();
-        options.setHttpTokens(metadataMember(node, "HttpTokens", "a string"));
-        options.setHttpEndpoint(metadataMember(node, "HttpEndpoint", "a string"));
-        String hops = metadataMember(node, "HttpPutResponseHopLimit", "an integer");
+        options.setHttpTokens(metadataMember(node, "HttpTokens", "String"));
+        options.setHttpEndpoint(metadataMember(node, "HttpEndpoint", "String"));
+        String hops = metadataMember(node, "HttpPutResponseHopLimit", "Integer");
         if (hops != null) {
             try {
                 options.setHttpPutResponseHopLimit(Integer.valueOf(hops));
             } catch (NumberFormatException invalid) {
-                throw new AwsException("ValidationError", "HttpPutResponseHopLimit must be an integer.", 400);
+                throw typeMismatch("#/MetadataOptions/HttpPutResponseHopLimit", "Integer",
+                        node.path("HttpPutResponseHopLimit"));
             }
         }
         return options;
@@ -239,14 +240,31 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * A MetadataOptions member's text, or null when it is absent or blank. A list or an object fails
-     * rather than reading as absent, which would leave the member at its default.
+     * the schema's type check rather than reading as absent, which would leave the member at its
+     * default.
      */
-    private String metadataMember(JsonNode metadataOptions, String member, String expected) {
+    private String metadataMember(JsonNode metadataOptions, String member, String expectedType) {
         JsonNode value = metadataOptions.path(member);
         if (value.isContainerNode()) {
-            throw new AwsException("ValidationError", member + " must be " + expected + ".", 400);
+            throw typeMismatch("#/MetadataOptions/" + member, expectedType, value);
         }
         return blankToNull(value.asText(null));
+    }
+
+    /** CloudFormation's schema type error, worded as the S3 and DynamoDB provisioners report it. */
+    private static AwsException typeMismatch(String pointer, String expectedType, JsonNode value) {
+        return new AwsException("InvalidRequest", "Model validation failed (" + pointer
+                + ": expected type: " + expectedType + ", found: " + schemaTypeName(value) + ")", 400);
+    }
+
+    private static String schemaTypeName(JsonNode value) {
+        return switch (value.getNodeType()) {
+            case OBJECT -> "JSONObject";
+            case ARRAY -> "JSONArray";
+            case BOOLEAN -> "Boolean";
+            case NUMBER -> value.isIntegralNumber() ? "Integer" : "Double";
+            default -> "String";
+        };
     }
 
     private LaunchConfiguration requireLaunchConfiguration(String region, String name) {
