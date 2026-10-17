@@ -3,12 +3,15 @@ package io.github.hectorvent.floci.config;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasKey;
@@ -89,10 +92,39 @@ class LocalStackParityTest {
     }
 
     @Test
-    void dnsSuffixes() {
-        assertThat(value("floci.dns.extra-suffixes"), equalTo("localhost.localstack.cloud,localhost.floci.io"));
-        assertThat(value("floci.dns.extra-suffixes", "FLOCI_DNS_EXTRA_SUFFIXES", "custom.internal"),
-                equalTo("custom.internal,localhost.localstack.cloud,localhost.floci.io"));
+    void dnsSuffixesAreAppendedToWhateverIsConfigured() {
+        // Not a translated property: it would outrank and replace suffixes set in application.yml.
+        assertThat(value("floci.dns.extra-suffixes"), nullValue());
+        assertThat(LocalStackParity.withDnsSuffixes(Optional.empty(), Map.of()),
+                equalTo(Optional.of(List.of("localhost.localstack.cloud", "localhost.floci.io"))));
+        assertThat(LocalStackParity.withDnsSuffixes(Optional.of(List.of("custom.internal", "localhost.floci.io")),
+                        Map.of()),
+                equalTo(Optional.of(List.of("custom.internal", "localhost.floci.io", "localhost.localstack.cloud"))));
+        assertThat(LocalStackParity.withDnsSuffixes(Optional.of(List.of("custom.internal")),
+                        Map.of("LOCALSTACK_PARITY", "false")),
+                equalTo(Optional.of(List.of("custom.internal"))));
+    }
+
+    @Test
+    void gatewayListenWithAPortGivesTheHostAndThePort() {
+        assertThat(value("quarkus.http.host", "GATEWAY_LISTEN", "0.0.0.0:4566"), equalTo("0.0.0.0"));
+        assertThat(value("floci.port", "GATEWAY_LISTEN", "0.0.0.0:4567"), equalTo("4567"));
+        assertThat(value("quarkus.http.host", "GATEWAY_LISTEN", "[::]:4566,0.0.0.0:443"), equalTo("::"));
+        assertThat(value("quarkus.http.host", "GATEWAY_LISTEN", "0.0.0.0"), equalTo("0.0.0.0"));
+        assertThat(value("floci.port", "GATEWAY_LISTEN", "0.0.0.0:4567", "EDGE_PORT", "4570"), equalTo("4570"));
+        assertThat(value("floci.port", "GATEWAY_LISTEN", "0.0.0.0:4567", "FLOCI_PORT", "4571"), nullValue());
+    }
+
+    @Test
+    void hooksGetTheTranslationAsVariables() {
+        Map<String, String> env = LocalStackParity.environment(Map.of("EDGE_PORT", "4567", "PERSISTENCE", "1"));
+        assertThat(env.get("FLOCI_PORT"), equalTo("4567"));
+        assertThat(env.get("FLOCI_STORAGE_MODE"), equalTo("persistent"));
+        assertThat(env.get("FLOCI_DNS_EXTRA_SUFFIXES"), equalTo("localhost.localstack.cloud,localhost.floci.io"));
+        assertThat(LocalStackParity.environment(Map.of("EDGE_PORT", "4567", "FLOCI_PORT", "4568")),
+                not(hasKey("FLOCI_PORT")));
+        assertThat(LocalStackParity.environment(Map.of("LOCALSTACK_PARITY", "false", "EDGE_PORT", "4567")),
+                anEmptyMap());
     }
 
     @Test
@@ -115,12 +147,14 @@ class LocalStackParityTest {
     @Test
     void ignoredVariablesProduceNothing() {
         Map<String, String> out = LocalStackParity.translate(Map.of("LAMBDA_EXECUTOR", "local", "SERVICES", "s3"));
-        assertThat(out.keySet(), equalTo(Set.of("floci.dns.extra-suffixes")));
+        assertThat(out.keySet(), equalTo(Set.of()));
         assertThat(out, not(hasKey("floci.services.lambda.executor")));
     }
 
     @Test
-    void ordinalSitsBetweenEnvironmentAndSystemProperties() {
-        assertThat(new LocalStackParityConfigSource(Map.of()).getOrdinal(), allOf(greaterThan(300), lessThan(400)));
+    void ordinalSitsBelowEnvironmentAndTlsButAboveTheConfigFiles() {
+        // .env is 295, config/application.yml 265; environment variables and TlsConfigSource are 300.
+        assertThat(new LocalStackParityConfigSource(Map.of()).getOrdinal(), allOf(greaterThan(295), lessThan(300)));
+        assertThat(new TlsConfigSource().getOrdinal(), greaterThan(new LocalStackParityConfigSource(Map.of()).getOrdinal()));
     }
 }

@@ -2,8 +2,15 @@ package io.github.hectorvent.floci.config;
 
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Translates LocalStack Community environment variables into the Floci configuration they mean,
@@ -11,14 +18,22 @@ import java.util.Map;
  *
  * <p>An explicitly set Floci variable always wins: a mapping is produced only when the matching
  * {@code FLOCI_*} or {@code QUARKUS_*} environment variable is absent. The DNS suffixes are the
- * one exception: LocalStack's and Floci's hostname suffixes are appended to any configured ones.
- * The whole translation is off when {@code LOCALSTACK_PARITY=false}.
+ * one exception: LocalStack's and Floci's hostname suffixes are appended to the configured ones,
+ * wherever those are set ({@link #withDnsSuffixes}). The whole translation is off when
+ * {@code LOCALSTACK_PARITY=false}.
  */
 public final class LocalStackParity {
 
     private static final Logger LOG = Logger.getLogger(LocalStackParity.class);
 
-    static final String PARITY_SUFFIXES = "localhost.localstack.cloud,localhost.floci.io";
+    static final List<String> PARITY_SUFFIXES = List.of("localhost.localstack.cloud", "localhost.floci.io");
+
+    /** {@code host:port}, {@code [v6]:port}, or a bare host; LocalStack accepts a comma-separated list. */
+    private static final Pattern HOST_PORT = Pattern.compile("^(?:\\[([^\\]]+)\\]|([^:\\[\\]]+)):(\\d+)$");
+
+    /** One translated setting: the Floci variable it stands for, its property, and its value. */
+    record Mapping(String variable, String property, String value) {
+    }
 
     private LocalStackParity() {
     }
@@ -38,6 +53,47 @@ public final class LocalStackParity {
      */
     public static Map<String, String> translate(Map<String, String> env) {
         Map<String, String> out = new LinkedHashMap<>();
+        for (Mapping mapping : mappings(env)) {
+            out.put(mapping.property(), mapping.value());
+        }
+        return out;
+    }
+
+    /**
+     * The same translation as {@code FLOCI_*}/{@code QUARKUS_*} variables, for child processes such
+     * as init hooks: the entrypoint script used to export them, so hooks inherited them. Includes
+     * {@code FLOCI_DNS_EXTRA_SUFFIXES} with the LocalStack suffixes appended, as the script did.
+     */
+    public static Map<String, String> environment(Map<String, String> env) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (!enabled(env)) {
+            return out;
+        }
+        for (Mapping mapping : mappings(env)) {
+            out.put(mapping.variable(), mapping.value());
+        }
+        String suffixes = env.get("FLOCI_DNS_EXTRA_SUFFIXES");
+        out.put("FLOCI_DNS_EXTRA_SUFFIXES", String.join(",", withDnsSuffixes(
+                isSet(suffixes) ? Optional.of(List.of(suffixes.split(","))) : Optional.empty(), env).orElseThrow()));
+        return out;
+    }
+
+    /** The configured extra DNS suffixes, plus LocalStack's and Floci's when parity is on. */
+    public static Optional<List<String>> withDnsSuffixes(Optional<List<String>> configured) {
+        return withDnsSuffixes(configured, System.getenv());
+    }
+
+    static Optional<List<String>> withDnsSuffixes(Optional<List<String>> configured, Map<String, String> env) {
+        if (!enabled(env)) {
+            return configured;
+        }
+        Set<String> suffixes = new LinkedHashSet<>(configured.orElse(List.of()));
+        suffixes.addAll(PARITY_SUFFIXES);
+        return Optional.of(List.copyOf(suffixes));
+    }
+
+    private static List<Mapping> mappings(Map<String, String> env) {
+        List<Mapping> out = new ArrayList<>();
         if (!enabled(env)) {
             return out;
         }
@@ -47,14 +103,28 @@ public final class LocalStackParity {
             put(out, env, "FLOCI_STORAGE_MODE", "floci.storage.mode", "persistent");
         }
 
-        put(out, env, "FLOCI_PORT", "floci.port", env.get("EDGE_PORT"));
-        put(out, env, "FLOCI_HOSTNAME", "floci.hostname", firstSet(env, "LOCALSTACK_HOST", "LOCALSTACK_HOSTNAME"));
-
         // LocalStack listens on GATEWAY_LISTEN with no further opt-in, so it also gives the
-        // consent Floci requires for a non-loopback address.
+        // consent Floci requires for a non-loopback address. Its first entry may carry a port,
+        // which stands in for EDGE_PORT when that is unset.
+        String gatewayHost = null;
+        String gatewayPort = null;
         String gatewayListen = env.get("GATEWAY_LISTEN");
         if (isSet(gatewayListen)) {
-            put(out, env, "QUARKUS_HTTP_HOST", "quarkus.http.host", gatewayListen);
+            String first = gatewayListen.split(",")[0].trim();
+            Matcher hostPort = HOST_PORT.matcher(first);
+            if (hostPort.matches()) {
+                gatewayHost = hostPort.group(1) != null ? hostPort.group(1) : hostPort.group(2);
+                gatewayPort = hostPort.group(3);
+            } else {
+                gatewayHost = first;
+            }
+        }
+
+        put(out, env, "FLOCI_PORT", "floci.port", isSet(env.get("EDGE_PORT")) ? env.get("EDGE_PORT") : gatewayPort);
+        put(out, env, "FLOCI_HOSTNAME", "floci.hostname", firstSet(env, "LOCALSTACK_HOST", "LOCALSTACK_HOSTNAME"));
+
+        if (isSet(gatewayHost)) {
+            put(out, env, "QUARKUS_HTTP_HOST", "quarkus.http.host", gatewayHost);
             put(out, env, "FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE",
                     "floci.security.allow-unsafe-network-exposure", "true");
         }
@@ -81,10 +151,6 @@ public final class LocalStackParity {
         // Shared by every container-backed service; per-service networks still take precedence.
         put(out, env, "FLOCI_SERVICES_DOCKER_NETWORK", "floci.services.docker-network", env.get("DOCKER_NETWORK"));
 
-        // Container-to-container hostname routing (Function URLs, presigned S3, SQS QueueUrl, ...).
-        String suffixes = env.get("FLOCI_DNS_EXTRA_SUFFIXES");
-        out.put("floci.dns.extra-suffixes", isSet(suffixes) ? suffixes + "," + PARITY_SUFFIXES : PARITY_SUFFIXES);
-
         if ("1".equals(env.get("USE_SSL"))) {
             put(out, env, "FLOCI_TLS_ENABLED", "floci.tls.enabled", "true");
         }
@@ -97,10 +163,10 @@ public final class LocalStackParity {
         return out;
     }
 
-    private static void put(Map<String, String> out, Map<String, String> env, String flociVariable,
+    private static void put(List<Mapping> out, Map<String, String> env, String flociVariable,
                             String property, String value) {
         if (isSet(value) && !isSet(env.get(flociVariable))) {
-            out.put(property, value);
+            out.add(new Mapping(flociVariable, property, value));
         }
     }
 
