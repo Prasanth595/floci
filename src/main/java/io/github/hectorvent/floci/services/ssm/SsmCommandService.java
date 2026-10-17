@@ -260,7 +260,7 @@ public class SsmCommandService implements Resettable {
 
     private static Map<String, List<String>> parseShellParameters(JsonNode node) {
         if (node.isMissingNode() || node.isNull()) {
-            return Map.of();
+            throw invalidShellParameters();
         }
         if (!node.isObject()) {
             throw invalidShellParameters();
@@ -279,13 +279,17 @@ public class SsmCommandService implements Resettable {
             }
             parameters.put(field.getKey(), values);
         }
+        List<String> commands = parameters.get("commands");
+        if (commands == null || commands.isEmpty()) {
+            throw invalidShellParameters();
+        }
         return parameters;
     }
 
     private static AwsException invalidShellParameters() {
         return new AwsException("InvalidParameters",
-                "AWS-RunShellScript parameters must be string lists; executionTimeout must contain "
-                        + "one integer from 1 to 172800.", 400);
+                "AWS-RunShellScript requires at least one command and string-list parameters; "
+                        + "executionTimeout must contain one integer from 1 to 172800.", 400);
     }
 
     private static void validateTimeoutSeconds(int timeoutSeconds) {

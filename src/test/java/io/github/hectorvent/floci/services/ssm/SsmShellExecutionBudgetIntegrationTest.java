@@ -133,6 +133,31 @@ class SsmShellExecutionBudgetIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "null", "{}", "{\"commands\":[]}"})
+    void shellRequiresAtLeastOneCommandBeforeAllocation(String parameters) throws Exception {
+        String instance = "i-budget-" + UUID.randomUUID();
+        ObjectNode request = request(instance);
+        if ("missing".equals(parameters)) {
+            request.remove("Parameters");
+        } else {
+            request.set("Parameters", mapper.readTree(parameters));
+        }
+        try {
+            Response response = call("AmazonSSM.SendCommand", request);
+            assertAll("required script is checked before allocation or dispatch",
+                    () -> assertEquals(400, response.statusCode()),
+                    () -> assertEquals("InvalidParameters", response.jsonPath().getString("__type")),
+                    () -> assertTrue(RequestScopes.callAs(ACCOUNT, REGION,
+                            () -> service.listCommands(null, instance, REGION)).isEmpty()),
+                    () -> verifyNoInteractions(executor));
+            Response retry = call("AmazonSSM.SendCommand", request(instance));
+            assertEquals(200, retry.statusCode());
+        } finally {
+            cleanup(instance);
+        }
+    }
+
     private ObjectNode request(String instance) {
         ObjectNode request = mapper.createObjectNode();
         request.put("DocumentName", "AWS-RunShellScript");

@@ -75,7 +75,8 @@ document's 3600-second default and carry an explicit parameter unchanged.
 allowances for these shell requests. This corrects metadata and execution budgets; it does not
 add automatic delivery expiration, restart recovery, cleanup retries or late-start fencing.
 Internal CodeDeploy hook budgets and non-shell document handling keep their existing behavior.
-Malformed shell parameter wire shapes or execution limits are refused before command creation
+Missing or empty `commands`, malformed shell parameter wire shapes and invalid execution limits
+are refused before command creation
 with `InvalidParameters`/HTTP400. This is Floci's chosen mapping; exact AWS error wording and
 empty-list normalization were not observed live. Other document parameters and delivery-timeout
 coercion/upper-bound handling are not a complete document-schema implementation.

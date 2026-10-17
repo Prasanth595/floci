@@ -66,6 +66,33 @@ class SsmShellExecutionBudgetTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "empty", "only-timeout"})
+    void requiredScriptIsCheckedBeforeCreatingACommand(String shape) {
+        Assumptions.assumeFalse(TestFixtures.isRealAws(), "Uses an emulator-only managed-node fixture");
+        String instance = "i-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17);
+        try (SsmClient ssm = TestFixtures.ssmClient()) {
+            try {
+                assertThatThrownBy(() -> ssm.sendCommand(request -> {
+                    request.documentName("AWS-RunShellScript").instanceIds(instance).timeoutSeconds(30);
+                    if ("empty".equals(shape)) request.parameters(Map.of("commands", List.of()));
+                    if ("only-timeout".equals(shape)) request.parameters(Map.of("executionTimeout", List.of("5")));
+                })).isInstanceOfSatisfying(SsmException.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(400);
+                    assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidParameters");
+                });
+                assertThat(ssm.listCommands(request -> request.instanceId(instance)).commands()).isEmpty();
+                Command retry = ssm.sendCommand(request -> request.documentName("AWS-RunShellScript")
+                        .instanceIds(instance).timeoutSeconds(30)
+                        .parameters(Map.of("commands", List.of("echo retry")))).command();
+                assertThat(retry.commandId()).isNotBlank();
+                assertThat(retry.timeoutSeconds()).isEqualTo(30);
+            } finally {
+                cancelFixture(ssm, instance);
+            }
+        }
+    }
+
     private static void cancelFixture(SsmClient ssm, String instance) {
         // SendCommand has no deletion API: cancel its queued work, retaining normal command history.
         for (Command command : ssm.listCommands(r -> r.instanceId(instance)).commands()) {
