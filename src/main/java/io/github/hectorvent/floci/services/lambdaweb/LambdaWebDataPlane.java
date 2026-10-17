@@ -208,7 +208,7 @@ public class LambdaWebDataPlane {
         RequestOptions options = new RequestOptions()
                 .setHost(environment.host())
                 .setPort(environment.port())
-                .setURI(request.uri())
+                .setURI(upstreamUri(request))
                 .setMethod(request.method());
         client.request(options).onSuccess(upstream -> {
             copyRequestHeaders(request, upstream, host, target.endpoint().endpointName, requestId);
@@ -399,6 +399,49 @@ public class LambdaWebDataPlane {
     /** The shapes Floci mints, in any case and with any port, so a near miss gets the AWS 404 and not another service. */
     static boolean isLambdaWebHost(String host) {
         return ENDPOINT_DOMAIN.matcher(host).matches();
+    }
+
+    /** The app gets the path without dot segments, as on AWS. Repeated slashes and the query stay as sent. */
+    static String upstreamUri(HttpServerRequest request) {
+        String path = request.path();
+        if (path == null) {
+            return request.uri();
+        }
+        String query = request.query();
+        return withoutDotSegments(path) + (query == null ? "" : "?" + query);
+    }
+
+    /** RFC 3986 section 5.2.4. */
+    static String withoutDotSegments(String path) {
+        String in = path;
+        StringBuilder out = new StringBuilder();
+        while (!in.isEmpty()) {
+            if (in.startsWith("../")) {
+                in = in.substring(3);
+            } else if (in.startsWith("./") || in.startsWith("/./")) {
+                in = in.substring(2);
+            } else if (in.equals("/.")) {
+                in = "/";
+            } else if (in.startsWith("/../")) {
+                in = in.substring(3);
+                removeLastSegment(out);
+            } else if (in.equals("/..")) {
+                in = "/";
+                removeLastSegment(out);
+            } else if (in.equals(".") || in.equals("..")) {
+                in = "";
+            } else {
+                int next = in.indexOf('/', in.startsWith("/") ? 1 : 0);
+                int end = next < 0 ? in.length() : next;
+                out.append(in, 0, end);
+                in = in.substring(end);
+            }
+        }
+        return out.toString();
+    }
+
+    private static void removeLastSegment(StringBuilder out) {
+        out.setLength(Math.max(out.lastIndexOf("/"), 0));
     }
 
     static boolean hasBody(HttpMethod method, int status) {

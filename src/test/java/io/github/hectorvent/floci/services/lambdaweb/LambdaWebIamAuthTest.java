@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -72,9 +73,30 @@ class LambdaWebIamAuthTest {
     }
 
     @Test
-    void theSignedPathMayBeNormalizedOrDoubleEncoded() {
+    void theSignatureCoversThePathAsSignersNormalizeIt() {
         assertTrue(allows(signer().sign("GET", HOST, "/a/c").withPathAndQuery("/a/./b/../c")));
+        assertTrue(allows(signer().sign("GET", HOST, "/a/b").withPathAndQuery("/a//b")));
+        assertTrue(allows(signer().sign("GET", HOST, "/a").withPathAndQuery("/a/b/..")));
         assertTrue(allows(signer().sign("GET", HOST, "/path%2Fenc/a%20b?c=x%2By")));
+    }
+
+    @Test
+    void aSignatureOverThePathAsSentIsRefusedWhenSignersWouldNormalizeIt() {
+        assertFalse(allows(signer().rawPath().sign("GET", HOST, "/a/./b/../c")));
+        assertFalse(allows(signer().rawPath().sign("GET", HOST, "/a//b")));
+        assertTrue(allows(signer().rawPath().sign("GET", HOST, "/a/b/")));
+    }
+
+    @Test
+    void signersResolveDotSegmentsAndDropEmptySegments() {
+        assertEquals("/a/c", LambdaWebIamAuth.signedPath("/a/./b/../c"));
+        assertEquals("/a/b", LambdaWebIamAuth.signedPath("/a//b"));
+        assertEquals("/a", LambdaWebIamAuth.signedPath("//a"));
+        assertEquals("/a", LambdaWebIamAuth.signedPath("/a/b/.."));
+        assertEquals("/a/b/", LambdaWebIamAuth.signedPath("/a/b/"));
+        assertEquals("/", LambdaWebIamAuth.signedPath("/a/.."));
+        assertEquals("/", LambdaWebIamAuth.signedPath("/"));
+        assertEquals("/a/%2e%2e/b", LambdaWebIamAuth.signedPath("/a/%2e%2e/b"));
     }
 
     @Test

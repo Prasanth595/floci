@@ -7,7 +7,6 @@ import io.github.hectorvent.floci.core.common.auth.CredentialScope;
 import io.github.hectorvent.floci.core.common.auth.SigV4AuthorizationHeader;
 import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
-import io.github.hectorvent.floci.services.cloudfront.CloudFrontRequestRouter;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
@@ -29,12 +28,11 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
 /**
  * The checks an {@code IamAuth} endpoint makes before a request reaches the function: a SigV4
@@ -124,17 +122,30 @@ public class LambdaWebIamAuth {
         String canonicalHeaders = SigV4Canonicalization.canonicalHeaders(signed.signedHeaders(),
                 name -> String.join(",", request.headers().getAll(name)));
         String canonicalQuery = SigV4Canonicalization.canonicalQueryString(request.query(), signed.presigned());
-        // Signers remove dot segments from the path before they sign it.
-        Set<String> paths = new LinkedHashSet<>(List.of(request.path(),
-                CloudFrontRequestRouter.normalizePath(request.path())));
-        for (String path : paths) {
-            if (SigV4Canonicalization.signatureMatches(request.method(), path, canonicalQuery,
-                    canonicalHeaders, signed.signedHeaders(), payloadHash, signed.amzDate(), scope, secretKey,
-                    signed.signature())) {
-                return scope.accessKeyId();
+        boolean matches = SigV4Canonicalization.signatureMatches(request.method(), signedPath(request.path()),
+                canonicalQuery, canonicalHeaders, signed.signedHeaders(), payloadHash, signed.amzDate(), scope,
+                secretKey, signed.signature());
+        return matches ? scope.accessKeyId() : null;
+    }
+
+    /**
+     * The path as signers sign it, with dot segments resolved and empty segments dropped. Lambda
+     * refuses a signature over the path as sent when the two differ.
+     */
+    static String signedPath(String path) {
+        List<String> segments = new ArrayList<>();
+        for (String segment : path.split("/")) {
+            if (segment.equals("..")) {
+                if (!segments.isEmpty()) {
+                    segments.removeLast();
+                }
+            } else if (!segment.isEmpty() && !segment.equals(".")) {
+                segments.add(segment);
             }
         }
-        return null;
+        String first = path.startsWith("/") ? "/" : "";
+        String last = path.endsWith("/") && !segments.isEmpty() ? "/" : "";
+        return first + String.join("/", segments) + last;
     }
 
     /** The header signature, or the presigned query when there is no {@code Authorization} header. */

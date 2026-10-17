@@ -46,6 +46,7 @@ final class LambdaWebRequestSigner {
     private String service = "lambda";
     private Instant signedAt = Instant.now();
     private boolean presigned;
+    private boolean normalizePath = true;
     private String contentSha256 = "UNSIGNED-PAYLOAD";
 
     LambdaWebRequestSigner credentials(String accessKeyId, String secretKey, String sessionToken) {
@@ -75,6 +76,12 @@ final class LambdaWebRequestSigner {
         return this;
     }
 
+    /** Signs the path as it is sent, without resolving its dot segments. */
+    LambdaWebRequestSigner rawPath() {
+        this.normalizePath = false;
+        return this;
+    }
+
     /** The {@code X-Amz-Content-SHA256} value to send and sign, or null to send none. */
     LambdaWebRequestSigner contentSha256(String contentSha256) {
         this.contentSha256 = contentSha256;
@@ -98,6 +105,7 @@ final class LambdaWebRequestSigner {
                 .putProperty(AwsV4HttpSigner.SERVICE_SIGNING_NAME, service)
                 .putProperty(AwsV4HttpSigner.REGION_NAME, region)
                 .putProperty(AwsV4HttpSigner.PAYLOAD_SIGNING_ENABLED, false)
+                .putProperty(AwsV4HttpSigner.NORMALIZE_PATH, normalizePath)
                 .putProperty(AwsV4HttpSigner.AUTH_LOCATION, presigned ? AuthLocation.QUERY_STRING : AuthLocation.HEADER)
                 .putProperty(AwsV4HttpSigner.EXPIRATION_DURATION, presigned ? Duration.ofMinutes(5) : null)
                 .putProperty(HttpSigner.SIGNING_CLOCK, Clock.fixed(signedAt, ZoneOffset.UTC))).request();

@@ -162,6 +162,10 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         assertTrue(chunked.contains("\"bodyLength\":17"), chunked);
         assertTrue(chunked.contains("\"transfer-encoding\":\"chunked\""), chunked);
 
+        // The app gets the path without dot segments, as on AWS. Repeated slashes stay.
+        String dotted = raw("GET /a//b/./c/../d?x=1 HTTP/1.1\r\nHost: " + domain + "\r\nConnection: close\r\n\r\n");
+        assertTrue(dotted.contains("\"url\":\"/a//b/d?x=1\""), dotted);
+
         // An AWS signature and its session token never reach the app. Other credentials do.
         given().header("Host", domain).header("Authorization", "Bearer abc").header("X-Amz-Security-Token", "tok")
                 .when().get("/")
