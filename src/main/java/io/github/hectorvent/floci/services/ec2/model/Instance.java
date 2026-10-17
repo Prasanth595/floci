@@ -62,8 +62,9 @@ public class Instance {
     private boolean disableApiTermination = false;
 
     // Null for an instance persisted before metadata options were stored; reads fall back to
-    // AWS's launch defaults through effectiveMetadataOptions().
-    private LaunchTemplateData.MetadataOptions metadataOptions;
+    // AWS's launch defaults through effectiveMetadataOptions(). Volatile because IMDS reads it on
+    // its event loop while ModifyInstanceMetadataOptions replaces it from a request thread.
+    private volatile LaunchTemplateData.MetadataOptions metadataOptions;
 
     // The credit option this instance acquired, at launch from the request or from its burstable
     // family's default, or at a resize onto a burstable type. Stored rather than derived from the
