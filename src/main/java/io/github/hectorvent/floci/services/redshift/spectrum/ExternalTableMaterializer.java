@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.redshift.proxy.S3CopySimulator;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -60,6 +61,7 @@ public class ExternalTableMaterializer {
     private final S3Service s3Service;
     private final IamService iamService;
     private final EmulatorConfig config;
+    private final ExternalCatalogLocks catalogLocks;
     private final ConcurrentHashMap<String, String> fingerprints = new ConcurrentHashMap<>();
     /** Column definitions each loaded table was created with, to tell a data reload from a schema change. */
     private final ConcurrentHashMap<String, String> schemaSignatures = new ConcurrentHashMap<>();
@@ -94,16 +96,27 @@ public class ExternalTableMaterializer {
 
     public ExternalTableMaterializer(FlociDuckClient duckClient, GlueService glueService, S3Service s3Service,
                                      IamService iamService, EmulatorConfig config) {
+        this(duckClient, glueService, s3Service, iamService, config, new ExternalCatalogLocks());
+    }
+
+    @Inject
+    public ExternalTableMaterializer(FlociDuckClient duckClient, GlueService glueService, S3Service s3Service,
+                                     IamService iamService, EmulatorConfig config, ExternalCatalogLocks catalogLocks) {
         this.duckClient = duckClient;
         this.glueService = glueService;
         this.s3Service = s3Service;
         this.iamService = iamService;
         this.config = config;
+        this.catalogLocks = catalogLocks;
+    }
+
+    ExternalCatalogLocks catalogLocks() {
+        return catalogLocks;
     }
 
     public Outcome ensureCurrent(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
                                  String tableName) {
-        try (ExternalCatalogLocks.Guard ignored = ExternalCatalogLocks.read(binding,
+        try (ExternalCatalogLocks.Guard ignored = catalogLocks.read(binding,
                 session.inTransaction() || !backend.permitsCachePublication())) {
             return ensureCurrentLocked(backend, session, binding, tableName);
         }

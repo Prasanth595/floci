@@ -11,6 +11,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -19,9 +20,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -36,8 +38,9 @@ class ExternalLifecycleTest {
     private final GlueService glue = mock(GlueService.class);
     private final BackendSql backend = mock(BackendSql.class);
     private final ExternalMetadataWriter metadata = spy(new ExternalMetadataWriter(glue, new ObjectMapper()));
+    private final ExternalCatalogLocks catalogLocks = new ExternalCatalogLocks();
     private final SpectrumQueryPreparation preparation = new SpectrumQueryPreparation(registry, materializer,
-            new ExternalStatementParser(), glue, metadata);
+            new ExternalStatementParser(), glue, metadata, catalogLocks);
     private Table table;
 
     @BeforeEach
@@ -296,13 +299,16 @@ class ExternalLifecycleTest {
     @Test
     void implicitExtendedTransactionTimesOutWhileCatalogMutationIsWaiting() throws Exception {
         when(backend.permitsCachePublication()).thenReturn(false);
+        ExternalCatalogLocks shortLocks = new ExternalCatalogLocks(Duration.ofMillis(20));
+        SpectrumQueryPreparation timedPreparation = new SpectrumQueryPreparation(registry, materializer,
+                new ExternalStatementParser(), glue, metadata, shortLocks);
         try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
-            ExternalCatalogLocks.Guard mutation = ExternalCatalogLocks.write(BINDING);
+            ExternalCatalogLocks.Guard mutation = shortLocks.write(BINDING);
             try {
                 Future<Boolean> read = executor.submit(
-                        () -> preparation.prepare("SELECT * FROM lake.sales", SESSION, backend));
+                        () -> timedPreparation.prepare("SELECT * FROM lake.sales", SESSION, backend));
                 ExecutionException failure = assertThrows(ExecutionException.class,
-                        () -> read.get(35, TimeUnit.SECONDS));
+                        () -> read.get(5, TimeUnit.SECONDS));
                 SpectrumReadException timeout = assertInstanceOf(SpectrumReadException.class, failure.getCause());
                 assertEquals("58030", timeout.sqlState());
                 verifyNoInteractions(materializer, glue);
@@ -352,14 +358,19 @@ class ExternalLifecycleTest {
                 "dev", "alias", "ANALYTICS", BINDING.iamRoleArn());
         when(registry.list(SESSION.accountId(), otherSession.clusterKey(), "dev")).thenReturn(List.of(alias));
         SpectrumQueryPreparation otherPreparation = new SpectrumQueryPreparation(registry, materializer,
-                new ExternalStatementParser(), glue, metadata);
+                new ExternalStatementParser(), glue, metadata, catalogLocks);
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             Future<Boolean> first = executor.submit(() -> preparation.prepare(sql, SESSION, backend));
             try {
                 assertTrue(checking.await(10, TimeUnit.SECONDS));
-                Future<Boolean> second = executor.submit(() -> otherPreparation.prepare(
-                        sql.replace("lake.sales", "alias.sales"), otherSession, backend));
-                assertThrows(TimeoutException.class, () -> second.get(300, TimeUnit.MILLISECONDS));
+                AtomicReference<Thread> secondThread = new AtomicReference<>();
+                Future<Boolean> second = executor.submit(() -> {
+                    secondThread.set(Thread.currentThread());
+                    return otherPreparation.prepare(
+                            sql.replace("lake.sales", "alias.sales"), otherSession, backend);
+                });
+                awaitBlockedOrDone(secondThread, second);
+                assertFalse(second.isDone());
                 release.countDown();
                 assertTrue(first.get(10, TimeUnit.SECONDS));
                 assertTrue(second.get(10, TimeUnit.SECONDS));

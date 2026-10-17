@@ -32,15 +32,16 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -783,9 +784,13 @@ class ExternalTableMaterializerTest {
             Future<ExternalTableMaterializer.Outcome> first = executor.submit(
                     () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
             assertThat(loading.await(10, TimeUnit.SECONDS), equalTo(true));
-            Future<ExternalTableMaterializer.Outcome> second = executor.submit(
-                    () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
-            assertThrows(TimeoutException.class, () -> second.get(300, TimeUnit.MILLISECONDS));
+            AtomicReference<Thread> secondThread = new AtomicReference<>();
+            Future<ExternalTableMaterializer.Outcome> second = executor.submit(() -> {
+                secondThread.set(Thread.currentThread());
+                return materializer.ensureCurrent(backend, session(false), BINDING, "events");
+            });
+            awaitBlockedOrDone(secondThread, second);
+            assertFalse(second.isDone());
 
             release.countDown();
 
@@ -821,15 +826,19 @@ class ExternalTableMaterializerTest {
         ExternalCatalogRegistry registry = mock(ExternalCatalogRegistry.class);
         when(registry.list(ACCOUNT, BINDING.clusterKey(), "dev")).thenReturn(List.of(BINDING));
         SpectrumQueryPreparation preparation = new SpectrumQueryPreparation(registry, materializer,
-                new ExternalStatementParser(), glue, mock(ExternalMetadataWriter.class));
+                new ExternalStatementParser(), glue, mock(ExternalMetadataWriter.class), materializer.catalogLocks());
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             Future<ExternalTableMaterializer.Outcome> load = executor.submit(
                     () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
             try {
                 assertTrue(reading.await(10, TimeUnit.SECONDS));
-                Future<Boolean> drop = executor.submit(
-                        () -> preparation.prepare("DROP TABLE analytics.events", session(false), backend));
-                assertThrows(TimeoutException.class, () -> drop.get(300, TimeUnit.MILLISECONDS));
+                AtomicReference<Thread> dropThread = new AtomicReference<>();
+                Future<Boolean> drop = executor.submit(() -> {
+                    dropThread.set(Thread.currentThread());
+                    return preparation.prepare("DROP TABLE analytics.events", session(false), backend);
+                });
+                awaitBlockedOrDone(dropThread, drop);
+                assertFalse(drop.isDone());
                 release.countDown();
                 assertEquals(ExternalTableMaterializer.Outcome.LOADED, load.get(10, TimeUnit.SECONDS));
                 assertTrue(drop.get(10, TimeUnit.SECONDS));

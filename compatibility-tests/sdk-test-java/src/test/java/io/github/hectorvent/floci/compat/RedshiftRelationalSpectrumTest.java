@@ -90,16 +90,7 @@ class RedshiftRelationalSpectrumTest {
                         assertEquals(7L, rows.getLong(2));
                         assertFalse(rows.next());
                     }
-                    String id = data.executeStatement(r -> r.clusterIdentifier(clusterId).database("dev")
-                            .dbUser("admin").sql(sql)).id();
-                    Instant deadline = Instant.now().plusSeconds(30);
-                    DescribeStatementResponse status = data.describeStatement(r -> r.id(id));
-                    while (!status.statusAsString().equals("FINISHED") && Instant.now().isBefore(deadline)) {
-                        assertNotEquals("FAILED", status.statusAsString(), status.error());
-                        Thread.sleep(100);
-                        status = data.describeStatement(r -> r.id(id));
-                    }
-                    assertEquals("FINISHED", status.statusAsString(), status.error());
+                    String id = executeLifecycle(data, clusterId, sql);
                     GetStatementResultResponse result = data.getStatementResult(r -> r.id(id));
                     assertEquals(2L, result.totalNumRows());
                     assertEquals("VN", result.records().get(0).get(0).stringValue());
@@ -159,7 +150,7 @@ class RedshiftRelationalSpectrumTest {
         }
     }
 
-    private static void executeLifecycle(RedshiftDataClient data, String clusterId, String sql) throws InterruptedException {
+    private static String executeLifecycle(RedshiftDataClient data, String clusterId, String sql) throws InterruptedException {
         String id = data.executeStatement(r -> r.clusterIdentifier(clusterId).database("dev")
                 .dbUser("admin").sql(sql)).id();
         Instant deadline = Instant.now().plusSeconds(30);
@@ -170,5 +161,6 @@ class RedshiftRelationalSpectrumTest {
             status = data.describeStatement(r -> r.id(id));
         }
         assertEquals("FINISHED", status.statusAsString(), status.error());
+        return id;
     }
 }

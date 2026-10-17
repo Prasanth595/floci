@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.Partition;
 import io.github.hectorvent.floci.services.glue.model.Table;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
@@ -27,15 +28,24 @@ public class SpectrumQueryPreparation {
     private final ExternalStatementParser parser;
     private final GlueService glue;
     private final ExternalMetadataWriter metadata;
+    private final ExternalCatalogLocks catalogLocks;
     private final Map<BackendSql, List<ExternalSchemaBinding>> pendingBindings = new ConcurrentHashMap<>();
 
     public SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
                                     ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata) {
+        this(registry, materializer, parser, glue, metadata, new ExternalCatalogLocks());
+    }
+
+    @Inject
+    public SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
+                                    ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata,
+                                    ExternalCatalogLocks catalogLocks) {
         this.registry = registry;
         this.materializer = materializer;
         this.parser = parser;
         this.glue = glue;
         this.metadata = metadata;
+        this.catalogLocks = catalogLocks;
     }
 
     public boolean prepare(String sql, SpectrumSession session, BackendSql backend) {
@@ -92,7 +102,7 @@ public class SpectrumQueryPreparation {
         }
         if (statement.orElse(null) instanceof ExternalStatement.CreateTable table && bindings.containsKey(table.schemaName())) {
             ExternalSchemaBinding binding = bindings.get(table.schemaName());
-            try (ExternalCatalogLocks.Guard ignored = ExternalCatalogLocks.write(binding)) {
+            try (ExternalCatalogLocks.Guard ignored = catalogLocks.write(binding)) {
                 requireCurrentBinding(session, binding);
                 glue.createTable(binding.glueDatabase(), GlueTableBuilder.toGlueTable(table));
                 metadata.refresh(backend, session.accountId(), binding);
@@ -125,7 +135,7 @@ public class SpectrumQueryPreparation {
         Set<String> refreshed = new HashSet<>();
         for (ExternalReferenceScanner.Reference reference : ExternalReferenceScanner.scan(sql, bindings.keySet())) {
             ExternalSchemaBinding binding = bindings.get(reference.schema());
-            try (ExternalCatalogLocks.Guard ignored = ExternalCatalogLocks.read(binding,
+            try (ExternalCatalogLocks.Guard ignored = catalogLocks.read(binding,
                     session.inTransaction() || !backend.permitsCachePublication())) {
                 requireCurrentBinding(session, binding);
                 ExternalTableMaterializer.Outcome outcome = materializer.ensureCurrent(backend, session, binding, reference.table());
@@ -149,7 +159,7 @@ public class SpectrumQueryPreparation {
 
     private void addPartitions(ExternalStatement.AddPartitions statement, ExternalSchemaBinding binding,
                                SpectrumSession session, BackendSql backend) {
-        try (ExternalCatalogLocks.Guard ignored = ExternalCatalogLocks.write(binding)) {
+        try (ExternalCatalogLocks.Guard ignored = catalogLocks.write(binding)) {
             requireCurrentBinding(session, binding);
             addPartitionsLocked(statement, binding, session, backend);
         }
@@ -201,7 +211,7 @@ public class SpectrumQueryPreparation {
 
     private void dropTable(ExternalStatement.DropTable statement, ExternalSchemaBinding binding,
                            SpectrumSession session, BackendSql backend) {
-        try (ExternalCatalogLocks.Guard ignored = ExternalCatalogLocks.write(binding)) {
+        try (ExternalCatalogLocks.Guard ignored = catalogLocks.write(binding)) {
             requireCurrentBinding(session, binding);
             dropTableLocked(statement, binding, session, backend);
         }
@@ -231,7 +241,7 @@ public class SpectrumQueryPreparation {
 
     private void dropSchema(ExternalStatement.DropSchema statement, ExternalSchemaBinding binding,
                             SpectrumSession session, BackendSql backend) {
-        try (ExternalCatalogLocks.Guard ignored = ExternalCatalogLocks.write(binding)) {
+        try (ExternalCatalogLocks.Guard ignored = catalogLocks.write(binding)) {
             requireCurrentBinding(session, binding);
             requireSchemaOwner(backend, binding.schemaName());
             if (!statement.cascade() && hasGlueTables(binding)) {
