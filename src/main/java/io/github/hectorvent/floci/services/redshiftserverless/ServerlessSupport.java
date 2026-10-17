@@ -49,6 +49,10 @@ final class ServerlessSupport {
         return new AwsException("ConflictException", message, 400);
     }
 
+    static AwsException invalidPagination(String message) {
+        return new AwsException("InvalidPaginationException", message, 400);
+    }
+
     static void requireText(String value, String field) {
         if (value == null || value.isBlank()) {
             throw validation(field + " is required.");

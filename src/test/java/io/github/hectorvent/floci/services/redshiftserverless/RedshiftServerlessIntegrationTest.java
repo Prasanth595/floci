@@ -726,6 +726,12 @@ class RedshiftServerlessIntegrationTest {
                 .statusCode(200)
                 .body("snapshotCopyConfiguration.destinationRegion", equalTo("eu-west-1"))
                 .extract().path("snapshotCopyConfiguration.snapshotCopyConfigurationId");
+        call("ListSnapshotCopyConfigurations", "{\"maxResults\":0}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        call("ListSnapshotCopyConfigurations", "{\"nextToken\":\"bad-token\"}")
+                .statusCode(400)
+                .body("__type", equalTo("InvalidPaginationException"));
         call("DeleteSnapshotCopyConfiguration", "{\"snapshotCopyConfigurationId\":\"" + replacementCopyId + "\"}")
                 .statusCode(200);
     }

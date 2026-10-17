@@ -59,9 +59,8 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
             throw ServerlessSupport.validation("destinationRegion must differ from the namespace's Region.");
         }
         validateRetention(snapshotRetentionPeriod);
-        if (!serverless.namespaceExists(namespaceName, region)) {
-            throw ServerlessSupport.notFound("The namespace " + namespaceName + " was not found.");
-        }
+        Namespace namespace = serverless.findNamespace(namespaceName, region)
+                .orElseThrow(() -> ServerlessSupport.notFound("The namespace " + namespaceName + " was not found."));
         boolean duplicate = live(region).stream().anyMatch(existing ->
                 existing.getNamespaceName().equals(namespaceName));
         if (duplicate) {
@@ -74,7 +73,7 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
         configuration.setSnapshotCopyConfigurationArn(regionResolver.buildArn("redshift-serverless", region,
                 "snapshotcopyconfiguration/" + configuration.getSnapshotCopyConfigurationId()));
         configuration.setNamespaceName(namespaceName);
-        configuration.setOwnerId(serverless.findNamespace(namespaceName, region).map(Namespace::getNamespaceId).orElse(null));
+        configuration.setOwnerId(namespace.getNamespaceId());
         configuration.setDestinationRegion(destinationRegion);
         configuration.setDestinationKmsKeyId(destinationKmsKeyId);
         configuration.setSnapshotRetentionPeriod(snapshotRetentionPeriod);
@@ -84,6 +83,10 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
 
     public synchronized PaginatedResult<SnapshotCopyConfiguration> listSnapshotCopyConfigurations(
             String namespaceName, String region, Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 1 || maxResults > PAGE_SIZE)) {
+            throw ServerlessSupport.validation("maxResults must be between 1 and " + PAGE_SIZE);
+        }
+        int limit = maxResults != null ? maxResults : PAGE_SIZE;
         List<SnapshotCopyConfiguration> matching = live(region).stream()
                 .filter(configuration -> namespaceName == null
                         || namespaceName.equals(configuration.getNamespaceName()))
@@ -91,7 +94,8 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
                 .map(SnapshotCopyConfiguration::new)
                 .toList();
         return Pagination.paginate(matching, SnapshotCopyConfiguration::getSnapshotCopyConfigurationId,
-                maxResults, nextToken, PAGE_SIZE, PAGE_SIZE, "InvalidPaginationException");
+                limit, nextToken, "snapshot-copy",
+                token -> ServerlessSupport.invalidPagination("Invalid nextToken."));
     }
 
     /** Changes the retention of copied snapshots, the only member AWS lets an update change. */

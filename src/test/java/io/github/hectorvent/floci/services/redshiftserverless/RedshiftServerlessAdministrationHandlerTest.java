@@ -500,6 +500,29 @@ class RedshiftServerlessAdministrationHandlerTest {
     }
 
     @Test
+    void snapshotCopyPagingWalksPagesAndValidatesInputs() {
+        for (String name : List.of("page-copy-a", "page-copy-b", "page-copy-c")) {
+            namespace(name);
+            ok("CreateSnapshotCopyConfiguration", "{\"namespaceName\":\"" + name
+                    + "\",\"destinationRegion\":\"us-west-2\"}");
+        }
+
+        JsonNode firstPage = ok("ListSnapshotCopyConfigurations", "{\"maxResults\":2}");
+        assertEquals(2, firstPage.get("snapshotCopyConfigurations").size());
+        assertTrue(firstPage.has("nextToken"));
+
+        String token = firstPage.get("nextToken").textValue();
+        JsonNode secondPage = ok("ListSnapshotCopyConfigurations", "{\"nextToken\":\"" + token + "\"}");
+        assertEquals(1, secondPage.get("snapshotCopyConfigurations").size());
+        assertFalse(secondPage.has("nextToken"));
+
+        assertEquals("ValidationException", errorType("ListSnapshotCopyConfigurations", "{\"maxResults\":0}"));
+        assertEquals("ValidationException", errorType("ListSnapshotCopyConfigurations", "{\"maxResults\":101}"));
+        assertEquals("InvalidPaginationException",
+                errorType("ListSnapshotCopyConfigurations", "{\"nextToken\":\"bad-token\"}"));
+    }
+
+    @Test
     void tracksAreTheTwoAwsReleaseTracks() {
         JsonNode track = ok("GetTrack", "{\"trackName\":\"trailing\"}").get("track");
         assertEquals("trailing", track.get("trackName").textValue());

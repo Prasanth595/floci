@@ -11,6 +11,7 @@ import software.amazon.awssdk.services.redshiftserverless.RedshiftServerlessClie
 import software.amazon.awssdk.services.redshiftserverless.model.ConflictException;
 import software.amazon.awssdk.services.redshiftserverless.model.EndpointAccess;
 import software.amazon.awssdk.services.redshiftserverless.model.GetCredentialsResponse;
+import software.amazon.awssdk.services.redshiftserverless.model.InvalidPaginationException;
 import software.amazon.awssdk.services.redshiftserverless.model.Namespace;
 import software.amazon.awssdk.services.redshiftserverless.model.NamespaceStatus;
 import software.amazon.awssdk.services.redshiftserverless.model.ResourceNotFoundException;
@@ -393,6 +394,12 @@ class RedshiftServerlessTest {
                 assertThat(client.listSnapshotCopyConfigurations(request -> request.namespaceName(namespaceName))
                         .snapshotCopyConfigurations()).extracting(configuration -> configuration.destinationRegion())
                         .containsExactly("eu-west-1");
+                assertThatThrownBy(() -> client.listSnapshotCopyConfigurations(request -> request
+                        .namespaceName(namespaceName).maxResults(0)))
+                        .isInstanceOf(ValidationException.class);
+                assertThatThrownBy(() -> client.listSnapshotCopyConfigurations(request -> request
+                        .namespaceName(namespaceName).nextToken("bad-token")))
+                        .isInstanceOf(InvalidPaginationException.class);
                 client.deleteSnapshotCopyConfiguration(request -> request.snapshotCopyConfigurationId(replacementId));
             } finally {
                 deleteBestEffort(client, namespaceName);
