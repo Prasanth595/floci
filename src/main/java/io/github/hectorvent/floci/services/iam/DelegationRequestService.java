@@ -49,6 +49,8 @@ public class DelegationRequestService {
     /** {@code delegationRequestIdType}, and the "dr-" prefix the reference's own examples carry. */
     private static final String ID_PREFIX = "dr-";
     private static final int ID_BYTES = 12;
+    /** {@code tradeInTokenType} publishes no length and no pattern, so this is simply unguessable. */
+    private static final int TOKEN_BYTES = 32;
     private static final Pattern ID_PATTERN = Pattern.compile("[\\w-]+");
     private static final Pattern ACCOUNT_PATTERN = Pattern.compile("\\d{12}");
     private static final Pattern NOTIFICATION_CHANNEL_PATTERN = Pattern.compile("^[a-zA-Z0-9:_.-]+$");
@@ -258,6 +260,86 @@ public class DelegationRequestService {
         }
     }
 
+    /**
+     * Releases the exchange token, {@code ACCEPTED} to {@code FINALIZED}.
+     *
+     * <p>"The delegation period (exchange token validity) begins when the request reaches
+     * Finalized state", so the release instant is kept with the token: every credential the token
+     * mints expires at release plus {@code SessionDuration}, however late it is redeemed. The
+     * reference says the move "cannot be rolled back", which is what makes {@code FINALIZED}
+     * terminal for the lifecycle operations while still expiring on its own window.
+     *
+     * <p>{@code OnlySendByOwner} is read here, which is the only operation it speaks to: the flag
+     * "prevents any party other than the owner from calling SendDelegationToken API for this
+     * delegation request", for the case the reference names, where a request was forwarded to a
+     * more privileged user for approval and the owner still has to be the one who releases it. So
+     * this is the one delegation call decided per identity rather than per account: the approver
+     * who accepted the request is a different ARN from the owner who claimed it, and with the flag
+     * set only the second of them may release.
+     *
+     * <p>Nothing hands the token back. AWS publishes it only in the {@code ExchangeToken}
+     * notification on the partner's SNS topic, and no operation on the family answers it, so it
+     * stays on the record until there is a notification to carry it.
+     */
+    public DelegationRequest release(String callerAccountId, String callerArn, String id) {
+        synchronized (requestLock) {
+            Instant now = clock.instant();
+            DelegationRequest request = visible(callerAccountId, id, now);
+            requireState(request, DelegationRequestState.ACCEPTED);
+            if (Boolean.TRUE.equals(request.getOnlySendByOwner())
+                    && !request.getOwnerId().equals(callerArn)) {
+                throw new AwsException("AccessDenied", "User is not authorized to perform: "
+                        + "iam:SendDelegationToken on " + request.getDelegationRequestId()
+                        + ", which is marked to be sent only by its owner.", 403);
+            }
+            request.setExchangeToken(newToken());
+            request.setTokenReleasedAt(now);
+            return moveTo(request, DelegationRequestState.FINALIZED, now);
+        }
+    }
+
+    // ── Token ─────────────────────────────────────────────────────────────────
+
+    /** A redeemed exchange token: the request behind it, and when its credentials expire. */
+    public record Redeemed(DelegationRequest request, Instant credentialExpiry) {}
+
+    /**
+     * The request an exchange token belongs to, if the caller may redeem it and it is still live.
+     *
+     * <p>"The exchange token can only be redeemed by the product provider account that created the
+     * delegation request", so the creating account is checked first and on its own: that is a
+     * refusal rather than an expiry, and checking it after the window would answer every foreign
+     * caller with whichever of the two happened to fail first.
+     *
+     * <p>A token nothing matches is answered as an expired one. {@code GetDelegatedAccessToken}
+     * models three errors and none of them says "no such token", and from the caller's side the
+     * two situations are the same: the reference's own remedy, "Request a new token and retry the
+     * operation", is the answer to both.
+     *
+     * <p>No expiry pass is needed on the way in. {@code SessionDuration} tops out at twelve hours
+     * and {@code FINALIZED} runs for a week, so the token's window always closes first and a
+     * request whose own window has run out has an unredeemable token either way.
+     */
+    public Redeemed redeem(String callerAccountId, String token) {
+        synchronized (requestLock) {
+            DelegationRequest request = requests.scanAllAccounts().stream()
+                    .filter(candidate -> candidate.getExchangeToken() != null
+                            && candidate.getExchangeToken().equals(token))
+                    .findFirst()
+                    .orElseThrow(DelegationRequestService::expiredToken);
+            if (!request.getRequestorId().equals(callerAccountId)) {
+                throw new AwsException("AccessDenied", "The exchange token for delegation request "
+                        + request.getDelegationRequestId() + " can only be redeemed by the account "
+                        + "that created the request.", 403);
+            }
+            Instant expiry = request.getTokenReleasedAt().plusSeconds(request.getSessionDuration());
+            if (!clock.instant().isBefore(expiry)) {
+                throw expiredToken();
+            }
+            return new Redeemed(request, expiry);
+        }
+    }
+
     // ── Readers ───────────────────────────────────────────────────────────────
 
     /** One request, by id, as the calling account is allowed to see it. */
@@ -450,6 +532,24 @@ public class DelegationRequestService {
         byte[] bytes = new byte[ID_BYTES];
         random.nextBytes(bytes);
         return ID_PREFIX + HexFormat.of().formatHex(bytes);
+    }
+
+    /**
+     * An opaque exchange token. The model gives {@code tradeInTokenType} no pattern and no length,
+     * only {@code sensitive}, so there is no published shape to match and nothing is encoded in
+     * it: the account allowed to redeem it is read off the request it was minted on.
+     */
+    private String newToken() {
+        byte[] bytes = new byte[TOKEN_BYTES];
+        random.nextBytes(bytes);
+        return HexFormat.of().formatHex(bytes);
+    }
+
+    /** The one shape {@code GetDelegatedAccessToken} publishes for a token it will not exchange. */
+    private static AwsException expiredToken() {
+        return new AwsException("ExpiredTradeInTokenException", "The trade-in token provided in "
+                + "the request has expired and can no longer be exchanged for credentials. "
+                + "Request a new token and retry the operation.", 400);
     }
 
     /**

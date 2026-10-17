@@ -13,6 +13,30 @@
 | `GetSessionToken` | Get temporary credentials for an IAM user |
 | `GetFederationToken` | Get temporary credentials for a federated user |
 | `DecodeAuthorizationMessage` | Decode an encoded authorization failure message |
+| `GetDelegatedAccessToken` | Exchange a delegation request's trade-in token for temporary credentials |
+
+## Delegated Access Token
+
+`GetDelegatedAccessToken` takes the exchange token an IAM delegation request released and answers
+credentials in the customer's account, acting as the identity that approved the request, which is
+the `AssumedPrincipal` it returns. Accepting a request records the identity that called it, and
+that is the identity mapped to the delegated credential, so a request its owner forwarded to an
+administrator for approval hands over the administrator's access rather than the owner's. The
+credentials expire at the moment the customer released the token plus the request's
+`SessionDuration`, not at the exchange, so the same token can be exchanged repeatedly and every
+session it mints ends at the same time.
+
+The credentials carry the permissions of that identity. AWS bounds them by the permission policy it
+renders from the partner's registered policy template, which no API registers, so Floci bounds them
+by the approving identity's own permissions: a user's policies and boundary, the account's access
+where the account root approved the request, and nothing at all where that identity no longer
+exists.
+
+Only the account that filed the delegation request may exchange its token; any other account gets
+`AccessDenied`. A token past its window, and a token nothing matches, both answer
+`ExpiredTradeInTokenException`. `PackedPolicySize` is not returned, the model deprecating it and
+stating it is not populated for this operation. See the delegation request section of the
+[IAM service doc](iam.md) for the lifecycle that issues the token.
 
 ## Configuration
 

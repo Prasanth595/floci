@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.WebIdentityToken;
 import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier;
+import io.github.hectorvent.floci.services.iam.model.DelegationRequest;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.testing.PartitionMatrix;
 import io.github.hectorvent.floci.testing.PartitionMatrix.PartitionCase;
@@ -40,6 +41,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -81,6 +83,11 @@ class StsQueryHandlerTest {
     }
 
     private static StsQueryHandler newHandler(IamService iamService, RegionResolver regionResolver, Clock clock) {
+        return newHandler(iamService, regionResolver, clock, mock(DelegationRequestService.class));
+    }
+
+    private static StsQueryHandler newHandler(IamService iamService, RegionResolver regionResolver,
+                                              Clock clock, DelegationRequestService delegation) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.IamServiceConfig iam = mock(EmulatorConfig.IamServiceConfig.class);
@@ -99,6 +106,7 @@ class StsQueryHandlerTest {
                 mock(OidcIssuerKeyLookup.class),
                 mock(SAMLProviderService.class),
                 mock(SAMLTrustPolicyEvaluator.class),
+                delegation,
                 clock);
     }
 
@@ -556,7 +564,8 @@ class StsQueryHandlerTest {
 
         StsQueryHandler handler = new StsQueryHandler(iamService, mock(AccountResolver.class),
                 new RegionResolver(REGION, "000000000000"), config, mock(AssumeRolePolicyEvaluator.class),
-                trust, verifier, keys, mock(SAMLProviderService.class), mock(SAMLTrustPolicyEvaluator.class));
+                trust, verifier, keys, mock(SAMLProviderService.class), mock(SAMLTrustPolicyEvaluator.class),
+                mock(DelegationRequestService.class));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", requestedRoleArn);
         params.putSingle("RoleSessionName", "app");
@@ -646,5 +655,46 @@ class StsQueryHandlerTest {
         Matcher matcher = pattern.matcher(body);
         assertTrue(matcher.find(), "expected " + pattern + " in " + body);
         return matcher.group(1);
+    }
+
+    /**
+     * The delegated session is the customer's grant, so it is registered in the customer's
+     * account, as a delegated session carrying the identity that approved the request, and with no
+     * issuing key. The request names a different owner here: accepting one records the identity
+     * that called it and "this is the identity that gets mapped to the delegated credential", so a
+     * session carrying the owner would hand over the wrong permissions on every request that was
+     * forwarded for approval. A partner key that happened to name an IAM user would otherwise
+     * become the session's issuer and bound it to that user's own permissions, which is the
+     * opposite of what the delegation gave away, and registering the approver as an issued
+     * session's role ARN would have it resolved by name.
+     */
+    @Test
+    void theDelegatedSessionBelongsToTheCustomerAndCarriesItsApprover() {
+        DelegationRequest request = new DelegationRequest();
+        request.setDelegationRequestId("dr-0123456789abcdef01234567");
+        request.setOwnerAccountId("000000000002");
+        request.setOwnerId("arn:aws:iam::000000000002:user/claimant");
+        request.setApproverId("arn:aws:iam::000000000002:user/admin");
+        Instant expiry = Instant.parse("2026-01-01T02:00:00Z");
+        IamService iamService = mock(IamService.class);
+        DelegationRequestService delegation = mock(DelegationRequestService.class);
+        when(delegation.redeem("000000000001", "token-1"))
+                .thenReturn(new DelegationRequestService.Redeemed(request, expiry));
+        StsQueryHandler handler = newHandler(iamService, new RegionResolver(REGION, "000000000001"),
+                Clock.systemUTC(), delegation);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("TradeInToken", "token-1");
+        Response response = handler.handle("GetDelegatedAccessToken", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+        assertTrue(((String) response.getEntity()).contains(
+                "<AssumedPrincipal>arn:aws:iam::000000000002:user/admin</AssumedPrincipal>"),
+                (String) response.getEntity());
+        verify(iamService).registerDelegatedSession(anyString(), anyString(), anyString(),
+                eq("arn:aws:iam::000000000002:user/admin"), eq(expiry), isNull(),
+                eq("000000000002"));
+        verify(iamService, never()).registerIssuedSession(anyString(), anyString(), anyString(),
+                anyString(), any(), any(), anyString(), any());
     }
 }

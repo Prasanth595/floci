@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -13,6 +15,8 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -33,6 +37,18 @@ class DelegationRequestIntegrationTest {
             + "/20261011/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=abc";
     private static final String TOPIC = "arn:aws:sns:us-east-1:000000000001:partner-notifications";
     private static final String TEMPLATE = "arn:aws:iam::partner:policy/template/example";
+    private static final String PARTNER_STS_AUTH = "AWS4-HMAC-SHA256 Credential=" + PARTNER
+            + "/20261011/us-east-1/sts/aws4_request, SignedHeaders=host, Signature=abc";
+    private static final String CUSTOMER_STS_AUTH = "AWS4-HMAC-SHA256 Credential=" + CUSTOMER
+            + "/20261011/us-east-1/sts/aws4_request, SignedHeaders=host, Signature=abc";
+
+    /**
+     * The exchange token reaches the partner over SNS and is answered by no operation, so the one
+     * step of this workflow that cannot be driven over the wire is reading it back. Everything
+     * either side of it is.
+     */
+    @Inject
+    DelegationRequestService delegationRequests;
 
     private static String workflowId() {
         return "workflow-" + Long.toString(System.nanoTime(), 36);
@@ -82,6 +98,27 @@ class DelegationRequestIntegrationTest {
     private static String stateOf(String authorization, String id) {
         return get(authorization, id).extract()
                 .path("GetDelegationRequestResponse.GetDelegationRequestResult.DelegationRequest.State");
+    }
+
+    private String finalizedId() {
+        String id = createdId();
+        byId(CUSTOMER_AUTH, "AssociateDelegationRequest", id).statusCode(200);
+        byId(CUSTOMER_AUTH, "AcceptDelegationRequest", id).statusCode(200);
+        byId(CUSTOMER_AUTH, "SendDelegationToken", id).statusCode(200);
+        return id;
+    }
+
+    private String tokenOf(String id) {
+        return RequestScopes.callAs(CUSTOMER,
+                () -> delegationRequests.get(CUSTOMER, id).getExchangeToken());
+    }
+
+    private static ValidatableResponse exchange(String authorization, String token) {
+        return given().header("Authorization", authorization)
+                .formParam("Action", "GetDelegatedAccessToken")
+                .formParam("Version", "2011-06-15")
+                .formParam("TradeInToken", token)
+            .when().post("/").then();
     }
 
     @Test
@@ -335,5 +372,108 @@ class DelegationRequestIntegrationTest {
                 .body("GetDelegationRequestResponse.GetDelegationRequestResult"
                         + ".DelegationRequest.Permissions.Parameters.member.Values.member",
                         equalTo("reports"));
+    }
+
+    @Test
+    void theCustomerReleasesTheTokenAndTheRequestFinalizes() {
+        String id = createdId();
+        byId(CUSTOMER_AUTH, "AssociateDelegationRequest", id).statusCode(200);
+        byId(CUSTOMER_AUTH, "AcceptDelegationRequest", id).statusCode(200);
+        assertEquals("ACCEPTED", stateOf(CUSTOMER_AUTH, id));
+
+        byId(CUSTOMER_AUTH, "SendDelegationToken", id).statusCode(200)
+                .body("SendDelegationTokenResponse.ResponseMetadata.RequestId", not(equalTo(null)));
+
+        assertEquals("FINALIZED", stateOf(CUSTOMER_AUTH, id));
+        assertNotNull(tokenOf(id));
+    }
+
+    @Test
+    void aRequestThatWasNeverAcceptedReleasesNothing() {
+        String id = createdId();
+        byId(CUSTOMER_AUTH, "AssociateDelegationRequest", id).statusCode(200);
+
+        byId(CUSTOMER_AUTH, "SendDelegationToken", id).statusCode(409)
+                .body("ErrorResponse.Error.Code", equalTo("ConcurrentModification"));
+        assertEquals("ASSIGNED", stateOf(CUSTOMER_AUTH, id));
+    }
+
+    @Test
+    void thePartnerExchangesTheTokenForCredentialsInTheCustomersAccount() {
+        String id = finalizedId();
+
+        ValidatableResponse exchanged = exchange(PARTNER_STS_AUTH, tokenOf(id)).statusCode(200);
+
+        String prefix = "GetDelegatedAccessTokenResponse.GetDelegatedAccessTokenResult.";
+        exchanged.body(prefix + "Credentials.AccessKeyId", startsWith("ASIA"))
+                .body(prefix + "Credentials.SessionToken", not(equalTo(null)))
+                .body(prefix + "AssumedPrincipal", equalTo("arn:aws:iam::" + CUSTOMER + ":root"));
+        assertFalse(exchanged.extract().asString().contains("PackedPolicySize"),
+                "the model deprecates it and states it is not populated for this operation");
+    }
+
+    /**
+     * The delegation is the customer's grant, so the session it mints answers as the customer's
+     * principal however the partner signed the exchange.
+     *
+     * <p>The account credential approved this request, so the principal is the account root and
+     * the session answers as the account itself. The account alone would not pin much: it comes
+     * off the principal ARN rather than the namespace the session was filed in, so it would pass
+     * with the session stored under the partner too, and that half is pinned in
+     * {@code StsQueryHandlerTest} instead.
+     */
+    @Test
+    void theMintedCredentialsActInTheCustomersAccount() {
+        String prefix = "GetDelegatedAccessTokenResponse.GetDelegatedAccessTokenResult.";
+        ValidatableResponse exchanged =
+                exchange(PARTNER_STS_AUTH, tokenOf(finalizedId())).statusCode(200);
+        String accessKeyId = exchanged.extract().path(prefix + "Credentials.AccessKeyId");
+        String sessionToken = exchanged.extract().path(prefix + "Credentials.SessionToken");
+
+        given().header("Authorization", "AWS4-HMAC-SHA256 Credential=" + accessKeyId
+                        + "/20261011/us-east-1/sts/aws4_request, SignedHeaders=host, Signature=abc")
+                .header("X-Amz-Security-Token", sessionToken)
+                .formParam("Action", "GetCallerIdentity")
+                .formParam("Version", "2011-06-15")
+            .when().post("/").then().statusCode(200)
+                .body("GetCallerIdentityResponse.GetCallerIdentityResult.Account",
+                        equalTo(CUSTOMER))
+                .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn",
+                        equalTo("arn:aws:iam::" + CUSTOMER + ":root"));
+    }
+
+    @Test
+    void theTokenIsOnlyGoodInTheHandsOfTheAccountThatFiledTheRequest() {
+        String id = finalizedId();
+
+        exchange(CUSTOMER_STS_AUTH, tokenOf(id)).statusCode(403)
+                .body("ErrorResponse.Error.Code", equalTo("AccessDenied"));
+    }
+
+    @Test
+    void aTokenNobodyIssuedIsRefusedTheWayAnExpiredOneIs() {
+        exchange(PARTNER_STS_AUTH, "not-a-token").statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ExpiredTradeInTokenException"));
+    }
+
+    @Test
+    void theExchangeNeedsAToken() {
+        given().header("Authorization", PARTNER_STS_AUTH)
+                .formParam("Action", "GetDelegatedAccessToken")
+                .formParam("Version", "2011-06-15")
+            .when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+    }
+
+    @Test
+    void theReleaseNeedsARequestIdLikeEveryOtherCallOnOne() {
+        // delegationRequestIdType declares a length and a pattern, so an omitted id breaks a
+        // constraint the model publishes and answers as the by-id operations already do.
+        iam(CUSTOMER_AUTH)
+                .formParam("Action", "SendDelegationToken")
+                .formParam("Version", "2010-05-08")
+            .when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", containsString("delegationRequestId"));
     }
 }
