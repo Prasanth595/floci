@@ -4555,12 +4555,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * ModifyInstanceMetadataOptions changes only the fields the caller names, as on AWS, so a
      * call that sets HttpTokens alone leaves HttpEndpoint and the hop limit as they were.
+     *
+     * <p>A cluster node is refused, as its lifecycle actions are: IMDS serves the instance its
+     * cluster registered, and EC2 holds only a copy of it, so a change made here would be reported
+     * by DescribeInstances but never enforced.
      */
     public Instance modifyInstanceMetadataOptions(String region, String instanceId,
                                                   LaunchTemplateData.MetadataOptions request) {
         ensureDefaultResources(region);
         validateMetadataOptions(request);
         Instance inst = getRequiredInstance(region, instanceId);
+        if (isExternalInstance(region, instanceId)) {
+            throw new AwsException("OperationNotPermitted",
+                    "The instance '" + instanceId + "' is a cluster node and its metadata options cannot be"
+                            + " modified through EC2", 400);
+        }
         inst.setMetadataOptions(LaunchTemplateData.MetadataOptions.merge(inst.effectiveMetadataOptions(), request));
         instances.put(key(region, instanceId), inst);
         return inst;
