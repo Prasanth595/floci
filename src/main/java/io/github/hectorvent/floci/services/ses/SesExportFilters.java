@@ -101,9 +101,6 @@ final class SesExportFilters {
         if (filters.isMissingNode() || filters.isNull()) {
             return;
         }
-        if (!filters.isObject()) {
-            throw new AwsException("SerializationException", null, 400);
-        }
         for (Member member : Member.values()) {
             List<String> values = stringArrayOrAbsent(filters, member.wireName);
             if (values != null && member.maxValues != NO_LIMIT && values.size() > member.maxValues) {

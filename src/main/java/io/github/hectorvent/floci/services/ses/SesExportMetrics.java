@@ -18,7 +18,6 @@ import java.util.Map;
 import java.util.Set;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringArrayOrAbsent;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
  * The metrics half of an export job. Every count comes from {@link SesMetricData}, the same
@@ -61,7 +60,7 @@ final class SesExportMetrics {
      * the per-value rules the batch operation applies.
      */
     static void validate(JsonNode metrics) {
-        requireWireTypes(metrics);
+        rejectNullElements(metrics);
         List<String> violations = new ArrayList<>();
         validateDimensions(metrics.path("Dimensions"), violations);
         JsonNode namespace = metrics.path("Namespace");
@@ -76,34 +75,21 @@ final class SesExportMetrics {
     }
 
     /**
-     * The deserialization-level checks, which come first and answer {@code SerializationException}
-     * like every other typed SES v2 member: a dimension value list of numbers was otherwise
-     * coerced to strings, and a metric that is a bare string was read as one with no members at
-     * all, both producing a successful but meaningless export.
+     * The SES v2 shape check has already rejected every member of the wrong JSON type, but it
+     * leaves a {@code null} list element to the operation. AWS's answer for one was not probed;
+     * Floci treats it as a {@code SerializationException}, ahead of the constraints.
      */
-    private static void requireWireTypes(JsonNode metrics) {
+    private static void rejectNullElements(JsonNode metrics) {
         JsonNode dimensions = metrics.path("Dimensions");
         if (present(dimensions)) {
-            if (!dimensions.isObject()) {
-                throw serializationError();
-            }
             Iterator<String> names = dimensions.fieldNames();
             while (names.hasNext()) {
                 stringArrayOrAbsent(dimensions, names.next());
             }
         }
-        stringMemberOrAbsent(metrics, "Namespace");
-        JsonNode requested = metrics.path("Metrics");
-        if (present(requested)) {
-            if (!requested.isArray()) {
+        for (JsonNode metric : metrics.path("Metrics")) {
+            if (metric.isNull()) {
                 throw serializationError();
-            }
-            for (JsonNode metric : requested) {
-                if (!metric.isObject()) {
-                    throw serializationError();
-                }
-                stringMemberOrAbsent(metric, "Name");
-                stringMemberOrAbsent(metric, "Aggregation");
             }
         }
     }

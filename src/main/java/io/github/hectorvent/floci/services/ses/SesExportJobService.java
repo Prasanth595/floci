@@ -39,7 +39,6 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
  * SES V2 export jobs. A job reads the timelines already stored at send time, renders them through
@@ -126,20 +125,20 @@ public class SesExportJobService implements Resettable {
 
     /**
      * The request's already-parsed {@code ExportDataSource} and {@code ExportDestination}. The
-     * controller keeps the JSON shape checks; the service owns the order the service-level rules
-     * fire in.
+     * controller has checked their JSON types against the SES v2 shapes; the service owns the order
+     * the service-level rules fire in.
      */
     public ExportJob createExportJob(String region, String accountId, JsonNode exportDataSource,
                                      JsonNode exportDestination, Runnable vdmGate) {
-        JsonNode metrics = objectMemberOrAbsent(exportDataSource, "MetricsDataSource");
-        JsonNode insights = objectMemberOrAbsent(exportDataSource, "MessageInsightsDataSource");
+        JsonNode metrics = exportDataSource.path("MetricsDataSource");
+        JsonNode insights = exportDataSource.path("MessageInsightsDataSource");
         if (metrics.isObject() == insights.isObject()) {
             throw new AwsException("BadRequestException", "One data source must be provided", 400);
         }
         if (!exportDestination.isObject()) {
             throw notNull("exportDestination");
         }
-        String dataFormat = stringMemberOrAbsent(exportDestination, "DataFormat");
+        String dataFormat = exportDestination.path("DataFormat").textValue();
         if (dataFormat == null) {
             throw notNull("exportDestination.dataFormat");
         }
@@ -543,18 +542,6 @@ public class SesExportJobService implements Resettable {
     private static AwsException notNull(String member) {
         return SmithyValidationErrors.exception("BadRequestException",
                 List.of("Value at '" + member + "' failed to satisfy constraint: Member must not be null"));
-    }
-
-    /**
-     * A union member of the wrong JSON type read as absent, so a request carrying a valid source
-     * plus a malformed one passed the exactly-one check and silently exported the valid half.
-     */
-    private static JsonNode objectMemberOrAbsent(JsonNode parent, String field) {
-        JsonNode member = parent.path(field);
-        if (!member.isMissingNode() && !member.isNull() && !member.isObject()) {
-            throw new AwsException("SerializationException", null, 400);
-        }
-        return member;
     }
 
     /**
