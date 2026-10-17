@@ -156,6 +156,28 @@ class Ec2EgressOnlyInternetGatewayIntegrationTest {
     }
 
     @Test
+    @Order(5)
+    void createAndDeleteWithoutTheRequiredIdAreMissingParameter() {
+        ec2()
+            .formParam("Action", "CreateEgressOnlyInternetGateway")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+
+        ec2()
+            .formParam("Action", "DeleteEgressOnlyInternetGateway")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"))
+            .body("Response.Errors.Error.Message",
+                    equalTo("The request must contain the parameter EgressOnlyInternetGatewayId"));
+    }
+
+    @Test
     @Order(6)
     void deleteRemovesTheGateway() {
         ec2()

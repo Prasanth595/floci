@@ -4886,9 +4886,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // cannot put the gateway back after it is gone. A route that targeted the gateway stays in its
     // table as a blackhole: AWS documents that state for a route whose target is no longer available.
     public void deleteEgressOnlyInternetGateway(String region, String eigwId) {
-        if (eigwId == null) {
-            throw new AwsException("InvalidGatewayID.NotFound", "The eigw ID 'null' does not exist", 400);
-        }
         synchronized (lockFor(key(region, eigwId))) {
             if (egressOnlyInternetGateways.get(key(region, eigwId)).isEmpty()) {
                 throw new AwsException("InvalidGatewayID.NotFound",

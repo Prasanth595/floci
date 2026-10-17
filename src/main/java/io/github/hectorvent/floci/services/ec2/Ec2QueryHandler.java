@@ -2986,7 +2986,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteEgressOnlyInternetGateway(MultivaluedMap<String, String> p, String region) {
-        service.deleteEgressOnlyInternetGateway(region, p.getFirst("EgressOnlyInternetGatewayId"));
+        service.deleteEgressOnlyInternetGateway(region, requiredParam(p, "EgressOnlyInternetGatewayId"));
         return xmlResponse(new XmlBuilder()
                 .start("DeleteEgressOnlyInternetGatewayResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
