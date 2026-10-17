@@ -1273,6 +1273,26 @@ An S3 object operation is checked as the action the S3 documentation gives it:
 A request naming several of these sub-resources is checked as the one S3 runs. `GET ?acl&tagging`
 returns the tags, so it needs `s3:GetObjectTagging`.
 
+A request that passes a role to a service also needs `iam:PassRole` on that role, as the IAM user
+guide requires: "To pass a role (and its permissions) to an AWS service, a user must have
+permissions to pass the role to the service." It is checked with `iam:PassedToService` naming the
+service the role goes to, the value AWS's Service Reference gives for the operation, so a grant to
+pass a role to EC2 does not let the same role be passed to Lambda. The operations checked, and the
+role each passes:
+- **Lambda:** `CreateFunction` and `UpdateFunctionConfiguration` (`Role`, when the request sets
+  it), `CreateWebFunction` and `CreateWebFunctionRevision` (the service configuration's
+  `executionRoleArn`), passed to `lambda.amazonaws.com`.
+- **EC2:** `RunInstances`, `RequestSpotInstances`, `AssociateIamInstanceProfile`,
+  `ReplaceIamInstanceProfileAssociation`, `CreateLaunchTemplate` and `CreateLaunchTemplateVersion`
+  pass the roles of the instance profile they name, to `ec2.amazonaws.com`. `CreateFlowLogs` passes
+  `DeliverLogsPermissionArn` to `vpc-flow-logs.amazonaws.com`. A profile that does not exist
+  passes nothing, and EC2 refuses it as without enforcement.
+
+Launching from a launch template does not check the template's role, as on AWS: the EC2 user guide
+warns that a user who can create launch template versions "can potentially update a launch template
+to pass an IAM role to an instance even if they don't have the iam:PassRole permission". The role
+parameters of other services are not checked yet.
+
 A request that names its operation, in a Query `Action`, an `X-Amz-Target` header or a Smithy RPC v2
 path (`/service/<service>/operation/<operation>`), is authorized as the action AWS checks for that
 operation, which is usually the operation's own name. An RPC v2 call is checked as the service and
@@ -1611,6 +1631,8 @@ floci populates:
   N days.
 - An object creation offers its tag and Object Lock keys to each action it is checked as: its
   `s3:PutObject` and the extra actions its settings need.
+- `iam:PassedToService`: the service principal a request passes a role to, for the
+  `iam:PassRole` check described above.
 - A `PutObject` carrying `If-Match` is authorized as `s3:GetObject` as well, and that second
   check is made without the object's tags in the context, as measured on AWS. `CopyObject` and
   `CompleteMultipartUpload`, the other operations the S3 user guide lists for `If-Match`, get the

@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProviders;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
@@ -520,6 +521,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 region, accountId, akid)) {
             return;
         }
+        if (abortIfRolePassDenied(ctx, caller, principal, callerArns.orElse(null), action, credentialScope,
+                region, accountId, akid)) {
+            return;
+        }
 
         // Tagged group creation requires either tagging permission, using the same resolved
         // caller (including session, boundary and SCP ceilings) as the primary operation.
@@ -834,6 +839,44 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private CallerArns accountRootArns(String accountId) {
         String rootArn = AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString();
         return CallerArns.accountRoot(rootArn, accountId);
+    }
+
+    /**
+     * A request that passes a role to a service also needs {@code iam:PassRole} on that role (see
+     * {@link PassedRoles}), checked as the caller with {@code iam:PassedToService} naming the
+     * service and the keys that say who is calling, which {@code callerArns} writes when it is known.
+     * An instance profile is looked up in the request's account, as EC2 resolves it; one that does
+     * not exist passes nothing, and the operation reports it. Returns true when the request was
+     * aborted.
+     */
+    private boolean abortIfRolePassDenied(ContainerRequestContext ctx, CallerContext caller, RequestPrincipal principal,
+                                          CallerArns callerArns, String action, String credentialScope,
+                                          String region, String accountId, String akid) {
+        for (PassedRoles.PassedRole passed : PassedRoles.of(action, ctx,
+                (name, arn) -> instanceProfileRoleArns(accountId, name, arn))) {
+            Map<String, List<String>> context = new HashMap<>();
+            if (callerArns != null) {
+                callerArns.putPrincipalKeys(context);
+            }
+            context.put("iam:PassedToService", List.of(passed.passedToService()));
+            if (abortIfDenied(ctx, caller, principal, "iam:PassRole", action, credentialScope,
+                    List.of(passed.roleArn()), List.of(context), region, accountId, akid)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The ARNs of the roles the instance profile, named by {@code name} or {@code arn}, holds. */
+    private List<String> instanceProfileRoleArns(String accountId, String name, String arn) {
+        String profileName = arn != null ? arn.substring(arn.lastIndexOf('/') + 1) : name;
+        return iamService.findInstanceProfile(accountId, profileName)
+                .filter(profile -> arn == null || arn.equals(profile.getArn()))
+                .map(profile -> profile.getRoleNames().stream()
+                        .flatMap(roleName -> iamService.findRole(accountId, roleName).stream())
+                        .map(IamRole::getArn)
+                        .toList())
+                .orElse(List.of());
     }
 
     /**
