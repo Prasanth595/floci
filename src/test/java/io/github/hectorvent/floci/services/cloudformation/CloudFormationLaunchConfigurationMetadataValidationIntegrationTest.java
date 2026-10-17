@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -21,8 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  */
 @QuarkusTest
 class CloudFormationLaunchConfigurationMetadataValidationIntegrationTest {
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=222222222222/20261016/us-east-1/cloudformation/aws4_request";
+    private static final String ACCOUNT = "222222222222";
+    private static final String AUTH = EnforcementFixtures.auth(ACCOUNT, "cloudformation");
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
@@ -38,25 +40,27 @@ class CloudFormationLaunchConfigurationMetadataValidationIntegrationTest {
                 "Properties":{"LaunchConfigurationName":"%s","ImageId":"ami-amazonlinux2023",
                 "InstanceType":"t3.micro","MetadataOptions":{%s}}}}}
                 """.formatted(name, member);
-        given().header("Authorization", AUTH).formParam("Action", "CreateStack")
-                .formParam("StackName", name).formParam("TemplateBody", template)
-                .post("/").then().statusCode(200);
+        try {
+            request("cloudformation", "CreateStack").formParam("StackName", name).formParam("TemplateBody", template)
+                    .post("/").then().statusCode(200);
 
-        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(name, AUTH);
-        assertEquals("ROLLBACK_COMPLETE", state.status(), state.reason());
-        String events = given().header("Authorization", AUTH).formParam("Action", "DescribeStackEvents")
-                .formParam("StackName", name).post("/").then().statusCode(200).extract().asString();
-        List<String> failures = XmlParser.extractGroups(events, "member").stream()
-                .filter(event -> "Launch".equals(event.get("LogicalResourceId"))
-                        && "CREATE_FAILED".equals(event.get("ResourceStatus")))
-                .map(event -> event.get("ResourceStatusReason"))
-                .toList();
-        assertThat(failures, contains(equalTo(message)));
-        given().header("Authorization", AUTH.replace("/cloudformation/", "/autoscaling/"))
-                .formParam("Action", "DescribeLaunchConfigurations")
-                .formParam("LaunchConfigurationNames.member.1", name).post("/").then().statusCode(200)
-                .body("DescribeLaunchConfigurationsResponse.DescribeLaunchConfigurationsResult"
-                        + ".LaunchConfigurations.member.size()", equalTo(0));
+            CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(name, AUTH);
+            assertEquals("ROLLBACK_COMPLETE", state.status(), state.reason());
+            String events = request("cloudformation", "DescribeStackEvents").formParam("StackName", name)
+                    .post("/").then().statusCode(200).extract().asString();
+            List<String> failures = XmlParser.extractGroups(events, "member").stream()
+                    .filter(event -> "Launch".equals(event.get("LogicalResourceId"))
+                            && "CREATE_FAILED".equals(event.get("ResourceStatus")))
+                    .map(event -> event.get("ResourceStatusReason"))
+                    .toList();
+            assertThat(failures, contains(equalTo(message)));
+            request("autoscaling", "DescribeLaunchConfigurations")
+                    .formParam("LaunchConfigurationNames.member.1", name).post("/").then().statusCode(200)
+                    .body("DescribeLaunchConfigurationsResponse.DescribeLaunchConfigurationsResult"
+                            + ".LaunchConfigurations.member.size()", equalTo(0));
+        } finally {
+            deleteStack(name);
+        }
     }
 
     @ParameterizedTest
@@ -69,16 +73,27 @@ class CloudFormationLaunchConfigurationMetadataValidationIntegrationTest {
                 "Properties":{"LaunchConfigurationName":"%s","ImageId":"ami-amazonlinux2023",
                 "InstanceType":"t3.micro","MetadataOptions":{"HttpPutResponseHopLimit":%s}}}}}
                 """.formatted(name, hopLimit);
-        given().header("Authorization", AUTH).formParam("Action", "CreateStack")
-                .formParam("StackName", name).formParam("TemplateBody", template)
-                .post("/").then().statusCode(200);
+        try {
+            request("cloudformation", "CreateStack").formParam("StackName", name).formParam("TemplateBody", template)
+                    .post("/").then().statusCode(200);
 
-        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(name, AUTH);
-        assertEquals("CREATE_COMPLETE", state.status(), state.reason());
-        given().header("Authorization", AUTH.replace("/cloudformation/", "/autoscaling/"))
-                .formParam("Action", "DescribeLaunchConfigurations")
-                .formParam("LaunchConfigurationNames.member.1", name).post("/").then().statusCode(200)
-                .body("DescribeLaunchConfigurationsResponse.DescribeLaunchConfigurationsResult"
-                        + ".LaunchConfigurations.member.MetadataOptions.HttpPutResponseHopLimit", equalTo(stored));
+            CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(name, AUTH);
+            assertEquals("CREATE_COMPLETE", state.status(), state.reason());
+            request("autoscaling", "DescribeLaunchConfigurations")
+                    .formParam("LaunchConfigurationNames.member.1", name).post("/").then().statusCode(200)
+                    .body("DescribeLaunchConfigurationsResponse.DescribeLaunchConfigurationsResult"
+                            + ".LaunchConfigurations.member.MetadataOptions.HttpPutResponseHopLimit", equalTo(stored));
+        } finally {
+            deleteStack(name);
+        }
+    }
+
+    // Ignores the status, so a test that failed before the stack existed keeps its own failure.
+    private static void deleteStack(String name) {
+        request("cloudformation", "DeleteStack").formParam("StackName", name).post("/");
+    }
+
+    private static RequestSpecification request(String service, String action) {
+        return given().header("Authorization", EnforcementFixtures.auth(ACCOUNT, service)).formParam("Action", action);
     }
 }
