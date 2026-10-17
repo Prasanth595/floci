@@ -48,6 +48,7 @@ public class SsmCommandService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(SsmCommandService.class);
     private static final int MIN_TIMEOUT_SECONDS = 30;
+    private static final int MAX_TIMEOUT_SECONDS = 2_592_000;
     private static final int MAX_INSTANCE_IDS = 50;
     private static final int DEFAULT_SHELL_EXECUTION_TIMEOUT_SECONDS = 3600;
     private static final int MAX_SHELL_EXECUTION_TIMEOUT_SECONDS = 172800;
@@ -295,6 +296,12 @@ public class SsmCommandService implements Resettable {
         if (timeoutSeconds < MIN_TIMEOUT_SECONDS) {
             throw SmithyValidationErrors.validationException(
                     "Value '" + timeoutSeconds + "' at 'timeoutSeconds' failed to satisfy constraint: Member must have value greater than or equal to 30");
+        }
+        if (timeoutSeconds > MAX_TIMEOUT_SECONDS) {
+            throw new AwsException(
+                    "ValidationException",
+                    "1 validation error detected: Value '" + timeoutSeconds + "' at 'timeoutSeconds' failed to satisfy constraint: Member must have value less than or equal to 2592000",
+                    400);
         }
     }
 
