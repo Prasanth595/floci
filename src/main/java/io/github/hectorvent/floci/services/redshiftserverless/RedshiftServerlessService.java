@@ -464,11 +464,25 @@ public class RedshiftServerlessService implements Resettable {
      * Region or resource type rather than resolving it to a local snapshot of the same name.
      */
     public String snapshotNameFromArn(String snapshotArn, String region) {
+        return snapshotNameFromArn(snapshotArn, region, "snapshotArn");
+    }
+
+    public String snapshotNameFromArn(String snapshotArn, String region, String memberName) {
         String prefix = regionResolver.buildArn("redshift-serverless", region, "snapshot/");
         if (snapshotArn == null || !snapshotArn.startsWith(prefix) || snapshotArn.length() == prefix.length()) {
-            throw ServerlessSupport.validation("snapshotArn does not identify a snapshot in this account and Region.");
+            throw ServerlessSupport.validation(memberName + " does not identify a snapshot in this account and Region.");
         }
         return snapshotArn.substring(prefix.length());
+    }
+
+    /** The workgroup called {@code workgroupName} in {@code region}, empty when there is none. */
+    public Optional<Workgroup> findWorkgroup(String workgroupName, String region) {
+        return workgroupName == null ? Optional.empty() : workgroups.get(storageKey(region, workgroupName));
+    }
+
+    /** The snapshot called {@code snapshotName} in {@code region}, empty when there is none. */
+    public Optional<RedshiftServerlessSnapshot> findSnapshot(String snapshotName, String region) {
+        return snapshotName == null ? Optional.empty() : snapshots.get(storageKey(region, snapshotName));
     }
 
     /**
