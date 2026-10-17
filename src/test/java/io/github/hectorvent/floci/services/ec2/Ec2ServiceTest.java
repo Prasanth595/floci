@@ -70,6 +70,7 @@ import org.mockito.InOrder;
 
 import java.io.StringReader;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.security.interfaces.RSAPrivateCrtKey;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -775,6 +776,40 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void egressOnlyInternetGatewayDeleteWaitsForTheLockTagWritesTake() throws Exception {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.43.0.0/16", false).getVpcId();
+        String eigwId = service.createEgressOnlyInternetGateway(region, vpcId, null, List.of())
+                .getEgressOnlyInternetGatewayId();
+        Method lockFor = Ec2Service.class.getDeclaredMethod("lockFor", String.class);
+        lockFor.setAccessible(true);
+        Object tagLock = lockFor.invoke(service, region + "::" + eigwId);
+        AtomicReference<Thread> deleter = new AtomicReference<>();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> deleting;
+            synchronized (tagLock) {
+                deleting = worker.submit(() -> {
+                    deleter.set(Thread.currentThread());
+                    service.deleteEgressOnlyInternetGateway(region, eigwId);
+                });
+                Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> deleting.isDone()
+                        || (deleter.get() != null && deleter.get().getState() == Thread.State.BLOCKED));
+                assertFalse(deleting.isDone(), "delete must take the gateway's tag lock");
+            }
+            deleting.get(5, TimeUnit.SECONDS);
+            assertTrue(service.describeEgressOnlyInternetGateways(region, List.of(eigwId), Map.of()).isEmpty());
+        } finally {
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
     void egressOnlyInternetGatewayIsCreatedDescribedAndDeleted() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
@@ -784,10 +819,11 @@ class Ec2ServiceTest {
         String vpcId = service.createVpc(region, "10.42.0.0/16", false).getVpcId();
 
         AwsException noVpc = assertThrows(AwsException.class,
-                () -> service.createEgressOnlyInternetGateway(region, "vpc-00000000000000000", null));
+                () -> service.createEgressOnlyInternetGateway(region, "vpc-00000000000000000", null, List.of()));
         assertEquals("InvalidVpcID.NotFound", noVpc.getErrorCode());
 
-        String eigwId = service.createEgressOnlyInternetGateway(region, vpcId, null).getEgressOnlyInternetGatewayId();
+        String eigwId = service.createEgressOnlyInternetGateway(region, vpcId, null, List.of())
+                .getEgressOnlyInternetGatewayId();
         assertTrue(eigwId.matches("eigw-[0-9a-f]{17}"), eigwId);
         service.createTags(region, List.of(eigwId), List.of(new Tag("Owner", "TeamA")));
 

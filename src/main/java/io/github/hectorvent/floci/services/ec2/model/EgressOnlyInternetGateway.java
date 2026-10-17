@@ -15,6 +15,9 @@ public class EgressOnlyInternetGateway {
     private String clientToken;
     private List<InternetGatewayAttachment> attachments = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
+    // The tags the create request carried, kept apart from later tag changes so a ClientToken
+    // replay is compared with the original request rather than the gateway's current tags.
+    private List<Tag> creationTags = new ArrayList<>();
 
     public EgressOnlyInternetGateway() {}
 
@@ -34,4 +37,7 @@ public class EgressOnlyInternetGateway {
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }
+
+    public List<Tag> getCreationTags() { return creationTags; }
+    public void setCreationTags(List<Tag> creationTags) { this.creationTags = creationTags; }
 }

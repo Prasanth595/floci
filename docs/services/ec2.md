@@ -235,10 +235,8 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
 | DisassociateVpcCidrBlock | Removes a secondary CIDR block association from a VPC. |
 
-The two describe-only network actions above provide discovery compatibility when no
-resources exist. Egress-only gateway discovery validates its pagination parameters before
-returning an empty page. Neither models virtual private gateway or egress-only internet
-gateway lifecycles.
+`DescribeVpnGateways` provides discovery compatibility when no resources exist; virtual
+private gateway lifecycles are not modelled.
 
 ### Subnets
 
@@ -316,9 +314,9 @@ Nested launch-template tags follow AWS's case-sensitive check: `aws:` is rejecte
 | DeleteInternetGateway | Deletes an internet gateway. |
 | AttachInternetGateway | Attaches an internet gateway to a VPC. |
 | DetachInternetGateway | Detaches an internet gateway from a VPC. |
-| CreateEgressOnlyInternetGateway | Creates an egress-only internet gateway attached to an existing VPC (`InvalidVpcID.NotFound` otherwise). Applies `TagSpecification` tags. A retry with the same `ClientToken` returns the gateway the first call created; the same token with a different `VpcId` fails with `IdempotentParameterMismatch`. |
-| DescribeEgressOnlyInternetGateways | Lists stored egress-only internet gateways, filtered by ID and by the `egress-only-internet-gateway-id`, `attachment.vpc-id`, `attachment.state` and tag filters. An unknown ID returns an empty set, as AWS does. Pagination parameters are validated; results come back in one page. |
-| DeleteEgressOnlyInternetGateway | Deletes an egress-only internet gateway; an unknown ID fails with `InvalidGatewayID.NotFound`. |
+| CreateEgressOnlyInternetGateway | Creates an egress-only internet gateway attached to an existing VPC (`InvalidVpcID.NotFound` otherwise). Tags are validated before the gateway is created, so a rejected tag leaves nothing behind. A retry with the same `ClientToken` returns the gateway the first call created, unchanged; the same token with a different `VpcId` or different `TagSpecification` tags fails with `IdempotentParameterMismatch`. |
+| DescribeEgressOnlyInternetGateways | Lists stored egress-only internet gateways, filtered by ID and by the `egress-only-internet-gateway-id`, `attachment.vpc-id`, `attachment.state` and tag filters. An unknown ID returns an empty set, as AWS does. `MaxResults` (5 to 255) pages the results, ordered by ID, with `NextToken`. |
+| DeleteEgressOnlyInternetGateway | Deletes an egress-only internet gateway; an unknown ID fails with `InvalidGatewayID.NotFound`. Routes that targeted it stay in their route tables with state `blackhole`. |
 
 ### Route Tables
 

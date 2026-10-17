@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.CapacityReservation;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.EgressOnlyInternetGateway;
+import io.github.hectorvent.floci.services.ec2.model.EgressOnlyInternetGatewayListResult;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Host;
 import io.github.hectorvent.floci.services.ec2.model.IamInstanceProfileAssociation;
@@ -4798,10 +4799,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // ─── Egress-only Internet Gateways ─────────────────────────────────────────
 
     // Created already attached: AWS has no attach/detach call for this gateway, the VPC is fixed at creation.
-    // ClientToken replays return the gateway the first call made; a reused token with another
-    // VpcId fails with IdempotentParameterMismatch, as the EC2 idempotency guide documents.
+    // ClientToken replays return the gateway the first call made, unchanged; a reused token with
+    // another VpcId or other creation tags fails with IdempotentParameterMismatch, as the EC2
+    // idempotency guide documents. Tags are applied here, with the gateway, so a replay never re-tags.
     public EgressOnlyInternetGateway createEgressOnlyInternetGateway(String region, String vpcId,
-                                                                     String clientToken) {
+                                                                     String clientToken, List<Tag> tagList) {
         ensureDefaultResources(region);
         if (vpcId == null || vpcId.isBlank()) {
             throw new AwsException("MissingParameter",
@@ -4813,7 +4815,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 for (EgressOnlyInternetGateway existing : egressOnlyInternetGateways.scan(
                         k -> k.startsWith(region + "::"))) {
                     if (token.equals(existing.getClientToken())) {
-                        if (!vpcId.equals(existing.getAttachments().get(0).getVpcId())) {
+                        if (!vpcId.equals(existing.getAttachments().get(0).getVpcId())
+                                || !tagMap(tagList).equals(tagMap(existing.getCreationTags()))) {
                             throw new AwsException("IdempotentParameterMismatch",
                                     "The client token '" + token + "' was already used with different parameters", 400);
                         }
@@ -4827,6 +4830,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             eigw.setRegion(region);
             eigw.setClientToken(token);
             eigw.getAttachments().add(new InternetGatewayAttachment(vpcId, "attached"));
+            eigw.setCreationTags(new ArrayList<>(tagList));
+            eigw.setTags(new ArrayList<>(tagList));
+            if (!tagList.isEmpty()) {
+                tags.put(eigw.getEgressOnlyInternetGatewayId(), new ArrayList<>(tagList));
+            }
             egressOnlyInternetGateways.put(key(region, eigw.getEgressOnlyInternetGatewayId()), eigw);
             return eigw;
         }
@@ -4840,16 +4848,71 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return egressOnlyInternetGateways.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(eigw -> ids.isEmpty() || ids.contains(eigw.getEgressOnlyInternetGatewayId()))
                 .filter(eigw -> matchesFilters(eigw, filters, region))
+                .sorted(Comparator.comparing(EgressOnlyInternetGateway::getEgressOnlyInternetGatewayId))
                 .collect(Collectors.toList());
     }
 
-    public void deleteEgressOnlyInternetGateway(String region, String eigwId) {
-        if (eigwId == null || egressOnlyInternetGateways.get(key(region, eigwId)).isEmpty()) {
-            throw new AwsException("InvalidGatewayID.NotFound",
-                    "The eigw ID '" + eigwId + "' does not exist", 400);
+    /**
+     * The paginated form. MaxResults is 5 to 255 in the EC2 model; null means the request left it
+     * out and gets every match in one page.
+     */
+    public EgressOnlyInternetGatewayListResult describeEgressOnlyInternetGateways(
+            String region, List<String> ids, Map<String, List<String>> filters, Integer maxResults,
+            String nextToken) {
+        if (maxResults != null && (maxResults < 5 || maxResults > 255)) {
+            throw new AwsException("InvalidMaxResults",
+                    "Value (" + maxResults + ") for parameter MaxResults is invalid. "
+                            + "Expecting a value between 5 and 255.", 400);
         }
-        egressOnlyInternetGateways.delete(key(region, eigwId));
-        tags.delete(eigwId);
+        int offset = decodeToken(nextToken);
+        List<EgressOnlyInternetGateway> all = describeEgressOnlyInternetGateways(region, ids, filters);
+        int total = all.size();
+        int toIndex = maxResults != null ? Math.min(offset + maxResults, total) : total;
+        List<EgressOnlyInternetGateway> page = offset < total
+                ? new ArrayList<>(all.subList(offset, toIndex))
+                : new ArrayList<>();
+        return new EgressOnlyInternetGatewayListResult(page, toIndex < total ? encodeToken(toIndex) : null);
+    }
+
+    private static Map<String, String> tagMap(List<Tag> tagList) {
+        Map<String, String> map = new HashMap<>();
+        for (Tag tag : tagList == null ? List.<Tag>of() : tagList) {
+            map.put(tag.getKey(), tag.getValue());
+        }
+        return map;
+    }
+
+    // Under the gateway's resource lock, the one createSystemTags takes, so a concurrent tag write
+    // cannot put the gateway back after it is gone. A route that targeted the gateway stays in its
+    // table as a blackhole: AWS documents that state for a route whose target is no longer available.
+    public void deleteEgressOnlyInternetGateway(String region, String eigwId) {
+        if (eigwId == null) {
+            throw new AwsException("InvalidGatewayID.NotFound", "The eigw ID 'null' does not exist", 400);
+        }
+        synchronized (lockFor(key(region, eigwId))) {
+            if (egressOnlyInternetGateways.get(key(region, eigwId)).isEmpty()) {
+                throw new AwsException("InvalidGatewayID.NotFound",
+                        "The eigw ID '" + eigwId + "' does not exist", 400);
+            }
+            egressOnlyInternetGateways.delete(key(region, eigwId));
+            tags.delete(eigwId);
+        }
+        for (RouteTable table : routeTables.scan(k -> k.startsWith(region + "::"))) {
+            if (table.getRoutes().stream().noneMatch(r -> eigwId.equals(r.getEgressOnlyInternetGatewayId()))) {
+                continue;
+            }
+            synchronized (lockFor(key(region, table.getRouteTableId()))) {
+                RouteTable current = routeTables.get(key(region, table.getRouteTableId())).orElse(null);
+                if (current == null) {
+                    continue;
+                }
+                current.getRoutes().stream()
+                        .filter(r -> eigwId.equals(r.getEgressOnlyInternetGatewayId()))
+                        .forEach(r -> r.setState("blackhole"));
+                routeTables.put(key(region, current.getRouteTableId()), current);
+                notifyRouteTableUpdated(region, current);
+            }
+        }
     }
 
     private void requireSupportedFilters(Collection<String> filterNames, Set<String> supportedFilters) {

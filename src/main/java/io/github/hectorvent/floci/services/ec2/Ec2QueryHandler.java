@@ -2950,10 +2950,10 @@ public class Ec2QueryHandler {
     }
 
     private Response handleCreateEgressOnlyInternetGateway(MultivaluedMap<String, String> p, String region) {
+        // Tags are validated before anything is created, so a rejected tag leaves no gateway behind.
+        List<Tag> resourceTags = parseTagsForResource(p, "egress-only-internet-gateway");
         EgressOnlyInternetGateway eigw = service.createEgressOnlyInternetGateway(
-                region, p.getFirst("VpcId"), p.getFirst("ClientToken"));
-        applyResourceTags(parseTagsForResource(p, "egress-only-internet-gateway"), region,
-                eigw.getEgressOnlyInternetGatewayId());
+                region, p.getFirst("VpcId"), p.getFirst("ClientToken"), resourceTags);
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateEgressOnlyInternetGatewayResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString());
@@ -2965,19 +2965,23 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
-    // Pagination is validated but never produces a nextToken: the whole set is returned in one page.
     private Response handleDescribeEgressOnlyInternetGateways(MultivaluedMap<String, String> p, String region) {
-        validateEmptyDiscoveryPagination(p, 255);
-        List<EgressOnlyInternetGateway> eigws = service.describeEgressOnlyInternetGateways(
-                region, getList(p, "EgressOnlyInternetGatewayId"), getFilters(p));
+        EgressOnlyInternetGatewayListResult result = service.describeEgressOnlyInternetGateways(
+                region, getList(p, "EgressOnlyInternetGatewayId"), getFilters(p),
+                p.getFirst("MaxResults") == null ? null : parseIntParam(p, "MaxResults", 0),
+                p.getFirst("NextToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeEgressOnlyInternetGatewaysResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("egressOnlyInternetGatewaySet");
-        for (EgressOnlyInternetGateway eigw : eigws) {
+        for (EgressOnlyInternetGateway eigw : result.egressOnlyInternetGateways()) {
             xml.start("item").raw(eigwXml(eigw)).end("item");
         }
-        xml.end("egressOnlyInternetGatewaySet").end("DescribeEgressOnlyInternetGatewaysResponse");
+        xml.end("egressOnlyInternetGatewaySet");
+        if (result.nextToken() != null) {
+            xml.elem("nextToken", result.nextToken());
+        }
+        xml.end("DescribeEgressOnlyInternetGatewaysResponse");
         return xmlResponse(xml.build());
     }
 
@@ -2989,20 +2993,6 @@ public class Ec2QueryHandler {
                 .elem("returnCode", "true")
                 .end("DeleteEgressOnlyInternetGatewayResponse")
                 .build());
-    }
-
-    private void validateEmptyDiscoveryPagination(MultivaluedMap<String, String> p, int maximum) {
-        String rawMaxResults = p.getFirst("MaxResults");
-        if (rawMaxResults != null) {
-            int maxResults = parseIntParam(p, "MaxResults", 0);
-            if (maxResults < 5 || maxResults > maximum) {
-                throw new AwsException("InvalidMaxResults",
-                        "The specified value for MaxResults is not valid.", 400);
-            }
-        }
-        if (p.getFirst("NextToken") != null) {
-            throw new AwsException("InvalidParameterValue", "Invalid NextToken", 400);
-        }
     }
 
     private Response emptyDescribeResponse(String action, String resultSet) {
