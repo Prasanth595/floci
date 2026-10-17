@@ -2892,7 +2892,12 @@ public class CognitoService implements ResourceProvider {
             CognitoUser user = findFederatedUser(userPoolId, provider.getProviderName(), subject).orElse(null);
             if (user == null) {
                 user = new CognitoUser();
-                user.setUsername(provider.getProviderName() + "_" + UUID.randomUUID());
+                String username = provider.getProviderName() + "_"
+                        + ("Google".equals(provider.getProviderType()) ? subject : UUID.randomUUID().toString());
+                if (userStore.get(userKey(userPoolId, username)).isPresent()) {
+                    throw new AwsException("UsernameExistsException", "User already exists", 400);
+                }
+                user.setUsername(username);
                 user.setUserPoolId(userPoolId);
                 user.getAttributes().put("sub", UUID.randomUUID().toString());
             }

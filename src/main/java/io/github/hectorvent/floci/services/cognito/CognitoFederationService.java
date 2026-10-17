@@ -57,8 +57,7 @@ public class CognitoFederationService {
     public String beginAuthorization(String userPoolId, String clientId, String redirectUri,
                                      List<String> requestedScopes, List<String> grantedScopes, String nonce,
                                      String providerName, String relyingPartyState, String codeChallenge) {
-        IdentityProvider provider = cognitoService.describeIdentityProvider(userPoolId, providerName);
-        requireOidcProvider(provider);
+        IdentityProvider provider = federationProvider(userPoolId, providerName);
         String authorizeEndpoint = requiredProviderDetail(provider, "authorize_url", "authorize endpoint");
         String providerClientId = requiredProviderDetail(provider, "client_id", "client_id");
         validateAuthorizeEndpoint(authorizeEndpoint, provider.getProviderName());
@@ -86,9 +85,7 @@ public class CognitoFederationService {
     }
 
     String completeAuthorization(CognitoAuthorizationTransaction transaction, String providerCode) {
-        IdentityProvider provider = cognitoService.describeIdentityProvider(
-                transaction.userPoolId(), transaction.providerName());
-        requireOidcProvider(provider);
+        IdentityProvider provider = federationProvider(transaction.userPoolId(), transaction.providerName());
         String providerCallback = cognitoService.getIdentityProviderCallbackEndpoint(transaction.userPoolId());
         JsonNode tokenResponse = oidcClient.exchangeCode(provider, providerCode, providerCallback);
         String accessToken = requiredText(tokenResponse, "access_token", "access token");
@@ -146,11 +143,16 @@ public class CognitoFederationService {
         return value;
     }
 
-    private void requireOidcProvider(IdentityProvider provider) {
+    private IdentityProvider federationProvider(String userPoolId, String providerName) {
+        IdentityProvider provider = cognitoService.describeIdentityProvider(userPoolId, providerName);
+        if ("Google".equals(provider.getProviderType())) {
+            return oidcClient.googleProvider(provider);
+        }
         if (!OIDC_PROVIDER_TYPE.equals(provider.getProviderType())) {
             throw new AwsException("InvalidParameterException", "Identity provider " + provider.getProviderName()
-                    + " must have ProviderType OIDC", 400);
+                    + " must have ProviderType OIDC or Google", 400);
         }
+        return provider;
     }
 
     private void validateAuthorizeEndpoint(String endpoint, String providerName) {

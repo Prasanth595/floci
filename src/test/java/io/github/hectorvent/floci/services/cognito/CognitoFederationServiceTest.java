@@ -26,6 +26,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
@@ -116,7 +117,7 @@ class CognitoFederationServiceTest {
 
     @Test
     void beginAuthorizationRejectsNonOidcProviderBeforeStoringState() {
-        createProvider("ExampleGoogle", "Google", Map.of(
+        createProvider("ExampleFacebook", "Facebook", Map.of(
                 "client_id", "provider-client",
                 "authorize_url", "https://provider.example.test/authorize",
                 "token_url", endpoint("/token"),
@@ -124,7 +125,7 @@ class CognitoFederationServiceTest {
 
         AwsException exception = assertThrows(AwsException.class, () -> federationService.beginAuthorization(
                 pool.getId(), "cognito-client", "https://application.example.test/callback",
-                List.of("openid"), "nonce-value", "ExampleGoogle"));
+                List.of("openid"), "nonce-value", "ExampleFacebook"));
 
         assertEquals("InvalidParameterException", exception.getErrorCode());
         assertNull(tokenRequest.get());
@@ -161,12 +162,12 @@ class CognitoFederationServiceTest {
 
     @Test
     void completeAuthorizationRejectsNonOidcProvider() {
-        createProvider("ExampleGoogle", "Google", Map.of(
+        createProvider("ExampleFacebook", "Facebook", Map.of(
                 "client_id", "provider-client",
                 "authorize_url", "https://provider.example.test/authorize",
                 "token_url", endpoint("/token"),
                 "attributes_url", endpoint("/userinfo")), Map.of());
-        String state = putTransaction("ExampleGoogle");
+        String state = putTransaction("ExampleFacebook");
 
         AwsException exception = assertThrows(AwsException.class,
                 () -> federationService.completeAuthorization(state, "provider-code"));
@@ -351,6 +352,132 @@ class CognitoFederationServiceTest {
     }
 
     @Test
+    void googleAuthorizationUsesDefaultsWithoutChangingStoredDetails() {
+        Map<String, String> details = Map.of("client_id", "google-client", "client_secret", "google-secret",
+                "authorize_scopes", "openid email profile");
+        createProvider("Google", "Google", details, Map.of("email", "email"));
+
+        String redirect = federationService.beginAuthorization(pool.getId(), "cognito-client",
+                "https://application.example.test/callback", List.of("openid"), "google-nonce", "Google");
+
+        assertTrue(redirect.startsWith("https://accounts.google.com/o/oauth2/v2/auth?"), redirect);
+        assertEquals("google-client", queryValue(redirect, "client_id"));
+        assertEquals("openid email profile", queryValue(redirect, "scope"));
+        assertEquals("google-nonce", queryValue(redirect, "nonce"));
+        assertFalse(redirect.contains("google-secret"));
+        assertEquals(details, cognitoService.describeIdentityProvider(pool.getId(), "Google").getProviderDetails());
+    }
+
+    @Test
+    void googleEndpointOverridesComeOnlyFromServerConfiguration() {
+        Map<String, String> supplied = Map.of("client_id", "google-client",
+                "authorize_url", "https://untrusted.example/authorize", "token_url", "https://untrusted.example/token",
+                "attributes_url", "https://untrusted.example/userinfo", "oidc_issuer", "https://untrusted.example");
+        IdentityProvider provider = createProvider("Google", "Google", supplied, Map.of());
+
+        IdentityProvider effective = new CognitoOidcClient(MAPPER).googleProvider(provider);
+
+        assertEquals("https://accounts.google.com/o/oauth2/v2/auth", effective.getProviderDetails().get("authorize_url"));
+        assertEquals("https://oauth2.googleapis.com/token", effective.getProviderDetails().get("token_url"));
+        assertEquals("https://openidconnect.googleapis.com/v1/userinfo", effective.getProviderDetails().get("attributes_url"));
+        assertEquals("https://accounts.google.com", effective.getProviderDetails().get("oidc_issuer"));
+        assertEquals(supplied, provider.getProviderDetails());
+    }
+
+    @Test
+    void googleSignInDiscoversConfiguredIssuerAndMapsUserInfoClaims() throws Exception {
+        CognitoFederationService googleFederation = googleFederation(discovery(), 200);
+        Map<String, String> details = Map.of("client_id", "google-client", "client_secret", "google-secret",
+                "authorize_scopes", "openid email profile");
+        createProvider("Google", "Google", details, Map.of("email", "email", "email_verified", "email_verified",
+                "name", "name", "given_name", "given_name", "family_name", "family_name", "picture", "picture"));
+        claimsResponse = """
+                {"sub":"google-subject","email":"google@example.test","email_verified":true,
+                 "name":"Google User","given_name":"Google","family_name":"User","picture":"https://picture.example/user"}
+                """;
+
+        String redirect = googleFederation.beginAuthorization(pool.getId(), "cognito-client",
+                "https://application.example.test/callback", List.of("openid"), "nonce-value", "Google");
+        assertTrue(redirect.startsWith(endpoint("/authorize") + "?"), redirect);
+        assertEquals("openid email profile", queryValue(redirect, "scope"));
+        String code = googleFederation.completeAuthorization(queryValue(redirect, "state"), "provider-code");
+        CognitoAuthorizationCode storedCode = stateStore.consumeAuthorizationCode(code).orElseThrow();
+        CognitoUser user = cognitoService.adminGetUser(pool.getId(), storedCode.userId());
+
+        assertEquals("Google_google-subject", user.getUsername());
+        assertEquals("google@example.test", user.getAttributes().get("email"));
+        assertEquals("true", user.getAttributes().get("email_verified"));
+        assertEquals("Google User", user.getAttributes().get("name"));
+        assertEquals("Google", user.getAttributes().get("given_name"));
+        assertEquals("User", user.getAttributes().get("family_name"));
+        assertEquals("https://picture.example/user", user.getAttributes().get("picture"));
+        assertEquals("google-client", formValue(tokenRequest.get().body(), "client_id"));
+        assertEquals("google-secret", formValue(tokenRequest.get().body(), "client_secret"));
+        assertEquals("Bearer provider-access-token", claimsRequest.get().authorization());
+        assertEquals(details, cognitoService.describeIdentityProvider(pool.getId(), "Google").getProviderDetails());
+    }
+
+    @Test
+    void googleSignInRejectsUntrustedOrIncompleteDiscoveryBeforeExchangingCredentials() throws Exception {
+        createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
+        for (String body : List.of(discovery().replace(endpoint(""), "https://other-issuer.example"),
+                "{\"issuer\":\"" + endpoint("") + "\"}",
+                discovery().replace(endpoint("/token"), "file:///tmp/token"), "[]")) {
+            CognitoFederationService googleFederation = googleFederation(body, 200);
+            assertThrows(AwsException.class, () -> googleFederation.beginAuthorization(pool.getId(), "cognito-client",
+                    "https://application.example.test/callback", List.of("openid"), null, "Google"));
+            oidcServer.removeContext("/.well-known/openid-configuration");
+        }
+        assertNull(tokenRequest.get());
+        assertNull(claimsRequest.get());
+    }
+
+    @Test
+    void googleSignInReportsDiscoveryFailureWithoutLeakingTheResponse() throws Exception {
+        createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
+        CognitoFederationService googleFederation = googleFederation("sensitive response", 503);
+
+        AwsException failure = assertThrows(AwsException.class, () -> googleFederation.beginAuthorization(
+                pool.getId(), "cognito-client", "https://application.example.test/callback", List.of("openid"), null, "Google"));
+
+        assertEquals("NotAuthorizedException", failure.getErrorCode());
+        assertFalse(failure.getMessage().contains("sensitive response"));
+        assertNull(tokenRequest.get());
+        assertNull(claimsRequest.get());
+    }
+
+    @Test
+    void googleProvisioningUsesSubjectAndReconcilesTheSameUser() throws Exception {
+        IdentityProvider provider = createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
+        CognitoUser first = cognitoService.provisionFederatedUser(pool.getId(), provider, "google-subject", null,
+                Map.of("email", "first@example.test"));
+        CognitoUser second = cognitoService.provisionFederatedUser(pool.getId(), provider, "google-subject", null,
+                Map.of("email", "updated@example.test"));
+
+        assertEquals("Google_google-subject", first.getUsername());
+        assertEquals(first.getUsername(), second.getUsername());
+        assertEquals("updated@example.test", second.getAttributes().get("email"));
+        JsonNode identity = MAPPER.readTree(second.getAttributes().get("identities")).get(0);
+        assertEquals("Google", identity.path("providerName").asText());
+        assertEquals("Google", identity.path("providerType").asText());
+        assertEquals("google-subject", identity.path("userId").asText());
+    }
+
+    @Test
+    void googleProvisioningDoesNotReplaceAnUnlinkedUserWithTheSameUsername() {
+        IdentityProvider provider = createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
+        cognitoService.adminCreateUser(pool.getId(), "Google_google-subject", Map.of("email", "local@example.test"),
+                "Password123!");
+
+        AwsException failure = assertThrows(AwsException.class, () -> cognitoService.provisionFederatedUser(
+                pool.getId(), provider, "google-subject", null, Map.of("email", "external@example.test")));
+
+        assertEquals("UsernameExistsException", failure.getErrorCode());
+        assertEquals("local@example.test", cognitoService.adminGetUser(pool.getId(), "Google_google-subject")
+                .getAttributes().get("email"));
+    }
+
+    @Test
     void completeAuthorizationStoresAwsCompatibleIdentityFields() throws Exception {
         createDefaultProvider();
 
@@ -410,6 +537,18 @@ class CognitoFederationServiceTest {
 
     private String endpoint(String path) {
         return "http://127.0.0.1:" + oidcServer.getAddress().getPort() + path;
+    }
+
+    private String discovery() {
+        return """
+                {"issuer":"%s","authorization_endpoint":"%s","token_endpoint":"%s","userinfo_endpoint":"%s"}
+                """.formatted(endpoint(""), endpoint("/authorize"), endpoint("/token"), endpoint("/userinfo"));
+    }
+
+    private CognitoFederationService googleFederation(String discovery, int status) {
+        oidcServer.createContext("/.well-known/openid-configuration", exchange -> writeResponse(exchange, status, discovery));
+        return new CognitoFederationService(cognitoService, stateStore,
+                new CognitoOidcClient(HttpClient.newHttpClient(), MAPPER, endpoint("")), CLOCK);
     }
 
     private void handleToken(HttpExchange exchange) throws IOException {
