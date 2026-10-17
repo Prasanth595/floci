@@ -37,6 +37,7 @@ public class RedshiftServerlessAdminJsonHandler {
     @Inject
     public RedshiftServerlessAdminJsonHandler(ObjectMapper objectMapper,
                                               RedshiftServerlessResourcePolicyService resourcePolicies,
+                                              RedshiftServerlessEndpointAccessService endpointAccess,
                                               RedshiftServerlessCustomDomainService customDomains,
                                               RedshiftServerlessSnapshotCopyService snapshotCopies) {
         this.objectMapper = objectMapper;

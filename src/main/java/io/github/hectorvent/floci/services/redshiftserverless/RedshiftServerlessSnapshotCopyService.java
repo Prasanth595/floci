@@ -33,7 +33,6 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
     /** The model gives {@code destinationRegion} no pattern, so the shape of a Region name is checked here. */
     private static final Pattern REGION_NAME = Pattern.compile("^[a-z0-9-]+$");
     private static final int MAX_RETENTION_DAYS = 3653;
-    private static final int PAGE_SIZE = 100;
 
     private final AccountAwareStorageBackend<SnapshotCopyConfiguration> configurations;
     private final RegionResolver regionResolver;
@@ -83,10 +82,7 @@ public class RedshiftServerlessSnapshotCopyService implements Resettable {
 
     public synchronized PaginatedResult<SnapshotCopyConfiguration> listSnapshotCopyConfigurations(
             String namespaceName, String region, Integer maxResults, String nextToken) {
-        if (maxResults != null && (maxResults < 1 || maxResults > PAGE_SIZE)) {
-            throw ServerlessSupport.validation("maxResults must be between 1 and " + PAGE_SIZE);
-        }
-        int limit = maxResults != null ? maxResults : PAGE_SIZE;
+        int limit = ServerlessSupport.pageSize(maxResults);
         List<SnapshotCopyConfiguration> matching = live(region).stream()
                 .filter(configuration -> namespaceName == null
                         || namespaceName.equals(configuration.getNamespaceName()))

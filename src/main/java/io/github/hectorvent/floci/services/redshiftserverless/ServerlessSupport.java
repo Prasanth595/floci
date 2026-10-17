@@ -21,6 +21,8 @@ import java.util.function.Predicate;
  */
 final class ServerlessSupport {
 
+    static final int PAGE_SIZE = 100;
+
     /** Use only for members whose model overrides the epoch-seconds default with ISO 8601. */
     static final DateTimeFormatter ISO_8601 =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
@@ -135,6 +137,13 @@ final class ServerlessSupport {
 
     static Integer maxResults(JsonNode request) {
         return integer(request, "maxResults");
+    }
+
+    static int pageSize(Integer maxResults) {
+        if (maxResults != null && (maxResults < 1 || maxResults > PAGE_SIZE)) {
+            throw validation("maxResults must be between 1 and " + PAGE_SIZE);
+        }
+        return maxResults != null ? maxResults : PAGE_SIZE;
     }
 
     /** Return the Region's surviving records and remove records whose original parent is gone. */

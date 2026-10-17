@@ -33,7 +33,6 @@ import java.util.regex.Pattern;
 public class RedshiftServerlessEndpointAccessService implements Resettable {
 
     private static final Pattern ENDPOINT_NAME = Pattern.compile("^[A-Za-z][A-Za-z0-9-]{0,29}$");
-    private static final int PAGE_SIZE = 100;
 
     private final AccountAwareStorageBackend<EndpointAccess> endpoints;
     private final RegionResolver regionResolver;
@@ -103,10 +102,7 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
                 .sorted(Comparator.comparing(EndpointAccess::getEndpointName))
                 .map(endpoint -> withCurrentConnection(endpoint, region))
                 .toList();
-        if (maxResults != null && (maxResults < 1 || maxResults > PAGE_SIZE)) {
-            throw ServerlessSupport.validation("maxResults must be between 1 and " + PAGE_SIZE);
-        }
-        int limit = maxResults != null ? maxResults : PAGE_SIZE;
+        int limit = ServerlessSupport.pageSize(maxResults);
         return Pagination.paginate(matching, EndpointAccess::getEndpointName, limit, nextToken,
                 "endpoint-access", token -> ServerlessSupport.validation("Invalid nextToken."));
     }

@@ -33,8 +33,6 @@ import java.util.Optional;
 @ApplicationScoped
 public class RedshiftServerlessCustomDomainService implements Resettable {
 
-    private static final int PAGE_SIZE = 100;
-
     private final AccountAwareStorageBackend<CustomDomainAssociation> associations;
     private final RedshiftServerlessService serverless;
     private final AcmService acmService;
@@ -91,10 +89,7 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
 
     public synchronized PaginatedResult<CustomDomainAssociation> listCustomDomainAssociations(
             String customDomainName, String certificateArn, String region, Integer maxResults, String nextToken) {
-        if (maxResults != null && (maxResults < 1 || maxResults > PAGE_SIZE)) {
-            throw ServerlessSupport.validation("maxResults must be between 1 and " + PAGE_SIZE);
-        }
-        int limit = maxResults != null ? maxResults : PAGE_SIZE;
+        int limit = ServerlessSupport.pageSize(maxResults);
         List<CustomDomainAssociation> matching = live(region).stream()
                 .filter(association -> customDomainName == null
                         || customDomainName.equals(association.getCustomDomainName()))
@@ -107,7 +102,7 @@ public class RedshiftServerlessCustomDomainService implements Resettable {
         return Pagination.paginate(matching,
                 association -> association.getWorkgroupName() + "|" + association.getCustomDomainName(),
                 limit, nextToken, "custom-domain",
-                token -> new AwsException("InvalidPaginationException", "Invalid nextToken.", 400));
+                token -> ServerlessSupport.invalidPagination("Invalid nextToken."));
     }
 
     /** Points the association at another certificate, the only member AWS lets an update change. */
