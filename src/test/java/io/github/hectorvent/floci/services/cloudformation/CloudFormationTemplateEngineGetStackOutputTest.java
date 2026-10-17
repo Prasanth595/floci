@@ -243,13 +243,6 @@ class CloudFormationTemplateEngineGetStackOutputTest {
     }
 
     @Test
-    void outputsValue_directReferenceResolves() {
-        assertEquals("Producer/VpcId@us-east-1", engine().resolveOutputValue(json("""
-                {"Fn::GetStackOutput": {"StackName": "Producer", "OutputName": "VpcId"}}
-                """)));
-    }
-
-    @Test
     void withoutAResolver_theReferenceFails() {
         CloudFormationTemplateEngine standalone = CloudFormationTemplateEngine.standalone("111111111111",
                 "us-east-1", "cloudcontrol", mapper, null);

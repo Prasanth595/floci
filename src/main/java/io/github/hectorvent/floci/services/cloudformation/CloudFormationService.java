@@ -27,7 +27,6 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynami
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
-import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.ssm.SsmService;
@@ -121,7 +120,7 @@ public class CloudFormationService implements ResourceProvider {
     private final CfnResourceDispatcher dispatcher;
     private final S3Service s3Service;
     private final SsmService ssmService;
-    private final IamService iamService;
+    private final GetStackOutputRoleAuthorizer stackOutputRoles;
     private final CfnDynamicReferences dynamicReferences;
     private final ObjectMapper objectMapper;
     private final EmulatorConfig config;
@@ -139,7 +138,7 @@ public class CloudFormationService implements ResourceProvider {
 
     @Inject
     public CloudFormationService(CfnResourceDispatcher dispatcher, S3Service s3Service,
-                                 SsmService ssmService, IamService iamService,
+                                 SsmService ssmService, GetStackOutputRoleAuthorizer stackOutputRoles,
                                  CfnDynamicReferences dynamicReferences,
                                  ObjectMapper objectMapper, EmulatorConfig config,
                                  RegionResolver regionResolver, Clock clock,
@@ -147,7 +146,7 @@ public class CloudFormationService implements ResourceProvider {
         this.dispatcher = dispatcher;
         this.s3Service = s3Service;
         this.ssmService = ssmService;
-        this.iamService = iamService;
+        this.stackOutputRoles = stackOutputRoles;
         this.dynamicReferences = dynamicReferences;
         this.objectMapper = objectMapper;
         this.config = config;
@@ -2197,7 +2196,7 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, String> outputValues = new LinkedHashMap<>();
             for (Map.Entry<String, JsonNode> output : outputs.entrySet()) {
                 try {
-                    outputValues.put(output.getKey(), finalEngine.resolveOutputValue(output.getValue().path("Value")));
+                    outputValues.put(output.getKey(), finalEngine.resolve(output.getValue().path("Value")));
                 } catch (AwsException e) {
                     if (!CloudFormationTemplateEngine.containsGetStackOutput(output.getValue())) {
                         throw e;
@@ -3899,38 +3898,15 @@ public class CloudFormationService implements ResourceProvider {
     /**
      * Reads the output a {@code Fn::GetStackOutput} names, as DescribeStacks does in the
      * referenced account and Region: the consuming stack's account, or the account of
-     * {@code roleArn}, a role CloudFormation has to be able to assume. The failures carry the
-     * messages AWS reports for them: STS's AccessDenied for a role that cannot be assumed (a user,
-     * a role of another partition, one that does not exist), DescribeStacks' ValidationError for a
+     * {@code roleArn}, a role CloudFormation has to be able to assume, which
+     * {@link GetStackOutputRoleAuthorizer} decides. The failures carry the messages AWS reports for
+     * them: STS's or DescribeStacks' AccessDenied for the role, DescribeStacks' ValidationError for a
      * missing stack, and a template error for a missing output.
-     *
-     * <p>On AWS the role is assumed by the stack's execution role, or without one by the caller
-     * of the stack operation (measured, eu-west-1, 2026-10-16), and the CDK's role trusts exactly
-     * the consuming account's execution role. Floci runs stack operations under no execution role
-     * and keeps no caller for them, so, as AssumeRole does with IAM enforcement off, it only
-     * requires the role to exist: its trust policy and its DescribeStacks permission are not
-     * evaluated, and the caller is named as the account's root.
      */
     private String resolveStackOutput(String accountId, String stackName, String outputName,
                                       String region, String roleArn) {
-        String ownerAccount = accountId;
-        if (roleArn != null) {
-            AwsArnUtils.Arn role = AwsArnUtils.parse(roleArn);
-            String partition = AwsRegions.partitionFor(region);
-            boolean assumable = "iam".equals(role.service()) && role.resource().startsWith("role/")
-                    && partition.equals(role.partition())
-                    && iamService.findRole(role.accountId(), role.resource().substring(role.resource().lastIndexOf('/') + 1))
-                            .filter(stored -> AwsArnUtils.isArn(stored.getArn())
-                                    && AwsArnUtils.parse(stored.getArn()).resource().equals(role.resource()))
-                            .isPresent();
-            if (!assumable) {
-                throw new AwsException("AccessDenied", CloudFormationTemplateEngine.sdkErrorMessage(
-                        "User: arn:" + partition + ":iam::" + accountId + ":root is not authorized to perform:"
-                                + " sts:AssumeRole on resource: " + roleArn,
-                        "AWSSecurityTokenService", 403, "AccessDenied"), 403);
-            }
-            ownerAccount = role.accountId();
-        }
+        String partition = AwsRegions.partitionFor(region);
+        String ownerAccount = roleArn == null ? accountId : stackOutputRoles.assume(roleArn, accountId, partition);
         // CloudFormation hands the stack name to DescribeStacks as written, a dynamic reference
         // included (it resolves none inside Fn::GetStackOutput), and DescribeStacks validates it.
         if (!STACK_NAME.matcher(stackName).matches()) {
@@ -3945,6 +3921,9 @@ public class CloudFormationService implements ResourceProvider {
             throw new AwsException("ValidationError", CloudFormationTemplateEngine.sdkErrorMessage(
                     "Stack with id " + stackName + " does not exist", "AmazonCloudFormation", 400,
                     "ValidationError"), 400);
+        }
+        if (roleArn != null) {
+            stackOutputRoles.requireDescribeStacks(roleArn, referenced.getStackId(), partition);
         }
         String value = referenced.outputsSnapshot().get(outputName);
         if (value == null) {
@@ -3988,7 +3967,8 @@ public class CloudFormationService implements ResourceProvider {
             throw new AwsException("ValidationError",
                     "Template error: Cannot use Fn::GetStackOutput in Conditions.", 400);
         }
-        if (importsAStackOutput(template)) {
+        if (template.findValues("Fn::ImportValue").stream()
+                .anyMatch(CloudFormationTemplateEngine::containsGetStackOutput)) {
             throw new AwsException("ValidationError", "Template error: the attribute in Fn::ImportValue must not"
                     + " depend on any resources, imported values, or Fn::GetAZs", 400);
         }
@@ -4007,9 +3987,8 @@ public class CloudFormationService implements ResourceProvider {
      * StackName or OutputName, when the stack operation is requested, with the messages AWS gives
      * (measured, eu-west-1, 2026-10-16). A value of the wrong type is DescribeStacks' to refuse.
      */
-    private static void requireGetStackOutputArguments(JsonNode node) {
-        if (node.isObject() && node.size() == 1 && node.has("Fn::GetStackOutput")) {
-            JsonNode arguments = node.get("Fn::GetStackOutput");
+    private static void requireGetStackOutputArguments(JsonNode template) {
+        for (JsonNode arguments : template.findValues("Fn::GetStackOutput")) {
             if (!arguments.isObject()) {
                 throw new AwsException("ValidationError",
                         "TemplateError: Fn::GetStackOutput requires a map of named parameters", 400);
@@ -4019,23 +3998,9 @@ public class CloudFormationService implements ResourceProvider {
                     throw new AwsException("ValidationError", "GetStackOutput: " + required + " is required", 400);
                 }
             }
+            // findValues does not look inside what it found; a parameter may hold another reference.
+            requireGetStackOutputArguments(arguments);
         }
-        for (JsonNode child : node) {
-            requireGetStackOutputArguments(child);
-        }
-    }
-
-    private static boolean importsAStackOutput(JsonNode node) {
-        if (node.isObject() && node.has("Fn::ImportValue")
-                && CloudFormationTemplateEngine.containsGetStackOutput(node.get("Fn::ImportValue"))) {
-            return true;
-        }
-        for (JsonNode child : node) {
-            if (importsAStackOutput(child)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**

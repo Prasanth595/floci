@@ -748,25 +748,9 @@ public class CloudFormationTemplateEngine {
         throw new AwsException("ValidationError", "No export named " + exportName + " found", 400);
     }
 
-    /** Resolves an {@code Outputs} entry's {@code Value}. */
-    public String resolveOutputValue(JsonNode node) {
-        return resolve(node);
-    }
-
     /** Whether {@code node} holds {@code Fn::GetStackOutput} anywhere inside it. */
     static boolean containsGetStackOutput(JsonNode node) {
-        if (node == null) {
-            return false;
-        }
-        if (node.isObject() && node.has(GET_STACK_OUTPUT)) {
-            return true;
-        }
-        for (JsonNode child : node) {
-            if (containsGetStackOutput(child)) {
-                return true;
-            }
-        }
-        return false;
+        return node != null && !node.findValues(GET_STACK_OUTPUT).isEmpty();
     }
 
     /**
@@ -818,7 +802,8 @@ public class CloudFormationTemplateEngine {
                     "TemplateError: Invalid RoleArn parameter " + roleArn + " in Fn::GetStackOutput", 400);
         }
         if (stackOutputResolver == null) {
-            throw templateError("Fn::GetStackOutput cannot be resolved outside a stack");
+            throw new AwsException("ValidationError",
+                    "Template error: Fn::GetStackOutput cannot be resolved outside a stack", 400);
         }
         return stackOutputResolver.resolve(referencedStack, outputName, referencedRegion, roleArn);
     }
@@ -849,9 +834,5 @@ public class CloudFormationTemplateEngine {
     static String sdkErrorMessage(String message, String service, int status, String errorCode) {
         return message + " (Service: " + service + "; Status Code: " + status + "; Error Code: " + errorCode
                 + "; Request ID: " + UUID.randomUUID() + "; Proxy: null)";
-    }
-
-    private static AwsException templateError(String message) {
-        return new AwsException("ValidationError", "Template error: " + message, 400);
     }
 }

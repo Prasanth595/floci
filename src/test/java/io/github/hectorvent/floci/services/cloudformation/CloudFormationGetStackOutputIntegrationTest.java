@@ -2,19 +2,23 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -35,7 +39,9 @@ class CloudFormationGetStackOutputIntegrationTest {
     private static final String OTHER_ACCOUNT = "000000000042";
     private static final String US_EAST_1 = "us-east-1";
     private static final String EU_WEST_1 = "eu-west-1";
-    private static final String SSM_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final String DESCRIBE_STACKS = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"cloudformation:DescribeStacks","Resource":"*"}]}""";
 
     @Inject
     S3Service s3Service;
@@ -43,35 +49,17 @@ class CloudFormationGetStackOutputIntegrationTest {
     @Inject
     SsmService ssmService;
 
+    @TestHTTPResource
+    URI baseUri;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
     private final String suffix = Long.toString(System.nanoTime(), 36);
-    /** Account, Region and name of every stack a test created, deleted in reverse order. */
-    private final List<String[]> stacksToDelete = new ArrayList<>();
-    /** Account and name of every role a test created. */
-    private final List<String[]> rolesToDelete = new ArrayList<>();
 
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
-    }
-
-    @AfterEach
-    void cleanUp() {
-        for (String[] stack : stacksToDelete.reversed()) {
-            given().header("Authorization", auth(stack[0], stack[1], "cloudformation"))
-                    .contentType("application/x-www-form-urlencoded")
-                    .formParam("Action", "DeleteStack")
-                    .formParam("StackName", stack[2])
-                    .when().post("/");
-        }
-        stacksToDelete.clear();
-        for (String[] role : rolesToDelete) {
-            given().header("Authorization", auth(role[0], US_EAST_1, "iam"))
-                    .contentType("application/x-www-form-urlencoded")
-                    .formParam("Action", "DeleteRole")
-                    .formParam("RoleName", role[1])
-                    .when().post("/");
-        }
-        rolesToDelete.clear();
     }
 
     @Test
@@ -195,10 +183,9 @@ class CloudFormationGetStackOutputIntegrationTest {
     }
 
     /**
-     * The role is assumed by the stack's execution role on AWS, and the CDK's role trusts exactly
-     * the consuming account's execution role (measured, eu-west-1, 2026-10-16). Floci runs stack
-     * operations under no execution role, so it requires the role to exist and evaluates no trust
-     * policy: the CDK's shape resolves, as one trusting only a service does.
+     * With IAM enforcement off, as AssumeRole, Floci requires the role to exist and evaluates no
+     * trust policy: the CDK's shape resolves, as one trusting only a service does.
+     * {@code CloudFormationGetStackOutputEnforcementIntegrationTest} covers enforcement on.
      */
     @Test
     void crossAccount_theRolesTrustPolicyIsNotEvaluated() {
@@ -539,42 +526,21 @@ class CloudFormationGetStackOutputIntegrationTest {
     }
 
     private void createStack(String account, String region, String stackName, String template) {
-        given().header("Authorization", auth(account, region, "cloudformation"))
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "CreateStack")
-                .formParam("StackName", stackName)
-                .formParam("TemplateBody", template)
-                .when().post("/").then().statusCode(200);
-        stacksToDelete.add(new String[] {account, region, stackName});
+        GetStackOutputFixtures.createStack(cleanup, account, region, stackName, template);
     }
 
     private void createRole(String account, String roleName) {
         createRole(account, roleName, "{\"AWS\":\"arn:aws:iam::" + DEFAULT_ACCOUNT + ":root\"}");
     }
 
+    /** A role in {@code account} whose trust policy allows {@code principal}, a Principal element's value. */
     private void createRole(String account, String roleName, String principal) {
-        given().header("Authorization", auth(account, US_EAST_1, "iam"))
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "CreateRole")
-                .formParam("RoleName", roleName)
-                .formParam("AssumeRolePolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":"
-                        + "\"Allow\",\"Principal\":" + principal + ",\"Action\":\"sts:AssumeRole\"}]}")
-                .when().post("/").then().statusCode(200);
-        rolesToDelete.add(new String[] {account, roleName});
+        EnforcementFixtures.createRole(cleanup, baseUri.getPort(), account, "/", roleName,
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":" + principal
+                        + ",\"Action\":\"sts:AssumeRole\"}]}", DESCRIBE_STACKS);
     }
 
-    private static ValidatableResponse parameterValue(
-            String account, String region, String name) {
-        return given().header("Authorization", auth(account, region, "ssm"))
-                .header("X-Amz-Target", "AmazonSSM.GetParameter")
-                .contentType(SSM_CONTENT_TYPE)
-                .body("{\"Name\": \"" + name + "\"}")
-                .when().post("/").then();
-    }
-
-    private static String auth(String accessKeyId, String region, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId
-                + "/20260907/" + region + "/" + service + "/aws4_request,"
-                + " SignedHeaders=host, Signature=abc";
+    private static ValidatableResponse parameterValue(String account, String region, String name) {
+        return GetStackOutputFixtures.parameterValue(account, region, name);
     }
 }

@@ -508,10 +508,16 @@ intrinsic's reference page:
   Fn::GetStackOutput`. Any other ARN that is not an existing role (a user, a role of another
   partition, a role that does not exist) fails with STS's `AccessDenied`, naming the account's root
   as the caller. On AWS the role is assumed by the stack's execution role, or without one by the
-  caller of the stack operation, and the CDK's role trusts the consuming account's execution role.
-  Floci runs stack operations under no execution role and keeps no caller for them, so, as
-  `AssumeRole` does with IAM enforcement off, the role's trust policy and its
-  `cloudformation:DescribeStacks` permission are not evaluated.
+  caller of the stack operation, and the outputs are read with DescribeStacks in a session named
+  `GetStackOutput`; the CDK's role trusts the consuming account's execution role. Floci runs stack
+  operations under no execution role and keeps no caller for them. With IAM enforcement off, as
+  `AssumeRole`, it evaluates neither the role's trust policy nor its permissions. With enforcement on,
+  the trust policy has to allow a principal in the consuming account (its root, or any principal of
+  it the policy names, such as the CDK's execution role), or STS's `AccessDenied` fails the resource,
+  and the role's policies have to allow `cloudformation:DescribeStacks` on the stack, or
+  DescribeStacks' `AccessDenied` does (`User: arn:aws:sts::A:assumed-role/R/GetStackOutput is not
+  authorized to perform: cloudformation:DescribeStacks on resource: ... because no identity-based
+  policy allows the cloudformation:DescribeStacks action`).
 - Arguments that are not a map, or that lack `StackName` or `OutputName`, are refused when the stack
   operation is requested, with `ValidationError` `TemplateError: Fn::GetStackOutput requires a map of
   named parameters` or `GetStackOutput: StackName is required`, as on AWS.
