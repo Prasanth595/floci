@@ -60,7 +60,9 @@ that stall between tokens. The model server controls how it reacts to that signa
 
 Operational HTTP-error warnings retain the upstream status code and omit the
 backend response body. A connected caller receives `ModelErrorException` with a
-bounded backend error description. Streaming error-body reads are limited to 8 KiB.
+bounded backend error description. Streaming error-body reads are limited to 8 KiB
+with a one-second collection deadline. If the body stalls, the proxy closes it and
+returns the known model error without body details.
 
 ## Examples
 
