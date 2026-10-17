@@ -8,12 +8,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.Ec2Requests.ec2;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
 class Ec2AddressMetadataIntegrationTest {
 
+    private static final String ACCOUNT_ID = "000000000000";
     private static final String REGION = "us-west-2";
     private static final String ALLOCATED = "AllocateAddressResponse.";
     private static final String DESCRIBED = "DescribeAddressesResponse.addressesSet.item.";
@@ -26,18 +27,18 @@ class Ec2AddressMetadataIntegrationTest {
     void deleteCreatedResources() {
         try {
             if (associationId != null) {
-                ec2("DisassociateAddress").formParam("AssociationId", associationId)
+                ec2("DisassociateAddress", ACCOUNT_ID, REGION).formParam("AssociationId", associationId)
                         .post("/").then().statusCode(200);
             }
         } finally {
             try {
                 if (allocationId != null) {
-                    ec2("ReleaseAddress").formParam("AllocationId", allocationId)
+                    ec2("ReleaseAddress", ACCOUNT_ID, REGION).formParam("AllocationId", allocationId)
                             .post("/").then().statusCode(200);
                 }
             } finally {
                 if (instanceId != null) {
-                    ec2("TerminateInstances").formParam("InstanceId.1", instanceId)
+                    ec2("TerminateInstances", ACCOUNT_ID, REGION).formParam("InstanceId.1", instanceId)
                             .post("/").then().statusCode(200);
                 }
             }
@@ -46,7 +47,7 @@ class Ec2AddressMetadataIntegrationTest {
 
     @Test
     void omittedMetadataUsesAmazonPoolAndTheRequestRegion() {
-        Response allocated = allocate(ec2("AllocateAddress"));
+        Response allocated = allocate(ec2("AllocateAddress", ACCOUNT_ID, REGION));
 
         allocated.then()
                 .body(ALLOCATED + "publicIpv4Pool", equalTo("amazon"))
@@ -59,7 +60,7 @@ class Ec2AddressMetadataIntegrationTest {
     @ParameterizedTest
     @CsvSource({"amazon,us-west-2", "ipv4pool-ec2-0123456789abcdef0,us-west-2-lax-1"})
     void explicitMetadataIsAllocatedDescribedAndFiltered(String pool, String borderGroup) {
-        Response allocated = allocate(ec2("AllocateAddress")
+        Response allocated = allocate(ec2("AllocateAddress", ACCOUNT_ID, REGION)
                 .formParam("PublicIpv4Pool", pool)
                 .formParam("NetworkBorderGroup", borderGroup));
 
@@ -70,13 +71,13 @@ class Ec2AddressMetadataIntegrationTest {
                 .body(DESCRIBED + "publicIpv4Pool", equalTo(pool))
                 .body(DESCRIBED + "networkBorderGroup", equalTo(borderGroup));
 
-        ec2("DescribeAddresses").formParam("AllocationId.1", allocationId)
+        ec2("DescribeAddresses", ACCOUNT_ID, REGION).formParam("AllocationId.1", allocationId)
                 .formParam("Filter.1.Name", "network-border-group")
                 .formParam("Filter.1.Value.1", borderGroup)
                 .post("/").then().statusCode(200)
                 .body("DescribeAddressesResponse.addressesSet.item.size()", equalTo(1))
                 .body(DESCRIBED + "allocationId", equalTo(allocationId));
-        ec2("DescribeAddresses").formParam("AllocationId.1", allocationId)
+        ec2("DescribeAddresses", ACCOUNT_ID, REGION).formParam("AllocationId.1", allocationId)
                 .formParam("Filter.1.Name", "network-border-group")
                 .formParam("Filter.1.Value.1", "us-east-1")
                 .post("/").then().statusCode(200)
@@ -86,16 +87,16 @@ class Ec2AddressMetadataIntegrationTest {
     @Test
     void metadataSurvivesInstanceAssociationAndDisassociation() {
         String pool = "ipv4pool-ec2-0123456789abcdef0";
-        allocate(ec2("AllocateAddress")
+        allocate(ec2("AllocateAddress", ACCOUNT_ID, REGION)
                 .formParam("PublicIpv4Pool", pool)
                 .formParam("NetworkBorderGroup", REGION));
-        instanceId = ec2("RunInstances")
+        instanceId = ec2("RunInstances", ACCOUNT_ID, REGION)
                 .formParam("ImageId", "ami-0abcdef1234567890")
                 .formParam("InstanceType", "t3.micro")
                 .formParam("MinCount", "1").formParam("MaxCount", "1")
                 .post("/").then().statusCode(200)
                 .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
-        associationId = ec2("AssociateAddress")
+        associationId = ec2("AssociateAddress", ACCOUNT_ID, REGION)
                 .formParam("AllocationId", allocationId)
                 .formParam("InstanceId", instanceId)
                 .post("/").then().statusCode(200)
@@ -107,7 +108,7 @@ class Ec2AddressMetadataIntegrationTest {
                 .body(DESCRIBED + "publicIpv4Pool", equalTo(pool))
                 .body(DESCRIBED + "networkBorderGroup", equalTo(REGION));
 
-        ec2("DisassociateAddress").formParam("AssociationId", associationId)
+        ec2("DisassociateAddress", ACCOUNT_ID, REGION).formParam("AssociationId", associationId)
                 .post("/").then().statusCode(200);
         associationId = null;
 
@@ -126,13 +127,7 @@ class Ec2AddressMetadataIntegrationTest {
     }
 
     private Response describe() {
-        return ec2("DescribeAddresses").formParam("AllocationId.1", allocationId)
+        return ec2("DescribeAddresses", ACCOUNT_ID, REGION).formParam("AllocationId.1", allocationId)
                 .post("/").then().statusCode(200).extract().response();
-    }
-
-    private RequestSpecification ec2(String action) {
-        return given().header("Authorization",
-                        "AWS4-HMAC-SHA256 Credential=test/20261016/" + REGION + "/ec2/aws4_request")
-                .formParam("Action", action);
     }
 }
