@@ -190,24 +190,33 @@ class Ec2MetadataProxyTest {
     @Test
     void podIdentityProbeIgnoresTheImagesHttpProxy(@TempDir Path directory) throws Exception {
         List<String> proxied = new CopyOnWriteArrayList<>();
-        HttpServer proxy = failingProxy(proxied);
-        HttpServer relay = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        relay.createContext("/v1/credentials", exchange -> {
-            exchange.sendResponseHeaders(400, -1);
-            exchange.close();
-        });
-        relay.start();
+        AtomicInteger relayed = new AtomicInteger();
+        HttpServer proxy = null;
+        HttpServer relay = null;
         try {
+            proxy = failingProxy(proxied);
+            relay = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            relay.createContext("/v1/credentials", exchange -> {
+                relayed.incrementAndGet();
+                exchange.sendResponseHeaders(400, -1);
+                exchange.close();
+            });
+            relay.start();
             String[] probe = {"sh", "-c",
                     Ec2MetadataProxy.podIdentityProbeCommand("http://127.0.0.1:" + relay.getAddress().getPort())};
 
             int result = HelperShellFixture.run(probe, directory, proxyEnvironment(proxy));
 
             assertEquals(0, result, HelperShellFixture.output(directory));
+            assertEquals(1, relayed.get(), HelperShellFixture.output(directory));
             assertEquals(List.of(), proxied);
         } finally {
-            relay.stop(0);
-            proxy.stop(0);
+            if (relay != null) {
+                relay.stop(0);
+            }
+            if (proxy != null) {
+                proxy.stop(0);
+            }
         }
     }
 
