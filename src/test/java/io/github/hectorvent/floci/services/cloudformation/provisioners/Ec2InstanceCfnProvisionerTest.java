@@ -22,6 +22,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -77,7 +78,7 @@ class Ec2InstanceCfnProvisionerTest {
 
         assertEquals("i-1", r.getPhysicalId());
         assertEquals(Set.of("InstanceId", "PrivateIp", "PublicIp", "PrivateDnsName", "PublicDnsName",
-                "AvailabilityZone", "VpcId", "State.Code", "State.Name"), r.getAttributes().keySet());
+                "AvailabilityZone", "VpcId", "State.Code", "State.Name"), publishedAttributes(r));
         assertEquals("10.0.0.5", r.getAttributes().get("PrivateIp"));
         assertEquals("us-east-1a", r.getAttributes().get("AvailabilityZone"));
         assertEquals("vpc-1", r.getAttributes().get("VpcId"));
@@ -116,7 +117,7 @@ class Ec2InstanceCfnProvisionerTest {
 
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx());
 
-        assertEquals(Set.of("InstanceId"), r.getAttributes().keySet());
+        assertEquals(Set.of("InstanceId"), publishedAttributes(r));
     }
 
     @Test
@@ -598,6 +599,48 @@ class Ec2InstanceCfnProvisionerTest {
         assertNull(reset.getValue().getHttpEndpoint());
     }
 
+    /**
+     * LaunchTemplate is createOnly on AWS::EC2::Instance. Naming another template, adding one or
+     * dropping it replaces the instance; a new version of the same template is applied in place,
+     * because the template's own provisioner publishes a version on every stack update.
+     */
+    @Test
+    void changingWhichLaunchTemplateTheInstanceUsesReplacesIt() throws Exception {
+        LaunchTemplateData data = new LaunchTemplateData();
+        data.setImageId("ami-1");
+        when(ec2.resolveLaunchTemplateData(eq("us-east-1"), any(), any(), any(), eq(false))).thenReturn(data);
+        Instance i1 = launched("i-1");
+        Instance i2 = launched("i-2");
+        Instance i3 = launched("i-3");
+        Instance i4 = launched("i-4");
+        when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any()))
+                .thenReturn(reservationOf(i1), reservationOf(i2), reservationOf(i3), reservationOf(i4));
+        for (Instance instance : List.of(i1, i2, i3, i4)) {
+            when(ec2.describeInstances("us-east-1", List.of(instance.getInstanceId()), null))
+                    .thenReturn(List.of(reservationOf(instance)));
+        }
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("""
+                {"LaunchTemplate": {"LaunchTemplateId": "lt-1", "Version": "1"}}
+                """), ctx(null));
+
+        provisioner.provision(r, props("""
+                {"LaunchTemplate": {"LaunchTemplateId": "lt-1", "Version": "2"}}
+                """), ctx("i-1"));
+        assertEquals("i-1", r.getPhysicalId());
+        provisioner.provision(r, props("""
+                {"LaunchTemplate": {"LaunchTemplateId": "lt-2", "Version": "1"}}
+                """), ctx("i-1"));
+        assertEquals("i-2", r.getPhysicalId());
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-2"));
+        assertEquals("i-3", r.getPhysicalId());
+        provisioner.provision(r, props("""
+                {"LaunchTemplate": {"LaunchTemplateName": "web", "Version": "1"}}
+                """), ctx("i-3"));
+        assertEquals("i-4", r.getPhysicalId());
+    }
+
     @Test
     void invalidMetadataOptionsFailBeforeAReusedInstanceChanges() throws Exception {
         StackResource r = resource("Server");
@@ -775,6 +818,19 @@ class Ec2InstanceCfnProvisionerTest {
         Reservation reservation = new Reservation();
         reservation.getInstances().add(instance);
         return reservation;
+    }
+
+    /** The attribute names Fn::GetAtt can read: the provisioner's own __Floci records are not among them. */
+    private static Set<String> publishedAttributes(StackResource r) {
+        return r.getAttributes().keySet().stream().filter(name -> !name.startsWith("__Floci"))
+                .collect(Collectors.toSet());
+    }
+
+    private static Instance launched(String instanceId) {
+        Instance instance = new Instance();
+        instance.setInstanceId(instanceId);
+        instance.setImageId("ami-1");
+        return instance;
     }
 
     private static Map<String, String> tagEntry(String resourceId, String key, String value) {

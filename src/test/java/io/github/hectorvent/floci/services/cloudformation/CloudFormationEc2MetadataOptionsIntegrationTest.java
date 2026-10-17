@@ -11,6 +11,7 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * MetadataOptions declared through CloudFormation reach the instance: an AWS::EC2::LaunchTemplate
@@ -131,7 +132,46 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
     }
 
     @Test
-    void optionsTheTemplateStopsDeclaringReturnToTheLaunchDefaults() {
+    void optionsTheInstanceStopsDeclaringReturnToTheLaunchDefaults() {
+        String stackName = "cfn-metadata-unset-" + UUID.randomUUID().toString().substring(0, 8);
+        String declared = """
+                {
+                  "Resources": {
+                    "Inst": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {
+                        "ImageId": "ami-12345678",
+                        "MetadataOptions": {"HttpTokens": "required", "HttpPutResponseHopLimit": 2}
+                      }
+                    }
+                  },
+                  "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
+                }
+                """;
+        String undeclared = """
+                {
+                  "Resources": {
+                    "Inst": {"Type": "AWS::EC2::Instance", "Properties": {"ImageId": "ami-12345678"}}
+                  },
+                  "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
+                }
+                """;
+        try {
+            cfn("CreateStack", stackName, declared);
+            String instanceId = output(describeStack(stackName, "CREATE_COMPLETE"), "InstanceId");
+
+            cfn("UpdateStack", stackName, undeclared);
+            assertEquals(instanceId, output(describeStack(stackName, "UPDATE_COMPLETE"), "InstanceId"));
+            XmlPath updated = describeInstance(instanceId);
+            assertEquals("optional", updated.getString(INSTANCE + "metadataOptions.httpTokens"));
+            assertEquals("1", updated.getString(INSTANCE + "metadataOptions.httpPutResponseHopLimit"));
+        } finally {
+            cfn("DeleteStack", stackName, null);
+        }
+    }
+
+    @Test
+    void removingTheLaunchTemplateReplacesTheInstanceWithDefaultOptions() {
         String stackName = "cfn-metadata-drop-" + UUID.randomUUID().toString().substring(0, 8);
         String withTemplate = """
                 {
@@ -156,6 +196,7 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
                 }
                 """;
         // What CDK's requireImdsv2 turned off produces: the template and the reference are gone.
+        // LaunchTemplate is createOnly, so AWS launches a new instance, with the launch defaults.
         String withoutTemplate = """
                 {
                   "Resources": {
@@ -170,8 +211,9 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
             assertEquals("required", describeInstance(instanceId).getString(INSTANCE + "metadataOptions.httpTokens"));
 
             cfn("UpdateStack", stackName, withoutTemplate);
-            assertEquals(instanceId, output(describeStack(stackName, "UPDATE_COMPLETE"), "InstanceId"));
-            assertEquals("optional", describeInstance(instanceId).getString(INSTANCE + "metadataOptions.httpTokens"));
+            String replacement = output(describeStack(stackName, "UPDATE_COMPLETE"), "InstanceId");
+            assertNotEquals(instanceId, replacement);
+            assertEquals("optional", describeInstance(replacement).getString(INSTANCE + "metadataOptions.httpTokens"));
         } finally {
             cfn("DeleteStack", stackName, null);
         }

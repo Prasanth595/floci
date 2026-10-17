@@ -1,12 +1,15 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * The {@code MetadataOptions} block that {@code AWS::EC2::Instance} and
@@ -16,26 +19,30 @@ import java.util.Objects;
  */
 final class Ec2CfnMetadataOptions {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String HTTP_TOKENS = "HttpTokens";
+    private static final String HOP_LIMIT = "HttpPutResponseHopLimit";
+    private static final String HTTP_ENDPOINT = "HttpEndpoint";
+    private static final String HTTP_PROTOCOL_IPV6 = "HttpProtocolIpv6";
+    private static final String INSTANCE_METADATA_TAGS = "InstanceMetadataTags";
 
     private Ec2CfnMetadataOptions() {}
 
     /**
      * The options a resolved block names, with absent or blank members left null, or null when
-     * there is no block. A null member takes the launch default when an instance launches, and is
-     * left as the instance has it on an update (see {@link #toApply}). {@code HttpPutResponseHopLimit}
-     * may be a JSON number or a numeric string, as a template parameter supplies it.
+     * there is no block. A null member takes the launch default when an instance launches; on an
+     * update, {@link #toApply} decides it. {@code HttpPutResponseHopLimit} may be a JSON number or a
+     * numeric string, as a template parameter supplies it.
      */
     static LaunchTemplateData.MetadataOptions parse(JsonNode block) {
         if (block == null || !block.isObject() || block.isEmpty()) {
             return null;
         }
         LaunchTemplateData.MetadataOptions options = new LaunchTemplateData.MetadataOptions();
-        options.setHttpTokens(member(block, "HttpTokens"));
-        options.setHttpEndpoint(member(block, "HttpEndpoint"));
-        options.setHttpProtocolIpv6(member(block, "HttpProtocolIpv6"));
-        options.setInstanceMetadataTags(member(block, "InstanceMetadataTags"));
-        String hopLimit = member(block, "HttpPutResponseHopLimit");
+        options.setHttpTokens(member(block, HTTP_TOKENS));
+        options.setHttpEndpoint(member(block, HTTP_ENDPOINT));
+        options.setHttpProtocolIpv6(member(block, HTTP_PROTOCOL_IPV6));
+        options.setInstanceMetadataTags(member(block, INSTANCE_METADATA_TAGS));
+        String hopLimit = member(block, HOP_LIMIT);
         if (hopLimit != null) {
             try {
                 options.setHttpPutResponseHopLimit(Integer.valueOf(hopLimit));
@@ -57,30 +64,30 @@ final class Ec2CfnMetadataOptions {
 
     /**
      * What an update applies to the instance it keeps: every option the template declares now, and
-     * the launch default for any it declared last time but no longer does, so turning an option off
-     * in the template turns it off on the instance. Options it never declared are left alone. Null
-     * when there is nothing to apply.
+     * the launch default for any member it declared last time but no longer does, so turning an
+     * option off in the template turns it off on the instance. Members it never declared are left
+     * as the instance has them. Null when nothing was declared, then or now.
      */
-    static LaunchTemplateData.MetadataOptions toApply(LaunchTemplateData.MetadataOptions previouslyDeclared,
+    static LaunchTemplateData.MetadataOptions toApply(Set<String> previouslyDeclared,
                                                       LaunchTemplateData.MetadataOptions declared) {
-        if (previouslyDeclared == null) {
+        if (previouslyDeclared.isEmpty()) {
             return declared;
         }
         LaunchTemplateData.MetadataOptions defaults = LaunchTemplateData.MetadataOptions.launchDefaults();
         LaunchTemplateData.MetadataOptions reset = new LaunchTemplateData.MetadataOptions();
-        if (previouslyDeclared.getHttpTokens() != null) {
+        if (previouslyDeclared.contains(HTTP_TOKENS)) {
             reset.setHttpTokens(defaults.getHttpTokens());
         }
-        if (previouslyDeclared.getHttpPutResponseHopLimit() != null) {
+        if (previouslyDeclared.contains(HOP_LIMIT)) {
             reset.setHttpPutResponseHopLimit(defaults.getHttpPutResponseHopLimit());
         }
-        if (previouslyDeclared.getHttpEndpoint() != null) {
+        if (previouslyDeclared.contains(HTTP_ENDPOINT)) {
             reset.setHttpEndpoint(defaults.getHttpEndpoint());
         }
-        if (previouslyDeclared.getHttpProtocolIpv6() != null) {
+        if (previouslyDeclared.contains(HTTP_PROTOCOL_IPV6)) {
             reset.setHttpProtocolIpv6(defaults.getHttpProtocolIpv6());
         }
-        if (previouslyDeclared.getInstanceMetadataTags() != null) {
+        if (previouslyDeclared.contains(INSTANCE_METADATA_TAGS)) {
             reset.setInstanceMetadataTags(defaults.getInstanceMetadataTags());
         }
         return LaunchTemplateData.MetadataOptions.merge(reset, declared);
@@ -96,29 +103,41 @@ final class Ec2CfnMetadataOptions {
                 || !Objects.equals(current.getInstanceMetadataTags(), applied.getInstanceMetadataTags());
     }
 
-    /** The declared options as a resource attribute value, or null when none were declared. */
-    static String encode(LaunchTemplateData.MetadataOptions declared) {
+    /**
+     * The CloudFormation names of the members {@code declared} sets, comma-separated, for a resource
+     * attribute, or null when it sets none. Only which members were declared is kept: that is all
+     * {@link #toApply} needs, and it does not depend on how the options are stored.
+     */
+    static String declaredMembers(LaunchTemplateData.MetadataOptions declared) {
         if (declared == null) {
             return null;
         }
-        try {
-            return MAPPER.writeValueAsString(declared);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Could not record the declared MetadataOptions", e);
+        List<String> members = new ArrayList<>();
+        if (declared.getHttpTokens() != null) {
+            members.add(HTTP_TOKENS);
         }
+        if (declared.getHttpPutResponseHopLimit() != null) {
+            members.add(HOP_LIMIT);
+        }
+        if (declared.getHttpEndpoint() != null) {
+            members.add(HTTP_ENDPOINT);
+        }
+        if (declared.getHttpProtocolIpv6() != null) {
+            members.add(HTTP_PROTOCOL_IPV6);
+        }
+        if (declared.getInstanceMetadataTags() != null) {
+            members.add(INSTANCE_METADATA_TAGS);
+        }
+        return members.isEmpty() ? null : String.join(",", members);
     }
 
-    /** The options {@link #encode} recorded, or null when there is no record. */
-    static LaunchTemplateData.MetadataOptions decode(String recorded) {
+    /** The member names {@link #declaredMembers} recorded; empty when there is no record. */
+    static Set<String> parseDeclaredMembers(String recorded) {
         if (recorded == null || recorded.isBlank()) {
-            return null;
+            return Set.of();
         }
-        try {
-            return MAPPER.readValue(recorded, LaunchTemplateData.MetadataOptions.class);
-        } catch (JsonProcessingException ignored) {
-            // Only encode() writes this attribute; a value it did not write resets nothing.
-            return null;
-        }
+        return Arrays.stream(recorded.split(",")).map(String::trim).filter(name -> !name.isEmpty())
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     private static String member(JsonNode block, String name) {

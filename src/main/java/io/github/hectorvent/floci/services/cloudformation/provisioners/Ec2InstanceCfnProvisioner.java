@@ -39,9 +39,15 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     // The instance profile the template declared last time, so an update that drops the property
     // can be told from one that never declared it (a launch template may have set the profile).
     private static final String DECLARED_IAM_PROFILE_ATTR = "__FlociDeclaredIamInstanceProfile";
-    // The MetadataOptions declared last time, the instance's own over its launch template's, so an
-    // update can return the options it no longer declares to their launch defaults.
+    // The MetadataOptions members declared last time, the instance's own or its launch template's, so
+    // an update can return the ones it no longer declares to their launch defaults.
     private static final String DECLARED_METADATA_OPTIONS_ATTR = "__FlociDeclaredMetadataOptions";
+    // Which launch template the instance was declared with ("none" for none). LaunchTemplate is
+    // createOnly, so naming another one, adding one or dropping it replaces the instance. Its
+    // Version is not compared: the template's own provisioner publishes a version on every stack
+    // update, so a version change is applied to the instance in place.
+    private static final String DECLARED_LAUNCH_TEMPLATE_ATTR = "__FlociDeclaredLaunchTemplate";
+    private static final String NO_LAUNCH_TEMPLATE = "none";
 
     private final Ec2Service ec2Service;
     /** How long {@link #delete} waits for a terminated instance; package-visible so tests can shorten it. */
@@ -78,7 +84,9 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         // AWS::NoValue resolves to an empty node here, which on AWS means the property is absent
         // (launch without a template), so it must not turn into an InvalidLaunchTemplateId.NotFound.
         LaunchTemplateData.MetadataOptions templateMetadataOptions = null;
+        String launchTemplate = NO_LAUNCH_TEMPLATE;
         if (ltRef != null && ltRef.isObject() && (ltId != null || ltName != null)) {
+            launchTemplate = ltId != null ? "id:" + ltId : "name:" + ltName;
             // A LaunchTemplate the stack references but that does not resolve is a real error, as on
             // AWS: let it fail the resource rather than silently launching with default config.
             LaunchTemplateData ltData = ec2Service.resolveLaunchTemplateData(region, ltId, ltName,
@@ -115,26 +123,27 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
 
         // On update, keep the existing instance unless a createOnly property changed: a changed
         // ImageId, SubnetId or KeyName replaces it (compared against the instance, which carries
-        // them), as does a changed PrivateIpAddress or AvailabilityZone (compared against the value
-        // declared last time, since the launch does not apply those to the instance). A mutable-only
-        // change (tags, and the like) reuses it. Launching unconditionally would leak the prior
-        // instance every update.
+        // them), as does a changed PrivateIpAddress, AvailabilityZone or launch template (compared
+        // against the value declared last time, since the instance does not carry those). A
+        // mutable-only change (tags, and the like) reuses it. Launching unconditionally would leak
+        // the prior instance every update.
         Instance prior = ctx.isUpdate() ? findInstance(region, ctx.priorPhysicalId()) : null;
         if (prior != null && !createOnlyChanged(prior, imageId, subnetId, keyName)
-                && !declaredCreateOnlyChanged(attributesBefore, privateIpAddress, availabilityZone)) {
+                && !declaredCreateOnlyChanged(attributesBefore, privateIpAddress, availabilityZone, launchTemplate)) {
             // A reused instance still has its mutable properties reconciled to the template rather
             // than left at their prior values; re-read it so the published attributes reflect them.
             LaunchTemplateData.MetadataOptions metadataOptionsToApply = Ec2CfnMetadataOptions.toApply(
-                    Ec2CfnMetadataOptions.decode(attributesBefore.get(DECLARED_METADATA_OPTIONS_ATTR)), metadataOptions);
+                    Ec2CfnMetadataOptions.parseDeclaredMembers(attributesBefore.get(DECLARED_METADATA_OPTIONS_ATTR)),
+                    metadataOptions);
             reconcileMutableProperties(region, prior, instanceType, securityGroupIds, userData,
                     iamInstanceProfileArn, attributesBefore.get(DECLARED_IAM_PROFILE_ATTR), metadataOptionsToApply);
             Instance reconciled = findInstance(region, prior.getInstanceId());
             Instance current = reconciled != null ? reconciled : prior;
             r.setPhysicalId(current.getInstanceId());
             publishInstanceAttributes(r, current);
-            storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
+            storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone, launchTemplate);
             putOrRemove(r, DECLARED_IAM_PROFILE_ATTR, iamInstanceProfileArn);
-            putOrRemove(r, DECLARED_METADATA_OPTIONS_ATTR, Ec2CfnMetadataOptions.encode(metadataOptions));
+            putOrRemove(r, DECLARED_METADATA_OPTIONS_ATTR, Ec2CfnMetadataOptions.declaredMembers(metadataOptions));
             Ec2Tags.reconcile(ec2Service, region, current.getInstanceId(), desiredTags);
             ReplacementCleanup.record(r, ctx, attributesBefore);
             return;
@@ -166,9 +175,9 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         // published State is the settled instance's rather than the pending one RunInstances returned.
         Instance launched = findInstance(region, instance.getInstanceId());
         publishInstanceAttributes(r, launched != null ? launched : instance);
-        storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
+        storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone, launchTemplate);
         putOrRemove(r, DECLARED_IAM_PROFILE_ATTR, iamInstanceProfileArn);
-        putOrRemove(r, DECLARED_METADATA_OPTIONS_ATTR, Ec2CfnMetadataOptions.encode(metadataOptions));
+        putOrRemove(r, DECLARED_METADATA_OPTIONS_ATTR, Ec2CfnMetadataOptions.declaredMembers(metadataOptions));
         // A createOnly change that landed a new instance id replaced the prior one: record it so
         // the stack cleans the displaced instance up after the update commits.
         ReplacementCleanup.record(r, ctx, attributesBefore);
@@ -231,10 +240,11 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
      * ModifyInstanceAttribute requires it (the instance stopped first and started again after, the
      * "some interruptions" the property is documented with), and a changed IamInstanceProfile is
      * associated or replaced, or disassociated when the template declared one last time and drops it
-     * now. A changed MetadataOptions is applied with ModifyInstanceMetadataOptions, which the
-     * property's "No interruption" update allows. Only a declared SecurityGroupIds, UserData or
-     * MetadataOptions is reconciled, so a template that omits them does not strip what the instance
-     * already has (a launch template may have set it).
+     * now. {@code metadataOptions} is what {@link Ec2CfnMetadataOptions#toApply} settled on, applied
+     * with ModifyInstanceMetadataOptions as the property's "No interruption" update allows: the
+     * options declared now, and the launch default for any declared last time and dropped since.
+     * Only a declared SecurityGroupIds or UserData is reconciled, so a template that omits them does
+     * not strip what the instance already has (a launch template may have set it).
      */
     private void reconcileMutableProperties(String region, Instance prior, String instanceType,
                                             List<String> securityGroupIds, String userData,
@@ -319,9 +329,11 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
      * recorded from this provision on, and a later change to it then forces replacement.
      */
     private static boolean declaredCreateOnlyChanged(Map<String, String> priorAttributes,
-                                                     String privateIpAddress, String availabilityZone) {
+                                                     String privateIpAddress, String availabilityZone,
+                                                     String launchTemplate) {
         return recordedValueChanged(priorAttributes.get(DECLARED_PRIVATE_IP_ATTR), privateIpAddress)
-                || recordedValueChanged(priorAttributes.get(DECLARED_AZ_ATTR), availabilityZone);
+                || recordedValueChanged(priorAttributes.get(DECLARED_AZ_ATTR), availabilityZone)
+                || recordedValueChanged(priorAttributes.get(DECLARED_LAUNCH_TEMPLATE_ATTR), launchTemplate);
     }
 
     private static boolean recordedValueChanged(String priorDeclared, String nowDeclared) {
@@ -330,9 +342,10 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private static void storeDeclaredCreateOnly(StackResource r, String privateIpAddress,
-                                                String availabilityZone) {
+                                                String availabilityZone, String launchTemplate) {
         putOrRemove(r, DECLARED_PRIVATE_IP_ATTR, privateIpAddress);
         putOrRemove(r, DECLARED_AZ_ATTR, availabilityZone);
+        putOrRemove(r, DECLARED_LAUNCH_TEMPLATE_ATTR, launchTemplate);
     }
 
     private static void putOrRemove(StackResource r, String key, String value) {
