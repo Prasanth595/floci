@@ -223,8 +223,9 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * {@code Subnets} is not create-only, so an update that keeps the balancer moves it onto the
-     * template's subnets in place, as SetSubnets does, rather than leaving it on a subnet the template
-     * dropped or replaced and the update cleanup then deletes. The prior list is kept for a rollback.
+     * template's subnets in place, as SetSubnets does. That also releases the subnets it leaves, which
+     * EC2 refuses to delete while a load balancer still uses them, so the update cleanup can delete a
+     * subnet the template dropped or replaced. The prior list is kept for a rollback.
      */
     private void moveToTemplateSubnets(StackResource r, LoadBalancer lb, List<String> subnets,
                                        ProvisionContext ctx) {

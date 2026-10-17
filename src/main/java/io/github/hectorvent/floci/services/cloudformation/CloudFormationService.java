@@ -2796,8 +2796,8 @@ public class CloudFormationService implements ResourceProvider {
             String region) {
         // Dependents first, in the template's order rather than the map's, as the update cleanup
         // walks it: a resource the update added sits after the resources that depend on it, so
-        // reversing the map would delete a subnet the update added before an instance or NAT
-        // gateway the update put on it, and EC2 refuses that delete.
+        // reversing the map would delete a subnet the update moved a load balancer onto before the
+        // load balancer is moved back, and EC2 refuses that delete.
         List<StackResource> resources = resourcesInCreationOrder(stack, region);
         Collections.reverse(resources);
         List<String> failures = new ArrayList<>();
