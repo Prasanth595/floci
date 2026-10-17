@@ -39,6 +39,33 @@ class RdsAutoscalingMinimumTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"30,30,32,33", "21,22,24,25"})
+    void combinedGrowthUsesTheResolvedAllocation(int requested, int resolved, int invalid, int valid) {
+        Assumptions.assumeFalse(TestFixtures.isRealAws(), "Uses a disposable emulator DB instance");
+        String id = TestFixtures.uniqueName("autoscaling-min");
+        try (RdsClient rds = TestFixtures.rdsClient()) {
+            try {
+                create(rds, id, 20);
+                assertThatThrownBy(() -> rds.modifyDBInstance(r -> r.dbInstanceIdentifier(id)
+                        .allocatedStorage(requested).maxAllocatedStorage(invalid).backupRetentionPeriod(2)))
+                        .isInstanceOfSatisfying(RdsException.class, e -> {
+                            assertThat(e.statusCode()).isEqualTo(400);
+                            assertThat(e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterValue");
+                        });
+                assertState(rds, id, 20, 100, 7);
+                DBInstance modified = rds.modifyDBInstance(r -> r.dbInstanceIdentifier(id)
+                        .allocatedStorage(requested).maxAllocatedStorage(valid).backupRetentionPeriod(2))
+                        .dbInstance();
+                assertThat(modified.allocatedStorage()).isEqualTo(resolved);
+                assertThat(modified.maxAllocatedStorage()).isEqualTo(valid);
+                assertState(rds, id, resolved, valid, 2);
+            } finally {
+                remove(rds, id);
+            }
+        }
+    }
+
     @Test
     void omissionAndDisableRequestsRemainAccepted() {
         Assumptions.assumeFalse(TestFixtures.isRealAws(), "Uses a disposable emulator DB instance");

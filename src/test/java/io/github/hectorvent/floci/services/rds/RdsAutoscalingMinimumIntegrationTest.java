@@ -52,6 +52,31 @@ class RdsAutoscalingMinimumIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"30,30,32,33", "21,22,24,25"})
+    void combinedGrowthUsesTheResolvedAllocation(int requested, int resolved, int invalid, int valid) {
+        String id = "autoscaling-min-" + UUID.randomUUID();
+        try {
+            create(id, 20);
+            Response response = modify(id).formParam("AllocatedStorage", requested)
+                    .formParam("MaxAllocatedStorage", invalid).formParam("BackupRetentionPeriod", 2).post("/");
+            Response stored = describe(id).extract().response();
+            assertAll("combined request preserves every field on rejection",
+                    () -> response.then().statusCode(400)
+                            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue")),
+                    () -> stored.then().body(RESULT + "AllocatedStorage", equalTo("20")),
+                    () -> stored.then().body(RESULT + "MaxAllocatedStorage", equalTo("100")),
+                    () -> stored.then().body(RESULT + "BackupRetentionPeriod", equalTo("7")));
+            modify(id).formParam("AllocatedStorage", requested).formParam("MaxAllocatedStorage", valid)
+                    .formParam("BackupRetentionPeriod", 2).post("/").then().statusCode(200);
+            describe(id).body(RESULT + "AllocatedStorage", equalTo(Integer.toString(resolved)))
+                    .body(RESULT + "MaxAllocatedStorage", equalTo(Integer.toString(valid)))
+                    .body(RESULT + "BackupRetentionPeriod", equalTo("2"));
+        } finally {
+            remove(id);
+        }
+    }
+
     @Test
     void omittedMaximumRetainsTheExistingThreshold() {
         String id = "autoscaling-min-" + UUID.randomUUID();

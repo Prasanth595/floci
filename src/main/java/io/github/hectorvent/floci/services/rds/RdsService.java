@@ -3074,7 +3074,7 @@ public class RdsService implements Resettable, ResourceProvider {
         // current size and engine version: a refusal here must leave the whole request unapplied.
         DbInstanceScalingChanges resolvedScaling = scaling.resolveFor(instance);
         DbInstanceSettings effective = withEffectiveWindows(settings, instance);
-        validateAutoscalingMinimum(instance, effective.maxAllocatedStorage());
+        validateAutoscalingMinimum(instance, effective.maxAllocatedStorage(), resolvedScaling.allocatedStorage());
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         if (optionGroupName != null && !optionGroupName.isBlank()) {
             validateInstanceOptionGroup(optionGroupName,
@@ -3147,7 +3147,7 @@ public class RdsService implements Resettable, ResourceProvider {
         settings.validate();
     }
 
-    private static void validateAutoscalingMinimum(DbInstance instance, Integer maximum) {
+    private static void validateAutoscalingMinimum(DbInstance instance, Integer maximum, Integer resolvedAllocation) {
         String clusterId = instance.getDbClusterIdentifier();
         String engine = instance.getEngineIdentifier();
         int allocated = instance.getAllocatedStorage();
@@ -3157,7 +3157,10 @@ public class RdsService implements Resettable, ResourceProvider {
                 || engine != null && engine.toLowerCase(Locale.ROOT).startsWith("custom-")) {
             return;
         }
-        if ((long) maximum * 10 < (long) allocated * 11) {
+        boolean belowCurrentMinimum = (long) maximum * 10 < (long) allocated * 11;
+        boolean belowResultingMinimum = resolvedAllocation != null && maximum > resolvedAllocation
+                && (long) maximum * 10 < (long) resolvedAllocation * 11;
+        if (belowCurrentMinimum || belowResultingMinimum) {
             throw new AwsException("InvalidParameterValue",
                     "MaxAllocatedStorage must be at least 10% greater than AllocatedStorage "
                             + "when storage autoscaling is enabled.", 400);

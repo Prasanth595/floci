@@ -447,10 +447,15 @@ For standalone instances with instance-owned storage, `ModifyDBInstance` rejects
 `MaxAllocatedStorage` threshold that is above the current allocation but less than 10% above it.
 For example, with 20 GiB allocated, 21 GiB is refused and 22 GiB meets this minimum. The refusal
 occurs before any settings in the request are changed, including backup retention and allocation.
-Omitted maximums and requests equal to the current allocation retain their existing behavior.
+When a request also grows allocation, an enabled threshold above the resolved new allocation
+must meet that allocation's 10% minimum too, including the existing upward rounding. For example,
+growth from 20 to 30 GiB refuses a maximum of 32 GiB and accepts 33 GiB. Omitted maximums and
+requests equal to the current allocation retain their existing behavior.
 
 This minimum check does not cover engine/class upper limits, IOPS ratios, maximums below the
 current allocation, zero/negative maximums, or all constraints on combined allocation changes.
+Maximums at or below the resulting allocation retain their prior current-allocation handling;
+this is not a complete combined-update constraint check.
 Aurora/cluster members and RDS Custom are outside this check. The emulator uses HTTP 400
 `InvalidParameterValue` for this refusal; its exact error wording is not a live AWS observation.
 
