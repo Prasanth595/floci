@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.appsync.graphql.auth;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.core.common.AccountResolver;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncTransportException;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -13,7 +13,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -54,7 +57,6 @@ class IamAuthValidatorTest {
     @BeforeEach
     void setUp() {
         validator = new IamAuthValidator(
-                new AccountResolver("000000000000"),
                 iamService,
                 new IamPolicyEvaluator(new ObjectMapper()));
         lenient().when(iamService.findSecretKey("AKIAGOOD")).thenReturn(Optional.of("good-secret"));
@@ -99,30 +101,145 @@ class IamAuthValidatorTest {
     }
 
     @Test
-    void knownKeyWithBadSignatureIs401() throws Exception {
+    void knownKeyWithBadSignatureIsABadRequestNamingTheCanonicalRequest() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
                 "api-1", HOST, BODY, "AKIAGOOD", "wrong-secret", REGION, Instant.now());
 
-        assertThrows(AppSyncTransportException.class,
-                () -> validator.validateRequest(authorization(signed), "api-1", infoWith(signed)));
+        AppSyncTransportException ex = assertRejected(signed, 400, "BadRequestException");
+        assertTrue(ex.getMessage().startsWith("The request signature we calculated does not match the signature you"
+                + " provided. Check your AWS Secret Access Key and signing method. Consult the service documentation"
+                + " for details.\n\nThe Canonical String for this request should have been\n'POST\n"
+                + "/v1/apis/api-1/graphql\n\nhost:" + HOST + "\nx-amz-date:" + signed.get("X-Amz-Date")
+                + "\n\nhost;x-amz-date\n"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("'\n\nThe String-to-Sign should have been\n'AWS4-HMAC-SHA256\n"
+                + signed.get("X-Amz-Date") + "\n"), ex.getMessage());
     }
 
     @Test
-    void tamperedBodyAfterSigningIs401() throws Exception {
+    void tamperedBodyAfterSigningIsABadRequest() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
                 "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
         AuthRequestInfo tampered = new AuthRequestInfo("{ hello }", null, Map.of(), List.of("10.0.0.1"),
                 "req-1", "000000000000", "us-east-1", signed, "{ hello, tampered }");
 
-        assertThrows(AppSyncTransportException.class,
+        AppSyncTransportException ex = assertThrows(AppSyncTransportException.class,
                 () -> validator.validateRequest(authorization(signed), "api-1", tampered));
+        assertEquals(400, ex.getHttpStatus());
     }
 
     @Test
-    void unsignedRequestIsRejected() {
-        assertThrows(AppSyncTransportException.class, () -> validator.validateRequest(
-                "AWS4-HMAC-SHA256 Credential=AKIAGOOD/20260205/us-east-1/appsync/aws4_request",
-                "api-1", infoWith(Map.of())));
+    void missingPartsAreNamedTogetherWithTheHeaderHash() throws Exception {
+        String authorization = "AWS4-HMAC-SHA256 Credential=AKIAGOOD/20260205/us-east-1/appsync/aws4_request";
+        AppSyncTransportException ex = assertRejected(authorization, Map.of(), 403, "IncompleteSignatureException");
+        assertEquals("Authorization header requires 'Signature' parameter."
+                + " Authorization header requires 'SignedHeaders' parameter."
+                + " Authorization header requires existence of either a 'X-Amz-Date' or a 'Date' header."
+                + " (Hashed with SHA-256 and encoded with Base64) Authorization=" + hashed(authorization),
+                ex.getMessage());
+
+        assertEquals("Authorization header requires 'Credential' parameter."
+                + " Authorization header requires 'Signature' parameter."
+                + " Authorization header requires 'SignedHeaders' parameter."
+                + " (Hashed with SHA-256 and encoded with Base64) Authorization=" + hashed("AWS4-HMAC-SHA256"),
+                assertRejected("AWS4-HMAC-SHA256", Map.of("X-Amz-Date", "20260205T000000Z"), 403,
+                        "IncompleteSignatureException").getMessage());
+    }
+
+    @Test
+    void aPartWithoutAnEqualsSignRefusesTheHeader() {
+        String authorization = "AWS4-HMAC-SHA256 garbage";
+        assertEquals("Invalid key=value pair (missing equal-sign) in Authorization header (hashed with SHA-256 and"
+                + " encoded with Base64): '" + hashed(authorization) + "'.",
+                assertRejected(authorization, Map.of(), 403, "IncompleteSignatureException").getMessage());
+    }
+
+    @Test
+    void theDateMustBeInTheBasicFormatAndTheCredentialHaveFiveParts() throws Exception {
+        Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
+        Map<String, String> dated = new LinkedHashMap<>(signed);
+        dated.remove("X-Amz-Date");
+        dated.put("Date", "Sat, 17 Oct 2026 22:15:13 GMT");
+        assertEquals("Date must be in ISO-8601 'basic format'. Got 'Sat, 17 Oct 2026 22:15:13 GMT'."
+                + " See http://en.wikipedia.org/wiki/ISO_8601",
+                assertRejected(dated, 403, "IncompleteSignatureException").getMessage());
+
+        String credential = "AKIAGOOD/x/y";
+        assertEquals("Credential must have exactly 5 slash-delimited elements, e.g. keyid/date/region/service/term,"
+                + " got 'AKIAGOOD/x/y'", assertRejected(withCredential(signed, credential), 403,
+                "IncompleteSignatureException").getMessage());
+    }
+
+    @Test
+    void aSignatureFromTheFutureIsNotYetCurrent() throws Exception {
+        Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now().plusSeconds(600));
+
+        assertTrue(assertRejected(signed, 400, "BadRequestException").getMessage()
+                .startsWith("Signature not yet current: " + signed.get("X-Amz-Date") + " is still later than "));
+    }
+
+    @Test
+    void theHostMustBeSignedBeforeTheScopeIsChecked() throws Exception {
+        Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
+        Map<String, String> unsignedHost = withCredential(signed,
+                credential(signed).replace("/appsync/", "/execute-api/"));
+        unsignedHost.put("Authorization", unsignedHost.get("Authorization").replace("host;x-amz-date", "x-amz-date"));
+
+        assertEquals("'Host' or ':authority' must be a 'SignedHeader' in the AWS Authorization.",
+                assertRejected(unsignedHost, 400, "BadRequestException").getMessage());
+    }
+
+    @Test
+    void everyScopeFaultIsNamedAtOnce() throws Exception {
+        Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
+        String[] scope = credential(signed).split("/");
+        String faulty = String.join("/", scope[0], "20200101", scope[2], "execute-api", "aws5_request");
+
+        assertEquals("Credential should be scoped to correct service: 'appsync'."
+                + " Credential should be scoped with a valid terminator: 'aws4_request'."
+                + " Date in Credential scope does not match YYYYMMDD from ISO-8601 version of date from HTTP. ",
+                assertRejected(withCredential(signed, faulty), 400, "BadRequestException").getMessage());
+    }
+
+    @Test
+    void aSignedHeaderMustBeInTheRequest() throws Exception {
+        Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
+        Map<String, String> missing = new LinkedHashMap<>(signed);
+        missing.put("Authorization", signed.get("Authorization").replace("host;x-amz-date", "host;x-amz-date;x-extra"));
+
+        assertEquals("'x-extra' is named as a SignedHeader, but it does not exist in the HTTP request.",
+                assertRejected(missing, 403, "IncompleteSignatureException").getMessage());
+    }
+
+    private AppSyncTransportException assertRejected(Map<String, String> signed, int status, String errorType) {
+        return assertRejected(authorization(signed), signed, status, errorType);
+    }
+
+    private AppSyncTransportException assertRejected(String authorization, Map<String, String> headers, int status,
+                                                     String errorType) {
+        AppSyncTransportException ex = assertThrows(AppSyncTransportException.class,
+                () -> validator.validateRequest(authorization, "api-1", infoWith(headers)));
+        assertEquals(status, ex.getHttpStatus(), ex.getMessage());
+        assertEquals(errorType, ex.getErrorType());
+        return ex;
+    }
+
+    private static String credential(Map<String, String> signed) {
+        return authorization(signed).split("Credential=")[1].split(",")[0];
+    }
+
+    private static Map<String, String> withCredential(Map<String, String> signed, String credential) {
+        Map<String, String> changed = new LinkedHashMap<>(signed);
+        changed.put("Authorization", authorization(signed).replace(credential(signed), credential));
+        return changed;
+    }
+
+    private static String hashed(String authorization) {
+        return Base64.getEncoder().encodeToString(Digests.sha256(authorization.getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test
@@ -139,8 +256,8 @@ class IamAuthValidatorTest {
                 "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION,
                 Instant.now().minusSeconds(3600));
 
-        assertThrows(AppSyncTransportException.class,
-                () -> validator.validateRequest(authorization(signed), "api-1", infoWith(signed)));
+        assertTrue(assertRejected(signed, 400, "BadRequestException").getMessage()
+                .startsWith("Signature expired: " + signed.get("X-Amz-Date") + " is now earlier than "));
     }
 
     @Test

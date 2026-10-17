@@ -6,9 +6,8 @@ import java.util.Map;
 /**
  * The {@code Credential}/{@code SignedHeaders}/{@code Signature} parameters carried by an
  * {@code AWS4-HMAC-SHA256 Authorization} header, split out of its raw comma-separated value.
- * Shared by every SigV4 verifier in this codebase that accepts a header-signed request:
- * {@code ExecuteApiSigV4Authorizer} (API Gateway) and {@code IamAuthValidator} (AppSync) both
- * parsed this independently before this class existed.
+ * AppSync's {@code IamAuthValidator} parses the header itself, because it names each missing part
+ * the way AppSync does.
  */
 public record SigV4AuthorizationHeader(String credential, String signedHeaders, String signature) {
 
