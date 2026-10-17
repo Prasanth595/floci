@@ -116,6 +116,32 @@ class LocalStackParityTest {
     }
 
     @Test
+    void gatewayListenWithOnlyAPortKeepsFlociBindAddress() {
+        assertThat(value("floci.port", "GATEWAY_LISTEN", ":4566"), equalTo("4566"));
+        assertThat(value("quarkus.http.host", "GATEWAY_LISTEN", ":4566"), nullValue());
+        assertThat(value("floci.security.allow-unsafe-network-exposure", "GATEWAY_LISTEN", ":4566"), nullValue());
+        assertThat(value("quarkus.http.host", "GATEWAY_LISTEN", "[::1]"), equalTo("::1"));
+    }
+
+    @Test
+    void localstackHostDropsItsPort() {
+        assertThat(value("floci.hostname", "LOCALSTACK_HOST", "localhost.localstack.cloud:4566"),
+                equalTo("localhost.localstack.cloud"));
+        assertThat(value("floci.hostname", "LOCALSTACK_HOSTNAME", "myhost:4567"), equalTo("myhost"));
+        assertThat(value("floci.hostname", "LOCALSTACK_HOST", ":4566"), nullValue());
+    }
+
+    @Test
+    void hostAndPortFollowLocalStacksForms() {
+        assertThat(LocalStackParity.parseHostAndPort("0.0.0.0:4566"),
+                equalTo(new LocalStackParity.HostAndPort("0.0.0.0", "4566")));
+        assertThat(LocalStackParity.parseHostAndPort("0.0.0.0"), equalTo(new LocalStackParity.HostAndPort("0.0.0.0", null)));
+        assertThat(LocalStackParity.parseHostAndPort(":4566"), equalTo(new LocalStackParity.HostAndPort(null, "4566")));
+        assertThat(LocalStackParity.parseHostAndPort("[::]:4566"), equalTo(new LocalStackParity.HostAndPort("::", "4566")));
+        assertThat(LocalStackParity.parseHostAndPort("[::1]"), equalTo(new LocalStackParity.HostAndPort("::1", null)));
+    }
+
+    @Test
     void hooksGetTheTranslationAsVariables() {
         Map<String, String> env = LocalStackParity.environment(Map.of("EDGE_PORT", "4567", "PERSISTENCE", "1"));
         assertThat(env.get("FLOCI_PORT"), equalTo("4567"));

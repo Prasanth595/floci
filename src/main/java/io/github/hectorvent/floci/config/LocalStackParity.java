@@ -28,11 +28,14 @@ public final class LocalStackParity {
 
     static final List<String> PARITY_SUFFIXES = List.of("localhost.localstack.cloud", "localhost.floci.io");
 
-    /** {@code host:port}, {@code [v6]:port}, or a bare host; LocalStack accepts a comma-separated list. */
-    private static final Pattern HOST_PORT = Pattern.compile("^(?:\\[([^\\]]+)\\]|([^:\\[\\]]+)):(\\d+)$");
+    private static final Pattern BRACKETED_IPV6 = Pattern.compile("^\\[([^\\]]+)\\](?::(\\d+))?$");
 
     /** One translated setting: the Floci variable it stands for, its property, and its value. */
     record Mapping(String variable, String property, String value) {
+    }
+
+    /** A host and a port, either of which may be absent (LocalStack then uses its default). */
+    record HostAndPort(String host, String port) {
     }
 
     private LocalStackParity() {
@@ -106,22 +109,19 @@ public final class LocalStackParity {
         // LocalStack listens on GATEWAY_LISTEN with no further opt-in, so it also gives the
         // consent Floci requires for a non-loopback address. Its first entry may carry a port,
         // which stands in for EDGE_PORT when that is unset.
-        String gatewayHost = null;
-        String gatewayPort = null;
+        // An empty host (":4566") keeps Floci's own bind address and takes just the port.
         String gatewayListen = env.get("GATEWAY_LISTEN");
-        if (isSet(gatewayListen)) {
-            String first = gatewayListen.split(",")[0].trim();
-            Matcher hostPort = HOST_PORT.matcher(first);
-            if (hostPort.matches()) {
-                gatewayHost = hostPort.group(1) != null ? hostPort.group(1) : hostPort.group(2);
-                gatewayPort = hostPort.group(3);
-            } else {
-                gatewayHost = first;
-            }
-        }
+        HostAndPort gateway = isSet(gatewayListen)
+                ? parseHostAndPort(gatewayListen.split(",")[0])
+                : new HostAndPort(null, null);
+        String gatewayHost = gateway.host();
 
-        put(out, env, "FLOCI_PORT", "floci.port", isSet(env.get("EDGE_PORT")) ? env.get("EDGE_PORT") : gatewayPort);
-        put(out, env, "FLOCI_HOSTNAME", "floci.hostname", firstSet(env, "LOCALSTACK_HOST", "LOCALSTACK_HOSTNAME"));
+        put(out, env, "FLOCI_PORT", "floci.port", isSet(env.get("EDGE_PORT")) ? env.get("EDGE_PORT") : gateway.port());
+        // LOCALSTACK_HOST is <hostname>:<port> (default localhost.localstack.cloud:4566); Floci's
+        // hostname is the host alone, its port comes from floci.port.
+        String localstackHost = firstSet(env, "LOCALSTACK_HOST", "LOCALSTACK_HOSTNAME");
+        put(out, env, "FLOCI_HOSTNAME", "floci.hostname",
+                isSet(localstackHost) ? parseHostAndPort(localstackHost).host() : null);
 
         if (isSet(gatewayHost)) {
             put(out, env, "QUARKUS_HTTP_HOST", "quarkus.http.host", gatewayHost);
@@ -161,6 +161,25 @@ public final class LocalStackParity {
 
         // LAMBDA_EXECUTOR and SERVICES are intentionally ignored.
         return out;
+    }
+
+    /**
+     * Parses the forms LocalStack's {@code HostAndPort.parse} accepts: {@code host:port},
+     * {@code host}, {@code :port}, {@code [v6]:port} and {@code [v6]}. A missing part is null.
+     */
+    static HostAndPort parseHostAndPort(String input) {
+        String value = input.trim();
+        Matcher ipv6 = BRACKETED_IPV6.matcher(value);
+        if (ipv6.matches()) {
+            return new HostAndPort(ipv6.group(1), ipv6.group(2));
+        }
+        int colon = value.indexOf(':');
+        if (colon < 0) {
+            return new HostAndPort(value.isEmpty() ? null : value, null);
+        }
+        String host = value.substring(0, colon).trim();
+        String port = value.substring(colon + 1).trim();
+        return new HostAndPort(host.isEmpty() ? null : host, port.isEmpty() ? null : port);
     }
 
     private static void put(List<Mapping> out, Map<String, String> env, String flociVariable,
