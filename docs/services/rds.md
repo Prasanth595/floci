@@ -443,21 +443,24 @@ Two deviations are worth knowing:
 
 ### Storage autoscaling threshold changes
 
-For standalone instances with instance-owned storage, `ModifyDBInstance` rejects an enabled
-`MaxAllocatedStorage` threshold that is above the current allocation but less than 10% above it.
-For example, with 20 GiB allocated, 21 GiB is refused and 22 GiB meets this minimum. The refusal
-occurs before any settings in the request are changed, including backup retention and allocation.
-When a request also grows allocation, an enabled threshold above the resolved new allocation
-must meet that allocation's 10% minimum too, including the existing upward rounding. For example,
-growth from 20 to 30 GiB refuses a maximum of 32 GiB and accepts 33 GiB. Omitted maximums and
-requests equal to the current allocation retain their existing behavior.
+For standalone instances with instance-owned storage, `ModifyDBInstance` checks an explicit
+`MaxAllocatedStorage` against the current allocation. The threshold must be at least 10% higher,
+except that a value equal to the current allocation retains the existing disable handling.
+For example, with 20 GiB allocated, maxima of 19 or 21 GiB are refused and 22 GiB meets this
+minimum. Explicit zero and negative maxima are also refused. Rejection occurs before any settings
+in the request change, including backup retention and allocation. An omitted maximum retains its
+stored value without rechecking historical state.
 
-This minimum check does not cover engine/class upper limits, IOPS ratios, maximums below the
-current allocation, zero/negative maximums, or all constraints on combined allocation changes.
-Maximums at or below the resulting allocation retain their prior current-allocation handling;
-this is not a complete combined-update constraint check.
-Aurora/cluster members and RDS Custom are outside this check. The emulator uses HTTP 400
-`InvalidParameterValue` for this refusal; its exact error wording is not a live AWS observation.
+The check uses the current allocation even when the request also changes storage. AWS applies
+threshold changes immediately while storage changes can wait for maintenance. Floci's existing
+immediate storage-change behavior remains; this is not a live AWS combined-growth capture or a
+complete check of all combined-update constraints.
+
+Aurora/cluster members and RDS Custom remain outside this check. Engine/class upper limits,
+IOPS ratios and create/restore/replica constraints remain separate. The chosen HTTP 400
+`InvalidParameterCombination` follows the adjacent allocated-storage refusal precedent. The
+message follows the guide's example, `Invalid max storage size for {engine_name}`; neither is
+claimed as an independently captured, universal live AWS maximum-error response.
 
 
 ## Examples

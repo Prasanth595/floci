@@ -23,6 +23,29 @@ class RdsAutoscalingMinimumIntegrationTest {
             "DescribeDBInstancesResponse.DescribeDBInstancesResult.DBInstances.DBInstance.";
 
     @ParameterizedTest
+    @CsvSource({"19", "0", "-1"})
+    void lowerMaximumRejectsWithoutChangingAnySetting(int maximum) {
+        String id = "autoscaling-lower-" + UUID.randomUUID();
+        try {
+            create(id, 20);
+            Response response = modify(id).formParam("MaxAllocatedStorage", maximum)
+                    .formParam("BackupRetentionPeriod", 2).post("/");
+            Response stored = describe(id).extract().response();
+            assertAll("only equality is the disable exception",
+                    () -> response.then().statusCode(400)
+                            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterCombination"))
+                            .body("ErrorResponse.Error.Message", equalTo("Invalid max storage size for postgres")),
+                    () -> stored.then().body(RESULT + "AllocatedStorage", equalTo("20")),
+                    () -> stored.then().body(RESULT + "MaxAllocatedStorage", equalTo("100")),
+                    () -> stored.then().body(RESULT + "BackupRetentionPeriod", equalTo("7")));
+            modify(id).formParam("MaxAllocatedStorage", 22).post("/").then().statusCode(200);
+            describe(id).body(RESULT + "MaxAllocatedStorage", equalTo("22"));
+        } finally {
+            remove(id);
+        }
+    }
+
+    @ParameterizedTest
     @CsvSource({"20,21,22,false", "21,23,24,false", "20,21,22,true"})
     void insufficientEnabledMaximumRejectsTheWholeModification(int allocated, int invalid, int valid,
                                                                boolean growAllocation) {
@@ -38,7 +61,8 @@ class RdsAutoscalingMinimumIntegrationTest {
             Response stored = describe(id).extract().response();
             assertAll("invalid maximum refuses before any setting or allocation changes",
                     () -> response.then().statusCode(400)
-                            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue")),
+                            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterCombination"))
+                            .body("ErrorResponse.Error.Message", equalTo("Invalid max storage size for postgres")),
                     () -> stored.then().body(RESULT + "MaxAllocatedStorage", equalTo("100")),
                     () -> stored.then().body(RESULT + "BackupRetentionPeriod", equalTo("7")),
                     () -> stored.then().body(RESULT + "AllocatedStorage", equalTo(Integer.toString(allocated))));
@@ -53,24 +77,18 @@ class RdsAutoscalingMinimumIntegrationTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"30,30,32,33", "21,22,24,25"})
-    void combinedGrowthUsesTheResolvedAllocation(int requested, int resolved, int invalid, int valid) {
+    @CsvSource({"30,30,32,false", "30,30,32,true", "21,22,24,false"})
+    void simultaneousGrowthDoesNotAddAnUnverifiedMinimum(int requested, int resolved, int maximum,
+                                                         boolean immediately) {
         String id = "autoscaling-min-" + UUID.randomUUID();
         try {
             create(id, 20);
-            Response response = modify(id).formParam("AllocatedStorage", requested)
-                    .formParam("MaxAllocatedStorage", invalid).formParam("BackupRetentionPeriod", 2).post("/");
-            Response stored = describe(id).extract().response();
-            assertAll("combined request preserves every field on rejection",
-                    () -> response.then().statusCode(400)
-                            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue")),
-                    () -> stored.then().body(RESULT + "AllocatedStorage", equalTo("20")),
-                    () -> stored.then().body(RESULT + "MaxAllocatedStorage", equalTo("100")),
-                    () -> stored.then().body(RESULT + "BackupRetentionPeriod", equalTo("7")));
-            modify(id).formParam("AllocatedStorage", requested).formParam("MaxAllocatedStorage", valid)
-                    .formParam("BackupRetentionPeriod", 2).post("/").then().statusCode(200);
+            modify(id).formParam("AllocatedStorage", requested).formParam("MaxAllocatedStorage", maximum)
+                    .formParam("BackupRetentionPeriod", 2).formParam("ApplyImmediately", immediately)
+                    .post("/").then().statusCode(200);
+            // Floci applies storage changes immediately; this is not a live AWS combined-growth capture.
             describe(id).body(RESULT + "AllocatedStorage", equalTo(Integer.toString(resolved)))
-                    .body(RESULT + "MaxAllocatedStorage", equalTo(Integer.toString(valid)))
+                    .body(RESULT + "MaxAllocatedStorage", equalTo(Integer.toString(maximum)))
                     .body(RESULT + "BackupRetentionPeriod", equalTo("2"));
         } finally {
             remove(id);

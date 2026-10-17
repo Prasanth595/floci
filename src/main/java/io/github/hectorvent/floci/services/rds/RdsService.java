@@ -3074,7 +3074,7 @@ public class RdsService implements Resettable, ResourceProvider {
         // current size and engine version: a refusal here must leave the whole request unapplied.
         DbInstanceScalingChanges resolvedScaling = scaling.resolveFor(instance);
         DbInstanceSettings effective = withEffectiveWindows(settings, instance);
-        validateAutoscalingMinimum(instance, effective.maxAllocatedStorage(), resolvedScaling.allocatedStorage());
+        validateAutoscalingMinimum(instance, effective.maxAllocatedStorage());
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         if (optionGroupName != null && !optionGroupName.isBlank()) {
             validateInstanceOptionGroup(optionGroupName,
@@ -3147,23 +3147,19 @@ public class RdsService implements Resettable, ResourceProvider {
         settings.validate();
     }
 
-    private static void validateAutoscalingMinimum(DbInstance instance, Integer maximum, Integer resolvedAllocation) {
+    private static void validateAutoscalingMinimum(DbInstance instance, Integer maximum) {
         String clusterId = instance.getDbClusterIdentifier();
-        String engine = instance.getEngineIdentifier();
+        String engine = engineName(instance);
         int allocated = instance.getAllocatedStorage();
-        if (maximum == null || allocated <= 0 || maximum <= allocated
+        if (maximum == null || allocated <= 0 || maximum == allocated
                 || clusterId != null && !clusterId.isBlank()
                 || isAuroraEngine(engine)
                 || engine != null && engine.toLowerCase(Locale.ROOT).startsWith("custom-")) {
             return;
         }
-        boolean belowCurrentMinimum = (long) maximum * 10 < (long) allocated * 11;
-        boolean belowResultingMinimum = resolvedAllocation != null && maximum > resolvedAllocation
-                && (long) maximum * 10 < (long) resolvedAllocation * 11;
-        if (belowCurrentMinimum || belowResultingMinimum) {
-            throw new AwsException("InvalidParameterValue",
-                    "MaxAllocatedStorage must be at least 10% greater than AllocatedStorage "
-                            + "when storage autoscaling is enabled.", 400);
+        if ((long) maximum * 10 < (long) allocated * 11) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Invalid max storage size for " + (engine == null ? null : engine.toLowerCase(Locale.ROOT)), 400);
         }
     }
 

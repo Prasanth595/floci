@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -12,6 +13,7 @@ import software.amazon.awssdk.services.rds.model.RdsException;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+@DisplayName("RDS storage autoscaling minimum")
 class RdsAutoscalingMinimumTest {
     @ParameterizedTest
     @CsvSource({"20,21,22", "21,23,24"})
@@ -25,7 +27,9 @@ class RdsAutoscalingMinimumTest {
                         .maxAllocatedStorage(invalid).backupRetentionPeriod(2)))
                         .isInstanceOfSatisfying(RdsException.class, e -> {
                             assertThat(e.statusCode()).isEqualTo(400);
-                            assertThat(e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterValue");
+                            assertThat(e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterCombination");
+                            assertThat(e.awsErrorDetails().errorMessage())
+                                    .isEqualTo("Invalid max storage size for postgres");
                         });
                 assertState(rds, id, allocated, 100, 7);
                 DBInstance modified = rds.modifyDBInstance(r -> r.dbInstanceIdentifier(id)
@@ -40,26 +44,45 @@ class RdsAutoscalingMinimumTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"30,30,32,33", "21,22,24,25"})
-    void combinedGrowthUsesTheResolvedAllocation(int requested, int resolved, int invalid, int valid) {
+    @CsvSource({"30,30,32,false", "30,30,32,true", "21,22,24,false"})
+    void simultaneousGrowthDoesNotAddAnUnverifiedMinimum(int requested, int resolved, int maximum,
+                                                         boolean immediately) {
         Assumptions.assumeFalse(TestFixtures.isRealAws(), "Uses a disposable emulator DB instance");
         String id = TestFixtures.uniqueName("autoscaling-min");
         try (RdsClient rds = TestFixtures.rdsClient()) {
             try {
                 create(rds, id, 20);
+                DBInstance modified = rds.modifyDBInstance(r -> r.dbInstanceIdentifier(id)
+                        .allocatedStorage(requested).maxAllocatedStorage(maximum).backupRetentionPeriod(2)
+                        .applyImmediately(immediately)).dbInstance();
+                assertThat(modified.allocatedStorage()).isEqualTo(resolved);
+                assertThat(modified.maxAllocatedStorage()).isEqualTo(maximum);
+                assertState(rds, id, resolved, maximum, 2);
+            } finally {
+                remove(rds, id);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"19", "0", "-1"})
+    void lowerMaximumRejectsWithoutMutation(int maximum) {
+        Assumptions.assumeFalse(TestFixtures.isRealAws(), "Uses a disposable emulator DB instance");
+        String id = TestFixtures.uniqueName("autoscaling-lower");
+        try (RdsClient rds = TestFixtures.rdsClient()) {
+            try {
+                create(rds, id, 20);
                 assertThatThrownBy(() -> rds.modifyDBInstance(r -> r.dbInstanceIdentifier(id)
-                        .allocatedStorage(requested).maxAllocatedStorage(invalid).backupRetentionPeriod(2)))
-                        .isInstanceOfSatisfying(RdsException.class, e -> {
-                            assertThat(e.statusCode()).isEqualTo(400);
-                            assertThat(e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterValue");
+                        .maxAllocatedStorage(maximum).backupRetentionPeriod(2)))
+                        .isInstanceOfSatisfying(RdsException.class, error -> {
+                            assertThat(error.statusCode()).isEqualTo(400);
+                            assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterCombination");
+                            assertThat(error.awsErrorDetails().errorMessage())
+                                    .isEqualTo("Invalid max storage size for postgres");
                         });
                 assertState(rds, id, 20, 100, 7);
-                DBInstance modified = rds.modifyDBInstance(r -> r.dbInstanceIdentifier(id)
-                        .allocatedStorage(requested).maxAllocatedStorage(valid).backupRetentionPeriod(2))
-                        .dbInstance();
-                assertThat(modified.allocatedStorage()).isEqualTo(resolved);
-                assertThat(modified.maxAllocatedStorage()).isEqualTo(valid);
-                assertState(rds, id, resolved, valid, 2);
+                rds.modifyDBInstance(r -> r.dbInstanceIdentifier(id).maxAllocatedStorage(22));
+                assertState(rds, id, 20, 22, 7);
             } finally {
                 remove(rds, id);
             }
