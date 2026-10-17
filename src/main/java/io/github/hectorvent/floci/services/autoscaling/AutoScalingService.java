@@ -184,14 +184,7 @@ public class AutoScalingService {
                                                           Boolean instanceMonitoringEnabled,
                                                           List<LaunchConfigurationBlockDeviceMapping> blockDeviceMappings,
                                                           LaunchTemplateData.MetadataOptions metadataOptions) {
-        try {
-            Ec2Service.validateMetadataOptions(metadataOptions);
-        } catch (AwsException error) {
-            if (!"InvalidParameterValue".equals(error.getErrorCode())) {
-                throw error;
-            }
-            throw new AwsException("ValidationError", error.getMessage(), 400);
-        }
+        validateMetadataOptions(metadataOptions);
         String key = lcKey(region, name);
         if (launchConfigs.containsKey(key)) {
             throw new AwsException("AlreadyExists",
@@ -259,6 +252,39 @@ public class AutoScalingService {
         lc.setRegion(region);
         launchConfigs.put(key, lc);
         return lc;
+    }
+
+    /**
+     * Refuses metadata options outside the Auto Scaling model, every violation in one
+     * {@code ValidationError} with AWS's texts.
+     */
+    private static void validateMetadataOptions(LaunchTemplateData.MetadataOptions options) {
+        if (options == null) {
+            return;
+        }
+        List<String> violations = new ArrayList<>();
+        requireMetadataEnum(violations, "httpTokens", options.getHttpTokens(), "optional", "required");
+        Integer hopLimit = options.getHttpPutResponseHopLimit();
+        if (hopLimit != null && (hopLimit < 1 || hopLimit > 64)) {
+            violations.add("Value '" + hopLimit + "' at 'metadataOptions.httpPutResponseHopLimit' failed to satisfy"
+                    + " constraint: Member must have value "
+                    + (hopLimit < 1 ? "greater than or equal to 1" : "less than or equal to 64"));
+        }
+        requireMetadataEnum(violations, "httpEndpoint", options.getHttpEndpoint(), "disabled", "enabled");
+        if (!violations.isEmpty()) {
+            String prefix = violations.size() == 1
+                    ? "1 validation error detected: "
+                    : violations.size() + " validation errors detected: ";
+            throw new AwsException("ValidationError", prefix + String.join("; ", violations), 400);
+        }
+    }
+
+    private static void requireMetadataEnum(List<String> violations, String member, String value,
+                                            String... allowed) {
+        if (value != null && !List.of(allowed).contains(value)) {
+            violations.add("Value '" + value + "' at 'metadataOptions." + member + "' failed to satisfy constraint:"
+                    + " Member must satisfy enum value set: [" + String.join(", ", allowed) + "]");
+        }
     }
 
     String resolveLaunchConfigurationProfile(String profile) {

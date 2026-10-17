@@ -5,10 +5,13 @@ import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -26,13 +29,26 @@ class CloudFormationLaunchConfigurationMetadataValidationIntegrationTest {
     private static final String ACCOUNT = "222222222222";
     private static final String AUTH = EnforcementFixtures.auth(ACCOUNT, "cloudformation");
 
+    static Stream<Arguments> invalidMetadataOptions() {
+        return Stream.of(
+                Arguments.of("\"HttpTokens\":\"invalid\"", "1 validation error detected: Value 'invalid' at"
+                        + " 'metadataOptions.httpTokens' failed to satisfy constraint: Member must satisfy enum value"
+                        + " set: [optional, required]"),
+                Arguments.of("\"HttpEndpoint\":\"invalid\"", "1 validation error detected: Value 'invalid' at"
+                        + " 'metadataOptions.httpEndpoint' failed to satisfy constraint: Member must satisfy enum value"
+                        + " set: [disabled, enabled]"),
+                Arguments.of("\"HttpPutResponseHopLimit\":0", "1 validation error detected: Value '0' at"
+                        + " 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint: Member must have"
+                        + " value greater than or equal to 1"),
+                Arguments.of("\"HttpPutResponseHopLimit\":65", "1 validation error detected: Value '65' at"
+                        + " 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint: Member must have"
+                        + " value less than or equal to 64"),
+                Arguments.of("\"HttpPutResponseHopLimit\":\"not-an-integer\"",
+                        "HttpPutResponseHopLimit must be an integer."));
+    }
+
     @ParameterizedTest
-    @CsvSource(delimiter = '|', value = {
-            "\"HttpTokens\":\"invalid\"|Value (invalid) for parameter HttpTokens is invalid. Valid values are: optional, required.",
-            "\"HttpEndpoint\":\"invalid\"|Value (invalid) for parameter HttpEndpoint is invalid. Valid values are: enabled, disabled.",
-            "\"HttpPutResponseHopLimit\":0|Value (0) for parameter HttpPutResponseHopLimit is invalid. Valid values are between 1 and 64.",
-            "\"HttpPutResponseHopLimit\":65|Value (65) for parameter HttpPutResponseHopLimit is invalid. Valid values are between 1 and 64.",
-            "\"HttpPutResponseHopLimit\":\"not-an-integer\"|HttpPutResponseHopLimit must be an integer."})
+    @MethodSource("invalidMetadataOptions")
     void invalidMetadataOptionsFailTheResourceWithoutCreatingIt(String member, String message) {
         String name = "cfn-invalid-metadata-" + UUID.randomUUID();
         String template = """

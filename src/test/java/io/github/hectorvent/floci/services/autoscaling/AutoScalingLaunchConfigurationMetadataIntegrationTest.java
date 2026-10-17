@@ -96,21 +96,49 @@ class AutoScalingLaunchConfigurationMetadataIntegrationTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"MetadataOptions.HttpTokens=invalid,ValidationError",
-            "MetadataOptions.HttpEndpoint=invalid,ValidationError",
-            "MetadataOptions.HttpPutResponseHopLimit=0,ValidationError",
-            "MetadataOptions.HttpPutResponseHopLimit=65,ValidationError",
-            "MetadataOptions.HttpPutResponseHopLimit=not-an-integer,MalformedInput"})
-    void invalidMetadataRefusesWithoutCreatingLaunchConfiguration(String parameter, String code) {
+    @CsvSource(delimiter = '|', quoteCharacter = '"', value = {
+            "MetadataOptions.HttpTokens=invalid|ValidationError|1 validation error detected: Value 'invalid' at"
+                    + " 'metadataOptions.httpTokens' failed to satisfy constraint: Member must satisfy enum value"
+                    + " set: [optional, required]",
+            "MetadataOptions.HttpEndpoint=invalid|ValidationError|1 validation error detected: Value 'invalid' at"
+                    + " 'metadataOptions.httpEndpoint' failed to satisfy constraint: Member must satisfy enum value"
+                    + " set: [disabled, enabled]",
+            "MetadataOptions.HttpPutResponseHopLimit=0|ValidationError|1 validation error detected: Value '0' at"
+                    + " 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint: Member must have"
+                    + " value greater than or equal to 1",
+            "MetadataOptions.HttpPutResponseHopLimit=65|ValidationError|1 validation error detected: Value '65' at"
+                    + " 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint: Member must have"
+                    + " value less than or equal to 64",
+            "MetadataOptions.HttpPutResponseHopLimit=not-an-integer|MalformedInput"
+                    + "|HttpPutResponseHopLimit must be an integer."})
+    void invalidMetadataRefusesWithoutCreatingLaunchConfiguration(String parameter, String code, String message) {
         String name = "invalid-metadata-" + UUID.randomUUID();
         String[] pair = parameter.split("=", 2);
         request("autoscaling", "CreateLaunchConfiguration")
                 .formParam("LaunchConfigurationName", name).formParam("ImageId", "ami-amazonlinux2023")
                 .formParam("InstanceType", "t3.micro").formParam(pair[0], pair[1])
-                .post("/").then().statusCode(400).body("ErrorResponse.Error.Code", equalTo(code));
+                .post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo(code))
+                .body("ErrorResponse.Error.Message", equalTo(message));
         request("autoscaling", "DescribeLaunchConfigurations")
                 .formParam("LaunchConfigurationNames.member.1", name).post("/").then().statusCode(200)
                 .body(LAUNCH_CONFIGURATION + ".size()", equalTo(0));
+    }
+
+    @Test
+    void everyInvalidMetadataMemberIsReportedInOneValidationError() {
+        String name = "invalid-metadata-" + UUID.randomUUID();
+        request("autoscaling", "CreateLaunchConfiguration")
+                .formParam("LaunchConfigurationName", name).formParam("ImageId", "ami-amazonlinux2023")
+                .formParam("InstanceType", "t3.micro")
+                .formParam("MetadataOptions.HttpTokens", "invalid")
+                .formParam("MetadataOptions.HttpPutResponseHopLimit", "65")
+                .post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", equalTo("2 validation errors detected: Value 'invalid' at"
+                        + " 'metadataOptions.httpTokens' failed to satisfy constraint: Member must satisfy enum value"
+                        + " set: [optional, required]; Value '65' at 'metadataOptions.httpPutResponseHopLimit' failed"
+                        + " to satisfy constraint: Member must have value less than or equal to 64"));
     }
 
     @ParameterizedTest

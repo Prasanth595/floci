@@ -4566,7 +4566,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return inst;
     }
 
-    public static void validateMetadataOptions(LaunchTemplateData.MetadataOptions options) {
+    private static void validateMetadataOptions(LaunchTemplateData.MetadataOptions options) {
         if (options == null) {
             return;
         }
