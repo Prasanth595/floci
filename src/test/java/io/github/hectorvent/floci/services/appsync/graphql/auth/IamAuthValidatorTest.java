@@ -207,14 +207,25 @@ class IamAuthValidatorTest {
     }
 
     @Test
-    void aSignedHeaderMustBeInTheRequest() throws Exception {
+    void aSignedHeaderMustBeInTheRequestBeforeTheHostOrTheCredentialIsChecked() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
                 "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
-        Map<String, String> missing = new LinkedHashMap<>(signed);
-        missing.put("Authorization", signed.get("Authorization").replace("host;x-amz-date", "host;x-amz-date;x-extra"));
+        Map<String, String> missing = withCredential(signed, "AKIAGOOD/x/y");
+        missing.put("Authorization", missing.get("Authorization").replace("host;x-amz-date", "x-amz-date;X-Extra"));
 
-        assertEquals("'x-extra' is named as a SignedHeader, but it does not exist in the HTTP request.",
+        assertEquals("'X-Extra' is named as a SignedHeader, but it does not exist in the HTTP request.",
                 assertRejected(missing, 403, "IncompleteSignatureException").getMessage());
+    }
+
+    @Test
+    void theHostIsCheckedBeforeTheCredentialParts() throws Exception {
+        Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
+        Map<String, String> unsignedHost = withCredential(signed, "AKIAGOOD/x/y");
+        unsignedHost.put("Authorization", unsignedHost.get("Authorization").replace("host;x-amz-date", "x-amz-date"));
+
+        assertEquals("'Host' or ':authority' must be a 'SignedHeader' in the AWS Authorization.",
+                assertRejected(unsignedHost, 400, "BadRequestException").getMessage());
     }
 
     private AppSyncTransportException assertRejected(Map<String, String> signed, int status, String errorType) {

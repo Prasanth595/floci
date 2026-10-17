@@ -134,16 +134,22 @@ public class IamAuthValidator {
             throw AppSyncAuth.incompleteSignature("Date must be in ISO-8601 'basic format'. Got '" + date
                     + "'. See http://en.wikipedia.org/wiki/ISO_8601");
         }
-        String[] scope = credential.split("/", -1);
-        if (scope.length != 5) {
-            throw AppSyncAuth.incompleteSignature("Credential must have exactly 5 slash-delimited elements,"
-                    + " e.g. keyid/date/region/service/term, got '" + credential + "'");
-        }
         checkSigningTime(signedAt);
+        for (String name : signedHeaders.split(";")) {
+            if (!hasHeader(headers, name)) {
+                throw AppSyncAuth.incompleteSignature("'" + name
+                        + "' is named as a SignedHeader, but it does not exist in the HTTP request.");
+            }
+        }
         String names = signedHeaders.toLowerCase(Locale.ROOT);
         if (!SigV4RequestValidator.containsHeader(names, "host")
                 && !SigV4RequestValidator.containsHeader(names, ":authority")) {
             throw AppSyncAuth.badRequest("'Host' or ':authority' must be a 'SignedHeader' in the AWS Authorization.");
+        }
+        String[] scope = credential.split("/", -1);
+        if (scope.length != 5) {
+            throw AppSyncAuth.incompleteSignature("Credential must have exactly 5 slash-delimited elements,"
+                    + " e.g. keyid/date/region/service/term, got '" + credential + "'");
         }
         String amzDate = AMZ_DATE.format(signedAt);
         checkScope(scope, amzDate);
@@ -153,12 +159,6 @@ public class IamAuthValidator {
             LOG.debugv("AppSync SigV4 request references unregistered access key={0}",
                     SigV4RequestValidator.sanitizeForLog(accessKeyId));
             throw AppSyncAuth.unrecognizedClient();
-        }
-        for (String name : names.split(";")) {
-            if (!hasHeader(headers, name)) {
-                throw AppSyncAuth.incompleteSignature("'" + name
-                        + "' is named as a SignedHeader, but it does not exist in the HTTP request.");
-            }
         }
         String canonicalRequest = "POST\n/v1/apis/" + apiId + "/graphql\n\n" + canonicalHeaders(names, headers)
                 + "\n" + names + "\n" + Digests.sha256Hex(info.rawBody().getBytes(StandardCharsets.UTF_8));
