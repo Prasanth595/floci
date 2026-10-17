@@ -771,7 +771,7 @@ template, and Auto Scaling refuses a group over it.
 EC2 stores and returns IAM's profile ID, including for launch-template, EC2 Fleet and
 Auto Scaling instances. Persisted instances from older versions omit the unknown ID until the
 profile is reassociated; looking up the ARN could misidentify a deleted and recreated
-profile. The `client-token` instance filter selects only matching launches.
+profile.
 
 ### Network Interfaces
 
