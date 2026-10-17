@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
+import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.Router;
@@ -137,8 +138,9 @@ public class Ec2MetadataServer {
         Router router = Router.router(vertx);
         router.route().handler(BodyHandler.create());
         // Ahead of every route, so a path IMDS does not serve also answers 401 when the instance
-        // requires tokens, as on AWS.
-        router.get().handler(this::refuseTokenlessReadsWhenTokensAreRequired);
+        // requires tokens, as on AWS. A method-free route, so methods IMDS does not serve keep the
+        // router's own answers rather than all becoming 405.
+        router.route().handler(this::refuseTokenlessReadsWhenTokensAreRequired);
 
         // IMDSv2 token endpoint
         router.put("/latest/api/token").handler(this::handleToken);
@@ -500,12 +502,13 @@ public class Ec2MetadataServer {
     }
 
     /**
-     * An instance whose HttpTokens is required refuses IMDSv1: as AWS does, a read without a token
-     * gets 401 before any data is looked up, whatever the path.
+     * An instance whose HttpTokens is required refuses IMDSv1: as AWS does, a read (GET or HEAD)
+     * without a token gets 401 before any data is looked up, whatever the path.
      */
     private void refuseTokenlessReadsWhenTokensAreRequired(RoutingContext ctx) {
+        HttpMethod method = ctx.request().method();
         String token = ctx.request().getHeader("x-aws-ec2-metadata-token");
-        if (token == null || token.isBlank()) {
+        if ((HttpMethod.GET.equals(method) || HttpMethod.HEAD.equals(method)) && (token == null || token.isBlank())) {
             Instance inst = resolveInstanceByIp(ctx);
             if (inst != null && "required".equals(inst.effectiveMetadataOptions().getHttpTokens())) {
                 ctx.response().setStatusCode(401).end();

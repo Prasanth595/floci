@@ -132,6 +132,23 @@ class Ec2MetadataTokenTest {
     }
 
     @Test
+    void requiredTokenRefusesATokenlessHeadRequest() throws Exception {
+        setTokenRequirement("required");
+
+        assertEquals(401, fixture.send("HEAD", "/latest/meta-data/instance-id", null).statusCode());
+    }
+
+    /** The token check sits ahead of the routes without claiming the methods IMDS does not serve. */
+    @Test
+    void aMethodImdsDoesNotServeIsStillNotFound() throws Exception {
+        setTokenRequirement("required");
+        String token = fixture.putToken("60").body();
+
+        assertEquals(404, fixture.send("POST", "/latest/meta-data/", token).statusCode());
+        assertEquals(404, fixture.send("POST", "/latest/meta-data/", null).statusCode());
+    }
+
+    @Test
     void aPathImdsDoesNotServeIsStillNotFoundWithAToken() throws Exception {
         setTokenRequirement("required");
         String token = fixture.putToken("60").body();
