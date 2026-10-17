@@ -1,8 +1,12 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -12,6 +16,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -23,6 +28,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -34,13 +40,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * is already covered by its own unit tests and by {@code CodeArtifactPypiControllerTest}, so what
  * this class needs to prove is the real container's behavior, not the parser's fidelity to one
  * exact client's byte-for-byte output.
+ *
+ * <p>The containers are namespaced by {@link SidecarContainersProfile}, which this class shares
+ * with the other sidecar classes, so its last test deletes the repositories and domains it created.
  */
 @QuarkusTest
-@TestProfile(CodeArtifactPypiSidecarProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CodeArtifactPypiDockerIntegrationTest {
 
     private static final String AUTH = "AWS4-HMAC-SHA256 Credential=AKID/20260904/us-east-1/codeartifact/aws4_request";
+    private static final String NON_DEFAULT_REGION_AUTH =
+            "AWS4-HMAC-SHA256 Credential=AKID/20260904/us-west-2/codeartifact/aws4_request";
+    private static final String OTHER_ACCOUNT_AUTH =
+            "AWS4-HMAC-SHA256 Credential=111122223333/20260904/us-east-1/codeartifact/aws4_request";
     private static final String DOMAIN = "pypi-sidecar-domain";
     private static final String REPO = "pypi-sidecar-repo";
     private static final String PACKAGE_NAME = "floci-pypiserver-spike";
@@ -51,9 +64,12 @@ class CodeArtifactPypiDockerIntegrationTest {
 
     private static String bearerToken;
 
+    @Inject
+    EmulatorConfig config;
+
     @BeforeAll
     static void setUp() {
-        CodeArtifactPypiSidecarProfile.requireDockerAndTheSidecarImage();
+        SidecarContainersProfile.requireDockerAndImage("floci.services.codeartifact.pypi-image");
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
@@ -290,17 +306,15 @@ class CodeArtifactPypiDockerIntegrationTest {
     @Test
     @Order(10)
     void aDomainCreatedInANonDefaultRegionIsServedThroughTheTokensOwnRegion() {
-        String nonDefaultRegionAuth =
-                "AWS4-HMAC-SHA256 Credential=AKID/20260904/us-west-2/codeartifact/aws4_request";
         String domain = "pypi-sidecar-non-default-region-domain";
 
-        given().contentType("application/json").header("Authorization", nonDefaultRegionAuth).body("{}")
+        given().contentType("application/json").header("Authorization", NON_DEFAULT_REGION_AUTH).body("{}")
                 .post("/v1/domain?domain=" + domain)
                 .then().statusCode(200);
-        given().contentType("application/json").header("Authorization", nonDefaultRegionAuth).body("{}")
+        given().contentType("application/json").header("Authorization", NON_DEFAULT_REGION_AUTH).body("{}")
                 .post("/v1/repository?domain=" + domain + "&repository=" + REPO)
                 .then().statusCode(200);
-        String token = given().header("Authorization", nonDefaultRegionAuth)
+        String token = given().header("Authorization", NON_DEFAULT_REGION_AUTH)
                 .post("/v1/authorization-token?domain=" + domain)
                 .then().statusCode(200)
                 .extract().jsonPath().getString("authorizationToken");
@@ -319,16 +333,15 @@ class CodeArtifactPypiDockerIntegrationTest {
     @Test
     @Order(11)
     void aDomainCreatedUnderANonDefaultAccountIsServedThroughTheTokensOwnAccount() {
-        String otherAccountAuth = "AWS4-HMAC-SHA256 Credential=111122223333/20260904/us-east-1/codeartifact/aws4_request";
         String domain = "pypi-sidecar-cross-account-domain";
 
-        given().contentType("application/json").header("Authorization", otherAccountAuth).body("{}")
+        given().contentType("application/json").header("Authorization", OTHER_ACCOUNT_AUTH).body("{}")
                 .post("/v1/domain?domain=" + domain)
                 .then().statusCode(200);
-        given().contentType("application/json").header("Authorization", otherAccountAuth).body("{}")
+        given().contentType("application/json").header("Authorization", OTHER_ACCOUNT_AUTH).body("{}")
                 .post("/v1/repository?domain=" + domain + "&repository=" + REPO)
                 .then().statusCode(200);
-        String token = given().header("Authorization", otherAccountAuth)
+        String token = given().header("Authorization", OTHER_ACCOUNT_AUTH)
                 .post("/v1/authorization-token?domain=" + domain)
                 .then().statusCode(200)
                 .extract().jsonPath().getString("authorizationToken");
@@ -497,9 +510,34 @@ class CodeArtifactPypiDockerIntegrationTest {
                 "state reset must stop reset-repo's pypiserver container");
     }
 
-    private static int runningPypiserverTestContainerCount() throws IOException, InterruptedException {
+    /**
+     * Last, since the class shares {@link SidecarContainersProfile}'s application with the other
+     * sidecar classes: deletes the repositories and domains the tests above created, which also stops
+     * their pypiserver containers.
+     */
+    @Test
+    @Order(99)
+    void cleanupDeletesTheRepositoriesAndDomainsItCreated() {
+        deleteDomain(AUTH, DOMAIN, REPO, "other-repo", "concurrent-repo", "reused-name");
+        deleteDomain(AUTH, "other-pypi-token-domain");
+        deleteDomain(NON_DEFAULT_REGION_AUTH, "pypi-sidecar-non-default-region-domain", REPO);
+        deleteDomain(OTHER_ACCOUNT_AUTH, "pypi-sidecar-cross-account-domain", REPO);
+    }
+
+    private static void deleteDomain(String auth, String domain, String... repositories) {
+        for (String repository : repositories) {
+            given().header("Authorization", auth)
+                    .delete("/v1/repository?domain=" + domain + "&repository=" + repository);
+        }
+        given().header("Authorization", auth).delete("/v1/domain?domain=" + domain);
+        List<String> domains = given().contentType("application/json").header("Authorization", auth).body("{}")
+                .post("/v1/domains").then().statusCode(200).extract().jsonPath().getList("domains.name");
+        assertFalse(domains.contains(domain), domain + " is still there");
+    }
+
+    private int runningPypiserverTestContainerCount() throws IOException, InterruptedException {
         Process process = new ProcessBuilder("docker", "ps", "-q",
-                "--filter", "name=floci-aws-codeartifact-pypi-test-pypiserver-")
+                "--filter", "name=" + ContainerStorageHelper.dockerName(config, "floci-pypiserver-"))
                 .redirectErrorStream(true).start();
         String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         process.waitFor();

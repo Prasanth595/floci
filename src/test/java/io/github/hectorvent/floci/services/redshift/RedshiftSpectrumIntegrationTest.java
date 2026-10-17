@@ -11,13 +11,12 @@ import io.github.hectorvent.floci.services.redshift.spectrum.ExternalStatementPa
 import io.github.hectorvent.floci.services.redshift.spectrum.GlueTableBuilder;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -36,7 +35,6 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -48,18 +46,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Runs Redshift Spectrum queries that read external tables from Glue and S3 through the floci-duck
+ * sidecar, alone and joined with tables inside the cluster.
+ *
+ * <p>The sidecar reads the objects back from Floci's S3 at {@code floci.base-url}, which
+ * {@link SidecarContainersProfile} points at the port the test application listens on, and the
+ * profile namespaces the containers. The class shares that application with the other sidecar
+ * classes, so as each test ends it deletes the IAM role it created, and only one it created.
+ */
 @QuarkusTest
-@TestProfile(RedshiftSpectrumIntegrationTest.SpectrumProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class RedshiftSpectrumIntegrationTest {
-
-    public static class SpectrumProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("quarkus.http.test-port", "17866", "quarkus.http.port", "17866",
-                    "floci.base-url", "http://localhost:17866",
-                    "floci.docker.resource-namespace", "spectrum-relational-tests");
-        }
-    }
 
     @Inject
     RedshiftService redshiftService;
@@ -85,27 +83,17 @@ class RedshiftSpectrumIntegrationTest {
     private String clusterId;
     private String bucket;
     private String glueDatabase;
+    private boolean roleCreated;
 
     @BeforeAll
     static void requireDocker() {
-        Assumptions.assumeTrue(isDockerAvailable(), "Docker daemon must be available for Redshift Spectrum integration tests");
-    }
-
-    private static boolean isDockerAvailable() {
-        try {
-            Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
-                    .redirectErrorStream(true)
-                    .start();
-            int exit = process.waitFor();
-            return exit == 0;
-        } catch (Exception ignored) {
-            return false;
-        }
+        SidecarContainersProfile.requireDocker();
     }
 
     private Cluster createClusterWithRole(String identifier) {
         if (iamService.findRole("000000000000", ROLE_NAME).isEmpty()) {
             iamService.createRole(ROLE_NAME, "/", TRUST_POLICY, null, 0, null);
+            roleCreated = true;
             iamService.putRolePolicy(ROLE_NAME, "AllowS3", """
                     {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
                     "Action":["s3:GetObject","s3:ListBucket"],"Resource":"*"}]}""");
@@ -126,6 +114,10 @@ class RedshiftSpectrumIntegrationTest {
         }
         if (glueDatabase != null) {
             glueService.deleteDatabase(glueDatabase);
+        }
+        if (roleCreated) {
+            iamService.deleteRolePolicy(ROLE_NAME, "AllowS3");
+            iamService.deleteRole(ROLE_NAME);
         }
     }
 

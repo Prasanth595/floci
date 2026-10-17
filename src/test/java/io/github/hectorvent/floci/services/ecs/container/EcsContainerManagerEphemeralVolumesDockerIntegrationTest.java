@@ -4,19 +4,19 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse.Mount;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -33,8 +33,16 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Verifies that the containers of an ECS task share its ephemeral storage, that stopping the task
+ * removes it, and that a later run removes the containers and volumes an earlier run left behind.
+ *
+ * <p>The task containers and volumes carry the namespace of {@link SidecarContainersProfile} in
+ * their owner label, so the leftover removal under test can only reach those of this test run,
+ * never a developer's running Floci.
+ */
 @QuarkusTest
-@TestProfile(EcsContainerManagerEphemeralVolumesDockerIntegrationTest.VolumeProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class EcsContainerManagerEphemeralVolumesDockerIntegrationTest {
 
     @Inject
@@ -43,22 +51,14 @@ class EcsContainerManagerEphemeralVolumesDockerIntegrationTest {
     @Inject
     DockerClient dockerClient;
 
-    private final List<EcsTaskHandle> handles = new ArrayList<>();
+    @Inject
+    EmulatorConfig config;
 
-    public static class VolumeProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.docker.resource-namespace", "ecs-ephemeral-volumes-test");
-        }
-    }
+    private final List<EcsTaskHandle> handles = new ArrayList<>();
 
     @BeforeEach
     void requireDocker() {
-        try {
-            dockerClient.pingCmd().exec();
-        } catch (Exception unavailable) {
-            Assumptions.abort("Docker daemon must be available for ephemeral volume integration tests");
-        }
+        SidecarContainersProfile.requireDocker();
     }
 
     @AfterEach
@@ -99,7 +99,8 @@ class EcsContainerManagerEphemeralVolumesDockerIntegrationTest {
         String volumeName = task.getTaskVolumeNames().iterator().next();
         Map<String, String> labels = dockerClient.inspectVolumeCmd(volumeName).exec().getLabels();
         assertEquals("ecs", labels.get(ContainerStorageHelper.SERVICE_LABEL));
-        assertEquals("ecs-ephemeral-volumes-test/4566", labels.get(ContainerStorageHelper.OWNER_LABEL));
+        assertEquals(SidecarContainersProfile.namespace() + "/" + config.port(),
+                labels.get(ContainerStorageHelper.OWNER_LABEL));
         assertTrue(labels.containsKey(EcsContainerManager.RUN_LABEL));
         try {
             String nextRun = "next-run-" + UUID.randomUUID();
