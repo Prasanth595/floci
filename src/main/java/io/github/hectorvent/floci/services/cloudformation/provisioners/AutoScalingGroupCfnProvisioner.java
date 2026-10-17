@@ -19,6 +19,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -228,12 +229,19 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
         options.setHttpEndpoint(metadataMember(node, "HttpEndpoint", "String"));
         String hops = metadataMember(node, "HttpPutResponseHopLimit", "Integer");
         if (hops != null) {
+            BigInteger hopLimit;
             try {
-                options.setHttpPutResponseHopLimit(Integer.valueOf(hops));
+                hopLimit = new BigInteger(hops);
             } catch (NumberFormatException invalid) {
                 throw typeMismatch("#/MetadataOptions/HttpPutResponseHopLimit", "Integer",
                         node.path("HttpPutResponseHopLimit"));
             }
+            // A whole number too large for an int is still an integer, so it is out of range, not mistyped.
+            if (hopLimit.bitLength() > 31) {
+                throw new AwsException("ValidationError", "1 validation error detected: "
+                        + AutoScalingService.hopLimitViolation(hops, hopLimit.signum() < 0), 400);
+            }
+            options.setHttpPutResponseHopLimit(hopLimit.intValue());
         }
         return options;
     }

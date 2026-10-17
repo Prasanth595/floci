@@ -266,9 +266,7 @@ public class AutoScalingService {
         requireMetadataEnum(violations, "httpTokens", options.getHttpTokens(), "optional", "required");
         Integer hopLimit = options.getHttpPutResponseHopLimit();
         if (hopLimit != null && (hopLimit < 1 || hopLimit > 64)) {
-            violations.add("Value '" + hopLimit + "' at 'metadataOptions.httpPutResponseHopLimit' failed to satisfy"
-                    + " constraint: Member must have value "
-                    + (hopLimit < 1 ? "greater than or equal to 1" : "less than or equal to 64"));
+            violations.add(hopLimitViolation(String.valueOf(hopLimit), hopLimit < 1));
         }
         requireMetadataEnum(violations, "httpEndpoint", options.getHttpEndpoint(), "disabled", "enabled");
         if (!violations.isEmpty()) {
@@ -277,6 +275,16 @@ public class AutoScalingService {
                     : violations.size() + " validation errors detected: ";
             throw new AwsException("ValidationError", prefix + String.join("; ", violations), 400);
         }
+    }
+
+    /**
+     * AWS's text for a hop limit outside 1 to 64. The value is text so that CloudFormation can report
+     * a whole number too large for an int the same way.
+     */
+    public static String hopLimitViolation(String value, boolean belowMinimum) {
+        return "Value '" + value + "' at 'metadataOptions.httpPutResponseHopLimit' failed to satisfy"
+                + " constraint: Member must have value "
+                + (belowMinimum ? "greater than or equal to 1" : "less than or equal to 64");
     }
 
     private static void requireMetadataEnum(List<String> violations, String member, String value,

@@ -45,6 +45,12 @@ class CloudFormationLaunchConfigurationMetadataValidationIntegrationTest {
                 Arguments.of("{\"HttpPutResponseHopLimit\":65}", "1 validation error detected: Value '65' at"
                         + " 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint: Member must have"
                         + " value less than or equal to 64"),
+                Arguments.of("{\"HttpPutResponseHopLimit\":2147483648}", "1 validation error detected: Value"
+                        + " '2147483648' at 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint:"
+                        + " Member must have value less than or equal to 64"),
+                Arguments.of("{\"HttpPutResponseHopLimit\":-2147483649}", "1 validation error detected: Value"
+                        + " '-2147483649' at 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint:"
+                        + " Member must have value greater than or equal to 1"),
                 Arguments.of("{\"HttpPutResponseHopLimit\":\"not-an-integer\"}", "Model validation failed"
                         + " (#/MetadataOptions/HttpPutResponseHopLimit: expected type: Integer, found: String)"),
                 Arguments.of("{\"HttpPutResponseHopLimit\":[2]}", "Model validation failed"
