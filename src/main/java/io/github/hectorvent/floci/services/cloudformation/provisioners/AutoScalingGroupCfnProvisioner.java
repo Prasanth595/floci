@@ -238,8 +238,7 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
             }
             // A whole number too large for an int is still an integer, so it is out of range, not mistyped.
             if (hopLimit.bitLength() > 31) {
-                throw new AwsException("ValidationError", "1 validation error detected: "
-                        + AutoScalingService.hopLimitViolation(hops, hopLimit.signum() < 0), 400);
+                throw AutoScalingService.metadataOptionsError(options, hopLimit);
             }
             options.setHttpPutResponseHopLimit(hopLimit.intValue());
         }
