@@ -168,25 +168,45 @@ class Ec2MetadataProxyTest {
     @Test
     void readinessProbeIgnoresTheImagesHttpProxy(@TempDir Path directory) throws Exception {
         List<String> proxied = new CopyOnWriteArrayList<>();
-        HttpServer proxy = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        proxy.createContext("/", exchange -> {
-            proxied.add(exchange.getRequestMethod() + " " + exchange.getRequestURI());
-            exchange.sendResponseHeaders(502, -1);
-            exchange.close();
-        });
-        proxy.start();
+        HttpServer proxy = failingProxy(proxied);
         try (Ec2MetadataTestFixture fixture = new Ec2MetadataTestFixture()) {
             fixture.start();
             requireTokens(fixture.instance());
-            String proxyUrl = "http://127.0.0.1:" + proxy.getAddress().getPort();
 
-            int result = HelperShellFixture.run(probe(fixture.endpoint()), directory, Map.of(
-                    "http_proxy", proxyUrl, "HTTP_PROXY", proxyUrl, "all_proxy", proxyUrl,
-                    "ALL_PROXY", proxyUrl, "no_proxy", "", "NO_PROXY", ""));
+            int result = HelperShellFixture.run(probe(fixture.endpoint()), directory, proxyEnvironment(proxy));
 
             assertEquals(0, result, HelperShellFixture.output(directory));
             assertEquals(List.of(), proxied);
         } finally {
+            proxy.stop(0);
+        }
+    }
+
+    /**
+     * The pod identity relay answers 400 without a pod token, which still proves socat relays. A
+     * proxy that answered in its place would look the same to the status check, so the probe
+     * must not go through one.
+     */
+    @Test
+    void podIdentityProbeIgnoresTheImagesHttpProxy(@TempDir Path directory) throws Exception {
+        List<String> proxied = new CopyOnWriteArrayList<>();
+        HttpServer proxy = failingProxy(proxied);
+        HttpServer relay = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        relay.createContext("/v1/credentials", exchange -> {
+            exchange.sendResponseHeaders(400, -1);
+            exchange.close();
+        });
+        relay.start();
+        try {
+            String[] probe = {"sh", "-c",
+                    Ec2MetadataProxy.podIdentityProbeCommand("http://127.0.0.1:" + relay.getAddress().getPort())};
+
+            int result = HelperShellFixture.run(probe, directory, proxyEnvironment(proxy));
+
+            assertEquals(0, result, HelperShellFixture.output(directory));
+            assertEquals(List.of(), proxied);
+        } finally {
+            relay.stop(0);
             proxy.stop(0);
         }
     }
@@ -274,6 +294,25 @@ class Ec2MetadataProxyTest {
     @FunctionalInterface
     private interface TokenStatus {
         int forAttempt(int attempt);
+    }
+
+    /** An HTTP proxy that records every request it is sent and answers each with 502. */
+    private static HttpServer failingProxy(List<String> proxied) throws Exception {
+        HttpServer proxy = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        proxy.createContext("/", exchange -> {
+            proxied.add(exchange.getRequestMethod() + " " + exchange.getRequestURI());
+            exchange.sendResponseHeaders(502, -1);
+            exchange.close();
+        });
+        proxy.start();
+        return proxy;
+    }
+
+    /** The proxy settings an image could carry, with nothing exempted. */
+    private static Map<String, String> proxyEnvironment(HttpServer proxy) {
+        String proxyUrl = "http://127.0.0.1:" + proxy.getAddress().getPort();
+        return Map.of("http_proxy", proxyUrl, "HTTP_PROXY", proxyUrl, "all_proxy", proxyUrl,
+                "ALL_PROXY", proxyUrl, "no_proxy", "", "NO_PROXY", "");
     }
 
     private static String[] probe(String endpoint) {

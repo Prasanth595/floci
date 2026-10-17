@@ -12,11 +12,11 @@ import java.util.Optional;
 public final class Ec2MetadataProxy {
 
     /**
-     * Run first in every helper shell Floci execs in a guest to run its system tools, these and the
-     * sshd install probe. {@code docker exec} hands the shell the image's environment, so an
-     * application's library search path or Python installation would otherwise be what the package
-     * manager, {@code socat} and {@code curl} load. Only the helper shell changes; the container's
-     * configured environment and its processes keep these variables.
+     * Run first in the shells that install and start these proxies and in the sshd install probe.
+     * {@code docker exec} hands the shell the image's environment, so an application's library
+     * search path or Python installation would otherwise be what the package manager, {@code socat}
+     * and {@code curl} load. Only the helper shell changes; the container's configured environment
+     * and its processes keep these variables.
      */
     static final String CLEAR_APPLICATION_PATHS = "unset LD_LIBRARY_PATH PYTHONPATH PYTHONHOME";
 
@@ -72,7 +72,17 @@ public final class Ec2MetadataProxy {
 
     public static String[] podIdentityStartCommand(String flociHost, int flociPort) {
         return startCommand("pod-identity", "169.254.170.23", 80, flociHost, flociPort,
-                "[ \"$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 http://169.254.170.23/v1/credentials)\" != \"000\" ] && exit 0");
+                podIdentityProbeCommand("http://169.254.170.23"));
+    }
+
+    /**
+     * Ready once the relay answers at all: without a pod's token Floci answers 400, which still
+     * proves socat relays. Any HTTP proxy the image configures is bypassed, since a proxy's own
+     * answer would pass the same check.
+     */
+    static String podIdentityProbeCommand(String endpoint) {
+        return "[ \"$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 1 " + endpoint
+                + "/v1/credentials)\" != \"000\" ] && exit 0";
     }
 
     public static String[] startCommand(String name, String bindIp, int bindPort,
