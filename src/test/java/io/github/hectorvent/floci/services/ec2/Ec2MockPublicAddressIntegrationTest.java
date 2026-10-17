@@ -410,8 +410,8 @@ class Ec2MockPublicAddressIntegrationTest {
         // The interface outlives the instance and brings its address to the next one launched on it.
         String second = launchOnInterface(owner, eni);
         assertEquals(elastic, publicIp(owner, second));
-        address(owner, allocation).body(ADDRESS + "instanceId", equalTo(second))
-                .body(ADDRESS + "associationId", equalTo(association));
+        address(owner, allocation).body(ADDRESS + "associationId", equalTo(association))
+                .body(ADDRESS + "networkInterfaceId", equalTo(eni));
         request("StopInstances", owner).formParam("InstanceId.1", second).post("/").then().statusCode(200);
         assertEquals(elastic, publicIp(owner, second));
         request("StartInstances", owner).formParam("InstanceId.1", second).post("/").then().statusCode(200);
@@ -442,6 +442,14 @@ class Ec2MockPublicAddressIntegrationTest {
                 .formParam("SubnetId", subnet).post("/").then().statusCode(200)
                 .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
         assertTrue(publicIp(owner, instance).matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"));
+        // AssociateAddress by InstanceId needs exactly one interface, so the address goes on first.
+        ValidatableResponse allocated = allocateAddress(owner);
+        String allocation = allocated.extract().path("AllocateAddressResponse.allocationId");
+        String elastic = allocated.extract().path("AllocateAddressResponse.publicIp");
+        String association = request("AssociateAddress", owner).formParam("AllocationId", allocation)
+                .formParam("InstanceId", instance).post("/").then().statusCode(200)
+                .extract().path("AssociateAddressResponse.associationId");
+        assertEquals(elastic, publicIp(owner, instance));
         String extra = request("CreateNetworkInterface", owner).formParam("SubnetId", subnet)
                 .post("/").then().statusCode(200)
                 .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
@@ -450,23 +458,19 @@ class Ec2MockPublicAddressIntegrationTest {
                 .post("/").then().statusCode(200).extract().path("AttachNetworkInterfaceResponse.attachmentId");
 
         // A released public address is not replaced while a second interface is attached.
-        request("StopInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
-        request("StartInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
-        assertEquals("", publicIp(owner, instance));
-        ValidatableResponse allocated = allocateAddress(owner);
-        String allocation = allocated.extract().path("AllocateAddressResponse.allocationId");
-        String elastic = allocated.extract().path("AllocateAddressResponse.publicIp");
-        String association = request("AssociateAddress", owner).formParam("AllocationId", allocation)
-                .formParam("InstanceId", instance).post("/").then().statusCode(200)
-                .extract().path("AssociateAddressResponse.associationId");
-        assertEquals(elastic, publicIp(owner, instance));
         request("DisassociateAddress", owner).formParam("AssociationId", association).post("/").then()
                 .statusCode(200);
         assertEquals("", publicIp(owner, instance));
+        request("StopInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        request("StartInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        assertEquals("", publicIp(owner, instance));
 
-        // With the second interface gone, the next start assigns one again.
+        // With the second interface gone, starting the still-running instance changes nothing, and
+        // the next real start assigns an address again.
         request("DetachNetworkInterface", owner).formParam("AttachmentId", attachment).post("/").then()
                 .statusCode(200);
+        request("StartInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        assertEquals("", publicIp(owner, instance));
         request("StopInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
         request("StartInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
         assertTrue(publicIp(owner, instance).matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"));

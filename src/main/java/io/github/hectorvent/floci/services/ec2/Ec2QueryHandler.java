@@ -811,9 +811,11 @@ public class Ec2QueryHandler {
             blockDeviceMappings = LaunchTemplateData.BlockDeviceMapping.merge(
                     launchTemplateData.getBlockDeviceMappings(), blockDeviceMappings);
             if (!suppliedInterfaces) {
+                // With neither request interfaces nor, after the check above, a request SubnetId,
+                // the template's primary interface places the launch.
                 LaunchTemplateData.NetworkInterface primary = launchTemplateData.primaryNetworkInterface();
                 if (primary != null) {
-                    subnetId = firstNonBlank(subnetId, primary.getSubnetId());
+                    subnetId = primary.getSubnetId();
                     if (associatePublicIp == null) {
                         associatePublicIp = primary.getAssociatePublicIpAddress();
                     }

@@ -634,8 +634,7 @@ leaves the primary one, and the instance's public address, in place.
 
 Deleting an interface, including deletion on instance termination, disassociates its
 Elastic IP without releasing the allocation. A retained interface keeps its association
-after termination; release still follows that interface's VPC rules. An instance launched on
-that interface takes the address over, and DescribeAddresses reports it as its `InstanceId`.
+after termination; release still follows that interface's VPC rules.
 
 An allocated Elastic IP's `54.x.x.x` address is invented and routes nowhere, so associating
 it re-points it at the address the instance is actually reachable on — the same value
@@ -744,7 +743,9 @@ Two behaviours worth calling out, because they are what Terraform reads back:
   `CreateFleet` launches take their subnet and `AssociatePublicIpAddress` from the interface at
   device index 0; when that interface names no subnet, `CreateFleet` still uses the first
   interface that does. Auto Scaling launches take only its `AssociatePublicIpAddress`, since the
-  group's `VPCZoneIdentifier` places them.
+  group's `VPCZoneIdentifier` places them. Network interfaces, on the `RunInstances` request or
+  in its launch template, cannot be combined with an instance-level `SubnetId`
+  (`InvalidParameterCombination`); place the subnet on the primary network interface instead.
 
 #### Launch template versions
 
@@ -1138,9 +1139,6 @@ describes, a released address is not replaced while a second network interface i
 
 An Elastic IP associated with the instance's primary private address replaces the automatic
 address and is kept across a stop. Disassociating it from a running instance assigns a new
-automatic address when the launch requested one. An Elastic IP on a secondary private address
-does not change the instance's public address. A terminated instance has no public address.
-
-Network interfaces, on the `RunInstances` request or in its launch template, cannot be combined
-with an instance-level `SubnetId` (`InvalidParameterCombination`); place the subnet on the
-primary network interface instead.
+automatic address when the launch requested one. An Elastic IP that a retained interface
+carries becomes the public address of the next instance launched on that interface. A
+terminated instance has no public address.
