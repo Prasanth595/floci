@@ -25,6 +25,7 @@ import io.vertx.mutiny.core.Vertx;
 import jakarta.enterprise.inject.Instance;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 
 import static org.mockito.Mockito.mock;
@@ -33,9 +34,9 @@ import static org.mockito.Mockito.mock;
  * Builds {@link AslExecutor} for tests, naming only the collaborators a test uses.
  *
  * <p>Every other collaborator defaults to what the convenience constructors pass: a Mockito mock
- * for each integration, the system clock, a real sleeper, no Wait cap override, and no RDS Data,
- * Redshift Data, service registry or Lambda task authorizer. A Lambda target resolver is built
- * over the function store unless a test supplies its own.
+ * for each integration, the system clock, a real sleeper, no Wait cap override, AWS's 5-minute
+ * Express limit, and no RDS Data, Redshift Data, service registry or Lambda task authorizer. A
+ * Lambda target resolver is built over the function store unless a test supplies its own.
  */
 final class AslExecutorFixture {
 
@@ -77,6 +78,7 @@ final class AslExecutorFixture {
         private RedshiftDataJsonHandler redshiftDataHandler;
         private ServiceRegistry serviceRegistry;
         private LambdaTaskAuthorizer lambdaTaskAuthorizer;
+        private Duration expressMaxExecutionTime;
 
         private Builder() {
         }
@@ -221,6 +223,11 @@ final class AslExecutorFixture {
             return this;
         }
 
+        Builder expressMaxExecutionTime(Duration expressMaxExecutionTime) {
+            this.expressMaxExecutionTime = expressMaxExecutionTime;
+            return this;
+        }
+
         AslExecutor build() {
             return new AslExecutor(lambdaExecutor,
                     targetResolver != null ? targetResolver : new LambdaTargetResolver(functionStore, null),
@@ -229,7 +236,7 @@ final class AslExecutorFixture {
                     schedulerService, schedulerController, rdsDataService, objectMapper,
                     jsonataEvaluator != null ? jsonataEvaluator : new JsonataEvaluator(objectMapper),
                     sfnService, config, vertx, customResourceLiveness, clock, sleeper, maxWaitSeconds,
-                    redshiftDataHandler, serviceRegistry, lambdaTaskAuthorizer);
+                    redshiftDataHandler, serviceRegistry, lambdaTaskAuthorizer, expressMaxExecutionTime);
         }
     }
 }

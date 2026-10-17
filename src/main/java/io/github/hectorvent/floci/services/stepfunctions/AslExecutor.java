@@ -162,8 +162,9 @@ public class AslExecutor {
     // How long a Task waits for its token, or for a .sync job to end, when the state declares no
     // TimeoutSeconds. AWS lets it run for a year; the emulator would rather free the worker thread.
     private static final int DEFAULT_TASK_TIMEOUT_SECONDS = 300;
-    // AWS's hard quota on an Express execution, which a synchronous one is.
+    // AWS's hard quota on an Express execution, synchronous or not.
     private static final Duration EXPRESS_MAX_EXECUTION_TIME = Duration.ofMinutes(5);
+    private static final Set<String> TERMINAL_STATUSES = Set.of("SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED");
 
     /**
      * AWS ends an execution once its history reaches this many events. The count is neither reset
@@ -270,6 +271,7 @@ public class AslExecutor {
     private final Sleeper sleeper;
     // Null in production, where the ceiling comes from the Step Functions config. Tests pin it.
     private final Integer maxWaitSecondsOverride;
+    private final Duration expressMaxExecutionTime;
     private final Map<String, ActiveMockExecution> activeMocks = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "sfn-executor");
@@ -296,7 +298,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler, serviceRegistry,
-                lambdaTaskAuthorizer);
+                lambdaTaskAuthorizer, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -312,7 +314,7 @@ public class AslExecutor {
                 CustomResourceLiveness customResourceLiveness,
                 Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride,
                 RedshiftDataJsonHandler redshiftDataHandler, ServiceRegistry serviceRegistry,
-                LambdaTaskAuthorizer lambdaTaskAuthorizer) {
+                LambdaTaskAuthorizer lambdaTaskAuthorizer, Duration expressMaxExecutionTimeOverride) {
         this.serviceRegistry = serviceRegistry;
         this.lambdaTaskAuthorizer = lambdaTaskAuthorizer;
         this.customResourceLiveness = customResourceLiveness;
@@ -345,6 +347,9 @@ public class AslExecutor {
         this.clock = clock;
         this.sleeper = sleeper;
         this.maxWaitSecondsOverride = maxWaitSecondsOverride;
+        this.expressMaxExecutionTime = expressMaxExecutionTimeOverride != null
+                ? expressMaxExecutionTimeOverride
+                : EXPRESS_MAX_EXECUTION_TIME;
         if (vertx != null) {
             // This can be optimized further
             // TODO Set WebclientOptions useragent to Amazon|StepFunctions|HttpInvoke|{{{{region}}}}
@@ -371,7 +376,7 @@ public class AslExecutor {
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null);
+                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null);
     }
 
     // Kept for tests that do not exercise the Redshift Data API integration.
@@ -392,7 +397,7 @@ public class AslExecutor {
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                clock, sleeper, maxWaitSecondsOverride, null, null, null);
+                clock, sleeper, maxWaitSecondsOverride, null, null, null, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -460,9 +465,15 @@ public class AslExecutor {
                              MockedTestCase mockedTestCase,
                              BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
         registerMocks(exec, mockedTestCase);
+        // An Express execution has the same maximum execution time however it was started; a
+        // Standard one is allowed a year, which the emulator does not enforce.
+        long maxExecutionDeadlineNanos = "EXPRESS".equals(sm.getType())
+                ? System.nanoTime() + expressMaxExecutionTime.toNanos()
+                : Long.MAX_VALUE;
         executor.submit(() -> {
             try {
-                runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate, Long.MAX_VALUE));
+                runUnderExecutionAccount(sm,
+                        () -> doExecute(sm, exec, history, onUpdate, maxExecutionDeadlineNanos));
             } catch (RuntimeException | Error e) {
                 // submit() parks whatever the task throws in a Future nobody reads, so without this
                 // the worker dies silently. doExecute has already published the terminal status by
@@ -487,23 +498,24 @@ public class AslExecutor {
     public void executeSync(StateMachine sm, Execution exec, List<HistoryEvent> history,
                             MockedTestCase mockedTestCase,
                             BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
-        executeSync(sm, exec, history, mockedTestCase, onUpdate, EXPRESS_MAX_EXECUTION_TIME);
-    }
-
-    void executeSync(StateMachine sm, Execution exec, List<HistoryEvent> history,
-                     MockedTestCase mockedTestCase,
-                     BiConsumer<Execution, List<HistoryEvent>> onUpdate, Duration maxExecutionTime) {
         registerMocks(exec, mockedTestCase);
         // The execution itself ends at this deadline, as it does at its TimeoutSeconds, so it runs
         // no further state once the caller has been answered TIMED_OUT.
-        long maxExecutionDeadlineNanos = System.nanoTime() + maxExecutionTime.toNanos();
+        long maxExecutionDeadlineNanos = System.nanoTime() + expressMaxExecutionTime.toNanos();
         try {
             Future<?> f = executor.submit(() -> runUnderExecutionAccount(sm,
                     () -> doExecute(sm, exec, history, onUpdate, maxExecutionDeadlineNanos)));
-            f.get(maxExecutionTime.toNanos(), TimeUnit.NANOSECONDS);
+            f.get(maxExecutionDeadlineNanos - System.nanoTime(), TimeUnit.NANOSECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
-            exec.setStopDate(System.currentTimeMillis() / 1000.0);
-            exec.setStatus("TIMED_OUT");
+            // The worker ends itself at the same deadline. This answers the caller when it has not
+            // yet, and never replaces an outcome the worker already published.
+            synchronized (exec) {
+                if (hasEnded(exec)) {
+                    return;
+                }
+                exec.setStopDate(System.currentTimeMillis() / 1000.0);
+                exec.setStatus("TIMED_OUT");
+            }
             onUpdate.accept(exec, history);
         } catch (Exception e) {
             LOG.warnv("Sync execution wait failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
@@ -587,6 +599,11 @@ public class AslExecutor {
                     stateResult = runState(chain, currentStateName, stateDef, currentInput, sm,
                             topLevelQueryLanguage, execContext, variables, executionDeadlineNanos);
                 } catch (FailStateException e) {
+                    // A failure that came back after the deadline, like a late success, ends the
+                    // execution as timed out.
+                    if (System.nanoTime() >= executionDeadlineNanos) {
+                        throw new ExecutionTimedOutException();
+                    }
                     failExecution(exec, chain, e);
                     onUpdate.accept(exec, history);
                     return;
@@ -5778,7 +5795,7 @@ public class AslExecutor {
      */
     private void failExecution(Execution exec, HistoryChain chain, String error, String cause) {
         synchronized (exec) {
-            if (abortedByCaller(exec)) {
+            if (hasEnded(exec)) {
                 return;
             }
             exec.setError(error);
@@ -5817,11 +5834,15 @@ public class AslExecutor {
      */
     private void timeOutExecution(Execution exec, HistoryChain chain) {
         synchronized (exec) {
-            if (abortedByCaller(exec)) {
-                return;
+            // A synchronous caller may have published the timeout already; the event still ends
+            // the history. Any other outcome already published stands.
+            if (!"TIMED_OUT".equals(exec.getStatus())) {
+                if (hasEnded(exec)) {
+                    return;
+                }
+                exec.setStopDate(System.currentTimeMillis() / 1000.0);
+                exec.setStatus("TIMED_OUT");
             }
-            exec.setStopDate(System.currentTimeMillis() / 1000.0);
-            exec.setStatus("TIMED_OUT");
         }
         chain.end("ExecutionTimedOut", 0L, Map.of("error", "States.Timeout"));
     }
@@ -5835,7 +5856,7 @@ public class AslExecutor {
      */
     private void succeedExecution(Execution exec, HistoryChain chain, JsonNode output) {
         synchronized (exec) {
-            if (abortedByCaller(exec)) {
+            if (hasEnded(exec)) {
                 return;
             }
             exec.setOutput(output.toString());
@@ -5848,13 +5869,23 @@ public class AslExecutor {
 
     /**
      * True once StopExecution published ABORTED on this execution. The state loop reads it between
-     * states and every terminal write here reads it before publishing, so the worker's own status
-     * loses the race against a stop that arrived while it was still stepping: what a caller has
-     * already read back from DescribeExecution is what stands.
+     * states, so the worker stops stepping once a caller has stopped it.
      */
     private static boolean abortedByCaller(Execution exec) {
         synchronized (exec) {
             return "ABORTED".equals(exec.getStatus());
+        }
+    }
+
+    /**
+     * True once any outcome has been published on this execution: a stop from StopExecution, a
+     * synchronous caller answered with TIMED_OUT, or the worker's own. Every terminal write reads
+     * it before publishing, so the first outcome stands: what a caller has already read back from
+     * DescribeExecution or StartSyncExecution is never replaced.
+     */
+    private static boolean hasEnded(Execution exec) {
+        synchronized (exec) {
+            return TERMINAL_STATUSES.contains(exec.getStatus());
         }
     }
 
