@@ -162,6 +162,8 @@ public class AslExecutor {
     // How long a Task waits for its token, or for a .sync job to end, when the state declares no
     // TimeoutSeconds. AWS lets it run for a year; the emulator would rather free the worker thread.
     private static final int DEFAULT_TASK_TIMEOUT_SECONDS = 300;
+    // AWS's hard quota on an Express execution, which a synchronous one is.
+    private static final Duration EXPRESS_MAX_EXECUTION_TIME = Duration.ofMinutes(5);
 
     /**
      * AWS ends an execution once its history reaches this many events. The count is neither reset
@@ -460,7 +462,7 @@ public class AslExecutor {
         registerMocks(exec, mockedTestCase);
         executor.submit(() -> {
             try {
-                runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate));
+                runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate, Long.MAX_VALUE));
             } catch (RuntimeException | Error e) {
                 // submit() parks whatever the task throws in a Future nobody reads, so without this
                 // the worker dies silently. doExecute has already published the terminal status by
@@ -485,11 +487,20 @@ public class AslExecutor {
     public void executeSync(StateMachine sm, Execution exec, List<HistoryEvent> history,
                             MockedTestCase mockedTestCase,
                             BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+        executeSync(sm, exec, history, mockedTestCase, onUpdate, EXPRESS_MAX_EXECUTION_TIME);
+    }
+
+    void executeSync(StateMachine sm, Execution exec, List<HistoryEvent> history,
+                     MockedTestCase mockedTestCase,
+                     BiConsumer<Execution, List<HistoryEvent>> onUpdate, Duration maxExecutionTime) {
         registerMocks(exec, mockedTestCase);
+        // The execution itself ends at this deadline, as it does at its TimeoutSeconds, so it runs
+        // no further state once the caller has been answered TIMED_OUT.
+        long maxExecutionDeadlineNanos = System.nanoTime() + maxExecutionTime.toNanos();
         try {
-            Future<?> f = executor.submit(() ->
-                    runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate)));
-            f.get(300, TimeUnit.SECONDS);
+            Future<?> f = executor.submit(() -> runUnderExecutionAccount(sm,
+                    () -> doExecute(sm, exec, history, onUpdate, maxExecutionDeadlineNanos)));
+            f.get(maxExecutionTime.toNanos(), TimeUnit.NANOSECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
             exec.setStopDate(System.currentTimeMillis() / 1000.0);
             exec.setStatus("TIMED_OUT");
@@ -541,7 +552,7 @@ public class AslExecutor {
     }
 
     private void doExecute(StateMachine sm, Execution exec, List<HistoryEvent> history,
-                           BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+                           BiConsumer<Execution, List<HistoryEvent>> onUpdate, long maxExecutionDeadlineNanos) {
         HistoryChain chain = HistoryChain.of(history);
         try {
             JsonNode definition = objectMapper.readTree(sm.getDefinition());
@@ -550,11 +561,12 @@ public class AslExecutor {
             String topLevelQueryLanguage = definition.path("QueryLanguage").asText("JSONPath");
             JsonNode currentInput = parseInput(exec.getInput());
             // The state machine's total budget, computed once so every state measures against the
-            // same instant. Long.MAX_VALUE stands for a definition with no TimeoutSeconds.
+            // same instant: the earlier of its TimeoutSeconds and the maximum execution time its
+            // workflow type allows. Long.MAX_VALUE stands for neither.
             int timeoutSeconds = definition.path("TimeoutSeconds").asInt(0);
             long executionDeadlineNanos = timeoutSeconds > 0
-                    ? System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
-                    : Long.MAX_VALUE;
+                    ? Math.min(System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds), maxExecutionDeadlineNanos)
+                    : maxExecutionDeadlineNanos;
             JsonNode execContext = buildContext(exec, sm);
             // Execution-scoped JSONata variables (the Assign field). Mutated in place as states
             // assign, so later states observe earlier assignments.
@@ -581,6 +593,11 @@ public class AslExecutor {
                 }
                 currentInput = stateResult.output();
                 currentStateName = stateResult.nextState();
+            }
+            // A last state that outran the deadline, such as an integration call that does not
+            // watch it, ends the execution as timed out rather than succeeded.
+            if (System.nanoTime() >= executionDeadlineNanos) {
+                throw new ExecutionTimedOutException();
             }
 
             succeedExecution(exec, chain, currentInput);
