@@ -452,6 +452,20 @@ class ExternalTableMaterializerTest {
         assertThat(backend.statements.getLast(), containsString("CREATE TABLE \"analytics\".\"events\""));
     }
 
+    @Test
+    void invalidatingDataKeepsTheExistingTableAndItsDependencies() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        materializer.invalidateTable(BINDING.clusterKey(), "dev", "analytics", "events");
+        backend.statements.clear();
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+        String swap = backend.statements.getLast();
+        assertThat(swap, containsString("TRUNCATE \"analytics\".\"events\""));
+        assertThat(swap, not(containsString("DROP TABLE IF EXISTS \"analytics\".\"events\"")));
+    }
+
     private void forceReload() {
         when(s3.listObjectsWithPrefixes(eq("bucket"), eq("events/"), eq(""), eq(1000), any(), any()))
                 .thenReturn(new S3Service.ListObjectsResult(

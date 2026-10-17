@@ -211,6 +211,13 @@ public class ExternalTableMaterializer {
         forgetMatching(key -> key.equals(clusterKey + "|" + databaseName + "|" + schemaName + "|" + tableName));
     }
 
+    /** Reloads data after a catalog change without dropping the table's grants and dependent views. */
+    public void invalidateTable(String clusterKey, String databaseName, String schemaName, String tableName) {
+        String key = clusterKey + "|" + databaseName + "|" + schemaName + "|" + tableName;
+        fingerprints.remove(key);
+        latestLoads.remove(key);
+    }
+
     /** Forgets every table of one external schema, so a dropped and recreated schema is reloaded. */
     public void forgetSchema(String clusterKey, String databaseName, String schemaName) {
         String prefix = schemaPrefix(clusterKey, databaseName, schemaName);

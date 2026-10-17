@@ -4,9 +4,12 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Database;
+import io.github.hectorvent.floci.services.glue.model.Partition;
+import io.github.hectorvent.floci.services.glue.model.Table;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -57,10 +60,24 @@ public class SpectrumQueryPreparation {
     }
 
     public boolean handlesDdl(String sql, SpectrumSession session) {
-        Optional<ExternalStatement> statement = parser.parse(sql);
-        return statement.orElse(null) instanceof ExternalStatement.CreateSchema
-                || statement.orElse(null) instanceof ExternalStatement.CreateTable table
-                && (session.inTransaction() || bindings(session).containsKey(table.schemaName()));
+        ExternalStatement statement = parser.parse(sql).orElse(null);
+        return switch (statement) {
+            case ExternalStatement.CreateSchema ignored -> true;
+            case ExternalStatement.CreateTable table -> session.inTransaction() || bindings(session).containsKey(table.schemaName());
+            case ExternalStatement.AddPartitions partitions -> bindings(session).containsKey(partitions.schemaName());
+            case ExternalStatement.DropTable table -> bindings(session).containsKey(table.schemaName());
+            case ExternalStatement.DropSchema schema -> bindings(session).containsKey(schema.schemaName());
+            case null -> false;
+        };
+    }
+
+    public String commandTag(String sql) {
+        return switch (parser.parse(sql).orElse(null)) {
+            case ExternalStatement.AddPartitions ignored -> "ALTER TABLE";
+            case ExternalStatement.DropTable ignored -> "DROP TABLE";
+            case ExternalStatement.DropSchema ignored -> "DROP SCHEMA";
+            case null, default -> "CREATE EXTERNAL";
+        };
     }
 
     private boolean prepareInScope(String sql, SpectrumSession session, BackendSql backend) {
@@ -78,6 +95,24 @@ public class SpectrumQueryPreparation {
             glue.createTable(binding.glueDatabase(), GlueTableBuilder.toGlueTable(table));
             metadata.refresh(backend, session.accountId(), binding);
             return true;
+        }
+        switch (statement.orElse(null)) {
+            case ExternalStatement.AddPartitions partitions when bindings.containsKey(partitions.schemaName()) -> {
+                rejectTransaction(session);
+                addPartitions(partitions, bindings.get(partitions.schemaName()), session, backend);
+                return true;
+            }
+            case ExternalStatement.DropTable table when bindings.containsKey(table.schemaName()) -> {
+                rejectTransaction(session);
+                dropTable(table, bindings.get(table.schemaName()), session, backend);
+                return true;
+            }
+            case ExternalStatement.DropSchema schema when bindings.containsKey(schema.schemaName()) -> {
+                rejectTransaction(session);
+                dropSchema(schema, bindings.get(schema.schemaName()), session, backend);
+                return true;
+            }
+            case null, default -> { }
         }
         Optional<ExternalReferenceScanner.Reference> write = ExternalReferenceScanner.writeTarget(sql, bindings.keySet());
         if (write.isPresent()) {
@@ -97,6 +132,90 @@ public class SpectrumQueryPreparation {
             }
         }
         return false;
+    }
+
+    private static void rejectTransaction(SpectrumSession session) {
+        if (session.inTransaction()) {
+            throw new SpectrumSqlException("25001", "External catalog changes cannot run inside a transaction block");
+        }
+    }
+
+    private void addPartitions(ExternalStatement.AddPartitions statement, ExternalSchemaBinding binding,
+                               SpectrumSession session, BackendSql backend) {
+        Table table = glue.getTable(binding.glueDatabase(), statement.tableName());
+        if (table.getPartitionKeys() == null || table.getPartitionKeys().isEmpty()) {
+            throw new SpectrumSqlException("22023", "External table has no partition keys");
+        }
+        List<Partition> requested = statement.partitions().stream()
+                .map(spec -> GlueTableBuilder.toGluePartition(table, spec)).toList();
+        Set<List<String>> values = new HashSet<>();
+        for (Partition partition : glue.getPartitions(binding.glueDatabase(), statement.tableName())) {
+            values.add(partition.getValues());
+        }
+        List<Partition> additions = new ArrayList<>();
+        for (Partition partition : requested) {
+            if (values.add(partition.getValues())) {
+                additions.add(partition);
+            } else if (!statement.ifNotExists()) {
+                throw new SpectrumSqlException("42710", "Partition already exists: " + partition.getValues());
+            }
+        }
+        requireSchemaOwner(backend, binding.schemaName());
+        try {
+            for (Partition partition : additions) {
+                glue.createPartition(binding.glueDatabase(), statement.tableName(), partition);
+            }
+        } finally {
+            // A failed catalog write may follow a successful one; never keep the old data fingerprint.
+            materializer.invalidateTable(session.clusterKey(), session.databaseName(), binding.schemaName(), statement.tableName());
+        }
+        metadata.refresh(backend, session.accountId(), binding);
+    }
+
+    private void dropTable(ExternalStatement.DropTable statement, ExternalSchemaBinding binding,
+                           SpectrumSession session, BackendSql backend) {
+        boolean exists = true;
+        try {
+            glue.getTable(binding.glueDatabase(), statement.tableName());
+        } catch (AwsException exception) {
+            if (!statement.ifExists() || !"EntityNotFoundException".equals(exception.getErrorCode())) {
+                throw exception;
+            }
+            exists = false;
+        }
+        requireSchemaOwner(backend, binding.schemaName());
+        // Cold tables have no PostgreSQL relation. Check any cached relation's dependencies before deleting Glue metadata.
+        backend.execute("DROP TABLE IF EXISTS " + ExternalTableMaterializer.quote(binding.schemaName()) + "."
+                + ExternalTableMaterializer.quote(statement.tableName()) + (statement.cascade() ? " CASCADE" : " RESTRICT"));
+        materializer.forget(session.clusterKey(), session.databaseName(), binding.schemaName(), statement.tableName());
+        if (exists) {
+            glue.deleteTable(binding.glueDatabase(), statement.tableName());
+        }
+        metadata.refresh(backend, session.accountId(), binding);
+    }
+
+    private void dropSchema(ExternalStatement.DropSchema statement, ExternalSchemaBinding binding,
+                            SpectrumSession session, BackendSql backend) {
+        if (!statement.cascade() && !glue.getTables(binding.glueDatabase()).isEmpty()) {
+            throw new SpectrumSqlException("2BP01", "Cannot drop external schema because it contains external tables");
+        }
+        // One implicit PostgreSQL transaction keeps the local schema and its SVV metadata in sync.
+        backend.execute("DROP SCHEMA " + (statement.ifExists() ? "IF EXISTS " : "")
+                + ExternalTableMaterializer.quote(binding.schemaName()) + (statement.cascade() ? " CASCADE" : " RESTRICT")
+                + "; " + metadata.purgeSql(binding.schemaName()));
+        registry.unbind(session.accountId(), session.clusterKey(), session.databaseName(), binding.schemaName());
+        materializer.forgetSchema(session.clusterKey(), session.databaseName(), binding.schemaName());
+    }
+
+    private static void requireSchemaOwner(BackendSql backend, String schemaName) {
+        String body = "BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = "
+                + sqlLiteral(schemaName) + " AND pg_catalog.pg_has_role(current_user, n.nspowner, 'USAGE')) THEN "
+                + "RAISE EXCEPTION 'Must be owner of external schema' USING ERRCODE = '42501'; END IF; END";
+        backend.execute("DO " + sqlLiteral(body));
+    }
+
+    private static String sqlLiteral(String value) {
+        return "'" + value.replace("'", "''") + "'";
     }
 
     private boolean createSchema(ExternalStatement.CreateSchema schema, SpectrumSession session, BackendSql backend) {
