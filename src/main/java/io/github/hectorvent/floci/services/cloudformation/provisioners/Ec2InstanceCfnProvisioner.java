@@ -39,6 +39,9 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     // The instance profile the template declared last time, so an update that drops the property
     // can be told from one that never declared it (a launch template may have set the profile).
     private static final String DECLARED_IAM_PROFILE_ATTR = "__FlociDeclaredIamInstanceProfile";
+    // The MetadataOptions declared last time, the instance's own over its launch template's, so an
+    // update can return the options it no longer declares to their launch defaults.
+    private static final String DECLARED_METADATA_OPTIONS_ATTR = "__FlociDeclaredMetadataOptions";
 
     private final Ec2Service ec2Service;
     /** How long {@link #delete} waits for a terminated instance; package-visible so tests can shorten it. */
@@ -95,6 +98,9 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         // RunInstances merges a request over the launch template it names.
         LaunchTemplateData.MetadataOptions metadataOptions = Ec2CfnMetadataOptions.over(templateMetadataOptions,
                 props != null ? Ec2CfnMetadataOptions.parse(engine.resolveNode(props.get("MetadataOptions"))) : null);
+        // Checked before anything changes: a reused instance gets its options last, after its
+        // type, groups, user data and profile, so a bad value found there would leave it half updated.
+        Ec2Service.validateMetadataOptions(metadataOptions);
         if (instanceType == null || instanceType.isBlank()) {
             instanceType = "t3.micro";
         }
@@ -118,14 +124,17 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
                 && !declaredCreateOnlyChanged(attributesBefore, privateIpAddress, availabilityZone)) {
             // A reused instance still has its mutable properties reconciled to the template rather
             // than left at their prior values; re-read it so the published attributes reflect them.
+            LaunchTemplateData.MetadataOptions metadataOptionsToApply = Ec2CfnMetadataOptions.toApply(
+                    Ec2CfnMetadataOptions.decode(attributesBefore.get(DECLARED_METADATA_OPTIONS_ATTR)), metadataOptions);
             reconcileMutableProperties(region, prior, instanceType, securityGroupIds, userData,
-                    iamInstanceProfileArn, attributesBefore.get(DECLARED_IAM_PROFILE_ATTR), metadataOptions);
+                    iamInstanceProfileArn, attributesBefore.get(DECLARED_IAM_PROFILE_ATTR), metadataOptionsToApply);
             Instance reconciled = findInstance(region, prior.getInstanceId());
             Instance current = reconciled != null ? reconciled : prior;
             r.setPhysicalId(current.getInstanceId());
             publishInstanceAttributes(r, current);
             storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
             putOrRemove(r, DECLARED_IAM_PROFILE_ATTR, iamInstanceProfileArn);
+            putOrRemove(r, DECLARED_METADATA_OPTIONS_ATTR, Ec2CfnMetadataOptions.encode(metadataOptions));
             Ec2Tags.reconcile(ec2Service, region, current.getInstanceId(), desiredTags);
             ReplacementCleanup.record(r, ctx, attributesBefore);
             return;
@@ -159,6 +168,7 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         publishInstanceAttributes(r, launched != null ? launched : instance);
         storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
         putOrRemove(r, DECLARED_IAM_PROFILE_ATTR, iamInstanceProfileArn);
+        putOrRemove(r, DECLARED_METADATA_OPTIONS_ATTR, Ec2CfnMetadataOptions.encode(metadataOptions));
         // A createOnly change that landed a new instance id replaced the prior one: record it so
         // the stack cleans the displaced instance up after the update commits.
         ReplacementCleanup.record(r, ctx, attributesBefore);

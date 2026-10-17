@@ -26,6 +26,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -566,6 +567,55 @@ class Ec2InstanceCfnProvisionerTest {
         assertEquals("optional", modified.getValue().getHttpTokens());
         verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
                 any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void reusedInstanceResetsMetadataOptionsTheTemplateNoLongerDeclares() throws Exception {
+        Instance i1 = new Instance();
+        i1.setInstanceId("i-1");
+        i1.setImageId("ami-1");
+        stubLaunch(i1);
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "required", "HttpPutResponseHopLimit": 2}}
+                """), ctx(null));
+        LaunchTemplateData.MetadataOptions applied = LaunchTemplateData.MetadataOptions.launchDefaults();
+        applied.setHttpTokens("required");
+        applied.setHttpPutResponseHopLimit(2);
+        i1.setMetadataOptions(applied);
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(i1)));
+
+        // The template dropped MetadataOptions (CDK's requireImdsv2 turned off), so what it set
+        // last time goes back to the launch default, and what it never set is left alone.
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-1"));
+
+        ArgumentCaptor<LaunchTemplateData.MetadataOptions> reset =
+                ArgumentCaptor.forClass(LaunchTemplateData.MetadataOptions.class);
+        verify(ec2).modifyInstanceMetadataOptions(eq("us-east-1"), eq("i-1"), reset.capture());
+        assertEquals("optional", reset.getValue().getHttpTokens());
+        assertEquals(1, reset.getValue().getHttpPutResponseHopLimit());
+        assertNull(reset.getValue().getHttpEndpoint());
+    }
+
+    @Test
+    void invalidMetadataOptionsFailBeforeAReusedInstanceChanges() throws Exception {
+        StackResource r = resource("Server");
+        r.setPhysicalId("i-1");
+        r.getAttributes().put("InstanceId", "i-1");
+        Instance prior = new Instance();
+        prior.setInstanceId("i-1");
+        prior.setImageId("ami-1");
+        prior.setInstanceType("t3.micro");
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(prior)));
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "InstanceType": "t3.large", "MetadataOptions": {"HttpTokens": "Required"}}
+                """), ctx("i-1")));
+
+        assertEquals("InvalidParameterValue", failure.getErrorCode());
+        verifyNoInteractions(ec2);
     }
 
     @Test

@@ -131,6 +131,141 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
     }
 
     @Test
+    void optionsTheTemplateStopsDeclaringReturnToTheLaunchDefaults() {
+        String stackName = "cfn-metadata-drop-" + UUID.randomUUID().toString().substring(0, 8);
+        String withTemplate = """
+                {
+                  "Resources": {
+                    "Lt": {
+                      "Type": "AWS::EC2::LaunchTemplate",
+                      "Properties": {
+                        "LaunchTemplateData": {"ImageId": "ami-12345678", "MetadataOptions": {"HttpTokens": "required"}}
+                      }
+                    },
+                    "Inst": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {
+                        "LaunchTemplate": {
+                          "LaunchTemplateId": {"Ref": "Lt"},
+                          "Version": {"Fn::GetAtt": ["Lt", "LatestVersionNumber"]}
+                        }
+                      }
+                    }
+                  },
+                  "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
+                }
+                """;
+        // What CDK's requireImdsv2 turned off produces: the template and the reference are gone.
+        String withoutTemplate = """
+                {
+                  "Resources": {
+                    "Inst": {"Type": "AWS::EC2::Instance", "Properties": {"ImageId": "ami-12345678"}}
+                  },
+                  "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
+                }
+                """;
+        try {
+            cfn("CreateStack", stackName, withTemplate);
+            String instanceId = output(describeStack(stackName, "CREATE_COMPLETE"), "InstanceId");
+            assertEquals("required", describeInstance(instanceId).getString(INSTANCE + "metadataOptions.httpTokens"));
+
+            cfn("UpdateStack", stackName, withoutTemplate);
+            assertEquals(instanceId, output(describeStack(stackName, "UPDATE_COMPLETE"), "InstanceId"));
+            assertEquals("optional", describeInstance(instanceId).getString(INSTANCE + "metadataOptions.httpTokens"));
+        } finally {
+            cfn("DeleteStack", stackName, null);
+        }
+    }
+
+    @Test
+    void invalidMetadataOptionsFailTheUpdateBeforeTheInstanceChanges() {
+        String stackName = "cfn-metadata-invalid-" + UUID.randomUUID().toString().substring(0, 8);
+        String template = """
+                {
+                  "Resources": {
+                    "Inst": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {
+                        "ImageId": "ami-12345678",
+                        "InstanceType": "%s",
+                        "MetadataOptions": {"HttpTokens": "%s"}
+                      }
+                    }
+                  },
+                  "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
+                }
+                """;
+        try {
+            cfn("CreateStack", stackName, template.formatted("t3.micro", "required"));
+            String instanceId = output(describeStack(stackName, "CREATE_COMPLETE"), "InstanceId");
+
+            cfn("UpdateStack", stackName, template.formatted("t3.small", "Required"));
+            describeStack(stackName, "UPDATE_ROLLBACK_COMPLETE");
+            XmlPath unchanged = describeInstance(instanceId);
+            assertEquals("t3.micro", unchanged.getString(INSTANCE + "instanceType"));
+            assertEquals("required", unchanged.getString(INSTANCE + "metadataOptions.httpTokens"));
+        } finally {
+            cfn("DeleteStack", stackName, null);
+        }
+    }
+
+    @Test
+    void intrinsicsAndNoValueResolveInsideMetadataOptions() {
+        String stackName = "cfn-metadata-intrinsic-" + UUID.randomUUID().toString().substring(0, 8);
+        String template = """
+                {
+                  "Parameters": {"Tokens": {"Type": "String", "Default": "required"}},
+                  "Conditions": {"Never": {"Fn::Equals": ["a", "b"]}},
+                  "Resources": {
+                    "Inst": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {
+                        "ImageId": "ami-12345678",
+                        "MetadataOptions": {
+                          "HttpTokens": {"Ref": "Tokens"},
+                          "HttpPutResponseHopLimit": {"Fn::If": ["Never", 5, {"Ref": "AWS::NoValue"}]}
+                        }
+                      }
+                    }
+                  },
+                  "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
+                }
+                """;
+        try {
+            cfn("CreateStack", stackName, template);
+            XmlPath described = describeInstance(output(describeStack(stackName, "CREATE_COMPLETE"), "InstanceId"));
+            assertEquals("required", described.getString(INSTANCE + "metadataOptions.httpTokens"));
+            assertEquals("1", described.getString(INSTANCE + "metadataOptions.httpPutResponseHopLimit"));
+        } finally {
+            cfn("DeleteStack", stackName, null);
+        }
+    }
+
+    @Test
+    void anInstanceHopLimitThatIsNotAnIntegerFailsTheInstance() {
+        String stackName = "cfn-metadata-inst-bad-" + UUID.randomUUID().toString().substring(0, 8);
+        String template = """
+                {
+                  "Resources": {
+                    "Inst": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {"ImageId": "ami-12345678", "MetadataOptions": {"HttpPutResponseHopLimit": "two"}}
+                    }
+                  }
+                }
+                """;
+        try {
+            cfn("CreateStack", stackName, template);
+            describeStack(stackName, "ROLLBACK_COMPLETE");
+            cfnRequest("DescribeStackEvents").formParam("StackName", stackName)
+                    .post("/").then().statusCode(200)
+                    .body(containsString("HttpPutResponseHopLimit must be an integer."));
+        } finally {
+            cfn("DeleteStack", stackName, null);
+        }
+    }
+
+    @Test
     void aHopLimitThatIsNotAnIntegerFailsTheLaunchTemplate() {
         String stackName = "cfn-metadata-bad-" + UUID.randomUUID().toString().substring(0, 8);
         String template = """
