@@ -8,8 +8,10 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpClientRequest;
+import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
+import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpVersion;
 import io.vertx.core.http.RequestOptions;
 import io.vertx.core.json.JsonArray;
@@ -365,21 +367,21 @@ class EcrRegistryDataPlaneTest {
                     .setProtocolVersion(HttpVersion.HTTP_2)
                     .setHttp2ClearTextUpgrade(false));
             SocketAddress server = SocketAddress.inetSocketAddress(dataPlane.actualPort(), "127.0.0.1");
-            List<Future<Integer>> statuses = new ArrayList<>();
+            List<Future<HttpClientResponse>> responses = new ArrayList<>();
             for (int i = 0; i < uploads; i++) {
-                statuses.add(client.request(new RequestOptions()
+                responses.add(client.request(new RequestOptions()
                                 .setServer(server)
                                 .setHost("000000000000.dkr.ecr.us-east-1.localhost")
                                 .setPort(4566)
                                 .setMethod(HttpMethod.PATCH)
                                 .setURI("/v2/platform/api/blobs/uploads/upload-" + i))
-                        .compose(request -> request.send(layer))
-                        .map(response -> response.statusCode()));
+                        .compose(request -> request.send(layer)));
             }
 
-            Future.all(statuses).toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
-            for (Future<Integer> status : statuses) {
-                assertEquals(202, status.result());
+            Future.all(responses).toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+            for (Future<HttpClientResponse> response : responses) {
+                assertEquals(HttpVersion.HTTP_2, response.result().version());
+                assertEquals(202, response.result().statusCode());
             }
             assertEquals(uploads * layer.length(), bytesReceived.get());
             assertTrue(registryConnectionsClosed.await(5, TimeUnit.SECONDS),
@@ -424,6 +426,7 @@ class EcrRegistryDataPlaneTest {
                             .setMethod(HttpMethod.PATCH)
                             .setURI("/v2/platform/api/blobs/uploads/abandoned"))
                     .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertEquals(HttpVersion.HTTP_2, upload.version());
             upload.putHeader("Content-Length", String.valueOf(1024 * 1024));
             upload.write(Buffer.buffer(new byte[64 * 1024]));
             assertTrue(uploadStarted.await(5, TimeUnit.SECONDS), "the upload reached the registry");
@@ -432,6 +435,78 @@ class EcrRegistryDataPlaneTest {
 
             assertTrue(registryConnectionClosed.await(5, TimeUnit.SECONDS),
                     "the abandoned exchange closes its registry connection");
+        } finally {
+            if (client != null) {
+                client.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
+            if (dataPlane != null) {
+                dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
+            registry.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    /**
+     * A client that resets its stream while the data plane is still checking an immutable tag ends
+     * the exchange there: nothing of it reaches the registry, and the tag is free for the next
+     * write.
+     */
+    @Test
+    void aWriteResetDuringTheTagCheckNeverReachesTheRegistryAndFreesTheTag() throws Exception {
+        AtomicReference<HttpServerRequest> heldCheck = new AtomicReference<>();
+        CountDownLatch checkArrived = new CountDownLatch(1);
+        AtomicInteger manifestWrites = new AtomicInteger();
+        AtomicReference<String> manifestBody = new AtomicReference<>();
+        HttpServer registry = vertx.createHttpServer()
+                .requestHandler(request -> {
+                    if (request.method() == HttpMethod.HEAD) {
+                        // The first check waits until the test answers it; later ones find no tag.
+                        if (heldCheck.compareAndSet(null, request)) {
+                            checkArrived.countDown();
+                        } else {
+                            request.response().setStatusCode(404).end();
+                        }
+                    } else if (request.method() == HttpMethod.PUT) {
+                        manifestWrites.incrementAndGet();
+                        request.body().onSuccess(body -> {
+                            manifestBody.set(body.toString());
+                            request.response().setStatusCode(201).end();
+                        });
+                    } else {
+                        request.response().setStatusCode(405).end();
+                    }
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        HttpServer dataPlane = null;
+        HttpClient client = null;
+        try {
+            dataPlane = dataPlane(registry, true);
+            client = vertx.createHttpClient(new HttpClientOptions()
+                    .setProtocolVersion(HttpVersion.HTTP_2)
+                    .setHttp2ClearTextUpgrade(false));
+            HttpClientRequest write = client.request(new RequestOptions()
+                            .setServer(SocketAddress.inetSocketAddress(dataPlane.actualPort(), "127.0.0.1"))
+                            .setHost("000000000000.dkr.ecr.us-east-1.localhost")
+                            .setPort(4566)
+                            .setMethod(HttpMethod.PUT)
+                            .setURI("/v2/platform/api/manifests/v1"))
+                    .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertEquals(HttpVersion.HTTP_2, write.version());
+            write.putHeader("Content-Length", "64");
+            write.write(Buffer.buffer("{\"abandoned\""));
+            assertTrue(checkArrived.await(5, TimeUnit.SECONDS), "the data plane checks the tag first");
+
+            write.reset();
+            // A PING answered after the reset means the data plane has read the reset first.
+            write.connection().ping(Buffer.buffer("12345678"))
+                    .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            heldCheck.get().response().setStatusCode(404).end();
+
+            assertEquals(201, putManifest(dataPlane.actualPort()).statusCode());
+            assertEquals(1, manifestWrites.get());
+            assertEquals("{}", manifestBody.get());
         } finally {
             if (client != null) {
                 client.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
