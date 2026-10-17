@@ -172,6 +172,26 @@ public class AutoScalingService {
                                                           Boolean associatePublicIpAddress,
                                                           Boolean instanceMonitoringEnabled,
                                                           List<LaunchConfigurationBlockDeviceMapping> blockDeviceMappings) {
+        return createLaunchConfiguration(region, name, instanceId, imageId, instanceType, keyName,
+                securityGroups, userData, iamInstanceProfile, associatePublicIpAddress,
+                instanceMonitoringEnabled, blockDeviceMappings, null);
+    }
+
+    public LaunchConfiguration createLaunchConfiguration(String region, String name, String instanceId,
+                                                          String imageId, String instanceType, String keyName,
+                                                          List<String> securityGroups, String userData,
+                                                          String iamInstanceProfile, Boolean associatePublicIpAddress,
+                                                          Boolean instanceMonitoringEnabled,
+                                                          List<LaunchConfigurationBlockDeviceMapping> blockDeviceMappings,
+                                                          LaunchTemplateData.MetadataOptions metadataOptions) {
+        try {
+            Ec2Service.validateMetadataOptions(metadataOptions);
+        } catch (AwsException error) {
+            if (!"InvalidParameterValue".equals(error.getErrorCode())) {
+                throw error;
+            }
+            throw new AwsException("ValidationError", error.getMessage(), 400);
+        }
         String key = lcKey(region, name);
         if (launchConfigs.containsKey(key)) {
             throw new AwsException("AlreadyExists",
@@ -229,6 +249,7 @@ public class AutoScalingService {
         lc.setUserData(userData);
         lc.setUserDataBase64Encoded(Boolean.TRUE);
         lc.setIamInstanceProfile(iamInstanceProfile);
+        lc.setMetadataOptions(metadataOptions);
         lc.setAssociatePublicIpAddress(associatePublicIpAddress);
         // AWS documents InstanceMonitoring as enabled by default and always returns the
         // structure from Describe, unlike AssociatePublicIpAddress whose absence is meaningful.

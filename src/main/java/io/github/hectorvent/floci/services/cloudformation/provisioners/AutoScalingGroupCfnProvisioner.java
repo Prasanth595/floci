@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -202,13 +203,38 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
                     // it stays null rather than collapsing to false.
                     associatePublicIp == null || associatePublicIp.isBlank()
                             ? null
-                            : Boolean.parseBoolean(associatePublicIp));
+                            : Boolean.parseBoolean(associatePublicIp), null, List.of(), metadataOptions(props, ctx));
             deleteRenamedResource(ctx, name, n -> autoScalingService.deleteLaunchConfiguration(region, n),
                     "launch configuration");
         }
         // Ref returns the launch configuration name.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", lc.getLaunchConfigurationArn());
+    }
+
+    private LaunchTemplateData.MetadataOptions metadataOptions(JsonNode props, ProvisionContext ctx) {
+        // Resolved as a whole, so an Fn::If can select the block or AWS::NoValue and a member set
+        // to AWS::NoValue is absent rather than blank.
+        JsonNode node = props == null ? null
+                : ctx.engine().resolveNodeOmittingNoValue(props.get("MetadataOptions"));
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return null;
+        }
+        if (!node.isObject()) {
+            throw new AwsException("ValidationError", "MetadataOptions must be an object.", 400);
+        }
+        LaunchTemplateData.MetadataOptions options = new LaunchTemplateData.MetadataOptions();
+        options.setHttpTokens(blankToNull(node.path("HttpTokens").asText(null)));
+        options.setHttpEndpoint(blankToNull(node.path("HttpEndpoint").asText(null)));
+        String hops = blankToNull(node.path("HttpPutResponseHopLimit").asText(null));
+        if (hops != null) {
+            try {
+                options.setHttpPutResponseHopLimit(Integer.valueOf(hops));
+            } catch (NumberFormatException invalid) {
+                throw new AwsException("ValidationError", "HttpPutResponseHopLimit must be an integer.", 400);
+            }
+        }
+        return options;
     }
 
     private LaunchConfiguration requireLaunchConfiguration(String region, String name) {

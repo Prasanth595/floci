@@ -552,7 +552,7 @@ public class AutoScalingReconciler {
                         propagatedInstanceTags(asg, launchSource), launchSource.userData(),
                         launchSource.launchConfigurationName() == null ? launchSource.iamInstanceProfile()
                                 : asgService.resolveLaunchConfigurationProfile(launchSource.iamInstanceProfile()),
-                        launchSource.associatePublicIpAddress(), null, 0, null, null, null,
+                        launchSource.associatePublicIpAddress(), null, 0, null, launchSource.metadataOptions(), null,
                         launchSource.encodedUserData() != null ? launchSource.encodedUserData()
                                 : encodeLegacyUserData(launchSource.userData()),
                         false, null, null, launchSource.blockDeviceMappings());
@@ -851,7 +851,7 @@ public class AutoScalingReconciler {
                     // subnet's MapPublicIpOnLaunch, and only null means
                     // "fall back to the subnet default".
                     lc.getAssociatePublicIpAddress(),
-                    null);
+                    null, lc.getMetadataOptions());
         }
 
         LaunchTemplate launchTemplate = resolveLaunchTemplate(asg);
@@ -880,7 +880,7 @@ public class AutoScalingReconciler {
                     asg.getLaunchTemplateName(),
                     resolvedVersion,
                     null,
-                    version.getData().getBlockDeviceMappings());
+                    version.getData().getBlockDeviceMappings(), version.getData().getMetadataOptions());
         }
 
         MixedInstancesPolicy.LaunchTemplateSpecification specification =
@@ -915,7 +915,7 @@ public class AutoScalingReconciler {
                         specification.getLaunchTemplateName(),
                         resolvedVersion,
                         null,
-                        version.getData().getBlockDeviceMappings());
+                        version.getData().getBlockDeviceMappings(), version.getData().getMetadataOptions());
             }
         }
 
@@ -1027,7 +1027,8 @@ public class AutoScalingReconciler {
             String launchTemplateName,
             String launchTemplateVersion,
             Boolean associatePublicIpAddress,
-            List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings) {}
+            List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings,
+            LaunchTemplateData.MetadataOptions metadataOptions) {}
 
     // Override for describeAutoScalingGroups with null region (all regions)
     // The service only filters by region when non-null; null means all.
