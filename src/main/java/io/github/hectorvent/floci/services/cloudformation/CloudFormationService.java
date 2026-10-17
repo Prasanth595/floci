@@ -2205,6 +2205,8 @@ public class CloudFormationService implements ResourceProvider {
                     // An output whose Fn::GetStackOutput cannot be read fails the operation once the
                     // resources exist, and the stack rolls back as for a resource that failed
                     // (measured: a create deletes them and ends ROLLBACK_COMPLETE).
+                    LOG.warnv("Stack {0} output {1} failed: {2}", stack.getStackName(), output.getKey(),
+                            e.getMessage());
                     rollbackFailedExecution(stack, region, isCreate, e.getMessage(), previousState,
                             attemptedResourceIds);
                     return;
@@ -3674,9 +3676,12 @@ public class CloudFormationService implements ResourceProvider {
             });
         }
         // CloudFormation creates or updates the child with these values, so the call fails as a
-        // CreateStack or UpdateStack would, before the child is created or changed.
+        // CreateStack or UpdateStack would, before the child is created or changed: a parameter
+        // without a value, or a Fn::GetStackOutput where the child's template may not hold one
+        // (measured: the Child resource fails with the template error, and the parent rolls back).
         try {
             requireParameterValues(childTemplate, childParams);
+            validateGetStackOutputPlacement(childTemplate);
         } catch (AwsException e) {
             resource.setStatus("CREATE_FAILED");
             resource.setStatusReason(e.getMessage());
@@ -3951,17 +3956,31 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * The two places AWS refuses {@code Fn::GetStackOutput} when the stack operation is requested,
-     * before anything runs: anywhere in the Conditions section, and inside an
-     * {@code Fn::ImportValue}, whose export name may not depend on another stack.
+     * The places AWS refuses {@code Fn::GetStackOutput} when the stack operation is requested,
+     * before anything runs (measured, eu-west-1, 2026-10-04 and 2026-10-17): anywhere in the
+     * Conditions section, inside an {@code Fn::ImportValue}, and in an output's
+     * {@code Export.Name}, neither of which may depend on another stack. A nested stack's template
+     * is checked when the child is created, and the child's resource fails with the same message.
      */
     private void validateGetStackOutputPlacement(String templateBody) {
+        JsonNode parsed;
+        try {
+            parsed = parseTemplate(templateBody);
+        } catch (Exception e) {
+            // As validateResourceDependencies: a template that does not parse fails where it is
+            // processed, with the parser's error.
+            LOG.debugv("Skipping Fn::GetStackOutput placement validation; template did not parse: {0}",
+                    e.getMessage());
+            return;
+        }
         JsonNode template;
         try {
             // The rules hold for the template as processed: an AWS::Include fragment can carry it.
-            template = awsIncludeProcessor.mergeIncludes(parseTemplate(templateBody));
-        } catch (Exception e) {
-            LOG.debugv("Skipping Fn::GetStackOutput placement validation; template did not parse: {0}",
+            template = awsIncludeProcessor.mergeIncludes(parsed);
+        } catch (AwsException e) {
+            // A fragment that cannot be read fails the operation as the transform does, where the
+            // includes are processed; the request itself is not refused for it on AWS.
+            LOG.debugv("Skipping Fn::GetStackOutput placement validation; an AWS::Include failed: {0}",
                     e.getMessage());
             return;
         }
@@ -3972,6 +3991,13 @@ public class CloudFormationService implements ResourceProvider {
         if (importsAStackOutput(template)) {
             throw new AwsException("ValidationError", "Template error: the attribute in Fn::ImportValue must not"
                     + " depend on any resources, imported values, or Fn::GetAZs", 400);
+        }
+        for (Map.Entry<String, JsonNode> output : template.path("Outputs").properties()) {
+            if (CloudFormationTemplateEngine.containsGetStackOutput(output.getValue().path("Export").path("Name"))) {
+                throw new AwsException("ValidationError", "Template format error: Output " + output.getKey()
+                        + " is malformed.  The Name field of Export must not depend on any resources, imported"
+                        + " values, or Fn::GetAZs.", 400);
+            }
         }
         requireGetStackOutputArguments(template);
     }

@@ -495,8 +495,8 @@ intrinsic's reference page:
   define is ignored.
 - A parameter value may use any intrinsic function, including a `Ref` or `Fn::GetAtt` to a resource
   of the same stack, `Fn::ImportValue` and another `Fn::GetStackOutput`; it resolves like any property.
-  A dynamic reference is not resolved there: the stack name reaches DescribeStacks as written and
-  fails its name constraint (`1 validation error detected: Value '{{resolve:ssm:...}}' at 'stackName'
+  A dynamic reference is not resolved there, one inside an `Fn::Sub` variable map included: the stack
+  name reaches DescribeStacks as written and fails its name constraint (`1 validation error detected: Value '{{resolve:ssm:...}}' at 'stackName'
   failed to satisfy constraint: ...`), as on AWS.
 - A referenced stack that does not exist fails the resource with DescribeStacks' `ValidationError`
   (`Stack with id X does not exist (Service: AmazonCloudFormation; ...)`), and an output that does not
@@ -521,7 +521,10 @@ intrinsic's reference page:
   which the reference page lists as not supported yet. An output that cannot be read fails the
   operation once the resources exist, and the stack rolls back. Anywhere in `Conditions`, and inside
   `Fn::ImportValue`, the stack operation is refused when it is requested, with `ValidationError`,
-  `AWS::Include` fragments included.
+  `AWS::Include` fragments included; in an output's `Export.Name` too, with `Template format error:
+  Output O is malformed.  The Name field of Export must not depend on any resources, imported values,
+  or Fn::GetAZs.` In a nested stack's template the same rules fail the child's resource with the
+  same message when the child is created, and the parent rolls back.
 
 ## Template Parameters
 

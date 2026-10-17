@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
@@ -38,6 +39,9 @@ class CloudFormationGetStackOutputIntegrationTest {
 
     @Inject
     S3Service s3Service;
+
+    @Inject
+    SsmService ssmService;
 
     private final String suffix = Long.toString(System.nanoTime(), 36);
     /** Account, Region and name of every stack a test created, deleted in reverse order. */
@@ -258,6 +262,32 @@ class CloudFormationGetStackOutputIntegrationTest {
                 + " Error Code: ValidationError; Request ID: "));
     }
 
+    /**
+     * Measured (eu-west-1, 2026-10-17): nor is one inside an Fn::Sub variable map, although the
+     * parameter it names holds the producer's name.
+     */
+    @Test
+    void aDynamicReferenceInAnFnSubVariableMapIsNotResolved() {
+        String producer = name("sub-producer");
+        String consumer = name("sub-dynamic");
+        String producerName = parameter("sub-producer-name");
+        createProducer(DEFAULT_ACCOUNT, US_EAST_1, producer, "vpc-sub");
+        ssmService.putParameter(producerName, producer, "String", null, true, US_EAST_1);
+        String reference = "{{resolve:ssm:" + producerName + "}}";
+        try {
+            createStack(DEFAULT_ACCOUNT, US_EAST_1, consumer, consumer(parameter("sub-dynamic"),
+                    "{\"Fn::GetStackOutput\": {\"StackName\": {\"Fn::Sub\": [\"${N}\", {\"N\": \"" + reference
+                            + "\"}]}, \"OutputName\": \"VpcId\"}}"));
+
+            CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(consumer);
+            assertEquals("ROLLBACK_COMPLETE", state.status());
+            assertThat(state.reason(), containsString("1 validation error detected: Value '" + reference
+                    + "' at 'stackName' failed to satisfy constraint"));
+        } finally {
+            ssmService.deleteParameter(producerName, US_EAST_1);
+        }
+    }
+
     @Test
     void crossPartitionRegion_failsTheDeploy() {
         String consumer = name("partition");
@@ -387,6 +417,55 @@ class CloudFormationGetStackOutputIntegrationTest {
                     .body(containsString("Template error: Cannot use Fn::GetStackOutput in Conditions."));
         } finally {
             s3Service.deleteObject(bucket, "conditions.json");
+            s3Service.deleteBucket(bucket);
+        }
+    }
+
+    /** Measured (eu-west-1, 2026-10-17): an output's export name may not depend on another stack. */
+    @Test
+    void inAnExportName_isRefusedOnCreate() {
+        String template = """
+                {"Resources": {"Topic": {"Type": "AWS::SNS::Topic"}},
+                 "Outputs": {"Out": {"Value": "x", "Export": {"Name":
+                   {"Fn::GetStackOutput": {"StackName": "%s", "OutputName": "VpcId"}}}}}}
+                """.formatted(name("producer"));
+
+        given().contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack")
+                .formParam("StackName", name("export-name"))
+                .formParam("TemplateBody", template)
+                .when().post("/").then()
+                .statusCode(400)
+                .body(containsString("<Code>ValidationError</Code>"))
+                .body(containsString("Template format error: Output Out is malformed.  The Name field of Export"
+                        + " must not depend on any resources, imported values, or Fn::GetAZs."));
+    }
+
+    /**
+     * Measured (eu-west-1, 2026-10-17): a nested stack's template is checked when the child is
+     * created. The Child resource fails with the template error, and the parent rolls back.
+     */
+    @Test
+    void inANestedStacksConditions_failsTheChildResource() {
+        String bucket = name("nested");
+        String parent = name("nested-parent");
+        s3Service.createBucket(bucket, US_EAST_1);
+        s3Service.putObject(bucket, "child.json", """
+                {"Conditions": {"C": {"Fn::Equals": [
+                  {"Fn::GetStackOutput": {"StackName": "%s", "OutputName": "VpcId"}}, "x"]}},
+                 "Resources": {"Topic": {"Type": "AWS::SNS::Topic", "Condition": "C"}}}
+                """.formatted(name("producer")).getBytes(StandardCharsets.UTF_8), "application/json", Map.of());
+        try {
+            createStack(DEFAULT_ACCOUNT, US_EAST_1, parent, """
+                    {"Resources": {"Child": {"Type": "AWS::CloudFormation::Stack",
+                      "Properties": {"TemplateURL": "http://localhost/%s/child.json"}}}}
+                    """.formatted(bucket));
+
+            CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(parent);
+            assertEquals("ROLLBACK_COMPLETE", state.status());
+            assertThat(state.reason(), containsString("Template error: Cannot use Fn::GetStackOutput in Conditions."));
+        } finally {
+            s3Service.deleteObject(bucket, "child.json");
             s3Service.deleteBucket(bucket);
         }
     }

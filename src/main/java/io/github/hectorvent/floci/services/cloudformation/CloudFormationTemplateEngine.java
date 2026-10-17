@@ -65,6 +65,11 @@ public class CloudFormationTemplateEngine {
     private final UnaryOperator<String> dynamicReferenceResolver;
     private final StackOutputResolver stackOutputResolver;
     private final List<String> unresolvedIntrinsics = new ArrayList<>();
+    /**
+     * Above zero while {@code Fn::GetStackOutput}'s arguments resolve: CloudFormation hands them on
+     * with their dynamic references unresolved.
+     */
+    private int dynamicReferencesSuspended;
 
     /**
      * A minimal engine for a resource provisioned outside any stack (Cloud Control CreateResource).
@@ -338,7 +343,8 @@ public class CloudFormationTemplateEngine {
      * text an intrinsic function (e.g. {@code Fn::Sub}) produces.
      */
     private TextNode resolveDynamicReferences(String value) {
-        if (dynamicReferenceResolver == null || value == null || !value.contains("{{resolve:")) {
+        if (dynamicReferenceResolver == null || dynamicReferencesSuspended > 0 || value == null
+                || !value.contains("{{resolve:")) {
             return TextNode.valueOf(value);
         }
         return TextNode.valueOf(dynamicReferenceResolver.apply(value));
@@ -817,12 +823,23 @@ public class CloudFormationTemplateEngine {
         return stackOutputResolver.resolve(referencedStack, outputName, referencedRegion, roleArn);
     }
 
+    /**
+     * A parameter's value, with every dynamic reference in it left as written, one inside an
+     * {@code Fn::Sub} variable map included: CloudFormation does not resolve them there, so the
+     * stack name reaches DescribeStacks unresolved and fails its name constraint (measured,
+     * eu-west-1, 2026-10-17).
+     */
     private String getStackOutputParameter(JsonNode args, String name) {
         JsonNode value = args.get(name);
         if (value == null || value.isNull()) {
             return "";
         }
-        return resolveIntrinsic(value);
+        dynamicReferencesSuspended++;
+        try {
+            return resolveIntrinsic(value);
+        } finally {
+            dynamicReferencesSuspended--;
+        }
     }
 
     /**

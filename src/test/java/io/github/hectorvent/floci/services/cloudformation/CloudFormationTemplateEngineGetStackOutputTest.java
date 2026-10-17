@@ -225,6 +225,23 @@ class CloudFormationTemplateEngineGetStackOutputTest {
         assertEquals(List.of(Arrays.asList("P", "O", "us-east-1", null)), lookups);
     }
 
+    /**
+     * Measured (eu-west-1, 2026-10-17): a dynamic reference in an argument is handed on as written,
+     * one inside an Fn::Sub variable map included, while the same Fn::Sub elsewhere resolves it.
+     */
+    @Test
+    void dynamicReferencesInTheArguments_areLeftAsWritten() {
+        CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine("111111111111", "us-east-1",
+                "consumer", "stack/id", Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), mapper,
+                name -> null, value -> value.replace("{{resolve:ssm:/name}}", "Producer"), this::lookup);
+        String sub = "{\"Fn::Sub\": [\"${N}\", {\"N\": \"{{resolve:ssm:/name}}\"}]}";
+
+        engine.resolve(json("{\"Fn::GetStackOutput\": {\"StackName\": " + sub + ", \"OutputName\": \"VpcId\"}}"));
+
+        assertEquals(List.of(Arrays.asList("{{resolve:ssm:/name}}", "VpcId", "us-east-1", null)), lookups);
+        assertEquals("Producer", engine.resolve(json(sub)));
+    }
+
     @Test
     void outputsValue_directReferenceResolves() {
         assertEquals("Producer/VpcId@us-east-1", engine().resolveOutputValue(json("""
