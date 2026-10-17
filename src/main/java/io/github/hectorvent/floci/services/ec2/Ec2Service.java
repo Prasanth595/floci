@@ -3571,6 +3571,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             suppliedEni.setAttachment(launchAttachment);
                             suppliedEni.setStatus("in-use");
                             networkInterfaces.put(key(region, suppliedEni.getNetworkInterfaceId()), suppliedEni);
+                            // An Elastic IP the interface kept from an earlier instance now belongs
+                            // to this one, which DescribeAddresses reports as its InstanceId.
+                            for (Address carried : addresses.scan(k -> k.startsWith(region + "::"))) {
+                                if (carried.getAssociationId() != null
+                                        && eni.getNetworkInterfaceId().equals(carried.getNetworkInterfaceId())) {
+                                    carried.setInstanceId(instanceId);
+                                    addresses.put(key(region, carried.getAllocationId()), carried);
+                                }
+                            }
                         }
 
                         // Root EBS volume
@@ -3982,8 +3991,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             instances.scan(k -> true).stream()
                     .filter(i -> i.getRegion().equals(region) && "pending".equals(i.getState().getName()))
                     .forEach(i -> {
-                        completeMockLaunch(i);
-                        instances.put(key(i.getRegion(), i.getInstanceId()), i);
+                        if (completeMockLaunch(region, i, false)) {
+                            instances.put(key(i.getRegion(), i.getInstanceId()), i);
+                        }
                     });
         }
         List<Instance> all = new ArrayList<>(instances.scan(k -> true));
@@ -4012,35 +4022,107 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return new ArrayList<>(reservationMap.values());
     }
 
-    private void completeMockLaunch(Instance instance) {
+    /**
+     * Moves a mock instance to running, under its lock and only if no other request has moved it
+     * on since the caller looked: a launch must still be pending, a start must not be terminated.
+     * It shows the Elastic IP on its primary private address, or else an automatic address.
+     *
+     * @param restart true for StartInstances, where AWS assigns a replacement automatic address
+     * @return whether the instance changed
+     */
+    private boolean completeMockLaunch(String region, Instance instance, boolean restart) {
         synchronized (instance) {
-            assignMockPublicAddress(instance);
+            String state = instance.getState() == null ? null : instance.getState().getName();
+            if (restart ? "terminated".equals(state) || "shutting-down".equals(state) : !"pending".equals(state)) {
+                return false;
+            }
+            Address elastic = primaryElasticAddress(region, instance);
+            if (elastic != null) {
+                setPublicAddress(instance, elastic.getPublicIp());
+            } else {
+                assignMockPublicAddress(region, instance, restart);
+            }
             instance.setState(InstanceState.running());
+            return true;
         }
     }
 
-    private static void assignMockPublicAddress(Instance instance) {
-        if (instance.isAssociatePublicIp() && instance.getPublicIpAddress() == null) {
-            Random random = new Random();
-            String publicIp = "54." + random.nextInt(256) + "."
-                    + random.nextInt(256) + "." + random.nextInt(256);
-            instance.setPublicIpAddress(publicIp);
-            instance.setPublicDnsName(publicIp);
+    /**
+     * Gives a mock instance an automatic public address when its launch asked for one. As on AWS,
+     * only an interface the launch created gets one, and an address released by a stop or by a
+     * disassociated Elastic IP is not replaced while a second interface is attached.
+     */
+    private void assignMockPublicAddress(String region, Instance instance, boolean replacement) {
+        if (!instance.isAssociatePublicIp() || instance.getPublicIpAddress() != null
+                || launchedOnExistingInterface(region, instance)
+                || replacement && instance.getNetworkInterfaces() != null && instance.getNetworkInterfaces().size() > 1) {
+            return;
         }
+        setPublicAddress(instance, randomPublicIpv4());
     }
 
-    /** A stopped mock instance keeps an associated Elastic IP and loses an automatic address. */
+    /** A stopped mock instance keeps the Elastic IP on its primary private address and loses an automatic one. */
     private void releaseMockPublicAddress(String region, Instance instance) {
-        boolean elastic = addresses.scan(k -> k.startsWith(region + "::")).stream()
-                .anyMatch(address -> instance.getInstanceId().equals(address.getInstanceId()));
-        if (!elastic) {
-            clearPublicAddress(instance);
-        }
+        Address elastic = primaryElasticAddress(region, instance);
+        setPublicAddress(instance, elastic == null ? null : elastic.getPublicIp());
+    }
+
+    private static void setPublicAddress(Instance instance, String publicIp) {
+        instance.setPublicIpAddress(publicIp);
+        instance.setPublicDnsName(publicIp);
     }
 
     private static void clearPublicAddress(Instance instance) {
-        instance.setPublicIpAddress(null);
-        instance.setPublicDnsName(null);
+        setPublicAddress(instance, null);
+    }
+
+    private static String randomPublicIpv4() {
+        Random random = new Random();
+        return "54." + random.nextInt(256) + "." + random.nextInt(256) + "." + random.nextInt(256);
+    }
+
+    private static String primaryInterfaceId(Instance instance) {
+        return instance.getNetworkInterfaces() == null || instance.getNetworkInterfaces().isEmpty() ? null
+                : instance.getNetworkInterfaces().get(0).getNetworkInterfaceId();
+    }
+
+    /** Whether the instance's primary interface is one the caller created and handed to the launch. */
+    private boolean launchedOnExistingInterface(String region, Instance instance) {
+        String primaryInterfaceId = primaryInterfaceId(instance);
+        return primaryInterfaceId != null && networkInterfaces.get(key(region, primaryInterfaceId)).isPresent();
+    }
+
+    /**
+     * The secondary private address of the instance's primary interface that {@code privateIp}
+     * names, or null when it names the primary address, or no address of that interface.
+     */
+    private String secondaryPrivateIpOf(String region, Instance instance, String privateIp) {
+        String primaryInterfaceId = primaryInterfaceId(instance);
+        if (privateIp == null || primaryInterfaceId == null || privateIp.equals(instance.getPrivateIpAddress())) {
+            return null;
+        }
+        return networkInterfaces.get(key(region, primaryInterfaceId))
+                .filter(ni -> ni.getPrivateIpAddresses() != null && ni.getPrivateIpAddresses().stream()
+                        .anyMatch(ip -> !ip.isPrimary() && privateIp.equals(ip.getPrivateIpAddress())))
+                .map(ni -> privateIp)
+                .orElse(null);
+    }
+
+    /**
+     * The Elastic IP associated with the instance's primary private address, by instance or by
+     * the primary interface it was associated through, or null.
+     */
+    private Address primaryElasticAddress(String region, Instance instance) {
+        String primaryInterfaceId = primaryInterfaceId(instance);
+        for (Address address : addresses.scan(k -> k.startsWith(region + "::"))) {
+            boolean onInstance = instance.getInstanceId().equals(address.getInstanceId())
+                    || primaryInterfaceId != null && primaryInterfaceId.equals(address.getNetworkInterfaceId());
+            if (onInstance && address.getAssociationId() != null
+                    && secondaryPrivateIpOf(region, instance, address.getPrivateIpAddress()) == null) {
+                return address;
+            }
+        }
+        return null;
     }
 
     public String platformDetailsForInstance(Instance instance) {
@@ -4224,7 +4306,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             InstanceState prev = inst.getState();
             if (config.services().ec2().mock()) {
-                completeMockLaunch(inst);
+                completeMockLaunch(region, inst, true);
             } else {
                 restoreInstanceFirewall(inst);
                 String accountId = callerAccountId();
@@ -4279,8 +4361,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     .filter(i -> i.getRegion().equals(region) && "pending".equals(i.getState().getName()))
                     .filter(i -> instanceIds.isEmpty() || instanceIds.contains(i.getInstanceId()))
                     .forEach(i -> {
-                        completeMockLaunch(i);
-                        instances.put(key(i.getRegion(), i.getInstanceId()), i);
+                        if (completeMockLaunch(region, i, false)) {
+                            instances.put(key(i.getRegion(), i.getInstanceId()), i);
+                        }
                     });
         }
         List<Instance> all = new ArrayList<>(instances.scan(k -> true));
@@ -9830,10 +9913,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public Address allocateAddress(String region, String publicIpv4Pool, String networkBorderGroup) {
         ensureDefaultResources(region);
         String allocId = "eipalloc-" + randomHex(17);
-        String ip = "54." + (new Random().nextInt(256)) + "." + (new Random().nextInt(256)) + "." + (new Random().nextInt(256));
         Address addr = new Address();
         addr.setAllocationId(allocId);
-        addr.setPublicIp(ip);
+        addr.setPublicIp(randomPublicIpv4());
         addr.setRegion(region);
         // shortcut: pool and border group are metadata until real pool allocation is modeled.
         addr.setPublicIpv4Pool(publicIpv4Pool);
@@ -9843,6 +9925,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public Address associateAddress(String region, String allocationId, String instanceId) {
+        return associateAddress(region, allocationId, instanceId, null);
+    }
+
+    /**
+     * Associates the Elastic IP with one private address of the instance.
+     *
+     * @param privateIpAddress the instance's private address the Elastic IP is for; null, or an
+     *        address that is not a secondary one of the instance's primary interface, means its
+     *        primary private address
+     */
+    public Address associateAddress(String region, String allocationId, String instanceId, String privateIpAddress) {
         ensureDefaultResources(region);
         // Under the lock createNatGateway and deleteNatGateway take, so the gateway check and the
         // write cannot interleave with a gateway claiming or releasing the same allocation.
@@ -9858,25 +9951,28 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (addr.getAssociationId() != null) {
                 disassociateAddress(region, addr.getAssociationId());
             }
+            Instance target = instanceId == null ? null : instances.get(key(region, instanceId)).orElse(null);
+            String secondary = target == null ? null : secondaryPrivateIpOf(region, target, privateIpAddress);
             // "If you associate an Elastic IP address with an instance that has an existing Elastic IP
-            // address, the existing address is disassociated from the instance" (AssociateAddress),
-            // including one a retained interface carried onto this instance as its primary.
-            if (instanceId != null) {
-                String primaryInterfaceId = instances.get(key(region, instanceId))
-                        .filter(inst -> inst.getNetworkInterfaces() != null && !inst.getNetworkInterfaces().isEmpty())
-                        .map(inst -> inst.getNetworkInterfaces().get(0).getNetworkInterfaceId())
-                        .orElse(null);
+            // address, the existing address is disassociated from the instance" (AssociateAddress):
+            // the one on the same private address, including one a retained interface carried
+            // onto this instance as its primary.
+            if (target != null) {
+                String primaryInterfaceId = primaryInterfaceId(target);
                 for (Address existing : addresses.scan(k -> k.startsWith(region + "::"))) {
                     boolean onInstance = instanceId.equals(existing.getInstanceId())
                             || primaryInterfaceId != null && primaryInterfaceId.equals(existing.getNetworkInterfaceId());
                     if (onInstance && existing.getAssociationId() != null
-                            && !allocationId.equals(existing.getAllocationId())) {
+                            && !allocationId.equals(existing.getAllocationId())
+                            && Objects.equals(secondary, secondaryPrivateIpOf(region, target, existing.getPrivateIpAddress()))) {
                         disassociateAddress(region, existing.getAssociationId());
                     }
                 }
             }
             addr.setInstanceId(instanceId);
             addr.setAssociationId("eipassoc-" + randomHex(17));
+            // Kept for a secondary address; pointAddressAtInstance records the primary one otherwise.
+            addr.setPrivateIpAddress(secondary);
             pointAddressAtInstance(addr, region, instanceId);
             addresses.put(key(region, allocationId), addr);
             return addr;
@@ -9914,6 +10010,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (addr.getAllocatedPublicIp() == null) {
             addr.setAllocatedPublicIp(addr.getPublicIp());
         }
+        String secondary = secondaryPrivateIpOf(region, inst, addr.getPrivateIpAddress());
         String reachable = containerManager.reachablePublicAddress(inst);
         if (reachable != null) {
             addr.setPublicIp(reachable);
@@ -9922,16 +10019,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             inst.setPublicIpAddress(reachable);
             inst.setPublicDnsName("127.0.0.1".equals(reachable) ? "localhost" : reachable);
             instances.put(key(region, instanceId), inst);
-        } else if (config.services().ec2().mock()) {
-            // With no container to reach, the allocated address replaces any automatic one. A
-            // terminated instance keeps none, and an unchanged address is not written again.
+        } else if (config.services().ec2().mock() && secondary == null) {
+            // With no container to reach, the allocated address on the primary private address
+            // replaces any automatic one. A terminated instance keeps none, an unchanged address
+            // is not written again, and neither is one disassociated since the caller read it.
             boolean changed = false;
             synchronized (inst) {
                 String state = inst.getState() == null ? null : inst.getState().getName();
                 if (!"terminated".equals(state) && !"shutting-down".equals(state)
+                        && addr.getAssociationId() != null && instanceId.equals(addr.getInstanceId())
                         && !Objects.equals(addr.getPublicIp(), inst.getPublicIpAddress())) {
-                    inst.setPublicIpAddress(addr.getPublicIp());
-                    inst.setPublicDnsName(addr.getPublicIp());
+                    setPublicAddress(inst, addr.getPublicIp());
                     changed = true;
                 }
             }
@@ -9939,7 +10037,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 instances.put(key(region, instanceId), inst);
             }
         }
-        addr.setPrivateIpAddress(inst.getPrivateIpAddress());
+        addr.setPrivateIpAddress(secondary != null ? secondary : inst.getPrivateIpAddress());
         if (inst.getNetworkInterfaces() != null && !inst.getNetworkInterfaces().isEmpty()) {
             addr.setNetworkInterfaceId(inst.getNetworkInterfaces().get(0).getNetworkInterfaceId());
         }
@@ -9952,12 +10050,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         String interfaceKey = key(address.getRegion(), address.getNetworkInterfaceId());
         networkInterfaces.get(interfaceKey).ifPresent(ni -> {
+            // The address sits on the secondary private address it names, otherwise on the primary.
+            boolean onSecondary = ni.getPrivateIpAddresses().stream()
+                    .anyMatch(ip -> !ip.isPrimary() && Objects.equals(ip.getPrivateIpAddress(), address.getPrivateIpAddress()));
             for (NetworkInterfacePrivateIpAddress ip : ni.getPrivateIpAddresses()) {
-                if (!ip.isPrimary()) {
-                    continue;
-                }
+                boolean target = onSecondary
+                        ? !ip.isPrimary() && Objects.equals(ip.getPrivateIpAddress(), address.getPrivateIpAddress())
+                        : ip.isPrimary();
                 if (address.getAssociationId() != null) {
-                    ip.setAssociation(networkInterfaceAssociation(address, ni.getOwnerId()));
+                    if (target) {
+                        ip.setAssociation(networkInterfaceAssociation(address, ni.getOwnerId()));
+                    }
                 } else if (ip.getAssociation() != null
                         && address.getAllocationId().equals(ip.getAssociation().getAllocationId())) {
                     ip.setAssociation(null);
@@ -10033,7 +10136,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
                 clearPublicAddress(inst);
                 if ("running".equals(inst.getState().getName())) {
-                    assignMockPublicAddress(inst);
+                    assignMockPublicAddress(region, inst, true);
                 }
             }
             instances.put(key(region, instanceId), inst);

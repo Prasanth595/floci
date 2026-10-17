@@ -1119,8 +1119,7 @@ public class Ec2QueryHandler {
         String templateSubnetId = primary != null && isSet(primary.getSubnetId()) ? primary.getSubnetId()
                 : template.getNetworkInterfaces().stream()
                         .map(networkInterface -> networkInterface.getSubnetId())
-                        .filter(Objects::nonNull)
-                        .filter(value -> !value.isBlank())
+                        .filter(Ec2QueryHandler::isSet)
                         .findFirst()
                         .orElse(null);
         String subnetId = firstNonBlank(overrideSubnetId, templateSubnetId);
@@ -4370,7 +4369,7 @@ public class Ec2QueryHandler {
     private Response handleAssociateAddress(MultivaluedMap<String, String> p, String region) {
         String allocationId = p.getFirst("AllocationId");
         String instanceId = p.getFirst("InstanceId");
-        Address addr = service.associateAddress(region, allocationId, instanceId);
+        Address addr = service.associateAddress(region, allocationId, instanceId, p.getFirst("PrivateIpAddress"));
         XmlBuilder xml = new XmlBuilder()
                 .start("AssociateAddressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())

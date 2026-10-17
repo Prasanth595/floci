@@ -625,14 +625,17 @@ and [Elastic IP allocation](https://docs.aws.amazon.com/vpc/latest/userguide/Wor
 In a nondefault VPC it returns `InvalidIPAddress.InUse` without changing the association;
 call `DisassociateAddress` first, as specified by the
 [EC2 API reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ReleaseAddress.html).
-Associating an Elastic IP with an instance that already has one disassociates the earlier
-address, which stays allocated, as the
+Associating an Elastic IP with an instance that already has one on the same private address
+disassociates the earlier address, which stays allocated, as the
 [AssociateAddress reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_AssociateAddress.html)
-describes.
+describes. That is the primary private address unless `PrivateIpAddress` names a secondary
+address of the instance's primary interface, so an address on a secondary private address
+leaves the primary one, and the instance's public address, in place.
 
 Deleting an interface, including deletion on instance termination, disassociates its
 Elastic IP without releasing the allocation. A retained interface keeps its association
-after termination; release still follows that interface's VPC rules.
+after termination; release still follows that interface's VPC rules. An instance launched on
+that interface takes the address over, and DescribeAddresses reports it as its `InstanceId`.
 
 An allocated Elastic IP's `54.x.x.x` address is invented and routes nowhere, so associating
 it re-points it at the address the instance is actually reachable on — the same value
@@ -737,9 +740,11 @@ Two behaviours worth calling out, because they are what Terraform reads back:
   requests and `CreateFleet` launches, so `aws_launch_template.iam_instance_profile.name` converges.
 - **`NetworkInterfaces` stays a `NetworkInterfaces` block.** Its `Groups` are not hoisted into
   top-level `SecurityGroupIds`; on AWS the two are mutually exclusive. A launch from the template
-  resolves its security groups from whichever of the two is populated, and takes its subnet and
-  `AssociatePublicIpAddress` from the interface at device index 0. When that interface names no
-  subnet, `CreateFleet` still uses the first interface that does.
+  resolves its security groups from whichever of the two is populated. `RunInstances` and
+  `CreateFleet` launches take their subnet and `AssociatePublicIpAddress` from the interface at
+  device index 0; when that interface names no subnet, `CreateFleet` still uses the first
+  interface that does. Auto Scaling launches take only its `AssociatePublicIpAddress`, since the
+  group's `VPCZoneIdentifier` places them.
 
 #### Launch template versions
 
@@ -1124,11 +1129,18 @@ sets `AssociatePublicIpAddress`. Direct launches, EC2 Fleet launches and Auto Sc
 templates preserve both `true` and `false` overrides. An automatically assigned public address
 appears when the instance reaches `running`, whether DescribeInstances or
 DescribeInstanceStatus observes it first. It remains stable while running, is released on stop
-or termination, and is replaced on restart; the private address remains unchanged.
+or termination, and is replaced on restart; the private address remains unchanged. As the
+[InstanceNetworkInterfaceSpecification reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_InstanceNetworkInterfaceSpecification.html)
+specifies, only an interface the launch creates gets an automatic address: an instance launched
+on an existing network interface has none. As the
+[EC2 User Guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-instance-addressing.html#concepts-public-addresses)
+describes, a released address is not replaced while a second network interface is attached.
 
-An associated Elastic IP replaces the automatic address and is kept across a stop.
-Disassociating it from a running instance assigns a new automatic address when the launch
-requested one. A terminated instance has no public address.
+An Elastic IP associated with the instance's primary private address replaces the automatic
+address and is kept across a stop. Disassociating it from a running instance assigns a new
+automatic address when the launch requested one. An Elastic IP on a secondary private address
+does not change the instance's public address. A terminated instance has no public address.
 
-A launch template with network interfaces cannot be combined with an instance-level
-`SubnetId`; place the subnet on the primary network interface instead.
+Network interfaces, on the `RunInstances` request or in its launch template, cannot be combined
+with an instance-level `SubnetId` (`InvalidParameterCombination`); place the subnet on the
+primary network interface instead.

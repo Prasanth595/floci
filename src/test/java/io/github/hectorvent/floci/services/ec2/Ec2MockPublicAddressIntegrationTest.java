@@ -27,6 +27,9 @@ class Ec2MockPublicAddressIntegrationTest {
     private static final AtomicLong ACCOUNTS = new AtomicLong(722000000000L);
     private static final String REGION = "us-east-1";
     private static final String INSTANCE = "DescribeInstancesResponse.reservationSet.item.instancesSet.item.";
+    private static final String ADDRESS = "DescribeAddressesResponse.addressesSet.item.";
+    private static final String INTERFACE_ADDRESS =
+            "DescribeNetworkInterfacesResponse.networkInterfaceSet.item.privateIpAddressesSet.item.";
 
     @Inject AutoScalingReconciler reconciler;
     @Inject AutoScalingService groups;
@@ -155,24 +158,34 @@ class Ec2MockPublicAddressIntegrationTest {
         request("DeleteVpc", owner).formParam("VpcId", vpc).post("/").then().statusCode(200);
     }
 
-    @Test
-    void templateNetworkInterfaceRejectsAnInstanceLevelSubnet() {
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void networkInterfacesRejectAnInstanceLevelSubnet(boolean fromTemplate) {
         String owner = Long.toString(ACCOUNTS.incrementAndGet());
-        String template = request("CreateLaunchTemplate", owner)
-                .formParam("LaunchTemplateName", "invalid-subnet-combination")
-                .formParam("LaunchTemplateData.ImageId", "ami-amazonlinux2023")
-                .formParam("LaunchTemplateData.InstanceType", "t3.micro")
-                .formParam("LaunchTemplateData.NetworkInterface.1.DeviceIndex", 0)
-                .formParam("LaunchTemplateData.NetworkInterface.1.AssociatePublicIpAddress", true)
-                .post("/").then().statusCode(200)
-                .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
-        request("RunInstances", owner).formParam("MinCount", 1).formParam("MaxCount", 1)
-                .formParam("LaunchTemplate.LaunchTemplateId", template)
-                .formParam("SubnetId", "subnet-conflicting")
-                .post("/").then().statusCode(400)
+        RequestSpecification launch = request("RunInstances", owner).formParam("MinCount", 1)
+                .formParam("MaxCount", 1).formParam("SubnetId", "subnet-conflicting");
+        String template = null;
+        if (fromTemplate) {
+            template = request("CreateLaunchTemplate", owner)
+                    .formParam("LaunchTemplateName", "invalid-subnet-combination")
+                    .formParam("LaunchTemplateData.ImageId", "ami-amazonlinux2023")
+                    .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+                    .formParam("LaunchTemplateData.NetworkInterface.1.DeviceIndex", 0)
+                    .formParam("LaunchTemplateData.NetworkInterface.1.AssociatePublicIpAddress", true)
+                    .post("/").then().statusCode(200)
+                    .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+            launch.formParam("LaunchTemplate.LaunchTemplateId", template);
+        } else {
+            launch.formParam("ImageId", "ami-amazonlinux2023").formParam("InstanceType", "t3.micro")
+                    .formParam("NetworkInterface.1.DeviceIndex", 0)
+                    .formParam("NetworkInterface.1.AssociatePublicIpAddress", true);
+        }
+        launch.post("/").then().statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
-        request("DeleteLaunchTemplate", owner).formParam("LaunchTemplateId", template)
-                .post("/").then().statusCode(200);
+        if (template != null) {
+            request("DeleteLaunchTemplate", owner).formParam("LaunchTemplateId", template)
+                    .post("/").then().statusCode(200);
+        }
     }
 
     @Test
@@ -303,6 +316,175 @@ class Ec2MockPublicAddressIntegrationTest {
         request("DeleteNetworkInterface", owner).formParam("NetworkInterfaceId", eni).post("/").then().statusCode(200);
         request("DeleteSubnet", owner).formParam("SubnetId", subnet).post("/").then().statusCode(200);
         request("DeleteVpc", owner).formParam("VpcId", vpc).post("/").then().statusCode(200);
+    }
+
+    @Test
+    void elasticIpOnASecondaryAddressLeavesThePrimaryAddressAndTheInstanceAlone() {
+        String owner = Long.toString(ACCOUNTS.incrementAndGet());
+        String vpc = request("CreateVpc", owner).formParam("CidrBlock", "10.90.0.0/16")
+                .post("/").then().statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
+        String subnet = request("CreateSubnet", owner).formParam("VpcId", vpc)
+                .formParam("CidrBlock", "10.90.1.0/24").formParam("AvailabilityZone", REGION + "a")
+                .post("/").then().statusCode(200).extract().path("CreateSubnetResponse.subnet.subnetId");
+        String eni = request("CreateNetworkInterface", owner).formParam("SubnetId", subnet)
+                .formParam("PrivateIpAddress", "10.90.1.10")
+                .formParam("PrivateIpAddresses.1.PrivateIpAddress", "10.90.1.11")
+                .post("/").then().statusCode(200)
+                .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+        String instance = launchOnInterface(owner, eni);
+        ValidatableResponse primary = allocateAddress(owner);
+        String primaryAllocation = primary.extract().path("AllocateAddressResponse.allocationId");
+        String primaryIp = primary.extract().path("AllocateAddressResponse.publicIp");
+        ValidatableResponse secondary = allocateAddress(owner);
+        String secondaryAllocation = secondary.extract().path("AllocateAddressResponse.allocationId");
+        String secondaryIp = secondary.extract().path("AllocateAddressResponse.publicIp");
+        request("AssociateAddress", owner).formParam("AllocationId", primaryAllocation)
+                .formParam("InstanceId", instance).post("/").then().statusCode(200);
+        request("AssociateAddress", owner).formParam("AllocationId", secondaryAllocation)
+                .formParam("InstanceId", instance).formParam("PrivateIpAddress", "10.90.1.11")
+                .post("/").then().statusCode(200);
+
+        // Each address stays on its own private address, and the instance shows the primary's.
+        address(owner, primaryAllocation).body(ADDRESS + "instanceId", equalTo(instance))
+                .body(ADDRESS + "privateIpAddress", equalTo("10.90.1.10"));
+        address(owner, secondaryAllocation).body(ADDRESS + "instanceId", equalTo(instance))
+                .body(ADDRESS + "privateIpAddress", equalTo("10.90.1.11"));
+        request("DescribeNetworkInterfaces", owner).formParam("NetworkInterfaceId.1", eni).post("/").then()
+                .statusCode(200)
+                .body(INTERFACE_ADDRESS + "find { it.privateIpAddress == '10.90.1.10' }.association.publicIp",
+                        equalTo(primaryIp))
+                .body(INTERFACE_ADDRESS + "find { it.privateIpAddress == '10.90.1.11' }.association.publicIp",
+                        equalTo(secondaryIp));
+        assertEquals(primaryIp, publicIp(owner, instance));
+
+        // A new address for the primary private address displaces only the address already there.
+        ValidatableResponse replacement = allocateAddress(owner);
+        String replacementAllocation = replacement.extract().path("AllocateAddressResponse.allocationId");
+        String replacementIp = replacement.extract().path("AllocateAddressResponse.publicIp");
+        request("AssociateAddress", owner).formParam("AllocationId", replacementAllocation)
+                .formParam("InstanceId", instance).post("/").then().statusCode(200);
+        address(owner, primaryAllocation).body(ADDRESS + "associationId.size()", equalTo(0));
+        address(owner, secondaryAllocation).body(ADDRESS + "privateIpAddress", equalTo("10.90.1.11"));
+        assertEquals(replacementIp, publicIp(owner, instance));
+
+        request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        // The retained interface keeps its associations, which must go before the release.
+        for (String allocation : List.of(secondaryAllocation, replacementAllocation)) {
+            String association = address(owner, allocation).extract().path(ADDRESS + "associationId");
+            request("DisassociateAddress", owner).formParam("AssociationId", association).post("/").then()
+                    .statusCode(200);
+        }
+        for (String allocation : List.of(primaryAllocation, secondaryAllocation, replacementAllocation)) {
+            request("ReleaseAddress", owner).formParam("AllocationId", allocation).post("/").then().statusCode(200);
+        }
+        request("DeleteNetworkInterface", owner).formParam("NetworkInterfaceId", eni).post("/").then().statusCode(200);
+        request("DeleteSubnet", owner).formParam("SubnetId", subnet).post("/").then().statusCode(200);
+        request("DeleteVpc", owner).formParam("VpcId", vpc).post("/").then().statusCode(200);
+    }
+
+    @Test
+    void anExistingInterfaceTakesNoAutomaticAddressButKeepsTheElasticIpItCarries() {
+        String owner = Long.toString(ACCOUNTS.incrementAndGet());
+        String vpc = request("CreateVpc", owner).formParam("CidrBlock", "10.91.0.0/16")
+                .post("/").then().statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
+        String subnet = request("CreateSubnet", owner).formParam("VpcId", vpc)
+                .formParam("CidrBlock", "10.91.1.0/24").formParam("AvailabilityZone", REGION + "a")
+                .post("/").then().statusCode(200).extract().path("CreateSubnetResponse.subnet.subnetId");
+        request("ModifySubnetAttribute", owner).formParam("SubnetId", subnet)
+                .formParam("MapPublicIpOnLaunch.Value", true).post("/").then().statusCode(200);
+        String eni = request("CreateNetworkInterface", owner).formParam("SubnetId", subnet)
+                .post("/").then().statusCode(200)
+                .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+        // AWS assigns an automatic public address only to an interface the launch creates.
+        String first = launchOnInterface(owner, eni);
+        assertEquals("", publicIp(owner, first));
+        ValidatableResponse carried = allocateAddress(owner);
+        String allocation = carried.extract().path("AllocateAddressResponse.allocationId");
+        String elastic = carried.extract().path("AllocateAddressResponse.publicIp");
+        String association = request("AssociateAddress", owner).formParam("AllocationId", allocation)
+                .formParam("InstanceId", first).post("/").then().statusCode(200)
+                .extract().path("AssociateAddressResponse.associationId");
+        assertEquals(elastic, publicIp(owner, first));
+        request("TerminateInstances", owner).formParam("InstanceId.1", first).post("/").then().statusCode(200);
+
+        // The interface outlives the instance and brings its address to the next one launched on it.
+        String second = launchOnInterface(owner, eni);
+        assertEquals(elastic, publicIp(owner, second));
+        address(owner, allocation).body(ADDRESS + "instanceId", equalTo(second))
+                .body(ADDRESS + "associationId", equalTo(association));
+        request("StopInstances", owner).formParam("InstanceId.1", second).post("/").then().statusCode(200);
+        assertEquals(elastic, publicIp(owner, second));
+        request("StartInstances", owner).formParam("InstanceId.1", second).post("/").then().statusCode(200);
+        assertEquals(elastic, publicIp(owner, second));
+        request("DisassociateAddress", owner).formParam("AssociationId", association).post("/").then()
+                .statusCode(200);
+        assertEquals("", publicIp(owner, second));
+
+        request("TerminateInstances", owner).formParam("InstanceId.1", second).post("/").then().statusCode(200);
+        request("ReleaseAddress", owner).formParam("AllocationId", allocation).post("/").then().statusCode(200);
+        request("DeleteNetworkInterface", owner).formParam("NetworkInterfaceId", eni).post("/").then().statusCode(200);
+        request("DeleteSubnet", owner).formParam("SubnetId", subnet).post("/").then().statusCode(200);
+        request("DeleteVpc", owner).formParam("VpcId", vpc).post("/").then().statusCode(200);
+    }
+
+    @Test
+    void aSecondInterfaceWithholdsTheReplacementAutomaticAddress() {
+        String owner = Long.toString(ACCOUNTS.incrementAndGet());
+        String vpc = request("CreateVpc", owner).formParam("CidrBlock", "10.92.0.0/16")
+                .post("/").then().statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
+        String subnet = request("CreateSubnet", owner).formParam("VpcId", vpc)
+                .formParam("CidrBlock", "10.92.1.0/24").formParam("AvailabilityZone", REGION + "a")
+                .post("/").then().statusCode(200).extract().path("CreateSubnetResponse.subnet.subnetId");
+        request("ModifySubnetAttribute", owner).formParam("SubnetId", subnet)
+                .formParam("MapPublicIpOnLaunch.Value", true).post("/").then().statusCode(200);
+        String instance = request("RunInstances", owner).formParam("ImageId", "ami-amazonlinux2023")
+                .formParam("InstanceType", "t3.micro").formParam("MinCount", 1).formParam("MaxCount", 1)
+                .formParam("SubnetId", subnet).post("/").then().statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        assertTrue(publicIp(owner, instance).matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"));
+        String extra = request("CreateNetworkInterface", owner).formParam("SubnetId", subnet)
+                .post("/").then().statusCode(200)
+                .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+        String attachment = request("AttachNetworkInterface", owner).formParam("NetworkInterfaceId", extra)
+                .formParam("InstanceId", instance).formParam("DeviceIndex", 1)
+                .post("/").then().statusCode(200).extract().path("AttachNetworkInterfaceResponse.attachmentId");
+
+        // A released public address is not replaced while a second interface is attached.
+        request("StopInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        request("StartInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        assertEquals("", publicIp(owner, instance));
+        ValidatableResponse allocated = allocateAddress(owner);
+        String allocation = allocated.extract().path("AllocateAddressResponse.allocationId");
+        String elastic = allocated.extract().path("AllocateAddressResponse.publicIp");
+        String association = request("AssociateAddress", owner).formParam("AllocationId", allocation)
+                .formParam("InstanceId", instance).post("/").then().statusCode(200)
+                .extract().path("AssociateAddressResponse.associationId");
+        assertEquals(elastic, publicIp(owner, instance));
+        request("DisassociateAddress", owner).formParam("AssociationId", association).post("/").then()
+                .statusCode(200);
+        assertEquals("", publicIp(owner, instance));
+
+        // With the second interface gone, the next start assigns one again.
+        request("DetachNetworkInterface", owner).formParam("AttachmentId", attachment).post("/").then()
+                .statusCode(200);
+        request("StopInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        request("StartInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        assertTrue(publicIp(owner, instance).matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"));
+
+        request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        request("ReleaseAddress", owner).formParam("AllocationId", allocation).post("/").then().statusCode(200);
+        request("DeleteNetworkInterface", owner).formParam("NetworkInterfaceId", extra).post("/").then().statusCode(200);
+        request("DeleteSubnet", owner).formParam("SubnetId", subnet).post("/").then().statusCode(200);
+        request("DeleteVpc", owner).formParam("VpcId", vpc).post("/").then().statusCode(200);
+    }
+
+    private ValidatableResponse allocateAddress(String owner) {
+        return request("AllocateAddress", owner).formParam("Domain", "vpc").post("/").then().statusCode(200);
+    }
+
+    private ValidatableResponse address(String owner, String allocation) {
+        return request("DescribeAddresses", owner).formParam("AllocationId.1", allocation).post("/").then()
+                .statusCode(200);
     }
 
     private String launchOnInterface(String owner, String networkInterface) {
