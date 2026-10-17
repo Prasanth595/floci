@@ -112,11 +112,12 @@ class S3OwnershipControlsIntegrationTest {
 
     @Test
     @Order(2)
-    void createBucketAppliesAccountBlockPublicAclsOnlyWhenConfigured() {
+    void createBucketRejectsPublicAclRegardlessOfAccountBlockSetting() {
         given().header("x-amz-object-ownership", "ObjectWriter")
                 .header("x-amz-acl", "public-read")
                 .when().put("/" + BUCKET + "-public-unblocked")
-                .then().statusCode(200);
+                .then().statusCode(400)
+                .body(containsString("<Code>InvalidBucketAclWithBlockPublicAccessError</Code>"));
 
         s3Service.putAccountPublicAccessBlock("000000000000", """
                 <PublicAccessBlockConfiguration>
@@ -288,6 +289,14 @@ class S3OwnershipControlsIntegrationTest {
             .header("x-amz-acl", "public-read")
         .when()
             .post("/" + BUCKET + "/rejected-multipart?uploads")
+        .then()
+            .statusCode(400)
+            .body(containsString("AccessControlListNotSupported"));
+
+        given()
+            .header("x-amz-grant-read", "uri=\"http://acs.amazonaws.com/groups/global/AllUsers\"")
+        .when()
+            .post("/" + BUCKET + "/rejected-multipart-grant?uploads")
         .then()
             .statusCode(400)
             .body(containsString("AccessControlListNotSupported"));

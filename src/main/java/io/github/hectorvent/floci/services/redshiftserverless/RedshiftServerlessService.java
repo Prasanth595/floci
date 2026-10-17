@@ -475,6 +475,11 @@ public class RedshiftServerlessService implements Resettable {
         return snapshotArn.substring(prefix.length());
     }
 
+    /** The workgroup called {@code workgroupName} in {@code region}, empty when there is none. */
+    public Optional<Workgroup> findWorkgroup(String workgroupName, String region) {
+        return workgroupName == null ? Optional.empty() : workgroups.get(storageKey(region, workgroupName));
+    }
+
     /** The snapshot called {@code snapshotName} in {@code region}, empty when there is none. */
     public Optional<RedshiftServerlessSnapshot> findSnapshot(String snapshotName, String region) {
         return snapshotName == null ? Optional.empty() : snapshots.get(storageKey(region, snapshotName));

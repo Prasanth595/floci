@@ -18,7 +18,17 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -50,6 +60,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
             const [host, port] = process.env.AWS_LAMBDA_HTTP_ENDPOINT.split(':');
             http.createServer((req, res) => {
               if (req.url.startsWith('/slow')) { setTimeout(() => res.end('late'), 8000); return; }
+              if (req.url.startsWith('/wait')) { setTimeout(() => res.end('waited'), 3000); return; }
               if (req.url.startsWith('/stream')) {
                 res.writeHead(200, {'content-type': 'text/plain'});
                 let i = 0;
@@ -181,7 +192,97 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         assertNotEquals(logStream, after.header("lambda-web-logstream"), "a new environment serves the next request");
     }
 
+    @Test
+    @Timeout(240)
+    void environmentsScaleUpToMaxEnvironmentsAndTheRateLimitThrottles() throws Exception {
+        String domain = createFunction(30, 1);
+        given().contentType("application/json").body("{\"scalingConfig\": {\"maxEnvironments\": 2}}")
+                .when().patch(BASE + "/web-functions/" + functionName + "/endpoints/dev")
+                .then().statusCode(202);
+
+        // One request per environment: two run, the rest are refused, as recorded on AWS.
+        List<String> responses = parallel(5, () -> raw("GET /wait HTTP/1.1\r\nHost: " + domain
+                + "\r\nConnection: close\r\n\r\n"));
+        long served = responses.stream().filter(response -> response.startsWith("HTTP/1.1 200 ")).count();
+        List<String> throttled = responses.stream().filter(response -> response.startsWith("HTTP/1.1 429 ")).toList();
+        assertEquals(2, served, String.join("\n----\n", responses));
+        assertEquals(3, throttled.size(), String.join("\n----\n", responses));
+        for (String response : throttled) {
+            assertTrue(response.contains("\r\nlambda-web-error-type: Platform.EndpointMaxEnvThrottle\r\n"), response);
+            assertTrue(response.contains("<p>Request rate exceeded. Please try again later.</p>"), response);
+        }
+
+        // Requests one after another rotate over the two environments.
+        Set<String> logStreams = new HashSet<>();
+        for (int i = 0; i < 4; i++) {
+            logStreams.add(given().header("Host", domain).when().get("/status/200")
+                    .then().statusCode(200).extract().header("lambda-web-logstream"));
+        }
+        assertEquals(2, logStreams.size(), logStreams.toString());
+
+        // A new revision takes the place of an idle environment of the old one.
+        String revisionId = given().contentType("application/json")
+                .body("""
+                        {"buildConfig": {"codeConfig": {"s3Object": {"bucket": "%s", "key": "%s.zip"}},
+                                         "runtimeConfig": {"runtime": "nodejs24.x"}},
+                         "serviceConfig": {"executionRoleArn": "%s", "timeoutSeconds": 30}}
+                        """.formatted(BUCKET, functionName, ROLE))
+                .when().post(BASE + "/web-functions/" + functionName + "/revisions")
+                .then().statusCode(202)
+                .extract().path("revisionId");
+        String moved = given().header("Host", domain).when().get("/status/200")
+                .then().statusCode(200).extract().header("lambda-web-logstream");
+        assertTrue(moved.contains("[" + revisionId + "]"), moved);
+        logStreams.add(moved);
+
+        // A recreated endpoint shares no environment or rate with the deleted one.
+        String endpoints = BASE + "/web-functions/" + functionName + "/endpoints";
+        given().when().delete(endpoints + "/dev").then().statusCode(204);
+        String recreated = given().contentType("application/json")
+                .body("{\"endpointName\": \"dev\", \"endpointType\": \"HomeRegion\","
+                        + " \"authType\": \"ApplicationManaged\", \"autoDeploymentMode\": \"LatestRevision\","
+                        + " \"throttleConfig\": {\"rateLimit\": 100}}")
+                .when().put(endpoints)
+                .then().statusCode(202)
+                .extract().path("domainName");
+        String fresh = given().header("Host", recreated).when().get("/status/200")
+                .then().statusCode(200).extract().header("lambda-web-logstream");
+        assertFalse(logStreams.contains(fresh), fresh + " " + logStreams);
+
+        // Requests that all arrive at once are only admitted up to the rate.
+        int count = 200;
+        CyclicBarrier together = new CyclicBarrier(count);
+        List<String> burst = parallel(count, () -> raw("GET /status/200 HTTP/1.1\r\nHost: " + recreated
+                + "\r\nConnection: close\r\n\r\n", together));
+        List<String> limited = burst.stream().filter(response -> response.startsWith("HTTP/1.1 429 ")).toList();
+        assertFalse(limited.isEmpty(), "a burst well past the rate is throttled");
+        for (String response : limited) {
+            assertTrue(response.contains("\r\nlambda-web-error-type: Platform.EndpointRequestThrottle\r\n"), response);
+        }
+    }
+
+    private static List<String> parallel(int count, Callable<String> call) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(count);
+        try {
+            List<Future<String>> futures = new ArrayList<>();
+            for (int i = 0; i < count; i++) {
+                futures.add(pool.submit(call));
+            }
+            List<String> results = new ArrayList<>();
+            for (Future<String> future : futures) {
+                results.add(future.get(60, TimeUnit.SECONDS));
+            }
+            return results;
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
     private String createFunction(int timeoutSeconds) throws IOException {
+        return createFunction(timeoutSeconds, 64);
+    }
+
+    private String createFunction(int timeoutSeconds, int maxConcurrencyPerEnvironment) throws IOException {
         functionName = "dp-docker-" + Long.toString(System.nanoTime(), 36);
         s3Service.createBucket(BUCKET, "us-east-1");
         s3Service.putObject(BUCKET, functionName + ".zip", zip(APP), "application/zip", Map.of());
@@ -192,19 +293,29 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                            "buildConfig": {"codeConfig": {"s3Object": {"bucket": "%s", "key": "%s.zip"}},
                                            "runtimeConfig": {"runtime": "nodejs24.x"}},
                            "serviceConfig": {"executionRoleArn": "%s", "timeoutSeconds": %d,
+                                             "maxConcurrencyPerEnvironment": %d,
                                              "environmentVariables": {"CUSTOM": "yes"}}},
                          "endpointConfig": {"endpointName": "dev", "endpointType": "HomeRegion",
                                             "authType": "ApplicationManaged", "autoDeploymentMode": "LatestRevision"}}
-                        """.formatted(functionName, BUCKET, functionName, ROLE, timeoutSeconds))
+                        """.formatted(functionName, BUCKET, functionName, ROLE, timeoutSeconds,
+                        maxConcurrencyPerEnvironment))
                 .when().put(BASE + "/web-functions")
                 .then().statusCode(202)
                 .extract().path("endpoint.domainName");
     }
 
     /** Sends one raw HTTP/1.1 request with {@code Connection: close} and reads until the server closes. */
-    private static String raw(String request) throws IOException {
+    private static String raw(String request) throws Exception {
+        return raw(request, null);
+    }
+
+    /** As {@link #raw(String)}, sent once every party of {@code together} has connected. */
+    private static String raw(String request, CyclicBarrier together) throws Exception {
         try (Socket socket = new Socket("localhost", RestAssured.port)) {
             socket.setSoTimeout(30_000);
+            if (together != null) {
+                together.await(30, TimeUnit.SECONDS);
+            }
             OutputStream out = socket.getOutputStream();
             out.write(request.getBytes(StandardCharsets.US_ASCII));
             out.flush();

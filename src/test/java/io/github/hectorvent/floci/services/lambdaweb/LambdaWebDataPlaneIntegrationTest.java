@@ -51,7 +51,7 @@ class LambdaWebDataPlaneIntegrationTest {
     }
 
     @Test
-    void aDisabledEndpointAnswersBeforeAnyEnvironmentStarts() {
+    void aDisabledEndpointAnswersBeforeAnyEnvironmentStarts() throws IOException {
         String functionName = "dp-disabled-" + Long.toString(System.nanoTime(), 36);
         String domain = createFunction(functionName);
         given().contentType("application/json").body("{\"throttleConfig\": {\"rateLimit\": 0}}")
@@ -65,7 +65,38 @@ class LambdaWebDataPlaneIntegrationTest {
                 .body(equalTo(LambdaWebErrorPages.html(LambdaWebErrorPages.ENDPOINT_DISABLED,
                         response.header("lambda-web-request-id"))));
 
+        // The page keeps the connection, as on AWS. A body sent after it is skipped and the next request is served.
+        try (Socket socket = new Socket("localhost", RestAssured.port)) {
+            socket.setSoTimeout(10_000);
+            OutputStream out = socket.getOutputStream();
+            InputStream in = socket.getInputStream();
+            out.write(("POST /upload HTTP/1.1\r\nHost: " + domain + "\r\nContent-Length: 5\r\n\r\n")
+                    .getBytes(StandardCharsets.US_ASCII));
+            out.flush();
+            String first = readUntil(in, "</html>");
+            assertTrue(first.startsWith("HTTP/1.1 503 "), first);
+            assertTrue(first.contains("\r\nconnection: keep-alive\r\n"), first);
+            out.write(("hello" + "GET /next HTTP/1.1\r\nHost: " + domain + "\r\nConnection: close\r\n\r\n")
+                    .getBytes(StandardCharsets.US_ASCII));
+            out.flush();
+            String second = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            assertTrue(second.startsWith("HTTP/1.1 503 "), second);
+            assertTrue(second.contains("\r\nlambda-web-error-type: Platform.EndpointDisabled\r\n"), second);
+        }
+
         given().when().delete(BASE + "/web-functions/" + functionName).then().statusCode(204);
+    }
+
+    private static String readUntil(InputStream in, String end) throws IOException {
+        StringBuilder read = new StringBuilder();
+        while (!read.toString().endsWith(end)) {
+            int next = in.read();
+            if (next < 0) {
+                break;
+            }
+            read.append((char) next);
+        }
+        return read.toString();
     }
 
     @Test

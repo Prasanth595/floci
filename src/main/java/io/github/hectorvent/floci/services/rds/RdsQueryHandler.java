@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
+import io.github.hectorvent.floci.services.rds.export.RdsExportTaskService;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
@@ -27,6 +28,7 @@ import io.github.hectorvent.floci.services.rds.model.DbRoleAssociation;
 import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.EventSubscription;
+import io.github.hectorvent.floci.services.rds.model.ExportTask;
 import io.github.hectorvent.floci.services.rds.model.GlobalCluster;
 import io.github.hectorvent.floci.services.rds.model.GlobalClusterMember;
 import io.github.hectorvent.floci.services.rds.model.LogExportChanges;
@@ -62,13 +64,15 @@ public class RdsQueryHandler {
     private static final Logger LOG = Logger.getLogger(RdsQueryHandler.class);
 
     private final RdsService service;
+    private final RdsExportTaskService exportTaskService;
     private final DocDbQueryHandler docDbQueryHandler;
     private final NeptuneQueryHandler neptuneQueryHandler;
     private final EmulatorConfig config;
 
     @Inject
-    public RdsQueryHandler(RdsService service, EmulatorConfig config, DocDbQueryHandler docDbQueryHandler,
-                           NeptuneQueryHandler neptuneQueryHandler) {
+    public RdsQueryHandler(RdsService service, RdsExportTaskService exportTaskService, EmulatorConfig config,
+                           DocDbQueryHandler docDbQueryHandler, NeptuneQueryHandler neptuneQueryHandler) {
+        this.exportTaskService = exportTaskService;
         this.docDbQueryHandler = docDbQueryHandler;
         this.neptuneQueryHandler = neptuneQueryHandler;
         this.service = service;
@@ -115,6 +119,8 @@ public class RdsQueryHandler {
                 case "DeleteDBClusterEndpoint" -> handleDeleteDbClusterEndpoint(params, region);
                 case "EnableHttpEndpoint" -> handleSetHttpEndpoint("EnableHttpEndpoint", params, region, true);
                 case "DisableHttpEndpoint" -> handleSetHttpEndpoint("DisableHttpEndpoint", params, region, false);
+                case "DescribeDBLogFiles" -> handleDescribeDbLogFiles(params, region);
+                case "DownloadDBLogFilePortion" -> handleDownloadDbLogFilePortion(params, region);
                 case "AddRoleToDBCluster" -> handleAddRoleToDbCluster(params, region);
                 case "RemoveRoleFromDBCluster" -> handleRemoveRoleFromDbCluster(params, region);
                 case "AddRoleToDBInstance" -> handleAddRoleToDbInstance(params, region);
@@ -176,6 +182,9 @@ public class RdsQueryHandler {
                 case "RestoreDBClusterToPointInTime" -> handleRestoreDbClusterToPointInTime(params, region);
                 case "DescribeDBClusterSnapshotAttributes" -> handleDescribeDbClusterSnapshotAttributes(params, region);
                 case "ModifyDBClusterSnapshotAttribute" -> handleModifyDbClusterSnapshotAttribute(params, region);
+                case "StartExportTask" -> handleStartExportTask(params, region);
+                case "DescribeExportTasks" -> handleDescribeExportTasks(params, region);
+                case "CancelExportTask" -> handleCancelExportTask(params, region);
                 case "DescribeGlobalClusters" -> handleDescribeGlobalClusters(params);
                 case "CreateGlobalCluster" -> handleCreateGlobalCluster(params, region);
                 case "ModifyGlobalCluster" -> handleModifyGlobalCluster(params);
@@ -378,6 +387,55 @@ public class RdsQueryHandler {
                 .elem("HttpEndpointEnabled", cluster.isHttpEndpointEnabled())
                 .build();
         return Response.ok(AwsQueryResponse.envelope(action, AwsNamespaces.RDS, result)).build();
+    }
+
+    private Response handleDescribeDbLogFiles(MultivaluedMap<String, String> params, String region) {
+        RdsService.LogFilePage page = service.describeDbLogFiles(region,
+                params.getFirst("DBInstanceIdentifier"),
+                params.getFirst("FilenameContains"),
+                optionalLong(params, "FileLastWritten"),
+                optionalLong(params, "FileSize"),
+                optionalInt(params.getFirst("MaxRecords")),
+                params.getFirst("Marker"));
+        XmlBuilder xml = new XmlBuilder().start("DescribeDBLogFiles");
+        for (RdsLogFiles.LogFile file : page.files()) {
+            xml.start("DescribeDBLogFilesDetails")
+               .elem("LogFileName", file.name())
+               .elem("LastWritten", file.lastWritten().toEpochMilli())
+               .elem("Size", file.size())
+               .end("DescribeDBLogFilesDetails");
+        }
+        xml.end("DescribeDBLogFiles");
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBLogFiles", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleDownloadDbLogFilePortion(MultivaluedMap<String, String> params, String region) {
+        RdsLogFiles.Portion portion = service.downloadDbLogFilePortion(region,
+                params.getFirst("DBInstanceIdentifier"),
+                params.getFirst("LogFileName"),
+                params.getFirst("Marker"),
+                optionalInt(params.getFirst("NumberOfLines")));
+        String result = new XmlBuilder()
+                .elem("LogFileData", portion.data())
+                .elem("Marker", portion.marker())
+                .elem("AdditionalDataPending", portion.additionalDataPending())
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("DownloadDBLogFilePortion", AwsNamespaces.RDS, result)).build();
+    }
+
+    private static Long optionalLong(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", name + " must be a number: " + value, 400);
+        }
     }
 
     private Response handleAddRoleToDbCluster(MultivaluedMap<String, String> params, String region) {
@@ -1930,6 +1988,94 @@ public class RdsQueryHandler {
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
+    }
+
+    private Response handleStartExportTask(MultivaluedMap<String, String> params, String region) {
+        String exportTaskIdentifier = params.getFirst("ExportTaskIdentifier");
+        String sourceArn = params.getFirst("SourceArn");
+        String s3BucketName = params.getFirst("S3BucketName");
+        String iamRoleArn = params.getFirst("IamRoleArn");
+        String kmsKeyId = params.getFirst("KmsKeyId");
+        Response missing = firstMissingParam(
+                "ExportTaskIdentifier", exportTaskIdentifier,
+                "SourceArn", sourceArn,
+                "S3BucketName", s3BucketName,
+                "IamRoleArn", iamRoleArn,
+                "KmsKeyId", kmsKeyId);
+        if (missing != null) {
+            return missing;
+        }
+        ExportTask task = exportTaskService.startExportTask(exportTaskIdentifier, sourceArn, s3BucketName,
+                params.getFirst("S3Prefix"), iamRoleArn, kmsKeyId, memberList(params, "ExportOnly"), region);
+        return Response.ok(AwsQueryResponse.envelope("StartExportTask", AwsNamespaces.RDS, exportTaskXml(task)))
+                .build();
+    }
+
+    private Response handleDescribeExportTasks(MultivaluedMap<String, String> params, String region) {
+        String sourceType = params.getFirst("SourceType");
+        if (sourceType != null && !List.of("SNAPSHOT", "CLUSTER").contains(sourceType)) {
+            throw new AwsException("InvalidParameterValue", "SourceType must be SNAPSHOT or CLUSTER.", 400);
+        }
+        Integer maxRecords = parseOptionalInt(params.getFirst("MaxRecords"));
+        if (maxRecords != null && (maxRecords < 20 || maxRecords > 100)) {
+            throw new AwsException("InvalidParameterValue", "MaxRecords must be between 20 and 100.", 400);
+        }
+        Map<String, List<String>> filters = new LinkedHashMap<>();
+        for (int i = 1; params.getFirst("Filters.Filter." + i + ".Name") != null; i++) {
+            String name = params.getFirst("Filters.Filter." + i + ".Name");
+            filters.put(name, extractRdsFilterValues(params, name));
+        }
+        List<ExportTask> all = exportTaskService.describeExportTasks(params.getFirst("ExportTaskIdentifier"),
+                params.getFirst("SourceArn"), sourceType, filters, region);
+        int from = Math.min(parseMarker(params.getFirst("Marker")), all.size());
+        int to = Math.min(from + (maxRecords != null ? maxRecords : 100), all.size());
+        XmlBuilder xml = new XmlBuilder().start("ExportTasks");
+        for (ExportTask task : all.subList(from, to)) {
+            xml.start("ExportTask").raw(exportTaskXml(task)).end("ExportTask");
+        }
+        xml.end("ExportTasks");
+        if (to < all.size()) {
+            xml.elem("Marker", String.valueOf(to));
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeExportTasks", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleCancelExportTask(MultivaluedMap<String, String> params, String region) {
+        String exportTaskIdentifier = params.getFirst("ExportTaskIdentifier");
+        Response missing = firstMissingParam("ExportTaskIdentifier", exportTaskIdentifier);
+        if (missing != null) {
+            return missing;
+        }
+        ExportTask task = exportTaskService.cancelExportTask(exportTaskIdentifier, region);
+        return Response.ok(AwsQueryResponse.envelope("CancelExportTask", AwsNamespaces.RDS, exportTaskXml(task)))
+                .build();
+    }
+
+    static String exportTaskXml(ExportTask task) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("ExportTaskIdentifier", task.getExportTaskIdentifier())
+                .elem("SourceArn", task.getSourceArn())
+                .elem("SourceType", task.getSourceType());
+        if (!task.getExportOnly().isEmpty()) {
+            xml.start("ExportOnly");
+            for (String entry : task.getExportOnly()) {
+                xml.elem("member", entry);
+            }
+            xml.end("ExportOnly");
+        }
+        xml.elem("SnapshotTime", task.getSnapshotTime() != null ? task.getSnapshotTime().toString() : null)
+                .elem("TaskStartTime", task.getTaskStartTime() != null ? task.getTaskStartTime().toString() : null)
+                .elem("TaskEndTime", task.getTaskEndTime() != null ? task.getTaskEndTime().toString() : null)
+                .elem("S3Bucket", task.getS3Bucket())
+                .elem("S3Prefix", task.getS3Prefix())
+                .elem("IamRoleArn", task.getIamRoleArn())
+                .elem("KmsKeyId", task.getKmsKeyId())
+                .elem("Status", task.getStatus())
+                .elem("PercentProgress", task.getPercentProgress())
+                .elem("TotalExtractedDataInGB", task.getTotalExtractedDataInGb())
+                .elem("FailureCause", task.getFailureCause())
+                .elem("WarningMessage", task.getWarningMessage());
+        return xml.build();
     }
 
     private Response handleDescribeDbSnapshots(MultivaluedMap<String, String> params, String region) {

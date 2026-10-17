@@ -818,7 +818,8 @@ public class S3Controller {
 
             if (hasQueryParam(uriInfo, "tagging")) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectTagging", authorization);
-                return handlePutObjectTagging(bucket, key, readWholeBody(body));
+                return handlePutObjectTagging(bucket, key, uriInfo.getQueryParameters().getFirst("versionId"),
+                        readWholeBody(body));
             }
             if (hasQueryParam(uriInfo, "retention")) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectRetention", authorization);
@@ -878,18 +879,17 @@ public class S3Controller {
             }
 
             if (copySource != null && !copySource.isEmpty()) {
+                ObjectLockHeaders lock = objectLockHeaders(httpHeaders);
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
-                return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, uriInfo, authorization);
+                return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, uriInfo, authorization,
+                        lock);
             }
 
             rejectUnimplementedPutConditions(ifMatch, ifNoneMatch);
 
             Map<String, String> inlineTags = parseInlineTaggingHeader(resolveInlineTaggingSource(tagging, uriInfo));
 
-            String lockMode = httpHeaders.getHeaderString("x-amz-object-lock-mode");
-            String retainUntilStr = httpHeaders.getHeaderString("x-amz-object-lock-retain-until-date");
-            String legalHold = httpHeaders.getHeaderString("x-amz-object-lock-legal-hold");
-            Instant retainUntil = retainUntilStr != null ? Instant.parse(retainUntilStr) : null;
+            ObjectLockHeaders lock = objectLockHeaders(httpHeaders);
 
             String checksumAlgorithm = getChecksumAlgorithm(httpHeaders, uriInfo);
             String persistedEncoding = toPersistedContentEncoding(contentEncoding);
@@ -909,9 +909,9 @@ public class S3Controller {
                     new PutObjectOptions()
                             .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
                             .withContentEncoding(persistedEncoding)
-                            .withObjectLockMode(lockMode)
-                            .withRetainUntilDate(retainUntil)
-                            .withLegalHoldStatus(legalHold)
+                            .withObjectLockMode(lock.mode())
+                            .withRetainUntilDate(lock.retainUntilDate())
+                            .withLegalHoldStatus(lock.legalHoldStatus())
                             .withContentDisposition(contentDisposition)
                             .withCacheControl(cacheControl)
                             .withServerSideEncryption(serverSideEncryption)
@@ -988,7 +988,7 @@ public class S3Controller {
 
             if (hasQueryParam(uriInfo, "tagging")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectTagging", authorization);
-                return handleGetObjectTagging(bucket, key);
+                return handleGetObjectTagging(bucket, key, versionId);
             }
             if (hasQueryParam(uriInfo, "annotation")) {
                 String annotationNameParam = uriInfo.getQueryParameters().getFirst("annotationName");
@@ -1491,8 +1491,8 @@ public class S3Controller {
 
             if (hasQueryParam(uriInfo, "tagging")) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:DeleteObjectTagging", authorization);
-                s3Service.deleteObjectTagging(bucket, key);
-                return Response.noContent().build();
+                return withVersionId(Response.noContent(), s3Service.deleteObjectTagging(bucket, key, versionId))
+                        .build();
             }
             if (hasQueryParam(uriInfo, "annotation")) {
                 boolean bypass = "true".equalsIgnoreCase(
@@ -1590,26 +1590,35 @@ public class S3Controller {
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
             if (hasQueryParam(uriInfo, "uploads")) {
+                ObjectLockHeaders lock = objectLockHeaders(httpHeaders);
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 MultipartUpload upload = s3Service.initiateMultipartUpload(bucket, key, contentType,
                         extractUserMetadata(httpHeaders, uriInfo),
-                        httpHeaders.getHeaderString("x-amz-storage-class"),
-                        httpHeaders.getHeaderString("Content-Disposition"),
-                        httpHeaders.getHeaderString("x-amz-server-side-encryption"),
-                        httpHeaders.getHeaderString("x-amz-acl"),
-                        httpHeaders.getHeaderString("x-amz-server-side-encryption-aws-kms-key-id"),
-                        httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
-                        httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
-                        httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"),
-                        getChecksumAlgorithm(httpHeaders, uriInfo),
                         resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-type"),
-                        parseInlineTaggingHeader(
-                                resolveInlineTaggingSource(httpHeaders.getHeaderString("x-amz-tagging"), uriInfo)),
-                        httpHeaders.getHeaderString("x-amz-grant-read"),
-                        httpHeaders.getHeaderString("x-amz-grant-write"),
-                        httpHeaders.getHeaderString("x-amz-grant-full-control"),
-                        httpHeaders.getHeaderString("x-amz-grant-read-acp"),
-                        httpHeaders.getHeaderString("x-amz-grant-write-acp"));
+                        new PutObjectOptions()
+                                .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
+                                .withContentDisposition(httpHeaders.getHeaderString("Content-Disposition"))
+                                .withServerSideEncryption(httpHeaders.getHeaderString("x-amz-server-side-encryption"))
+                                .withSseKmsKeyId(httpHeaders.getHeaderString(
+                                        "x-amz-server-side-encryption-aws-kms-key-id"))
+                                .withSseCustomerAlgorithm(httpHeaders.getHeaderString(
+                                        "x-amz-server-side-encryption-customer-algorithm"))
+                                .withSseCustomerKey(httpHeaders.getHeaderString(
+                                        "x-amz-server-side-encryption-customer-key"))
+                                .withSseCustomerKeyMd5(httpHeaders.getHeaderString(
+                                        "x-amz-server-side-encryption-customer-key-MD5"))
+                                .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders, uriInfo))
+                                .withAcl(httpHeaders.getHeaderString("x-amz-acl"))
+                                .withGrantRead(httpHeaders.getHeaderString("x-amz-grant-read"))
+                                .withGrantWrite(httpHeaders.getHeaderString("x-amz-grant-write"))
+                                .withGrantFullControl(httpHeaders.getHeaderString("x-amz-grant-full-control"))
+                                .withGrantReadAcp(httpHeaders.getHeaderString("x-amz-grant-read-acp"))
+                                .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp"))
+                                .withObjectLockMode(lock.mode())
+                                .withRetainUntilDate(lock.retainUntilDate())
+                                .withLegalHoldStatus(lock.legalHoldStatus())
+                                .withTagging(parseInlineTaggingHeader(resolveInlineTaggingSource(
+                                        httpHeaders.getHeaderString("x-amz-tagging"), uriInfo))));
                 String xml = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                         .start("InitiateMultipartUploadResult", AwsNamespaces.S3)
@@ -2627,16 +2636,21 @@ public class S3Controller {
 
     // --- Object Tagging ---
 
-    private Response handlePutObjectTagging(String bucket, String key, byte[] body) {
+    private Response handlePutObjectTagging(String bucket, String key, String versionId, byte[] body) {
         String xml = new String(body, StandardCharsets.UTF_8);
         Map<String, String> tags = XmlParser.extractPairs(xml, "Tag", "Key", "Value");
-        s3Service.putObjectTagging(bucket, key, tags);
-        return Response.ok().build();
+        return withVersionId(Response.ok(), s3Service.putObjectTagging(bucket, key, versionId, tags)).build();
     }
 
-    private Response handleGetObjectTagging(String bucket, String key) {
-        Map<String, String> tags = s3Service.getObjectTagging(bucket, key);
-        return Response.ok(buildTaggingXml(tags)).type(MediaType.APPLICATION_XML).build();
+    private Response handleGetObjectTagging(String bucket, String key, String versionId) {
+        S3Service.ObjectTaggingResult tagging = s3Service.getObjectTaggingResult(bucket, key, versionId);
+        return withVersionId(Response.ok(buildTaggingXml(tagging.tags())), tagging.versionId())
+                .type(MediaType.APPLICATION_XML).build();
+    }
+
+    /** {@code resp} with the id of the version a request acted on, when that version has one. */
+    private static Response.ResponseBuilder withVersionId(Response.ResponseBuilder resp, String versionId) {
+        return versionId != null ? resp.header("x-amz-version-id", versionId) : resp;
     }
 
     private String buildTaggingXml(Map<String, String> tags) {
@@ -3053,7 +3067,8 @@ public class S3Controller {
     private Response handleCopyObject(String copySource, String destBucket, String destKey,
                                       String contentType, HttpHeaders httpHeaders,
                                       UriInfo uriInfo,
-                                      S3Service.RequestAuthorization authorization) {
+                                      S3Service.RequestAuthorization authorization,
+                                      ObjectLockHeaders lock) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
         authorizeCopySourceRead(httpHeaders, sourceObject, authorization);
@@ -3109,6 +3124,9 @@ public class S3Controller {
                         .withGrantFullControl(httpHeaders.getHeaderString("x-amz-grant-full-control"))
                         .withGrantReadAcp(httpHeaders.getHeaderString("x-amz-grant-read-acp"))
                         .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp"))
+                        .withObjectLockMode(lock.mode())
+                        .withRetainUntilDate(lock.retainUntilDate())
+                        .withLegalHoldStatus(lock.legalHoldStatus())
                         .withIfMatch(httpHeaders.getHeaderString("If-Match"))
                         .withIfNoneMatch(httpHeaders.getHeaderString("If-None-Match"))
                         .withCopySourceConditions(copySourceConditions(httpHeaders)));
@@ -3585,10 +3603,12 @@ public class S3Controller {
         }
         // S3 InvalidArgument responses carry ArgumentName and ArgumentValue so the SDK can
         // surface which input was rejected, and EntityTooSmall and EntityTooLarge the proposed and
-        // allowed sizes. Multipart size errors also identify the rejected part.
+        // allowed sizes. Multipart size errors also identify the rejected part, and MethodNotAllowed
+        // the method and the kind of resource that refused it.
         // They travel through AwsException.extendedData.
         if (e.getExtendedData() != null) {
-            for (String field : List.of("ProposedSize", "MinSizeAllowed", "MaxSizeAllowed", "PartNumber", "ETag")) {
+            for (String field : List.of("Method", "ResourceType", "ProposedSize", "MinSizeAllowed",
+                    "MaxSizeAllowed", "PartNumber", "ETag")) {
                 Object value = e.getExtendedData().get(field);
                 if (value != null) {
                     xmlBuilder.elem(field, value.toString());
@@ -3624,7 +3644,13 @@ public class S3Controller {
                 .elem("RequestId", UUID.randomUUID().toString())
                 .end("Error")
                 .build();
-        return Response.status(e.getHttpStatus()).entity(xml).type(MediaType.APPLICATION_XML).build();
+        Response.ResponseBuilder response = Response.status(e.getHttpStatus())
+                .entity(xml).type(MediaType.APPLICATION_XML);
+        // A request refused because it reached a delete marker says so in x-amz-delete-marker.
+        if (e.getExtendedData() != null && "DeleteMarker".equals(e.getExtendedData().get("ResourceType"))) {
+            response.header("x-amz-delete-marker", "true");
+        }
+        return response.build();
     }
 
     private Response checkPreconditions(S3Object obj, String ifMatch, String ifNoneMatch,
@@ -4092,6 +4118,44 @@ public class S3Controller {
 
     private static final int MAX_INLINE_TAGS = 10;
     private static final int MAX_INLINE_TAGGING_HEADER_BYTES = 8 * 1024;
+
+    /** The Object Lock settings a PutObject, CopyObject or CreateMultipartUpload asks for in its headers. */
+    private record ObjectLockHeaders(String mode, Instant retainUntilDate, String legalHoldStatus) {
+    }
+
+    /**
+     * Reads the Object Lock headers of a PutObject, CopyObject or CreateMultipartUpload, refusing
+     * them as S3 was recorded refusing them, with InvalidArgument naming the header: a mode and a
+     * retain-until date come together or not at all, checked first, and the mode is GOVERNANCE or
+     * COMPLIANCE. A date that is not an ISO 8601 timestamp is refused the same way; S3 was not
+     * recorded on that one, so its message is floci's.
+     */
+    private static ObjectLockHeaders objectLockHeaders(HttpHeaders httpHeaders) {
+        String mode = httpHeaders.getHeaderString("x-amz-object-lock-mode");
+        String retainUntil = httpHeaders.getHeaderString("x-amz-object-lock-retain-until-date");
+        if ((mode == null) != (retainUntil == null)) {
+            throw new AwsException("InvalidArgument",
+                    "x-amz-object-lock-retain-until-date and x-amz-object-lock-mode must both be supplied", 400,
+                    Map.of("ArgumentName",
+                            mode == null ? "x-amz-object-lock-mode" : "x-amz-object-lock-retain-until-date"));
+        }
+        if (mode != null && !"GOVERNANCE".equals(mode) && !"COMPLIANCE".equals(mode)) {
+            throw new AwsException("InvalidArgument", "Unknown wormMode directive.", 400,
+                    Map.of("ArgumentName", "x-amz-object-lock-mode", "ArgumentValue", mode));
+        }
+        Instant retainUntilDate = null;
+        if (retainUntil != null) {
+            try {
+                retainUntilDate = Instant.parse(retainUntil);
+            } catch (DateTimeParseException e) {
+                throw new AwsException("InvalidArgument",
+                        "The x-amz-object-lock-retain-until-date header must be an ISO 8601 timestamp.", 400,
+                        Map.of("ArgumentName", "x-amz-object-lock-retain-until-date", "ArgumentValue", retainUntil));
+            }
+        }
+        return new ObjectLockHeaders(mode, retainUntilDate,
+                httpHeaders.getHeaderString("x-amz-object-lock-legal-hold"));
+    }
 
     /**
      * Resolves the inline {@code x-amz-tagging} value for PutObject and CreateMultipartUpload.

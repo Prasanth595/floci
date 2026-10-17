@@ -22,11 +22,15 @@ public class MultipartUpload {
     private String sseCustomerAlgorithm;
     private String sseCustomerKeyMd5;
     private String acl;
+    // The grants and Object Lock settings CreateMultipartUpload asks for, applied on completion.
     private String grantRead;
     private String grantWrite;
     private String grantFullControl;
     private String grantReadAcp;
     private String grantWriteAcp;
+    private String objectLockMode;
+    private Instant retainUntilDate;
+    private String legalHoldStatus;
     private String ownerAccountId;
     private String initiatorAccountId;
     private ChecksumAlgorithm checksumAlgorithm;
@@ -98,6 +102,15 @@ public class MultipartUpload {
 
     public String getGrantWriteAcp() { return grantWriteAcp; }
     public void setGrantWriteAcp(String grantWriteAcp) { this.grantWriteAcp = grantWriteAcp; }
+
+    public String getObjectLockMode() { return objectLockMode; }
+    public void setObjectLockMode(String objectLockMode) { this.objectLockMode = objectLockMode; }
+
+    public Instant getRetainUntilDate() { return retainUntilDate; }
+    public void setRetainUntilDate(Instant retainUntilDate) { this.retainUntilDate = retainUntilDate; }
+
+    public String getLegalHoldStatus() { return legalHoldStatus; }
+    public void setLegalHoldStatus(String legalHoldStatus) { this.legalHoldStatus = legalHoldStatus; }
 
     public String getOwnerAccountId() { return ownerAccountId; }
     public void setOwnerAccountId(String ownerAccountId) { this.ownerAccountId = ownerAccountId; }
