@@ -101,11 +101,15 @@ class SsmShellExecutionBudgetTest {
                     () -> assertEquals(30L + expected, Duration.between(
                             command.getRequestedDateTime(), command.getExpiresAfter()).toSeconds()),
                     () -> {
-                        if (fallback) assertEquals(expected, captured.get());
+                        if (fallback) {
+                            assertEquals(expected, captured.get());
+                        }
                     },
                     () -> {
-                        if (supplied != 0) assertEquals(Integer.toString(supplied),
-                                payload.at("/Parameters/executionTimeout/0").asText());
+                        if (supplied != 0) {
+                            assertEquals(Integer.toString(supplied),
+                                    payload.at("/Parameters/executionTimeout/0").asText());
+                        }
                     });
         } finally {
             service.stop();
@@ -186,7 +190,9 @@ class SsmShellExecutionBudgetTest {
         request.put("TimeoutSeconds", 30);
         ObjectNode parameters = request.putObject("Parameters");
         parameters.putArray("commands").add("echo budget");
-        if (supplied != 0) parameters.putArray("executionTimeout").add(Integer.toString(supplied));
+        if (supplied != 0) {
+            parameters.putArray("executionTimeout").add(Integer.toString(supplied));
+        }
         return request;
     }
 }

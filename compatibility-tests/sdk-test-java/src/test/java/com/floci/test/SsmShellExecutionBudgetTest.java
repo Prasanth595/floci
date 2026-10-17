@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -16,6 +17,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.*;
 
+@DisplayName("SSM shell execution budgets")
 class SsmShellExecutionBudgetTest {
     @ParameterizedTest
     @CsvSource({"0,3600", "1,1", "5,5", "172800,172800"})
@@ -24,7 +26,9 @@ class SsmShellExecutionBudgetTest {
         String instance = "i-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17);
         Map<String, List<String>> parameters = new LinkedHashMap<>();
         parameters.put("commands", List.of("echo budget"));
-        if (supplied != 0) parameters.put("executionTimeout", List.of(Integer.toString(supplied)));
+        if (supplied != 0) {
+            parameters.put("executionTimeout", List.of(Integer.toString(supplied)));
+        }
         try (SsmClient ssm = TestFixtures.ssmClient()) {
             try {
                 Command command = ssm.sendCommand(r -> r.documentName("AWS-RunShellScript")
@@ -75,8 +79,12 @@ class SsmShellExecutionBudgetTest {
             try {
                 assertThatThrownBy(() -> ssm.sendCommand(request -> {
                     request.documentName("AWS-RunShellScript").instanceIds(instance).timeoutSeconds(30);
-                    if ("empty".equals(shape)) request.parameters(Map.of("commands", List.of()));
-                    if ("only-timeout".equals(shape)) request.parameters(Map.of("executionTimeout", List.of("5")));
+                    if ("empty".equals(shape)) {
+                        request.parameters(Map.of("commands", List.of()));
+                    }
+                    if ("only-timeout".equals(shape)) {
+                        request.parameters(Map.of("executionTimeout", List.of("5")));
+                    }
                 })).isInstanceOfSatisfying(SsmException.class, error -> {
                     assertThat(error.statusCode()).isEqualTo(400);
                     assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidParameters");

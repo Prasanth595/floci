@@ -1,60 +1,39 @@
 package io.github.hectorvent.floci.services.ssm;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RequestScopes;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ssm.model.Command;
-import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
-import io.github.hectorvent.floci.testing.EnforcementFixtures;
-import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
-import io.quarkus.test.InjectMock;
-import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.net.URI;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 @QuarkusTest
-class SsmShellExecutionBudgetIntegrationTest {
+class SsmShellExecutionBudgetIntegrationTest extends SsmCommandIntegrationFixture {
     private static final String ACCOUNT = "222222222222";
     private static final String REGION = "us-west-2";
-    @Inject SsmCommandService service;
-    @Inject StorageFactory storageFactory;
     @Inject ObjectMapper mapper;
-    @InjectMock SsmDirectCommandExecutor executor;
-    @TestHTTPResource URI endpoint;
-
-    @BeforeEach
-    void setup() {
-        RestAssuredJsonUtils.configureAwsContentTypes();
-        reset(executor);
-    }
 
     @ParameterizedTest
     @CsvSource({"0,3600", "5,5", "172800,172800"})
     void publicResponseAndActualAgentPayloadKeepSeparateBudgets(int supplied, int execution) throws Exception {
         String instance = "i-budget-" + UUID.randomUUID();
         ObjectNode request = request(instance);
-        if (supplied != 0) request.withObject("Parameters").putArray("executionTimeout")
-                .add(Integer.toString(supplied));
+        if (supplied != 0) {
+            request.withObject("Parameters").putArray("executionTimeout").add(Integer.toString(supplied));
+        }
         try {
             Response response = call("AmazonSSM.SendCommand", request);
             assertEquals(200, response.statusCode());
@@ -75,8 +54,10 @@ class SsmShellExecutionBudgetIntegrationTest {
                     () -> assertEquals("3600", payload.at("/DocumentContent/parameters/executionTimeout/default")
                             .asText()),
                     () -> {
-                        if (supplied != 0) assertEquals(Integer.toString(supplied),
-                                payload.at("/Parameters/executionTimeout/0").asText());
+                        if (supplied != 0) {
+                            assertEquals(Integer.toString(supplied),
+                                    payload.at("/Parameters/executionTimeout/0").asText());
+                        }
                     });
         } finally {
             cleanup(instance);
@@ -96,7 +77,7 @@ class SsmShellExecutionBudgetIntegrationTest {
         try {
             Response response = call("AmazonSSM.SendCommand", request);
             List<Command> commands = RequestScopes.callAs(ACCOUNT, REGION,
-                    () -> service.listCommands(null, instance, REGION));
+                    () -> commandService.listCommands(null, instance, REGION));
             assertAll("refuse before any allocation or dispatch",
                     () -> assertEquals(400, response.statusCode()),
                     () -> assertEquals("InvalidParameters", response.jsonPath().getString("__type")),
@@ -126,7 +107,7 @@ class SsmShellExecutionBudgetIntegrationTest {
                     () -> assertEquals(400, response.statusCode()),
                     () -> assertEquals("InvalidParameters", response.jsonPath().getString("__type")),
                     () -> assertTrue(RequestScopes.callAs(ACCOUNT, REGION,
-                            () -> service.listCommands(null, instance, REGION)).isEmpty()),
+                            () -> commandService.listCommands(null, instance, REGION)).isEmpty()),
                     () -> verifyNoInteractions(executor));
         } finally {
             cleanup(instance);
@@ -149,7 +130,7 @@ class SsmShellExecutionBudgetIntegrationTest {
                     () -> assertEquals(400, response.statusCode()),
                     () -> assertEquals("InvalidParameters", response.jsonPath().getString("__type")),
                     () -> assertTrue(RequestScopes.callAs(ACCOUNT, REGION,
-                            () -> service.listCommands(null, instance, REGION)).isEmpty()),
+                            () -> commandService.listCommands(null, instance, REGION)).isEmpty()),
                     () -> verifyNoInteractions(executor));
             Response retry = call("AmazonSSM.SendCommand", request(instance));
             assertEquals(200, retry.statusCode());
@@ -168,25 +149,10 @@ class SsmShellExecutionBudgetIntegrationTest {
     }
 
     private Response call(String target, JsonNode request) {
-        return given().port(endpoint.getPort()).contentType("application/x-amz-json-1.1")
-                .header("Authorization", EnforcementFixtures.auth(ACCOUNT, REGION, "ssm"))
-                .header("X-Amz-Target", target).body(request.toString()).post("/");
+        return super.call(ACCOUNT, REGION, target, request.toString());
     }
 
     private void cleanup(String instance) {
-        AccountAwareStorageBackend<Command> commands = storageFactory.create(
-                "ssm", "ssm-commands.json", new TypeReference<>() {});
-        AccountAwareStorageBackend<CommandInvocation> invocations = storageFactory.create(
-                "ssm", "ssm-invocations.json", new TypeReference<>() {});
-        RequestScopes.runAs(ACCOUNT, REGION, () -> {
-            List<Command> owned = service.listCommands(null, instance, REGION);
-            assertAll("remove queued and polled correlations and every owned record",
-                    () -> service.failActiveInvocationsForInstance(REGION, instance, "fixture cleanup"),
-                    () -> assertAll(owned.stream().map(command -> (Executable) () -> {
-                        String key = REGION + "::" + command.getCommandId();
-                        assertAll(() -> invocations.deleteForAccount(ACCOUNT, key + "::" + instance),
-                                () -> commands.deleteForAccount(ACCOUNT, key));
-                    })));
-        });
+        cleanupCommands(ACCOUNT, REGION, instance);
     }
 }

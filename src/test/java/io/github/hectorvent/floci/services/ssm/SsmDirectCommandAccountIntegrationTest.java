@@ -6,21 +6,14 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ssm.model.Command;
 import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
-import io.github.hectorvent.floci.testing.EnforcementFixtures;
-import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
-import io.quarkus.test.InjectMock;
-import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
@@ -32,24 +25,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @QuarkusTest
-class SsmDirectCommandAccountIntegrationTest {
-    @Inject StorageFactory storageFactory;
+class SsmDirectCommandAccountIntegrationTest extends SsmCommandIntegrationFixture {
     @Inject RegionResolver regionResolver;
-    @InjectMock SsmDirectCommandExecutor executor;
-    @Inject SsmCommandService commandService;
-    @TestHTTPResource URI endpoint;
-
-    @BeforeEach
-    void setup() {
-        RestAssuredJsonUtils.configureAwsContentTypes();
-        reset(executor);
-    }
 
     @ParameterizedTest
     @CsvSource({
@@ -360,25 +342,6 @@ class SsmDirectCommandAccountIntegrationTest {
         assertTrue(invocations.getForAccount(account, key + "::" + instance).isPresent());
     }
 
-    private void deleteCommand(String account, String region, String commandId, String instance) {
-        AccountAwareStorageBackend<Command> commands = storageFactory.create(
-                "ssm", "ssm-commands.json", new TypeReference<>() {});
-        AccountAwareStorageBackend<CommandInvocation> invocations = storageFactory.create(
-                "ssm", "ssm-invocations.json", new TypeReference<>() {});
-        String key = region + "::" + commandId;
-        assertAll("remove owned queue, command and invocation",
-                () -> RequestScopes.runAs(account, region, () ->
-                        commandService.failActiveInvocationsForInstance(region, instance, "fixture cleanup")),
-                () -> {
-                    commands.deleteForAccount(account, key);
-                    assertTrue(commands.getForAccount(account, key).isEmpty());
-                },
-                () -> {
-                    invocations.deleteForAccount(account, key + "::" + instance);
-                    assertTrue(invocations.getForAccount(account, key + "::" + instance).isEmpty());
-                });
-    }
-
     private void joinWorker(AtomicReference<Thread> worker) throws InterruptedException {
         if (worker.get() != null) {
             worker.get().join(5000);
@@ -387,9 +350,6 @@ class SsmDirectCommandAccountIntegrationTest {
     }
 
     private Response call(String account, String region, String action, Map<String, Object> body) {
-        return given().port(endpoint.getPort()).contentType("application/x-amz-json-1.1")
-                .header("Authorization", EnforcementFixtures.auth(account, region, "ssm"))
-                .header("X-Amz-Target", action).body(body).post("/")
-                .then().statusCode(200).extract().response();
+        return super.call(account, region, action, body).then().statusCode(200).extract().response();
     }
 }
