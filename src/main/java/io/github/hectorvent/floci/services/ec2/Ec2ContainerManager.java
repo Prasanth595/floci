@@ -1598,6 +1598,9 @@ public class Ec2ContainerManager {
      */
     static String[] sshdInstallProbeCommand() {
         return new String[]{"sh", "-c",
+            // dnf and yum are Python programs: an image's PYTHONHOME or LD_LIBRARY_PATH made them
+            // fail to start, so sshd was never installed.
+            Ec2MetadataProxy.CLEAR_APPLICATION_PATHS + ";" +
             "if ! command -v sshd >/dev/null 2>&1 || ! command -v scp >/dev/null 2>&1; then" +
                     "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server openssh-clients >/dev/null 2>&1;" +
                     // yum is probed after dnf, and the order is load-bearing: Amazon Linux

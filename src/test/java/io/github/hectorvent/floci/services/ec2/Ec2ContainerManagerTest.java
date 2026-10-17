@@ -38,11 +38,14 @@ import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
 import java.io.Closeable;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -924,6 +927,26 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void sshdInstallProbeClearsApplicationPathsBeforeThePackageManagerRuns(@TempDir Path directory)
+            throws Exception {
+        // dnf and yum are Python programs, so an image's PYTHONHOME or LD_LIBRARY_PATH breaks the
+        // install. The fake dnf "installs" sshd and scp only when it runs with those cleared.
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        Path record = directory.resolve("tools");
+        HelperShellFixture.writeTool(bin, "dnf", HelperShellFixture.checkedToolEnvironment()
+                + "for tool in sshd scp; do\n"
+                + "  printf '#!/bin/sh\\nexit 0\\n' > \"$TEST_BIN/$tool\"\n"
+                + "  /bin/chmod +x \"$TEST_BIN/$tool\"\n"
+                + "done\n");
+
+        assertEquals(0, HelperShellFixture.run(Ec2ContainerManager.sshdInstallProbeCommand(), directory,
+                HelperShellFixture.applicationEnvironment(Map.of("PATH", bin.toString(),
+                        "TEST_RECORD", record.toString(), "TEST_BIN", bin.toString()))),
+                HelperShellFixture.output(directory));
+        assertEquals("dnf\n", Files.readString(record));
+    }
+
+    @Test
     void metadataProxyInstallCommandHandlesYumForAmazonLinux2() {
         // The IMDS proxy dependency install had the same gap, and unlike the sshd probe it
         // ends in an explicit failure: on an ami-amazonlinux2 instance it reached the else
@@ -1517,7 +1540,8 @@ class Ec2ContainerManagerTest {
     }
 
     private static final String[] SSHD_INSTALL_PROBE_CMD = {"sh", "-c",
-            "if ! command -v sshd >/dev/null 2>&1 || ! command -v scp >/dev/null 2>&1; then"
+            "unset LD_LIBRARY_PATH PYTHONPATH PYTHONHOME;"
+            + "if ! command -v sshd >/dev/null 2>&1 || ! command -v scp >/dev/null 2>&1; then"
             + "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server openssh-clients >/dev/null 2>&1;"
             + "  elif command -v yum >/dev/null 2>&1; then yum install -y openssh-server openssh-clients >/dev/null 2>&1;"
             + "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server openssh-client >/dev/null 2>&1;"

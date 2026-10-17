@@ -12,12 +12,13 @@ import java.util.Optional;
 public final class Ec2MetadataProxy {
 
     /**
-     * Run first in every helper shell. {@code docker exec} hands the shell the image's environment,
-     * so an application's bundled libraries or Python installation would otherwise be what the
-     * package manager, {@code socat} and {@code curl} load. Only the helper shell changes; the
-     * container's configured environment and its processes keep these variables.
+     * Run first in every helper shell Floci execs in a guest to run its system tools, these and the
+     * sshd install probe. {@code docker exec} hands the shell the image's environment, so an
+     * application's library search path or Python installation would otherwise be what the package
+     * manager, {@code socat} and {@code curl} load. Only the helper shell changes; the container's
+     * configured environment and its processes keep these variables.
      */
-    private static final String CLEAR_APPLICATION_PATHS = "unset LD_LIBRARY_PATH PYTHONPATH PYTHONHOME";
+    static final String CLEAR_APPLICATION_PATHS = "unset LD_LIBRARY_PATH PYTHONPATH PYTHONHOME";
 
     private Ec2MetadataProxy() {}
 
