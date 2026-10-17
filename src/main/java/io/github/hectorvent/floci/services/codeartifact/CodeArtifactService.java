@@ -50,6 +50,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -134,6 +135,9 @@ public class CodeArtifactService implements Resettable {
     public record PackageVersionCopyFailure(String errorCode, String errorMessage) {}
     public record CopyPackageVersionsResult(Map<String, PackageVersionCopyOutcome> successfulVersions,
                                               Map<String, PackageVersionCopyFailure> failedVersions) {}
+    public record AssetSummary(String name, long size, Map<String, String> hashes) {}
+    public record PackageVersionAssetsListResult(String format, String namespace, String packageName,
+            String version, String versionRevision, List<AssetSummary> assets, String nextToken) {}
     public record AuthorizationToken(String token, long expirationEpochSeconds) {}
     public record AuthorizationTokenScope(String owner, String region) {}
     private record AuthorizationTokenRecord(String owner, String region, String domain, Instant expiration) {}
@@ -802,10 +806,89 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
+     * Lists every asset of one package version. For {@code generic}, reads straight from the
+     * version's own stored {@link PackageAsset} map, the same source {@link
+     * #getPackageVersionAsset} and {@link #copyGenericPackageVersionAssets} already trust.
+     * Container-backed formats have no such record (same reason {@link #describePackageVersion}
+     * bridges them), so this reuses {@link RepositorySidecarManager#listPackageVersionAssetNames}
+     * ({@code CopyPackageVersions}' own enumeration primitive) and fetches each one to compute its
+     * size and hash, the same way {@link #getContainerBackedPackageVersionAsset} already computes
+     * a single asset's hash on the fly rather than trusting a stored value that doesn't exist.
+     *
+     * <p>{@code npm}/{@code pypi}/{@code nuget} genuinely have exactly one asset per version
+     * (confirmed by {@link RepositorySidecarManager#listPackageVersionAssetNames}'s own
+     * implementations for those three); only {@code maven} and {@code generic} can return more
+     * than one.
+     *
+     * <p>For a container-backed format, only the names are enumerated up front; {@code
+     * maxResults}/{@code nextToken} are applied to that name list before any byte is fetched, so
+     * a page request only ever downloads and hashes the assets it actually returns, not every
+     * asset the version has.
+     */
+    public PackageVersionAssetsListResult listPackageVersionAssets(String region, String domain, String domainOwner,
+            String repository, String format, String namespace, String packageName, String version,
+            Integer maxResults, String nextToken) {
+        validatePackageCoordinates(format, namespace, packageName, "listing the assets of");
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        requireNonBlank(version, "packageVersion");
+        validatePackageToken("packageVersion", version);
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+
+        PaginatedResult<AssetSummary> page;
+        String revision;
+        if (CONTAINER_BACKED_FORMATS.contains(format)) {
+            String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
+            RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                    .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                            + "' was not found.", version, "package-version"));
+            if (!manager.packageVersionExists(repoId, domain, repository, namespace, packageName, version)) {
+                throw notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version");
+            }
+            List<String> assetNames;
+            try {
+                assetNames = manager.listPackageVersionAssetNames(repoId, domain, repository, namespace,
+                        packageName, version);
+            } catch (UnsupportedOperationException e) {
+                throw new AwsException("InternalServerException", "Listing a " + format + " package version's "
+                        + "assets is not yet supported by this emulator.", 500);
+            }
+            PaginatedResult<String> namePage = Pagination.paginate(assetNames, Function.identity(), maxResults,
+                    nextToken, 100, 1000, "ValidationException");
+            List<AssetSummary> pageAssets = new ArrayList<>();
+            for (String assetName : namePage.items()) {
+                byte[] content = manager.fetchPackageVersionAsset(repoId, domain, repository, namespace,
+                                packageName, version, assetName)
+                        .orElseThrow(() -> new AwsException("InternalServerException", "Could not list version '"
+                                + version + "' of package '" + packageName + "': its asset '" + assetName
+                                + "' disappeared between listing and fetching it.", 500));
+                pageAssets.add(new AssetSummary(assetName, content.length, computeHashes(content)));
+            }
+            page = new PaginatedResult<>(pageAssets, namePage.nextToken());
+            revision = synthesizeContainerBackedRevision(repoId, namespace, packageName, version);
+        } else {
+            String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
+            CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key)
+                    .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                            + "' was not found.", version, "package-version"));
+            List<AssetSummary> allAssets = pv.getAssets().values().stream()
+                    .map(a -> new AssetSummary(a.getName(), a.getSize(), a.getHashes()))
+                    .toList();
+            page = Pagination.paginate(allAssets, AssetSummary::name, maxResults, nextToken, 100, 1000,
+                    "ValidationException");
+            revision = pv.getRevision();
+        }
+        return new PackageVersionAssetsListResult(format, namespace, packageName, version, revision, page.items(),
+                page.nextToken());
+    }
+
+    /**
      * Unlike {@code GetPackageVersionAsset}, real CodeArtifact's {@code DescribePackageVersion}
      * response has no asset listing at all (confirmed against the wire model: {@code
-     * PackageVersionDescription} has no such member; enumerating a version's files is {@code
-     * ListPackageVersionAssets}'s job, a separate, still-unimplemented action). All this needs
+     * PackageVersionDescription} has no such member; enumerating a version's files is {@link
+     * #listPackageVersionAssets}'s job, a separate action). All this needs
      * from a sidecar is a yes/no answer to "does this exact version exist," which is cheap for
      * every one of the three: Verdaccio's packument already lists every version it holds,
      * Reposilite's own details API answers directory existence the same way {@link
