@@ -788,13 +788,37 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
     private List<String> resolveStringListOrEmpty(JsonNode props, String source,
                                                   CloudFormationTemplateEngine engine) {
-        JsonNode resolved = resolveTyped(props, source, JsonNodeType.ARRAY, engine);
-        if (resolved == null) {
-            return List.of();
+        List<String> values = resolveStringList(props, source, engine);
+        return values == null ? List.of() : values;
+    }
+
+    /**
+     * The list-of-strings property {@code source}, or null when the template leaves it out,
+     * {@code Ref: AWS::NoValue} directly or through {@code Fn::If} included. A literal of another
+     * type is refused (see {@link #requireType}). An intrinsic is read through
+     * {@link CloudFormationTemplateEngine#resolveStringList}, as CloudFormation reads a {@code Ref}
+     * to a {@code CommaDelimitedList} parameter, which the engine resolves to the comma-joined text,
+     * and {@code Fn::Split} (measured, eu-west-1, 2026-10-18).
+     */
+    private static List<String> resolveStringList(JsonNode props, String source,
+                                                  CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return null;
         }
-        List<String> values = new ArrayList<>();
-        resolved.forEach(v -> values.add(v.asText()));
-        return values;
+        JsonNode raw = props.get(source);
+        if (raw.isValueNode()) {
+            requireType(source, raw, JsonNodeType.ARRAY);
+        }
+        if (raw.isObject()) {
+            JsonNode resolved = engine.resolveNodeOmittingNoValue(raw);
+            if (resolved == null || resolved.isNull() || resolved.isMissingNode()) {
+                return null;
+            }
+            if (resolved.isObject()) {
+                requireType(source, resolved, JsonNodeType.ARRAY);
+            }
+        }
+        return engine.resolveStringList(raw);
     }
 
     private List<Object> resolveObjectListOrEmpty(JsonNode props, String source,
@@ -862,10 +886,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
     private void putStringListIfPresent(Map<String, Object> request, JsonNode props, String source,
                                         String target, CloudFormationTemplateEngine engine) {
-        JsonNode resolved = resolveTyped(props, source, JsonNodeType.ARRAY, engine);
-        if (resolved != null) {
-            List<String> values = new ArrayList<>();
-            resolved.forEach(v -> values.add(v.asText()));
+        List<String> values = resolveStringList(props, source, engine);
+        if (values != null) {
             request.put(target, values);
         }
     }
