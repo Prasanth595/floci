@@ -545,10 +545,14 @@ as in the [AWS example](https://docs.aws.amazon.com/cognito/latest/developerguid
 | `CustomEmailSender_VerifyUserAttribute` | `GetUserAttributeVerificationCode` for `email` |
 | `CustomEmailSender_Authentication` | the `EMAIL_OTP` sign-in code of `USER_AUTH` and managed login |
 
-`userAttributes` includes `cognito:user_status`, and `clientMetadata` carries the `ClientMetadata`
-of the request that sends a sign-in code; it is `null` otherwise, as in the events Cognito sends. A pool without a `KMSKeyID`, a key Floci KMS cannot use, or a function that
-cannot be invoked fails the request with `CodeDeliveryFailureException` (`InternalErrorException`
-for a sign-in code); what the function does once invoked does not reach the caller.
+`userAttributes` includes `cognito:user_status`, and `clientMetadata` is `null` for every source,
+the `ClientMetadata` of an `InitiateAuth` included, as in the events Cognito sends.
+`CreateUserPool` and `UpdateUserPool` refuse a custom sender trigger without a `KMSKeyID`, and
+`CreateUserPool` a key that does not exist. A key that cannot encrypt fails the request, a sign-in
+included, with `CodeDeliveryFailureException` ("Caller needs to enable the configured KMS Key" for a
+disabled key, "Unable to encrypt CustomEmailSender/CustomSMSSender code using the configured KMS
+Key" otherwise) and keeps a sign-up's user; a function that cannot be invoked fails it with
+`UnexpectedLambdaException`. What the function does once invoked does not reach the caller.
 `CustomEmailSender_AdminCreateUser` and `CustomEmailSender_AccountTakeOverNotification` are not
 emulated, since Floci sends no invitations and has no threat protection, and neither is the
 `CustomSMSSender` trigger: SMS codes still go through SNS.

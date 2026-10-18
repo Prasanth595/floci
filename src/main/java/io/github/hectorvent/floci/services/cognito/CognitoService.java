@@ -399,12 +399,33 @@ public class CognitoService implements ResourceProvider {
         pool.setClientIdOverride(getClientIdOverride(userPoolTags));
         pool.setClientSecretOverride(ReservedTags.extractOverrideCognitoClientSecret(userPoolTags));
         populateUserPool(pool, request);
+        requireCustomSenderKey(pool, true, region);
 
         ensureJwtSigningKeys(pool);
         ensureRefreshTokenSecret(pool);
         poolStore.put(id, pool);
         LOG.infov("Created User Pool: {0}", id);
         return pool;
+    }
+
+    /**
+     * Measured (eu-west-1, 2026-10-16): a custom sender trigger needs a KMSKeyID, on CreateUserPool
+     * and UpdateUserPool alike, and CreateUserPool refuses a key that does not exist, since the grant
+     * Cognito creates on it fails.
+     */
+    private void requireCustomSenderKey(UserPool pool, boolean create, String region) {
+        Map<String, Object> config = pool.getLambdaConfig();
+        if (config == null || (!config.containsKey("CustomEmailSender") && !config.containsKey("CustomSMSSender"))) {
+            return;
+        }
+        if (!(config.get("KMSKeyID") instanceof String keyId) || keyId.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "KMSKeyId parameter is required when Custom SMS/Email Lambda trigger is used.", 400);
+        }
+        if (create && customSenderCodeEncryptor != null && !customSenderCodeEncryptor.keyExists(keyId, region)) {
+            throw new AwsException("InvalidParameterException", "Encountered error when CreateGrant was attempted"
+                    + " on the input KMS key - Key '" + keyId + "' does not exist", 400);
+        }
     }
 
     private @Nullable String getClientIdOverride(Map<String, String> userPoolTags) {
@@ -422,6 +443,9 @@ public class CognitoService implements ResourceProvider {
         UserPool updatedPool = MAPPER.convertValue(pool, UserPool.class);
 
         populateUserPool(updatedPool, request);
+        if (request.containsKey("LambdaConfig")) {
+            requireCustomSenderKey(updatedPool, false, region);
+        }
         if (request.get("PoolName") instanceof String poolName && !poolName.isBlank()) {
             updatedPool.setName(poolName);
         }
@@ -3391,7 +3415,7 @@ public class CognitoService implements ResourceProvider {
                 String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                         VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
                 if (!sendThroughCustomEmailSender(pool, client.getClientId(), triggerUser,
-                        deliveryTarget.deliveryMedium(), "CustomEmailSender_SignUp", code, Map.of())) {
+                        deliveryTarget.deliveryMedium(), "CustomEmailSender_SignUp", code)) {
                     Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
                             pool, client, triggerUser, "CustomMessage_SignUp", clientMetadata);
                     messageDispatcher.dispatch(pool, triggerUser, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
@@ -3400,6 +3424,8 @@ public class CognitoService implements ResourceProvider {
             } catch (VerificationCodeException e) {
                 rollbackSignUpConfirmationArtifacts(user);
                 throw mapVerificationCodeException(e);
+            } catch (CustomEmailSenderException e) {
+                throw e;
             } catch (RuntimeException e) {
                 rollbackSignUpConfirmationArtifacts(user);
                 throw new AwsException("CodeDeliveryFailureException",
@@ -3521,7 +3547,7 @@ public class CognitoService implements ResourceProvider {
             String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                     VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
             if (!sendThroughCustomEmailSender(pool, client.getClientId(), user,
-                    deliveryTarget.deliveryMedium(), "CustomEmailSender_ResendCode", code, Map.of())) {
+                    deliveryTarget.deliveryMedium(), "CustomEmailSender_ResendCode", code)) {
                 Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
                         pool, client, user, "CustomMessage_ResendCode", Map.of());
                 messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
@@ -3529,6 +3555,10 @@ public class CognitoService implements ResourceProvider {
             }
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
+        } catch (CustomEmailSenderException e) {
+            verificationCodeService.invalidatePrevious(pool.getId(), user.getUsername(),
+                    VerificationCode.Purpose.SIGNUP_CONFIRMATION);
+            throw e;
         } catch (RuntimeException e) {
             verificationCodeService.invalidatePrevious(pool.getId(), user.getUsername(),
                     VerificationCode.Purpose.SIGNUP_CONFIRMATION);
@@ -3925,7 +3955,7 @@ public class CognitoService implements ResourceProvider {
             String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                     VerificationCode.Purpose.PASSWORD_RESET, Duration.ofHours(1));
             if (!sendThroughCustomEmailSender(pool, client.getClientId(), user,
-                    deliveryTarget.deliveryMedium(), "CustomEmailSender_ForgotPassword", code, Map.of())) {
+                    deliveryTarget.deliveryMedium(), "CustomEmailSender_ForgotPassword", code)) {
                 Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
                         pool, client, user, "CustomMessage_ForgotPassword", Map.of());
                 messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.PASSWORD_RESET, code,
@@ -5928,7 +5958,7 @@ public class CognitoService implements ResourceProvider {
         CognitoUser deliveryUser = MAPPER.convertValue(user, CognitoUser.class);
         deliveryUser.getAttributes().put(attributeName, destination);
         if (!sendThroughCustomEmailSender(pool, clientId, deliveryUser, deliveryMedium(attributeName),
-                customEmailSenderSource, code, Map.of())) {
+                customEmailSenderSource, code)) {
             messageDispatcher.dispatch(pool, deliveryUser, purpose, code,
                     List.of(deliveryMedium(attributeName)));
         }
@@ -5942,27 +5972,45 @@ public class CognitoService implements ResourceProvider {
      * delivery.
      */
     private boolean sendThroughCustomEmailSender(UserPool pool, String clientId, CognitoUser user,
-                                                 String deliveryMedium, String triggerSource, String code,
-                                                 Map<String, String> clientMetadata) {
+                                                 String deliveryMedium, String triggerSource, String code) {
         if (!"EMAIL".equals(deliveryMedium) || !authFlowHandler.hasCustomEmailSender(pool)) {
             return false;
         }
+        if (customSenderCodeEncryptor == null) {
+            throw new IllegalStateException("custom sender encryption is not configured");
+        }
+        String encryptedCode;
         try {
-            if (customSenderCodeEncryptor == null) {
-                throw new IllegalStateException("custom sender encryption is not configured");
-            }
-            if (!(pool.getLambdaConfig().get("KMSKeyID") instanceof String keyId) || keyId.isBlank()) {
-                throw new IllegalStateException("LambdaConfig has no KMSKeyID");
-            }
-            String encryptedCode = customSenderCodeEncryptor.encrypt(keyId, pool.getId(), code,
-                    AwsArnUtils.regionOrDefault(pool.getArn(), regionResolver.getDefaultRegion()));
-            authFlowHandler.fireCustomEmailSender(pool, clientId, user, triggerSource, encryptedCode, clientMetadata);
-        } catch (RuntimeException e) {
-            LOG.warnv("Cannot hand a code to the CustomEmailSender trigger of pool {0} ({1}): {2}",
-                    pool.getId(), triggerSource, e.getMessage());
-            throw new AwsException("CodeDeliveryFailureException", "Failed to deliver the message.", 400);
+            encryptedCode = customSenderCodeEncryptor.encrypt((String) pool.getLambdaConfig().get("KMSKeyID"),
+                    pool.getId(), code, AwsArnUtils.regionOrDefault(pool.getArn(), regionResolver.getDefaultRegion()));
+        } catch (AwsException e) {
+            // Measured (eu-west-1, 2026-10-16): a disabled key and one pending deletion fail the
+            // request, sign-in included, with these CodeDeliveryFailureExceptions.
+            LOG.warnv("Cannot encrypt a {0} code for pool {1}: {2}", triggerSource, pool.getId(), e.getMessage());
+            throw new CustomEmailSenderException("CodeDeliveryFailureException",
+                    "DisabledException".equals(e.getErrorCode())
+                            ? "Caller needs to enable the configured KMS Key"
+                            : "Unable to encrypt CustomEmailSender/CustomSMSSender code using the configured KMS Key");
+        }
+        try {
+            authFlowHandler.fireCustomEmailSender(pool, clientId, user, triggerSource, encryptedCode);
+        } catch (AwsException e) {
+            // Measured: a function that is gone, or that Cognito may not invoke, answers this.
+            LOG.warnv("Cannot invoke the CustomEmailSender of pool {0}: {1}", pool.getId(), e.getMessage());
+            throw new CustomEmailSenderException("UnexpectedLambdaException",
+                    "CustomEmailSender invocation failed due to error AccessDeniedException.");
         }
         return true;
+    }
+
+    /**
+     * The CustomEmailSender could not take a code: the request fails with this, and unlike a failed
+     * SES or SNS delivery a sign-up is kept (measured), since only the code was not delivered.
+     */
+    private static final class CustomEmailSenderException extends AwsException {
+        CustomEmailSenderException(String errorCode, String message) {
+            super(errorCode, message, 400);
+        }
     }
 
     private void ensureAliasAvailable(UserPool pool, CognitoUser currentUser,
@@ -6094,11 +6142,15 @@ public class CognitoService implements ResourceProvider {
         try {
             code = verificationCodeService.issue(pool.getId(), user.getUsername(), purpose, Duration.ofMinutes(5));
             if (!sendThroughCustomEmailSender(pool, client.getClientId(), user, deliveryMedium,
-                    "CustomEmailSender_Authentication", code, Map.of())) {
+                    "CustomEmailSender_Authentication", code)) {
                 messageDispatcher.dispatch(pool, user, purpose, code, List.of(deliveryMedium), customMessageResponse);
             }
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
+        } catch (CustomEmailSenderException e) {
+            // Measured: InitiateAuth answers the sender's own error, not InternalErrorException.
+            verificationCodeService.invalidatePrevious(pool.getId(), user.getUsername(), purpose);
+            throw e;
         } catch (RuntimeException e) {
             // The code was already issued and stored before dispatch failed; invalidate it so
             // the rate limiter doesn't block an immediate retry for a code the user never

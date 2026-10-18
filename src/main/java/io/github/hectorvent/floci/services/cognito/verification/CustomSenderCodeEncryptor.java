@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cognito.verification;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.kms.KmsService;
 
 import javax.crypto.Cipher;
@@ -61,6 +62,19 @@ public final class CustomSenderCodeEncryptor {
 
     public CustomSenderCodeEncryptor(KmsService kms) {
         this.kms = kms;
+    }
+
+    /** Whether {@code kmsKeyId} names a key KMS has, which Cognito checks when it creates its grant. */
+    public boolean keyExists(String kmsKeyId, String region) {
+        try {
+            kms.describeKey(kmsKeyId, region);
+            return true;
+        } catch (AwsException e) {
+            if ("NotFoundException".equals(e.getErrorCode())) {
+                return false;
+            }
+            throw e;
+        }
     }
 
     /** Returns the base64 Encryption SDK message that carries {@code secret}, as the event's {@code code}. */

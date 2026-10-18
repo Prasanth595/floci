@@ -1910,15 +1910,16 @@ final class CognitoAuthFlowHandler {
     /**
      * Hands an encrypted code to the pool's CustomEmailSender function, which delivers the email in
      * Cognito's place. Cognito invokes custom sender triggers asynchronously, so the function's own
-     * outcome never reaches the caller; a function that cannot be invoked at all throws. As in the
-     * events Cognito sends, {@code clientMetadata} is null when the request carried none.
+     * outcome never reaches the caller; a function that cannot be invoked at all throws.
+     * {@code clientMetadata} is null for every source, even when InitiateAuth carries
+     * ClientMetadata (measured, eu-west-1, 2026-10-16).
      */
     void fireCustomEmailSender(UserPool pool, String clientId, CognitoUser user, String triggerSource,
-                               String encryptedCode, Map<String, String> clientMetadata) {
+                               String encryptedCode) {
         Map<String, Object> req = new HashMap<>();
         req.put("type", "customEmailSenderRequestV1");
         req.put("code", encryptedCode);
-        req.put("clientMetadata", clientMetadata == null || clientMetadata.isEmpty() ? null : clientMetadata);
+        req.put("clientMetadata", null);
         byte[] payload;
         try {
             payload = MAPPER.writeValueAsBytes(
