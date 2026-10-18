@@ -905,8 +905,8 @@ class CloudFormationDeletionPolicyIntegrationTest {
             assertThat(events, containsString("<LogicalResourceId>ChildStack</LogicalResourceId>"));
             assertThat(events, containsString("<ResourceStatus>CREATE_FAILED</ResourceStatus>"));
             assertThat(events, containsString("<ResourceStatusReason>Nested stack " + stackName
-                    + "-ChildStack failed: The specified log group already exists: " + logGroupName
-                    + "</ResourceStatusReason>"));
+                    + "-ChildStack failed: The following resource(s) failed to create: [MyLogGroup]."
+                    + " Rollback requested by user.</ResourceStatusReason>"));
         } finally {
             deleteStack(stackName);
         }

@@ -202,8 +202,8 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
-     * The stack's own reason is the summary; the cause a nested stack's parent and a stack set
-     * instance report is the failed resource's message, from the operation that rolled back.
+     * The stack's own reason is the summary; the cause a stack set instance reports is the failed
+     * resource's message, from the operation that rolled back.
      */
     @Test
     void failureCause_afterACreateRollback_isTheFailedResourcesMessage() {

@@ -2419,7 +2419,7 @@ public class CloudFormationService implements ResourceProvider {
 
     /**
      * The stack's reason, or, while that is still the rollback summary, the failed resource's own
-     * message, which is what a nested stack's parent and a stack set instance report as the cause.
+     * message, which is what a stack set instance reports as the cause.
      */
     static String failureCause(Stack stack) {
         String reason = stack.getStatusReason();
@@ -3765,7 +3765,7 @@ public class CloudFormationService implements ResourceProvider {
                 // a delete; a child an update only re-applied stays tracked by the prior resource.
                 resource.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
             }
-            String reason = failureCause(childStack);
+            String reason = childStack.getStatusReason();
             if (reason == null || reason.isBlank()) {
                 reason = "Nested stack " + childStackName + " rolled back or failed with status " + childStack.getStatus();
             } else {
