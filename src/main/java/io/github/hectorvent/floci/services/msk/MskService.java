@@ -434,7 +434,9 @@ public class MskService implements ResourceProvider {
         if (serverProperties == null) {
             throw new AwsException("BadRequestException", "serverProperties is required.", 400);
         }
-        if (configurationStorage.scan(k -> true).stream().anyMatch(c -> c.getName().equals(name))) {
+        if (configurationStorage.scan(k -> true).stream()
+                .filter(this::isCurrentRegion)
+                .anyMatch(c -> c.getName().equals(name))) {
             throw new AwsException("ConflictException", "Configuration already exists: " + name, 409);
         }
 
@@ -455,13 +457,13 @@ public class MskService implements ResourceProvider {
         // NotFoundException. The message prefix is a compatibility contract: terraform-provider-aws
         // (and the Pulumi provider bridging it) substring-matches "Configuration ARN does not exist"
         // to detect that a configuration is gone, so its post-delete waiter can complete.
-        return configurationStorage.get(arn)
+        return configurationStorage.get(arn).filter(this::isCurrentRegion)
                 .orElseThrow(() -> new AwsException("BadRequestException",
                         "Configuration ARN does not exist: " + arn, 400));
     }
 
     public PaginatedResult<MskConfiguration> listConfigurations(Integer maxResults, String nextToken) {
-        List<MskConfiguration> all = configurationStorage.scan(k -> true);
+        List<MskConfiguration> all = configurationStorage.scan(k -> true).stream().filter(this::isCurrentRegion).toList();
         return Pagination.paginate(all, MskConfiguration::getArn, maxResults, nextToken, MAX_PAGE, "BadRequestException");
     }
 
@@ -558,7 +560,7 @@ public class MskService implements ResourceProvider {
         if (cluster != null) {
             return cluster.getTags() != null ? cluster.getTags() : Map.of();
         }
-        MskConfiguration configuration = configurationStorage.get(arn).orElse(null);
+        MskConfiguration configuration = configurationStorage.get(arn).filter(this::isCurrentRegion).orElse(null);
         if (configuration != null) {
             return configuration.getTags() != null ? configuration.getTags() : Map.of();
         }
@@ -572,7 +574,7 @@ public class MskService implements ResourceProvider {
             storage.put(arn, cluster);
             return;
         }
-        MskConfiguration configuration = configurationStorage.get(arn).orElse(null);
+        MskConfiguration configuration = configurationStorage.get(arn).filter(this::isCurrentRegion).orElse(null);
         if (configuration != null) {
             configuration.setTags(merged(configuration.getTags(), tags));
             configurationStorage.put(arn, configuration);
@@ -588,7 +590,7 @@ public class MskService implements ResourceProvider {
             storage.put(arn, cluster);
             return;
         }
-        MskConfiguration configuration = configurationStorage.get(arn).orElse(null);
+        MskConfiguration configuration = configurationStorage.get(arn).filter(this::isCurrentRegion).orElse(null);
         if (configuration != null) {
             configuration.setTags(without(configuration.getTags(), tagKeys));
             configurationStorage.put(arn, configuration);
@@ -674,6 +676,14 @@ public class MskService implements ResourceProvider {
     @Override
     public Set<SupportedResourceType> getSupportedResourceTypes() {
         return Set.of(new SupportedResourceType("kafka:cluster", "kafka", true));
+    }
+
+    /**
+     * Configurations are regional like clusters. Their ARN has always carried the region they were
+     * created in, so it decides; there are no older records to keep visible.
+     */
+    private boolean isCurrentRegion(MskConfiguration configuration) {
+        return regionResolver.getRegion().equals(AwsArnUtils.regionOrDefault(configuration.getArn(), null));
     }
 
     private boolean isCurrentRegion(MskCluster cluster) {

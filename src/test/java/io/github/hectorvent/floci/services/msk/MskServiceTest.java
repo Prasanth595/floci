@@ -181,6 +181,24 @@ class MskServiceTest {
     }
 
     @Test
+    void configurationsAreRegionalLikeClusters() {
+        MskConfiguration east = mskService.createConfiguration("shared-config", "desc", List.of("3.6.0"), "props");
+
+        when(regionResolver.getRegion()).thenReturn("eu-west-1");
+        // The same name is free in another region, and each region lists and reads only its own.
+        MskConfiguration west = mskService.createConfiguration("shared-config", "desc", List.of("3.6.0"), "props");
+        assertEquals(List.of(west), mskService.listConfigurations(null, null).items());
+        AwsException describe = assertThrows(AwsException.class,
+                () -> mskService.describeConfiguration(east.getArn()));
+        assertEquals("BadRequestException", describe.getErrorCode());
+        assertThrows(AwsException.class, () -> mskService.listTagsForResource(east.getArn()));
+
+        when(regionResolver.getRegion()).thenReturn("us-east-1");
+        assertEquals(List.of(east), mskService.listConfigurations(null, null).items());
+        assertEquals(east, mskService.describeConfiguration(east.getArn()));
+    }
+
+    @Test
     void deleteCluster() {
         MskCluster cluster = mskService.createCluster("test-cluster");
         mskService.deleteCluster(cluster.getClusterArn());
