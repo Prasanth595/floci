@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.EmulatorConfig.SqsServiceConfig.EndpointStrategy;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -266,18 +267,13 @@ public class SqsService implements Resettable, ResourceProvider {
         }
     }
 
-    /** Queue URLs use floci's own endpoint, {@code <base-url>/<account>/<name>}. The default. */
-    static final String STRATEGY_PATH = "path";
-    /** Queue URLs use the AWS form, {@code https://sqs.<region>.<dnsSuffix>/<account>/<name>}. */
-    static final String STRATEGY_STANDARD = "standard";
-
     private final int defaultVisibilityTimeout;
     private final int maxMessageSize;
     /** Upper bound accepted for the MaximumMessageSize attribute. Raising max-message-size above
      * the AWS limit widens this bound so the configured default stays settable explicitly. */
     private final int maxAllowedMessageSize;
     private final String baseUrl;
-    private final String endpointStrategy;
+    private final EndpointStrategy endpointStrategy;
     private final RegionResolver regionResolver;
     private final boolean clearFifoDeduplicationCacheOnPurge;
     private final SnsService snsService;
@@ -408,7 +404,7 @@ public class SqsService implements Resettable, ResourceProvider {
                Instance<RequestContext> requestContextInstance, IamService iamService) {
         this(queueStore, messageStore, dedupStore, dedupIdentityStore, defaultVisibilityTimeout, maxMessageSize,
                 baseUrl, regionResolver, clearFifoDeduplicationCacheOnPurge, snsService, clock,
-                receiptHandleSecret, requestContextInstance, iamService, STRATEGY_PATH);
+                receiptHandleSecret, requestContextInstance, iamService, EndpointStrategy.PATH);
     }
 
     SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
@@ -418,7 +414,7 @@ public class SqsService implements Resettable, ResourceProvider {
                RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
                SnsService snsService, Clock clock, String receiptHandleSecret,
                Instance<RequestContext> requestContextInstance, IamService iamService,
-               String endpointStrategy) {
+               EndpointStrategy endpointStrategy) {
         this.queueStore = queueStore;
         this.messageStore = messageStore;
         this.dedupStore = dedupStore;
@@ -2003,7 +1999,7 @@ public class SqsService implements Resettable, ResourceProvider {
      * parses queue URLs. Lookups key off the URL path, so either form is accepted on input.
      */
     private String buildQueueUrl(String region, String accountId, String queueName) {
-        if (!STRATEGY_STANDARD.equalsIgnoreCase(endpointStrategy)) {
+        if (endpointStrategy != EndpointStrategy.STANDARD) {
             return baseUrl + "/" + accountId + "/" + queueName;
         }
         String effectiveRegion = region != null && !region.isBlank() ? region : regionResolver.getDefaultRegion();

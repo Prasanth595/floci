@@ -1359,7 +1359,12 @@ public interface EmulatorConfig {
          * URL path and ignore the host.
          */
         @WithDefault("path")
-        String endpointStrategy();
+        EndpointStrategy endpointStrategy();
+
+        enum EndpointStrategy {
+            PATH,
+            STANDARD
+        }
     }
 
     interface S3ServiceConfig {

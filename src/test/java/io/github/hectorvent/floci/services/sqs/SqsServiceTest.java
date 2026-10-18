@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.sqs;
 
+import io.github.hectorvent.floci.config.EmulatorConfig.SqsServiceConfig.EndpointStrategy;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
@@ -391,14 +393,14 @@ class SqsServiceTest {
     }
 
     private SqsService serviceWithStrategy(InMemoryStorage<String, Queue> store, RegionResolver resolver,
-                                           String strategy) {
+                                           EndpointStrategy strategy) {
         return new SqsService(store, null, null, null, 30, 1048576, BASE_URL, resolver, false, null, clock,
                 ReceiptHandle.DEFAULT_SECRET, null, null, strategy);
     }
 
     private SqsService standardService() {
         return serviceWithStrategy(new InMemoryStorage<>(), new RegionResolver("us-east-1", "000000000000"),
-                SqsService.STRATEGY_STANDARD);
+                EndpointStrategy.STANDARD);
     }
 
     @Test
@@ -476,15 +478,15 @@ class SqsServiceTest {
     @Test
     void standardStrategyUsesTheQueueOwnerAccount() {
         SqsService service = serviceWithStrategy(new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "111122223333"), SqsService.STRATEGY_STANDARD);
+                new RegionResolver("us-east-1", "111122223333"), EndpointStrategy.STANDARD);
 
         assertEquals("https://sqs.ap-southeast-2.amazonaws.com/111122223333/owned",
                 service.createQueue("owned", null, "ap-southeast-2").getQueueUrl());
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {SqsService.STRATEGY_PATH, SqsService.STRATEGY_STANDARD})
-    void everyAcceptedQueueUrlFormResolvesUnderEitherStrategy(String strategy) {
+    @EnumSource(EndpointStrategy.class)
+    void everyAcceptedQueueUrlFormResolvesUnderEitherStrategy(EndpointStrategy strategy) {
         SqsService service = serviceWithStrategy(new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), strategy);
         String region = "eu-west-1";
@@ -503,10 +505,10 @@ class SqsServiceTest {
 
     @ParameterizedTest
     @CsvSource({
-            "path, http://localhost:4566/000000000000/legacy-queue",
-            "standard, https://sqs.eu-west-1.amazonaws.com/000000000000/legacy-queue"
+            "PATH, http://localhost:4566/000000000000/legacy-queue",
+            "STANDARD, https://sqs.eu-west-1.amazonaws.com/000000000000/legacy-queue"
     })
-    void storedQueuesAreReportedInTheCurrentForm(String strategy, String expectedUrl) {
+    void storedQueuesAreReportedInTheCurrentForm(EndpointStrategy strategy, String expectedUrl) {
         String region = "eu-west-1";
         InMemoryStorage<String, Queue> store = new InMemoryStorage<>();
         Queue legacy = new Queue("legacy-queue", "http://old-host:4566/000000000000/legacy-queue");
