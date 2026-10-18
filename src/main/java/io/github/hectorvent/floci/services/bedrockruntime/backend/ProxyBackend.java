@@ -76,7 +76,7 @@ public class ProxyBackend implements BedrockBackend {
         HttpRequest request = buildHttpRequest(proxyConfig, openAiRequest);
 
         long start = System.nanoTime();
-        UpstreamCall call = send(modelId, request, "backend");
+        UpstreamCall call = send(modelId, request, "backend", "request");
         String responseBody;
         try (InputStream body = call.response().body()) {
             responseBody = new String(body.readAllBytes(), StandardCharsets.UTF_8);
@@ -118,7 +118,7 @@ public class ProxyBackend implements BedrockBackend {
         // BedrockOpenAiTranslator.streamBedrockEvents).
         HttpRequest request = buildHttpRequest(proxyConfig, openAiRequest);
         long startNanos = System.nanoTime();
-        UpstreamCall call = send(modelId, request, "stream");
+        UpstreamCall call = send(modelId, request, "stream", "stream");
         return output -> {
             try (InputStream body = call.response().body();
                  Stream<String> lines = new BufferedReader(new InputStreamReader(body, StandardCharsets.UTF_8)).lines()) {
@@ -152,7 +152,7 @@ public class ProxyBackend implements BedrockBackend {
      * thrown here, after a read of its body that a timer cuts off at the deadline: the request
      * timeout stops at the headers, so nothing else bounds a backend that stalls mid-error-body.
      */
-    private UpstreamCall send(String modelId, HttpRequest request, String subject) {
+    private UpstreamCall send(String modelId, HttpRequest request, String subject, String interruptedSubject) {
         // A stalled upstream must be closed on caller disconnect without waiting for another token.
         RoutingContext context = currentRequest.getCurrent();
         CompletableFuture<HttpResponse<InputStream>> pending = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream());
@@ -170,7 +170,7 @@ public class ProxyBackend implements BedrockBackend {
             pending.cancel(true);
             complete.set(true);
             monitor.interrupt();
-            throw new AwsException("ModelErrorException", "Proxy " + subject + " interrupted.", 424);
+            throw new AwsException("ModelErrorException", "Proxy " + interruptedSubject + " interrupted.", 424);
         } catch (ExecutionException | CancellationException failure) {
             complete.set(true);
             monitor.interrupt();
