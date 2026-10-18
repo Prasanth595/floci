@@ -1258,12 +1258,9 @@ public class DynamoDbService {
             // AWS validates index key values against the item the update produces.
             validateIndexKeyTypes(table, item, true);
 
-            if (sizeRule == UpdateSizeRule.UPDATE_ITEM) {
-                requireUpdateItemWithinSizeLimit(item,
-                        writtenAttributes(touchedPaths, updateExpression, expressionAttrNames),
-                        updateExpression != null
-                                ? DynamoDbItemSize.updateExpressionCost(updateExpression)
-                                : DynamoDbItemSize.attributeUpdatesCost(attributeUpdates));
+            if (sizeRule == UpdateSizeRule.UPDATE_ITEM && updateExpression != null) {
+                requireUpdateItemWithinSizeLimit(item, DynamoDbItemSize.updateStatementSize(updateExpression,
+                        path -> parsePath(path, expressionAttrNames), expressionAttrValues));
             } else {
                 requireUpdatedItemWithinSizeLimit(item);
             }
@@ -1305,18 +1302,6 @@ public class DynamoDbService {
 
     private List<Object> pathTokens(String path, String updateExpression, JsonNode expressionAttrNames) {
         return updateExpression != null ? parsePath(path, expressionAttrNames) : List.<Object>of(path);
-    }
-
-    private Set<String> writtenAttributes(List<String> touchedPaths, String updateExpression,
-                                           JsonNode expressionAttrNames) {
-        Set<String> names = new LinkedHashSet<>();
-        for (String path : touchedPaths) {
-            List<Object> tokens = pathTokens(path, updateExpression, expressionAttrNames);
-            if (!tokens.isEmpty() && tokens.get(0) instanceof String name) {
-                names.add(name);
-            }
-        }
-        return names;
     }
 
     public QueryResult query(String tableName, JsonNode keyConditions,
@@ -2168,9 +2153,8 @@ public class DynamoDbService {
         }
     }
 
-    private static void requireUpdateItemWithinSizeLimit(JsonNode item, Set<String> writtenAttributes,
-                                                          int actionCost) {
-        if (!DynamoDbItemSize.updateItemWithinLimit(item, writtenAttributes, actionCost)) {
+    private static void requireUpdateItemWithinSizeLimit(JsonNode item, int statementSize) {
+        if (!DynamoDbItemSize.updateItemWithinLimit(item, statementSize)) {
             throw new UpdatedItemTooLargeException();
         }
     }
@@ -3131,7 +3115,7 @@ public class DynamoDbService {
      * unwrapped form. Rejects forms like "(a) - (b)" where the outer parens do
      * not actually enclose the whole expression.
      */
-    private static String stripOuterParens(String expr) {
+    static String stripOuterParens(String expr) {
         String s = expr.trim();
         while (s.length() >= 2 && s.charAt(0) == '(' && s.charAt(s.length() - 1) == ')') {
             int depth = 0;
@@ -3875,7 +3859,7 @@ public class DynamoDbService {
      * Finds the index of an arithmetic operator (+ or -) that is outside
      * function parentheses. Returns -1 if none found.
      */
-    private int findArithmeticOperator(String expr) {
+    static int findArithmeticOperator(String expr) {
         int depth = 0;
         for (int i = 0; i < expr.length(); i++) {
             char c = expr.charAt(i);
@@ -3900,7 +3884,7 @@ public class DynamoDbService {
      * spaced form (e.g. PynamoDB always generates {@code "list_append (x, y)"}), which a plain
      * {@code startsWith(functionName + "(")} rejects.
      */
-    private static boolean startsWithFunctionCall(String value, String functionName) {
+    static boolean startsWithFunctionCall(String value, String functionName) {
         return value.startsWith(functionName)
                 && value.substring(functionName.length()).stripLeading().startsWith("(");
     }
