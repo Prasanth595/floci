@@ -167,12 +167,16 @@ imply an atomic transaction spanning Auto Scaling and EC2 after a process crash.
 
 ## Suspended Process Reasons
 
-`DescribeAutoScalingGroups` returns `SuspensionReason` alongside every suspended
-process. Floci uses the generic description `Suspended by local configuration.`
-for the current suspension state. It does not record an actor, timestamp or
-administrative suspension history. Resuming a process removes that process and
-its reason from the response. This also applies to saved groups containing the
-existing list of suspended process names.
+`SuspendProcesses` records when each newly suspended process entered that state.
+`DescribeAutoScalingGroups` returns `SuspensionReason` in the form
+`User suspended at 2026-10-18T16:00:00Z`. Repeating a suspension preserves its
+original time. Resuming a process removes its recorded time; suspending it again
+starts a new interval.
+
+Saved groups without a recorded suspension time still report the process name
+and omit the optional reason. Floci does not invent a date for those existing
+suspensions. A repeated suspension leaves an unknown time unknown until the
+process is resumed and suspended again.
 
 ## Capacity Reconciler (Phase 2)
 

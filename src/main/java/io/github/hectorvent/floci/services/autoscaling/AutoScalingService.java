@@ -22,6 +22,7 @@ import jakarta.inject.Inject;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
@@ -660,9 +661,17 @@ public class AutoScalingService {
         synchronized (lockFor(key)) {
             AutoScalingGroup asg = requireGroup(region, name);
             List<String> toSuspend = processes.isEmpty() ? ALL_SCALING_PROCESSES : processes;
-            Set<String> suspended = new LinkedHashSet<>(asg.getSuspendedProcesses());
-            suspended.addAll(toSuspend);
-            asg.setSuspendedProcesses(new ArrayList<>(suspended));
+            AutoScalingGroup.SuspensionState previous = asg.suspensionState();
+            Set<String> suspended = new LinkedHashSet<>(previous.processes());
+            Map<String, Instant> times = new LinkedHashMap<>(previous.times());
+            Instant now = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+            for (String process : toSuspend) {
+                if (suspended.add(process)) {
+                    times.put(process, now);
+                }
+            }
+            times.keySet().retainAll(suspended);
+            asg.updateSuspensionState(new ArrayList<>(suspended), times);
             groups.put(key, asg);
         }
     }
@@ -671,13 +680,16 @@ public class AutoScalingService {
         String key = asgKey(region, name);
         synchronized (lockFor(key)) {
             AutoScalingGroup asg = requireGroup(region, name);
+            AutoScalingGroup.SuspensionState previous = asg.suspensionState();
+            List<String> remaining = new ArrayList<>(previous.processes());
             if (processes.isEmpty()) {
-                asg.setSuspendedProcesses(new ArrayList<>());
+                remaining.clear();
             } else {
-                List<String> remaining = new ArrayList<>(asg.getSuspendedProcesses());
                 remaining.removeAll(processes);
-                asg.setSuspendedProcesses(remaining);
             }
+            Map<String, Instant> times = new LinkedHashMap<>(previous.times());
+            times.keySet().retainAll(remaining);
+            asg.updateSuspensionState(remaining, times);
             groups.put(key, asg);
         }
     }

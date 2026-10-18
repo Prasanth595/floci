@@ -7,6 +7,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -22,7 +23,7 @@ class AutoScalingSuspensionReasonIntegrationTest {
     private static final String REGION = "us-east-1";
     private static final String GROUP = "DescribeAutoScalingGroupsResponse.DescribeAutoScalingGroupsResult"
             + ".AutoScalingGroups.member";
-    private static final String REASON = "Suspended by local configuration.";
+    private static final String REASON_PREFIX = "User suspended at ";
     private static final List<String> ALL_PROCESSES = List.of("Launch", "Terminate", "AddToLoadBalancer",
             "AlarmNotification", "AZRebalance", "HealthCheck", "InstanceRefresh", "ReplaceUnhealthy", "ScheduledActions");
 
@@ -37,19 +38,25 @@ class AutoScalingSuspensionReasonIntegrationTest {
                 Response initial = describe(ACCOUNT, REGION, name);
                 process(ACCOUNT, REGION, "SuspendProcesses", name,
                         all ? List.of() : List.of("Launch", "Terminate"));
+                Response firstSuspension = describe(ACCOUNT, REGION, name);
                 process(ACCOUNT, REGION, "SuspendProcesses", name, List.of("Launch", "Launch"));
                 Response suspended = describe(ACCOUNT, REGION, name);
                 process(ACCOUNT, REGION, "ResumeProcesses", name, List.of("Launch"));
                 Response partial = describe(ACCOUNT, REGION, name);
                 process(ACCOUNT, REGION, "ResumeProcesses", name, List.of());
                 Response resumed = describe(ACCOUNT, REGION, name);
+                process(ACCOUNT, REGION, "SuspendProcesses", name, List.of("Launch"));
+                Response resuspended = describe(ACCOUNT, REGION, name);
                 List<String> expected = all ? ALL_PROCESSES : List.of("Launch", "Terminate");
                 List<String> remaining = new ArrayList<>(expected);
                 remaining.remove("Launch");
                 assertAll(() -> assertSuspensions(initial, List.of()),
                         () -> assertSuspensions(suspended, expected),
                         () -> assertSuspensions(partial, remaining),
-                        () -> assertSuspensions(resumed, List.of()));
+                        () -> assertSuspensions(resumed, List.of()),
+                        () -> assertSuspensions(resuspended, List.of("Launch")),
+                        () -> assertEquals(firstSuspension.xmlPath().getList(GROUP + ".SuspendedProcesses.member"),
+                                suspended.xmlPath().getList(GROUP + ".SuspendedProcesses.member")));
             } finally {
                 deleteGroup(ACCOUNT, REGION, name);
             }
@@ -98,7 +105,10 @@ class AutoScalingSuspensionReasonIntegrationTest {
         assertAll(() -> assertEquals(expected.size(), names.size()),
                 () -> assertEquals(new HashSet<>(expected), new HashSet<>(names)),
                 () -> assertEquals(expected.size(), reasons.size()),
-                () -> assertTrue(reasons.stream().allMatch(REASON::equals)),
+                () -> reasons.forEach(reason -> {
+                    assertTrue(reason.startsWith(REASON_PREFIX), reason);
+                    assertDoesNotThrow(() -> Instant.parse(reason.substring(REASON_PREFIX.length())));
+                }),
                 () -> assertTrue(response.xmlPath().getList(GROUP + ".Instances.member").isEmpty()));
     }
 

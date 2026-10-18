@@ -7,6 +7,7 @@ import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
 import software.amazon.awssdk.services.autoscaling.model.AutoScalingGroup;
 import software.amazon.awssdk.services.autoscaling.model.SuspendedProcess;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -20,9 +21,9 @@ class AutoScalingSuspensionReasonTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    @DisplayName("Every suspended process reports its local reason until resumed")
+    @DisplayName("Suspension dates remain stable until a process resumes")
     void reasonsFollowSuspensionAndResume(boolean all) {
-        assumeFalse(TestFixtures.isRealAws(), "Checks the emulator's generic local suspension reason");
+        assumeFalse(TestFixtures.isRealAws(), "Creates local suspension fixtures");
         String name = TestFixtures.uniqueName("sdk-suspension-reason");
         try (AutoScalingClient client = TestFixtures.autoScalingClient()) {
             client.createLaunchConfiguration(request -> request.launchConfigurationName(name)
@@ -35,8 +36,10 @@ class AutoScalingSuspensionReasonTest {
                     assertProcesses(group(client, name), List.of());
                     List<String> names = all ? List.of() : List.of("Launch", "Terminate");
                     client.suspendProcesses(request -> request.autoScalingGroupName(name).scalingProcesses(names));
+                    List<SuspendedProcess> original = group(client, name).suspendedProcesses();
                     client.suspendProcesses(request -> request.autoScalingGroupName(name)
                             .scalingProcesses("Launch", "Launch"));
+                    assertThat(group(client, name).suspendedProcesses()).isEqualTo(original);
                     List<String> expected = all ? ALL_PROCESSES : List.of("Launch", "Terminate");
                     assertProcesses(group(client, name), expected);
                     client.resumeProcesses(request -> request.autoScalingGroupName(name).scalingProcesses("Launch"));
@@ -65,7 +68,11 @@ class AutoScalingSuspensionReasonTest {
         assertThat(group.instances()).isEmpty();
         assertThat(group.suspendedProcesses()).extracting(SuspendedProcess::processName)
                 .containsExactlyInAnyOrderElementsOf(expected);
-        assertThat(group.suspendedProcesses()).allSatisfy(process ->
-                assertThat(process.suspensionReason()).isEqualTo("Suspended by local configuration."));
+        assertThat(group.suspendedProcesses()).allSatisfy(process -> {
+            String prefix = "User suspended at ";
+            assertThat(process.suspensionReason()).startsWith(prefix);
+            Instant date = Instant.parse(process.suspensionReason().substring(prefix.length()));
+            assertThat(date.getNano()).isZero();
+        });
     }
 }
