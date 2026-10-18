@@ -6,10 +6,14 @@ import java.util.Map;
 /**
  * The {@code Credential}/{@code SignedHeaders}/{@code Signature} parameters carried by an
  * {@code AWS4-HMAC-SHA256 Authorization} header, split out of its raw comma-separated value.
- * AppSync's {@code IamAuthValidator} parses the header itself, because it names each missing part
- * the way AppSync does.
+ * Shared by every SigV4 verifier in this codebase that accepts a header-signed request:
+ * {@code ExecuteApiSigV4Authorizer} (API Gateway) and {@code IamAuthValidator} (AppSync) both
+ * parsed this independently before this class existed.
+ *
+ * <p>{@code missingEqualSign} is true when a part has no {@code =}. AppSync refuses such a header.
  */
-public record SigV4AuthorizationHeader(String credential, String signedHeaders, String signature) {
+public record SigV4AuthorizationHeader(String credential, String signedHeaders, String signature,
+                                       boolean missingEqualSign) {
 
     private static final String ALGORITHM = "AWS4-HMAC-SHA256";
 
@@ -28,13 +32,16 @@ public record SigV4AuthorizationHeader(String credential, String signedHeaders, 
             return null;
         }
         Map<String, String> parameters = new LinkedHashMap<>();
+        boolean missingEqualSign = false;
         for (String part : trimmed.substring(ALGORITHM.length()).split(",")) {
             int equals = part.indexOf('=');
             if (equals > 0) {
                 parameters.put(part.substring(0, equals).trim(), part.substring(equals + 1).trim());
+            } else if (equals < 0 && !part.isBlank()) {
+                missingEqualSign = true;
             }
         }
-        return new SigV4AuthorizationHeader(
-                parameters.get("Credential"), parameters.get("SignedHeaders"), parameters.get("Signature"));
+        return new SigV4AuthorizationHeader(parameters.get("Credential"), parameters.get("SignedHeaders"),
+                parameters.get("Signature"), missingEqualSign);
     }
 }

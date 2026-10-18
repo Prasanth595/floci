@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.auth.SessionTokenCheck;
+import io.github.hectorvent.floci.core.common.auth.SigV4AuthorizationHeader;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.core.common.auth.SigV4SignedRequest;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncTransportException;
@@ -23,7 +24,6 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -113,10 +113,14 @@ public class IamAuthValidator {
      */
     private String verifySignature(String authorization, String apiId, AuthRequestInfo info) {
         Map<String, String> headers = info.requestHeaders();
-        Map<String, String> parameters = authorizationParameters(authorization);
-        String credential = parameters.get("Credential");
-        String signedHeaders = parameters.get("SignedHeaders");
-        String signature = parameters.get("Signature");
+        SigV4AuthorizationHeader parsed = SigV4AuthorizationHeader.parse(authorization);
+        if (parsed.missingEqualSign()) {
+            throw AppSyncAuth.incompleteSignature("Invalid key=value pair (missing equal-sign) in Authorization"
+                    + " header (hashed with SHA-256 and encoded with Base64): '" + hashed(authorization) + "'.");
+        }
+        String credential = parsed.credential();
+        String signedHeaders = parsed.signedHeaders();
+        String signature = parsed.signature();
         String date = hasHeader(headers, "X-Amz-Date") ? header(headers, "X-Amz-Date")
                 : hasHeader(headers, "Date") ? header(headers, "Date") : null;
         List<String> missing = new ArrayList<>();
@@ -187,24 +191,6 @@ public class IamAuthValidator {
         }
         checkSessionToken(accessKeyId, headers);
         return accessKeyId;
-    }
-
-    /** The parameters after the algorithm. A part with no equals sign refuses the whole header. */
-    private static Map<String, String> authorizationParameters(String authorization) {
-        Map<String, String> parameters = new HashMap<>();
-        for (String part : authorization.substring(ALGORITHM.length()).split(",")) {
-            String trimmed = part.trim();
-            if (trimmed.isEmpty()) {
-                continue;
-            }
-            int equals = trimmed.indexOf('=');
-            if (equals < 0) {
-                throw AppSyncAuth.incompleteSignature("Invalid key=value pair (missing equal-sign) in Authorization"
-                        + " header (hashed with SHA-256 and encoded with Base64): '" + hashed(authorization) + "'.");
-            }
-            parameters.put(trimmed.substring(0, equals).trim(), trimmed.substring(equals + 1).trim());
-        }
-        return parameters;
     }
 
     private static String hashed(String authorization) {
