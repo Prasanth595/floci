@@ -11,6 +11,9 @@ import io.github.hectorvent.floci.services.s3vectors.model.VectorIndex;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class S3VectorsServiceTest {
 
     private static final String REGION = "us-east-1";
+    private static final Instant CREATION_TIME = Instant.parse("2026-02-01T00:00:00Z");
     private S3VectorsService service;
 
     @BeforeEach
@@ -31,7 +35,8 @@ class S3VectorsServiceTest {
                 return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
-        service = new S3VectorsService(factory, new RegionResolver(REGION, "000000000000"));
+        service = new S3VectorsService(factory, new RegionResolver(REGION, "000000000000"),
+                Clock.fixed(CREATION_TIME, ZoneOffset.UTC));
     }
 
     @Test
@@ -40,6 +45,8 @@ class S3VectorsServiceTest {
         VectorBucket bucket = service.createVectorBucket("bucket", encryption, Map.of("old", "value"), REGION);
         VectorIndex index = service.createIndex("bucket", "index", 3, "float32", "cosine", List.of("text"),
                 null, Map.of("old", "value"), REGION);
+        assertEquals(CREATION_TIME, bucket.getCreationTime());
+        assertEquals(CREATION_TIME, index.getCreationTime());
 
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         VectorBucket restored = mapper.readValue(mapper.writeValueAsString(bucket), VectorBucket.class);

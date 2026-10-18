@@ -14,6 +14,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -31,14 +32,20 @@ public class S3VectorsService {
 
     private final AccountAwareStorageBackend<VectorBucket> store;
     private final RegionResolver regionResolver;
+    private final Clock clock;
     // Bounded, stable monitors also serialize deletion and recreation of the same bucket.
     private final Object[] bucketLocks = new Object[256];
 
     @Inject
     public S3VectorsService(StorageFactory factory, RegionResolver regionResolver) {
+        this(factory, regionResolver, Clock.systemUTC());
+    }
+
+    S3VectorsService(StorageFactory factory, RegionResolver regionResolver, Clock clock) {
         this.store = factory.create("s3vectors", "s3vectors.json",
                 new TypeReference<Map<String, VectorBucket>>() {});
         this.regionResolver = regionResolver;
+        this.clock = clock;
         for (int i = 0; i < bucketLocks.length; i++) {
             bucketLocks[i] = new Object();
         }
@@ -75,7 +82,7 @@ public class S3VectorsService {
             String arn = buildBucketArn(region, bucketName);
             VectorBucket bucket = new VectorBucket(bucketName, arn,
                     encryptionConfiguration != null ? encryptionConfiguration : Map.of("sseType", "AES256"));
-            bucket.setCreationTime(Instant.now());
+            bucket.setCreationTime(clock.instant());
             bucket.setTags(new ConcurrentHashMap<>(tags));
             store.put(key, bucket);
             LOG.infov("Created Vector Bucket: {0} in region {1}", bucketName, region);
@@ -108,9 +115,9 @@ public class S3VectorsService {
         }
     }
 
-    private static boolean backfillLegacyMetadata(VectorBucket bucket) {
+    private boolean backfillLegacyMetadata(VectorBucket bucket) {
         boolean changed = false;
-        Instant migrationTime = Instant.now();
+        Instant migrationTime = clock.instant();
         if (bucket.getCreationTime() == null) {
             bucket.setCreationTime(migrationTime);
             changed = true;
@@ -179,7 +186,7 @@ public class S3VectorsService {
 
             String arn = buildIndexArn(region, bucketName, indexName);
             VectorIndex index = new VectorIndex(indexName, arn, bucketName, dimension, dataType, distanceMetric);
-            index.setCreationTime(Instant.now());
+            index.setCreationTime(clock.instant());
             index.setNonFilterableMetadataKeys(List.copyOf(nonFilterableMetadataKeys));
             index.setEncryptionConfiguration(encryptionConfiguration != null
                     ? encryptionConfiguration : bucket.getEncryptionConfiguration());
