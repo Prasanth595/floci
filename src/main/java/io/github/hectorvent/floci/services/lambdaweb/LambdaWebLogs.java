@@ -65,8 +65,6 @@ public class LambdaWebLogs {
         private final ConcurrentLinkedQueue<Event> queue = new ConcurrentLinkedQueue<>();
         private final AtomicInteger queued = new AtomicInteger();
         private final AtomicBoolean writing = new AtomicBoolean();
-        /** Touched only by the writer, which never runs twice at once. */
-        private boolean created;
 
         private Sink(String accountId, String region, List<Destination> destinations) {
             this.accountId = accountId;
@@ -113,26 +111,23 @@ public class LambdaWebLogs {
                 }
             } finally {
                 writing.set(false);
-            }
-            if (!queue.isEmpty()) {
-                schedule();
-            }
-        }
-
-        private void put(List<Map<String, Object>> batch) {
-            if (!created) {
-                destinations.forEach(this::create);
-                created = true;
-            }
-            for (Destination destination : destinations) {
-                try {
-                    putTo(destination, batch);
-                } catch (RuntimeException e) {
-                    LOG.debugv("Could not deliver log events to {0}: {1}", destination.logGroup(), e.getMessage());
+                if (!queue.isEmpty()) {
+                    schedule();
                 }
             }
         }
 
+        private void put(List<Map<String, Object>> batch) {
+            for (Destination destination : destinations) {
+                try {
+                    putTo(destination, batch);
+                } catch (RuntimeException e) {
+                    LOG.warnv(e, "Could not deliver {0} log events to {1}", batch.size(), destination.logGroup());
+                }
+            }
+        }
+
+        /** The group and the stream are created when an event finds one of them missing, also after a delete. */
         private void putTo(Destination destination, List<Map<String, Object>> batch) {
             try {
                 logs.putLogEventsForAccount(accountId, destination.logGroup(), destination.logStream(), batch, region);
@@ -140,22 +135,31 @@ public class LambdaWebLogs {
                 if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
                     throw e;
                 }
-                // The group or the stream was deleted since the first event.
-                create(destination);
+                createLogGroup(destination);
+                createLogStream(destination);
                 logs.putLogEventsForAccount(accountId, destination.logGroup(), destination.logStream(), batch, region);
             }
         }
 
-        private void create(Destination destination) {
+        private void createLogGroup(Destination destination) {
             try {
                 logs.createLogGroupForAccount(accountId, destination.logGroup(), null, null, region);
-            } catch (AwsException alreadyThere) {
-                LOG.tracev("The log group {0} is there: {1}", destination.logGroup(), alreadyThere.getMessage());
+            } catch (AwsException e) {
+                ignoreAlreadyExists(e);
             }
+        }
+
+        private void createLogStream(Destination destination) {
             try {
                 logs.createLogStreamForAccount(accountId, destination.logGroup(), destination.logStream(), region);
-            } catch (AwsException alreadyThere) {
-                LOG.tracev("The log stream {0} is there: {1}", destination.logStream(), alreadyThere.getMessage());
+            } catch (AwsException e) {
+                ignoreAlreadyExists(e);
+            }
+        }
+
+        private static void ignoreAlreadyExists(AwsException e) {
+            if (!"ResourceAlreadyExistsException".equals(e.getErrorCode())) {
+                throw e;
             }
         }
     }
