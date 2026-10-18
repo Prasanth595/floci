@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 
 import java.util.ArrayList;
