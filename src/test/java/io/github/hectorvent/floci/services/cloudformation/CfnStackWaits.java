@@ -142,7 +142,8 @@ final class CfnStackWaits {
         String reason = null;
         for (Node event : newestFirst) {
             String status = text(event, "ResourceStatus");
-            if (text(event, "StackName").equals(text(event, "LogicalResourceId"))) {
+            if (text(event, "StackName").equals(text(event, "LogicalResourceId"))
+                    && text(event, "StackId").equals(text(event, "PhysicalResourceId"))) {
                 if (OPERATION_STARTS.contains(status)) {
                     break;
                 }

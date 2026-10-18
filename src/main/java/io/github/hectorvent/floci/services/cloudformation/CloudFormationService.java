@@ -2436,7 +2436,7 @@ public class CloudFormationService implements ResourceProvider {
         }
         for (int i = rollbackStart - 1; i >= 0; i--) {
             StackEvent event = events.get(i);
-            if (stack.getStackName().equals(event.getLogicalResourceId())) {
+            if (isOwnEvent(stack, event)) {
                 return reason;
             }
             if ("CREATE_FAILED".equals(event.getResourceStatus()) || "UPDATE_FAILED".equals(event.getResourceStatus())) {
@@ -2447,7 +2447,13 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     private static boolean isStackEvent(Stack stack, StackEvent event, Set<String> statuses) {
-        return stack.getStackName().equals(event.getLogicalResourceId()) && statuses.contains(event.getResourceStatus());
+        return isOwnEvent(stack, event) && statuses.contains(event.getResourceStatus());
+    }
+
+    /** The stack's own event: a resource may share the stack's name, but never its stack ID. */
+    private static boolean isOwnEvent(Stack stack, StackEvent event) {
+        return stack.getStackName().equals(event.getLogicalResourceId())
+                && Objects.equals(stack.getStackId(), event.getPhysicalResourceId());
     }
 
     private List<UpdateCleanupFailure> finishCommittedResourceCleanup(Stack stack, String region) {

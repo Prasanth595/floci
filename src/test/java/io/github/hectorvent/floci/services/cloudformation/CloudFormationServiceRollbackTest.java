@@ -211,8 +211,8 @@ class CloudFormationServiceRollbackTest {
         stack.setStackName("failure-cause");
         stack.setStackId("stack-id");
         stack.setRegion(REGION);
-        stack.getEvents().add(event(stack, "failure-cause", "CREATE_IN_PROGRESS", null));
-        stack.getEvents().add(event(stack, "FailingResource", "CREATE_FAILED", "simulated create failure"));
+        stack.getEvents().add(stackEvent(stack, "CREATE_IN_PROGRESS"));
+        stack.getEvents().add(resourceEvent(stack, "FailingResource", "CREATE_FAILED", "simulated create failure"));
         StackResource failed = resource("FailingResource", null, "AWS::Test::Failure", "CREATE_FAILED");
         failed.setStatusReason("simulated create failure");
         stack.getResources().put(failed.getLogicalId(), failed);
@@ -220,6 +220,26 @@ class CloudFormationServiceRollbackTest {
         service.rollbackFailedExecution(stack, REGION, true, failed, null, Set.of());
 
         assertEquals("ROLLBACK_COMPLETE", stack.getStatus());
+        assertEquals("simulated create failure", CloudFormationService.failureCause(stack));
+    }
+
+    /** A resource may share its stack's name; only the stack's ID tells the stack's own events apart. */
+    @Test
+    void failureCause_withAResourceNamedLikeItsStack_isThatResourcesMessage() {
+        Stack stack = new Stack();
+        stack.setStackName("Queue");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.getEvents().add(stackEvent(stack, "CREATE_IN_PROGRESS"));
+        stack.getEvents().add(resourceEvent(stack, "Queue", "CREATE_FAILED", "simulated create failure"));
+        StackResource failed = resource("Queue", null, "AWS::SQS::Queue", "CREATE_FAILED");
+        failed.setStatusReason("simulated create failure");
+        stack.getResources().put(failed.getLogicalId(), failed);
+
+        service.rollbackFailedExecution(stack, REGION, true, failed, null, Set.of());
+
+        assertEquals("The following resource(s) failed to create: [Queue]. Rollback requested by user.",
+                stack.getStatusReason());
         assertEquals("simulated create failure", CloudFormationService.failureCause(stack));
     }
 
@@ -235,7 +255,7 @@ class CloudFormationServiceRollbackTest {
         failed.setStatusReason("simulated create failure");
         stack.getResources().put(created.getLogicalId(), created);
         stack.getResources().put(failed.getLogicalId(), failed);
-        stack.getEvents().add(event(stack, "FailingResource", "CREATE_FAILED", "simulated create failure"));
+        stack.getEvents().add(resourceEvent(stack, "FailingResource", "CREATE_FAILED", "simulated create failure"));
         doThrow(new IllegalStateException("cannot delete")).when(provisioner).delete(eq(created), eq(REGION));
 
         service.rollbackFailedExecution(stack, REGION, true, failed, null, Set.of());
@@ -949,7 +969,14 @@ class CloudFormationServiceRollbackTest {
         }
     }
 
-    private static StackEvent event(Stack stack, String logicalId, String status, String reason) {
+    private static StackEvent stackEvent(Stack stack, String status) {
+        StackEvent event = resourceEvent(stack, stack.getStackName(), status, null);
+        event.setPhysicalResourceId(stack.getStackId());
+        event.setResourceType("AWS::CloudFormation::Stack");
+        return event;
+    }
+
+    private static StackEvent resourceEvent(Stack stack, String logicalId, String status, String reason) {
         StackEvent event = new StackEvent();
         event.setStackName(stack.getStackName());
         event.setLogicalResourceId(logicalId);
