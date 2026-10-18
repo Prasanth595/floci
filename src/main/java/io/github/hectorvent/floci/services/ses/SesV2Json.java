@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 
 import java.time.Instant;
@@ -147,7 +148,7 @@ final class SesV2Json {
      * A structure member as the AWS deserializer reads it: absent or null is returned as is, an
      * array is "Start of list found where not expected" and any other non-object "Expected null".
      */
-    static JsonNode structureMemberOrAbsent(JsonNode parent, String field) {
+    private static JsonNode structureMemberOrAbsent(JsonNode parent, String field) {
         JsonNode node = parent.path(field);
         if (node.isMissingNode() || node.isNull() || node.isObject()) {
             return node;
@@ -159,7 +160,7 @@ final class SesV2Json {
     }
 
     /** A string member with the AWS deserializer's message for each wrong JSON type. */
-    static String typedStringMemberOrAbsent(JsonNode parent, String field) {
+    private static String typedStringMemberOrAbsent(JsonNode parent, String field) {
         JsonNode node = parent.path(field);
         if (node.isMissingNode() || node.isNull()) {
             return null;
@@ -198,14 +199,14 @@ final class SesV2Json {
             return Map.of();
         }
         if (!keys.containsAll(filter.keySet())) {
-            throw new AwsException("BadRequestException", "1 validation error detected: Value at 'filter' "
+            throw SmithyValidationErrors.badRequest( "Value at 'filter' "
                     + "failed to satisfy constraint: Map keys must satisfy constraint: "
-                    + "[Member must satisfy enum value set: [" + String.join(", ", keys) + "]]", 400);
+                    + "[Member must satisfy enum value set: [" + String.join(", ", keys) + "]]");
         }
         if (filter.containsValue("")) {
-            throw new AwsException("BadRequestException", "1 validation error detected: Value at 'filter' "
+            throw SmithyValidationErrors.badRequest( "Value at 'filter' "
                     + "failed to satisfy constraint: Map value must satisfy constraint: "
-                    + "[Member must have length greater than or equal to 1]", 400);
+                    + "[Member must have length greater than or equal to 1]");
         }
         Map<String, String> values = new LinkedHashMap<>();
         filter.forEach((key, value) -> {
@@ -306,21 +307,6 @@ final class SesV2Json {
             throw new AwsException("BadRequestException", fieldName + " is required.", 400);
         }
         return node.asText();
-    }
-
-    /**
-     * Reads a {@code SuppressedReasons} member whose type {@link SesV2RequestShapes} has already
-     * checked; reason values are validated by the service layer. A {@code null} element is kept, so
-     * that validation rejects it as AWS does (verified against real AWS SES V2 on 2026-06-13).
-     * Missing / null yields an empty list for the PUT path, which AWS treats as an explicit empty
-     * override.
-     */
-    static List<String> parseSuppressedReasons(JsonNode reasonsNode) {
-        List<String> reasons = new ArrayList<>();
-        for (JsonNode r : reasonsNode) {
-            reasons.add(r.textValue());
-        }
-        return reasons;
     }
 
     /**

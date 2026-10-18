@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
@@ -392,10 +393,10 @@ public class NativeDynamoDbTableService {
 
     private static void validateSseType(String sseType) {
         if (!VALID_SSE_TYPES.contains(sseType)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + sseType
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + sseType
                     + "' at 'sSESpecification.sSEType' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [AES256, KMS]", 400);
+                    + "Member must satisfy enum value set: [AES256, KMS]");
         }
     }
 

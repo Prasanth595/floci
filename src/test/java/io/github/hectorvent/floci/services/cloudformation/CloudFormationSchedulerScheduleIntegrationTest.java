@@ -862,7 +862,8 @@ class CloudFormationSchedulerScheduleIntegrationTest {
             cloudFormation(stack, "CreateStack", root.toString(), Map.of("Name", name, "UseOptions", "false"));
             CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack);
             assertEquals("ROLLBACK_COMPLETE", state.status(), property);
-            assertTrue(state.reason().toLowerCase(Locale.ROOT).contains(field.toLowerCase(Locale.ROOT)), state.reason());
+            String failure = CfnStackWaits.failedResourceReason(stack);
+            assertTrue(failure.toLowerCase(Locale.ROOT).contains(field.toLowerCase(Locale.ROOT)), failure);
             getSchedule(name, "default").then().statusCode(404);
         } finally {
             deleteStack(stack);
@@ -884,7 +885,8 @@ class CloudFormationSchedulerScheduleIntegrationTest {
             cloudFormation(stack, "CreateStack", root.toString(), Map.of("Name", name));
             CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack);
             assertEquals("ROLLBACK_COMPLETE", state.status(), property);
-            assertTrue(state.reason().contains(property), state.reason());
+            String failure = CfnStackWaits.failedResourceReason(stack);
+            assertTrue(failure.contains(property), failure);
             getSchedule(name, "default").then().statusCode(404);
         } finally {
             deleteStack(stack);

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.emr.model.EmrBlockPublicAccess;
@@ -73,9 +74,9 @@ public class EmrService {
         // Only a missing Name fails AWS's framework validation: the member is REQUIRED but its
         // constraint is len=[0..256], so an explicit empty string is accepted by real EMR.
         if (cluster.getName() == null) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'name' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'name' failed to satisfy constraint: "
+                            + "Member must not be null");
         }
         String id = "j-" + randomId(13);
         cluster.setId(id);

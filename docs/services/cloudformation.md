@@ -425,6 +425,7 @@ status, named with its stack or by its ARN alone; a `StackName` that names no st
 - Code and mutable configuration changes update the existing function in place.
 - Replacement-only changes such as `FunctionName` or `PackageType` changes create a replacement function and remove the old one.
 - A changed `DurableConfig` updates the function in place. A `RetentionPeriodInDays` the template leaves out goes back to 14, and a `KMSKeyArn` it leaves out is cleared. Adding or removing `DurableConfig` replaces the function, since Lambda cannot do either in place. A durable function created without `Timeout` gets `min(ExecutionTimeout, 900)`, while an update without it sets 3, as on AWS.
+- `LoggingConfig` reaches the function on create and on update, in place. Removing it from the template puts the function back on its defaults: `Text` (`JSON` for a durable function) and `/aws/lambda/<name>`.
 - S3-backed code stays linked through `S3Bucket` / `S3Key`, so Lambda's reactive S3 sync continues to work for functions created by CloudFormation or CDK.
 - Hot-reload code (`S3Bucket: hot-reload`) is compared by host path: the same path is a no-op, a different path updates the bind mount in place.
 - `Tags` are applied when the function is created, including a replacement function. On `UpdateStack` the template's tags are applied and only the keys the previous template set and the new one drops are removed, so a tag added outside the template is kept, as in AWS.
@@ -436,19 +437,52 @@ numeric `Version` attribute. CloudFormation resolves the version before creating
 alias. As in SAM, the version's logical id is `<Function>Version` followed by ten hex digits of a
 SHA-1 over the function's code, with its template parameter references resolved (pseudo
 parameters such as `${AWS::Region}` stay as written), its `Environment` and `MemorySize` as
-written, and its `SnapStart` when it sets an `ApplyOn` other than `None`. An update that changes the
-code, `Environment` or `MemorySize`, or a parameter the code uses, publishes a new version and
-moves the alias to it. A parameter used only in `Environment` or `MemorySize` does not, and neither
-does a property outside the hash, such as `Timeout`. A new id publishes only when the function's
-code or configuration changed since its last version. floci does not give the function
-`SnapStart`, so turning it on changes the id but publishes nothing: the alias stays where it is.
+written, and its `SnapStart` when it sets an `ApplyOn` other than `None`. By default, then, an
+update that changes the code, `Environment` or `MemorySize`, or a parameter the code uses, publishes
+a new version and moves the alias to it. A parameter used only in `Environment` or `MemorySize` does
+not, and neither does a property outside the hash, such as `Timeout`.
 
-The version a new id replaces stays published: like SAM, floci gives the version
-`DeletionPolicy: Retain` unless the function sets a `DeletionPolicy`, and the update reports it
-`DELETE_SKIPPED`. With `Delete` floci reports the old version `DELETE_COMPLETE` but never deletes
-it, where AWS does. Changes made to `$LATEST` outside the stack, including Lambda's reactive S3
-sync, do not reach the alias until an update publishes a new version. Event sources and API
-integrations still invoke the function rather than the alias, so they run `$LATEST`.
+Two optional function properties change the id. Under `AutoPublishAliasAllProperties: true` the
+hash covers every property floci gives the function, its code's parameter references resolved as
+above, plus its `SnapStart`; those properties differ from the ones SAM generates, so these ids are
+floci's own rather than SAM's. An `AutoPublishCodeSha256` that is a string, or a `Ref` to a
+parameter holding one, replaces the hash with its first ten characters, under
+`AutoPublishAliasAllProperties` too; an empty value leaves the hash in place. `Globals` can set
+`AutoPublishAliasAllProperties` and `VersionDeletionPolicy`, but as in SAM not
+`AutoPublishCodeSha256`, which fails the transform there. floci does not honour a resource's
+`IgnoreGlobals`, so no function can opt out of a `VersionDeletionPolicy` in `Globals` with it: one
+without `AutoPublishAlias` fails the transform with
+`'VersionDeletionPolicy' requires 'AutoPublishAlias'.`, as it does in SAM when it does not ignore
+that global.
+
+A new id publishes a version, and moves the alias to it, only when the function's code or
+configuration changed since its last version. Otherwise the new version resource takes the last
+version and the alias stays where it is, as when an update changes only one of these:
+
+- A change to `SnapStart`: floci does not give the function `SnapStart`.
+- A new `AutoPublishCodeSha256` alone: on AWS this publishes, because SAM appends it to the
+  function's `Description`, but floci's transform sets no `Description` on the function.
+- Under `AutoPublishAliasAllProperties`, a change to `Tags` or `ReservedConcurrentExecutions`
+  only: AWS fails that update with
+  `A version for this Lambda function exists ( N ). Modify the function to create a new version.`,
+  where floci completes it.
+
+A function whose code is hot-reloaded publishes a version for every new id.
+
+Like SAM, floci gives the version the function's `DeletionPolicy`, else its `VersionDeletionPolicy`
+(`Delete` or `Retain`), else `Delete` for a function with a `CapacityProviderConfig` and `Retain`
+for any other. So by default the version a new id replaces stays published, and the update reports
+it `DELETE_SKIPPED`. With `Delete` floci reports the old version `DELETE_COMPLETE` but never deletes
+it, where AWS does. A `VersionDeletionPolicy` written as an intrinsic function, such as a `Ref` to
+a parameter, is copied onto the version unresolved, as SAM copies it. CloudFormation takes
+intrinsic functions only in resource properties, outputs, metadata attributes and update policy
+attributes, unless a transform such as `AWS::LanguageExtensions` resolves them first, and floci
+implements no such transform: it reads any `DeletionPolicy` that is not a plain string as `Delete`
+(see [Deletion Policies](#deletion-policies)).
+
+Changes made to `$LATEST` outside the stack, including Lambda's reactive S3 sync, do not reach the
+alias until an update publishes a new version. Event sources and API integrations still invoke the
+function rather than the alias, so they run `$LATEST`.
 
 ## RDS Credential Dynamic References
 
@@ -482,6 +516,55 @@ exports created by that account's stacks, and `Fn::ImportValue` resolves against
 export table — so two accounts can each own an export with the same name without colliding, mirroring
 how CloudFormation isolates exports per account and region. This is what lets a multi-account LZA
 deployment reuse identical export names across its member accounts.
+
+## Stack Output References (`Fn::GetStackOutput`)
+
+`Fn::GetStackOutput` reads an output of another stack, which needs no `Export`. It is what the CDK
+synthesizes for a weak cross-stack reference. The value is read when the consuming resource is created
+or updated. Floci follows what CloudFormation does, measured against it, where that departs from the
+intrinsic's reference page:
+
+- `StackName` and `OutputName` are required; `Region` defaults to the consuming stack's Region, and
+  `RoleArn` names a role in the account that owns the referenced stack. A key the function does not
+  define is ignored.
+- A parameter value may use any intrinsic function, including a `Ref` or `Fn::GetAtt` to a resource
+  of the same stack, `Fn::ImportValue` and another `Fn::GetStackOutput`; it resolves like any property.
+  A dynamic reference is not resolved there, one inside an `Fn::Sub` variable map included: the stack
+  name reaches DescribeStacks as written and fails its name constraint (`1 validation error detected: Value '{{resolve:ssm:...}}' at 'stackName'
+  failed to satisfy constraint: ...`), as on AWS.
+- A referenced stack that does not exist fails the resource with DescribeStacks' `ValidationError`
+  (`Stack with id X does not exist (Service: AmazonCloudFormation; ...)`), and an output that does not
+  exist with `TemplateError: Fn::GetStackOutput references output O from stack S, but this output was
+  not found. The output may have been deleted.` The reference never resolves to an empty string.
+- A `Region` that is not a Region fails with `TemplateError: Region R in Fn::GetStackOutput is not a
+  valid AWS region.`, and one of another partition with `InvalidClientTokenId`, as the call to it does.
+- A `RoleArn` that is not an ARN fails with `TemplateError: Invalid RoleArn parameter X in
+  Fn::GetStackOutput`. Any other ARN that is not an existing role (a user, a role of another
+  partition, a role that does not exist) fails with STS's `AccessDenied`, naming the account's root
+  as the caller. On AWS the role is assumed by the stack's execution role, or without one by the
+  caller of the stack operation, and the outputs are read with DescribeStacks in a session named
+  `GetStackOutput`; the CDK's role trusts the consuming account's execution role. Floci runs stack
+  operations under no execution role and keeps no caller for them. With IAM enforcement off, as
+  `AssumeRole`, it evaluates neither the role's trust policy nor its permissions. With enforcement on,
+  the trust policy has to allow a principal in the consuming account (its root, or any principal of
+  it the policy names, such as the CDK's execution role), or STS's `AccessDenied` fails the resource,
+  and the role's policies have to allow `cloudformation:DescribeStacks` on the stack, or
+  DescribeStacks' `AccessDenied` does (`User: arn:aws:sts::A:assumed-role/R/GetStackOutput is not
+  authorized to perform: cloudformation:DescribeStacks on resource: ... because no identity-based
+  policy allows the cloudformation:DescribeStacks action`).
+- Arguments that are not a map, or that lack `StackName` or `OutputName`, are refused when the stack
+  operation is requested, with `ValidationError` `TemplateError: Fn::GetStackOutput requires a map of
+  named parameters` or `GetStackOutput: StackName is required`, as on AWS.
+- An output whose `Condition` is false is never read, so one naming a stack that does not exist
+  leaves the operation complete; like any output whose condition is false, it is not listed.
+- It resolves inside an `Fn::Sub` variable map, inside `Fn::Base64` and as a direct `Outputs` value,
+  which the reference page lists as not supported yet. An output that cannot be read fails the
+  operation once the resources exist, and the stack rolls back. Anywhere in `Conditions`, and inside
+  `Fn::ImportValue`, the stack operation is refused when it is requested, with `ValidationError`,
+  `AWS::Include` fragments included; in an output's `Export.Name` too, with `Template format error:
+  Output O is malformed.  The Name field of Export must not depend on any resources, imported values,
+  or Fn::GetAZs.` In a nested stack's template the same rules fail the child's resource with the
+  same message when the child is created, and the parent rolls back.
 
 ## Template Parameters
 

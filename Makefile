@@ -92,11 +92,11 @@ run-native: ## Run the host binary from native-host on port 4566, state under ./
 	@file "$(NATIVE_BIN)" | grep -q ELF && [ "$$(uname -s)" != Linux ] && { echo "$(NATIVE_BIN) is a Linux binary from 'make native'; run 'make native-host' for this machine"; exit 1; } || true
 	$(NATIVE_BIN)
 
-native-install: ## Copy the host binary to $(PREFIX)/bin/floci (PREFIX defaults to ~/.local)
+native-install: ## Copy the host binary to $(PREFIX)/bin/floci-aws (PREFIX defaults to ~/.local); `floci` is the CLI
 	@test -n "$(NATIVE_BIN)" || { echo "no target/*-runner: run 'make native-host' first"; exit 1; }
 	mkdir -p $(PREFIX)/bin
-	cp "$(NATIVE_BIN)" $(PREFIX)/bin/floci
-	@echo "installed $(PREFIX)/bin/floci"
+	cp "$(NATIVE_BIN)" $(PREFIX)/bin/floci-aws
+	@echo "installed $(PREFIX)/bin/floci-aws"
 
 native-image: ## Package native/$(ARCH)/ as $(NATIVE_IMAGE) with docker/Dockerfile.native-package
 	@test -f native/$(ARCH)/application || { echo "native/$(ARCH)/application is missing: run 'make native' first"; exit 1; }
@@ -212,6 +212,7 @@ aws-data-sync: ## Regenerate src/main/resources/aws/*.json and the IAM managed-p
 	$(PYTHON) tools/aws/regen_redshift_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_types.py
 	$(PYTHON) tools/aws/regen_sesv2_shapes.py
+	$(PYTHON) tools/aws/regen_query_services.py
 	$(PYTHON) tools/aws/regen_managed_policies.py
 
 aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
@@ -246,6 +247,12 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 	@$(PYTHON) tools/aws/regen_sesv2_shapes.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/sesv2-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_query_services.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/query-services.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}

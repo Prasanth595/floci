@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.cognito.CognitoService.UserPoolDomainNames;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
@@ -648,14 +649,12 @@ public class CognitoJsonHandler {
     }
 
     private Response handleAdminCreateUser(JsonNode request) {
-        Map<String, String> attrs = new HashMap<>();
-        request.path("UserAttributes").forEach(a -> attrs.put(a.path("Name").asText(), a.path("Value").asText()));
+        Map<String, String> attrs = readNameValuePairs(request, "UserAttributes");
         String tempPassword = request.path("TemporaryPassword").isMissingNode() ? null
                 : request.path("TemporaryPassword").asText(null);
         String messageAction = request.path("MessageAction").isMissingNode() ? null
                 : request.path("MessageAction").asText(null);
-        Map<String, String> validationData = new HashMap<>();
-        request.path("ValidationData").forEach(a -> validationData.put(a.path("Name").asText(), a.path("Value").asText()));
+        Map<String, String> validationData = readNameValuePairs(request, "ValidationData");
         Map<String, String> clientMetadata = clientMetadata(request);
         List<String> desiredDeliveryMediums = new ArrayList<>();
         request.path("DesiredDeliveryMediums").forEach(m -> desiredDeliveryMediums.add(m.asText()));
@@ -720,8 +719,7 @@ public class CognitoJsonHandler {
     }
 
     private Response handleAdminUpdateUserAttributes(JsonNode request) {
-        Map<String, String> attrs = new HashMap<>();
-        request.path("UserAttributes").forEach(a -> attrs.put(a.path("Name").asText(), a.path("Value").asText()));
+        Map<String, String> attrs = readNameValuePairs(request, "UserAttributes");
         service.adminUpdateUserAttributes(
                 request.path("UserPoolId").asText(),
                 request.path("Username").asText(),
@@ -875,11 +873,11 @@ public class CognitoJsonHandler {
         List<Map<String, Object>> values = new ArrayList<>();
         for (JsonNode element : node) {
             if (element.isNull()) {
-                throw new AwsException("InvalidParameterException",
-                        "1 validation error detected: Value '" + node + "' at '"
+                throw SmithyValidationErrors.exception("InvalidParameterException",
+                        "Value '" + node + "' at '"
                                 + Character.toLowerCase(member.charAt(0)) + member.substring(1)
                                 + "' failed to satisfy constraint: Member must satisfy constraint: "
-                                + "[Member must not be null]", 400);
+                                + "[Member must not be null]");
             }
             if (!element.isObject()) {
                 throw new AwsException("SerializationException", "Unexpected value type in payload", 400);
@@ -999,14 +997,17 @@ public class CognitoJsonHandler {
     }
 
     private Response handleSignUp(JsonNode request) {
-        Map<String, String> attrs = new HashMap<>();
-        request.path("UserAttributes").forEach(a -> attrs.put(a.path("Name").asText(), a.path("Value").asText()));
+        Map<String, String> attrs = readNameValuePairs(request, "UserAttributes");
+        Map<String, String> validationData = readNameValuePairs(request, "ValidationData");
+        Map<String, String> clientMetadata = clientMetadata(request);
 
         CognitoUser user = service.signUp(
                 request.path("ClientId").asText(),
                 request.path("Username").asText(),
                 request.path("Password").asText(),
-                attrs
+                attrs,
+                validationData,
+                clientMetadata
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.put("UserConfirmed", "CONFIRMED".equals(user.getUserStatus()));
@@ -1124,8 +1125,7 @@ public class CognitoJsonHandler {
     }
 
     private Response handleUpdateUserAttributes(JsonNode request) {
-        Map<String, String> attrs = new HashMap<>();
-        request.path("UserAttributes").forEach(a -> attrs.put(a.path("Name").asText(), a.path("Value").asText()));
+        Map<String, String> attrs = readNameValuePairs(request, "UserAttributes");
         List<Map<String, Object>> deliveryDetails = service.updateUserAttributes(
                 request.path("AccessToken").asText(), attrs);
         ObjectNode response = objectMapper.createObjectNode();
@@ -1373,6 +1373,12 @@ public class CognitoJsonHandler {
         Map<String, String> values = new LinkedHashMap<>();
         node.fields().forEachRemaining(entry -> values.put(entry.getKey(), entry.getValue().asText()));
         return values;
+    }
+
+    private Map<String, String> readNameValuePairs(JsonNode request, String member) {
+        Map<String, String> pairs = new HashMap<>();
+        request.path(member).forEach(a -> pairs.put(a.path("Name").asText(), a.path("Value").asText()));
+        return pairs;
     }
 
     private List<String> readStringList(JsonNode request, String member) {

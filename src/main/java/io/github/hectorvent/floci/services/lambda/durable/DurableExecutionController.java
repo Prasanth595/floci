@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableErrorObject;
@@ -186,9 +187,8 @@ public class DurableExecutionController {
     public Response callbackSucceed(@Context HttpHeaders headers, @PathParam("callbackId") String callbackId,
                                     byte[] body) {
         if (body != null && MAX_CALLBACK_PAYLOAD_BYTES < body.length) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value at 'result' failed to "
-                    + "satisfy constraint: Member must have length less than or equal to " + MAX_CALLBACK_PAYLOAD_BYTES,
-                    400);
+            throw SmithyValidationErrors.validationException("Value at 'result' failed to "
+                    + "satisfy constraint: Member must have length less than or equal to " + MAX_CALLBACK_PAYLOAD_BYTES);
         }
         String result = body == null || body.length == 0 ? null : new String(body, StandardCharsets.UTF_8);
         service.completeCallback(callbackId, regionResolver.getAccountId(), regionResolver.resolveRegion(headers), true,

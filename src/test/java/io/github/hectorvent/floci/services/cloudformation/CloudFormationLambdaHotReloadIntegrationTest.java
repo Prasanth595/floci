@@ -5,6 +5,7 @@ import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
@@ -61,8 +62,9 @@ class CloudFormationLambdaHotReloadIntegrationTest {
         createStack(stackName, template(fnName, "relative/dist"));
 
         describeStacks(stackName)
-            .body(not(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>")))
-            .body(containsString("Hot-reload S3Key must be an absolute path"));
+            .body(not(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>")));
+        assertThat(CfnStackWaits.failedResourceReason(stackName, CFN_AUTH),
+                containsString("Hot-reload S3Key must be an absolute path"));
 
         given()
             .when().get("/2015-03-31/functions/" + fnName)

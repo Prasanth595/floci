@@ -6,6 +6,7 @@ import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.WaitContainerResultCallback;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RequestScopes;
@@ -35,6 +36,7 @@ import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
@@ -46,6 +48,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -65,14 +68,17 @@ import java.util.stream.Stream;
 /**
  * The execution environments of Web Function endpoints: Node.js server containers of a revision,
  * started by requests that find no room, reused while requests keep coming and removed after the
- * Lambda idle timeout. The runtime loads {@code index.js}, or the file {@code AWS_LAMBDA_NODEJS_ENTRYPOINT} names,
- * from {@code /var/task} with the node flags AWS uses.
+ * Lambda idle timeout. Node starts {@code /var/runtime/index.js} with the flags AWS uses, as on AWS. That runtime
+ * turns console output into log events and imports {@code index.js}, or the file {@code AWS_LAMBDA_NODEJS_ENTRYPOINT}
+ * names, from {@code /var/task}. What the process writes goes to the revision's log group.
  */
 @ApplicationScoped
 public class LambdaWebEnvironmentManager implements ContainerTeardown {
 
     static final int APP_PORT = 3000;
     static final String TASK_DIR = "/var/task";
+    static final String RUNTIME_DIR = "/var/runtime";
+    private static final String RUNTIME_RESOURCE = "lambdaweb/index.mjs";
     static final int MEMORY_MB = 2048;
     static final Duration LISTEN_TIMEOUT = Duration.ofSeconds(10);
     static final List<String> NODE_FLAGS = List.of("--expose-gc", "--max-http-header-size", "135168",
@@ -104,6 +110,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         private volatile String host;
         private volatile int port;
         private volatile String logStream;
+        private volatile LambdaWebLogs.Sink logs;
         private volatile SessionCreds roleCredentials;
         private final AtomicInteger inFlight = new AtomicInteger();
         private final AtomicLong lastUsed = new AtomicLong(System.nanoTime());
@@ -202,6 +209,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private final ZipExtractor zipExtractor;
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials executionRoleCredentials;
+    private final LambdaWebLogs logs;
+    private final byte[] runtime;
     /** The environments of each endpoint in each region. A list is only touched inside a map operation on its key. */
     private final ConcurrentHashMap<String, List<Environment>> pools = new ConcurrentHashMap<>();
     private final ScheduledExecutorService reaper = Executors.newSingleThreadScheduledExecutor(task -> {
@@ -216,7 +225,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                                        @StreamingDocker DockerClient streamingDocker, ImageResolver imageResolver,
                                        EcrRegistryManager ecrRegistryManager, S3Service s3Service,
                                        ZipExtractor zipExtractor, LaunchedContainerAwsEnv awsEnv,
-                                       LambdaExecutionRoleCredentials executionRoleCredentials) {
+                                       LambdaExecutionRoleCredentials executionRoleCredentials, LambdaWebLogs logs) {
         this.config = config;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
@@ -227,6 +236,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         this.zipExtractor = zipExtractor;
         this.awsEnv = awsEnv;
         this.executionRoleCredentials = executionRoleCredentials;
+        this.logs = logs;
+        this.runtime = runtimeScript();
         long period = Math.max(1, Math.min(30, config.services().lambda().containerIdleTimeoutSeconds() / 2 + 1));
         reaper.scheduleWithFixedDelay(this::reapIdle, period, period, TimeUnit.SECONDS);
     }
@@ -427,7 +438,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         Map<String, String> userEnv = revision.serviceConfig.environmentVariables == null
                 ? Map.of() : revision.serviceConfig.environmentVariables;
         List<String> cmd = new ArrayList<>(NODE_FLAGS);
-        cmd.add(userEnv.getOrDefault("AWS_LAMBDA_NODEJS_ENTRYPOINT", "index.js"));
+        cmd.add(RUNTIME_DIR + "/index.js");
         Optional<SessionCreds> roleCredentials = executionRoleCredentials.forRole(
                 revision.serviceConfig.executionRoleArn, accountId, fn.functionName);
         ContainerSpec spec = containerBuilder.newContainer(image)
@@ -453,6 +464,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         }
         try {
             copyCode(containerId, accountId, region, fn, revision);
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, RUNTIME_DIR, "index.js",
+                    runtime, 0644);
             ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
             EndpointInfo endpoint = info.getEndpoint(APP_PORT);
             awaitListening(containerId);
@@ -462,7 +475,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             environment.logStream = LOG_STREAM_DATE.format(Instant.now()) + "/" + fn.functionName + "["
                     + revision.revisionId + "]" + UUID.randomUUID().toString().replace("-", "");
             environment.roleCredentials = roleCredentials.orElse(null);
-            watchExit(environment);
+            environment.logs = logs.open(accountId, region, revision.serviceConfig.logGroup, environment.logStream);
+            watchExit(environment, true);
             LOG.infov("Started the Lambda Web environment {0} of {1} revision {2} at {3}:{4}",
                     containerId, fn.functionName, revision.revisionId, endpoint.host(), endpoint.port());
         } catch (RuntimeException e) {
@@ -643,23 +657,34 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     /**
      * A process that exits between requests is invisible to clients: the next request starts anew.
      * The attach stream ends when the process exits, and Floci times that on its own clock. The exit
-     * time Docker records comes from the daemon's clock, which can be seconds off. The output is
-     * dropped here. A reader that falls behind would block the app's writes.
+     * time Docker records comes from the daemon's clock, which can be seconds off. The stream also
+     * carries the output, which only goes into a queue here. A reader that falls behind would block
+     * the app's writes. {@code fromStart} replays what the app wrote while it started.
      */
-    private void watchExit(Environment environment) {
+    private void watchExit(Environment environment, boolean fromStart) {
+        Map<StreamType, LambdaWebOutputLines> streams = new EnumMap<>(StreamType.class);
         try {
             streamingDocker.attachContainerCmd(environment.containerId)
-                    .withStdOut(true).withStdErr(true).withFollowStream(true)
+                    .withStdOut(true).withStdErr(true).withFollowStream(true).withLogs(fromStart)
                     .exec(new ResultCallback.Adapter<Frame>() {
+                        @Override
+                        public void onNext(Frame frame) {
+                            LambdaWebOutputLines lines = streams.computeIfAbsent(frame.getStreamType(),
+                                    type -> new LambdaWebOutputLines());
+                            lines.append(frame.getPayload()).forEach(event -> deliver(environment, event));
+                        }
+
                         @Override
                         public void onComplete() {
                             super.onComplete();
+                            streams.values().forEach(lines -> lines.flush().forEach(event -> deliver(environment, event)));
                             exited(environment, System.nanoTime());
                         }
 
                         @Override
                         public void onError(Throwable throwable) {
                             super.onError(throwable);
+                            streams.values().forEach(lines -> lines.flush().forEach(event -> deliver(environment, event)));
                             LOG.debugv(throwable, "The exit watch of the Lambda Web environment {0} dropped",
                                     environment.containerId);
                             rearmExitWatch(environment);
@@ -689,8 +714,26 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                 exited(environment, System.nanoTime());
                 return;
             }
-            watchExit(environment);
+            watchExit(environment, false);
         }, EXIT_WATCH_REARM.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    /** AWS writes no event for a line that is empty or only spaces. */
+    private static void deliver(Environment environment, String event) {
+        if (!event.isBlank()) {
+            environment.logs.accept(event);
+        }
+    }
+
+    private static byte[] runtimeScript() {
+        try (InputStream in = Thread.currentThread().getContextClassLoader().getResourceAsStream(RUNTIME_RESOURCE)) {
+            if (in == null) {
+                throw new IllegalStateException(RUNTIME_RESOURCE + " is missing from the classpath");
+            }
+            return in.readAllBytes();
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read " + RUNTIME_RESOURCE, e);
+        }
     }
 
     /** The environment leaves the pool before waiters hear of the exit, so the request after a failed one starts anew. */

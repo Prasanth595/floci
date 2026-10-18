@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import jakarta.inject.Inject;
@@ -30,7 +31,6 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBooleanOrF
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
@@ -135,21 +135,19 @@ public class SesAccountController {
     public Response putAccountVdmAttributes(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
+            SesV2RequestShapes.check("PutAccountVdmAttributes", request);
             JsonNode vdm = request.path("VdmAttributes");
-            if (!vdm.isObject()) {
+            if (vdm.isMissingNode() || vdm.isNull()) {
                 throw new AwsException("BadRequestException", "VdmAttributes is required.", 400);
             }
             boolean vdmEnabled = parseFeatureStatus(vdm, "VdmEnabled",
                     "vdmAttributes.vdmEnabled", true);
             boolean engagement = parseFeatureStatus(
-                    requireObjectOrAbsent(vdm, "DashboardAttributes"), "EngagementMetrics",
+                    vdm.path("DashboardAttributes"), "EngagementMetrics",
                     "vdmAttributes.dashboardAttributes.engagementMetrics", false);
             boolean osd = parseFeatureStatus(
-                    requireObjectOrAbsent(vdm, "GuardianAttributes"), "OptimizedSharedDelivery",
+                    vdm.path("GuardianAttributes"), "OptimizedSharedDelivery",
                     "vdmAttributes.guardianAttributes.optimizedSharedDelivery", false);
             accountService.putAccountVdmAttributes(region,
                     new AccountVdmAttributes(vdmEnabled, engagement, osd));
@@ -158,8 +156,6 @@ public class SesAccountController {
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
@@ -240,31 +236,21 @@ public class SesAccountController {
     public Response putAccountSuppressionAttributes(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
-            JsonNode reasonsNode = request.path("SuppressedReasons");
+            JsonNode request = readOptionBody(objectMapper, body);
+            SesV2RequestShapes.check("PutAccountSuppressionAttributes", request);
             List<String> reasons = new ArrayList<>();
-            if (!reasonsNode.isMissingNode() && !reasonsNode.isNull()) {
-                if (!reasonsNode.isArray()) {
-                    throw new AwsException("BadRequestException", "SuppressedReasons must be an array.", 400);
+            for (JsonNode r : request.path("SuppressedReasons")) {
+                if (r.isNull()) {
+                    throw new AwsException("BadRequestException",
+                            "SuppressedReasons entries must be strings.", 400);
                 }
-                for (JsonNode r : reasonsNode) {
-                    if (r.isNull() || !r.isTextual()) {
-                        throw new AwsException("BadRequestException",
-                                "SuppressedReasons entries must be strings.", 400);
-                    }
-                    reasons.add(r.asText());
-                }
+                reasons.add(r.textValue());
             }
             suppressionService.putAccountSuppressionAttributes(region, reasons);
             LOG.infov("SES V2 PutAccountSuppressionAttributes: {0}", reasons);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
@@ -295,9 +281,9 @@ public class SesAccountController {
         JsonNode node = parent.path(field);
         if (node.isMissingNode() || node.isNull()) {
             if (required) {
-                throw new AwsException("BadRequestException",
-                        "1 validation error detected: Value null at '" + path
-                                + "' failed to satisfy constraint: Member must not be null", 400);
+                throw SmithyValidationErrors.badRequest(
+                        "Value null at '" + path
+                                + "' failed to satisfy constraint: Member must not be null");
             }
             return false;
         }
@@ -310,9 +296,8 @@ public class SesAccountController {
                 return false;
             }
         }
-        throw new AwsException("BadRequestException",
-                "1 validation error detected: Value at '" + path
-                        + "' failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]",
-                400);
+        throw SmithyValidationErrors.badRequest(
+                "Value at '" + path
+                        + "' failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]");
     }
 }

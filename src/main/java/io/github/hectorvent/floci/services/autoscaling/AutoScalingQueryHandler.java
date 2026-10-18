@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.autoscaling.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -496,17 +497,20 @@ public class AutoScalingQueryHandler {
     private Response handleDescribeTags(MultivaluedMap<String, String> p, String region) {
         List<Map.Entry<String, List<String>>> filters = new ArrayList<>();
         for (int i = 1; ; i++) {
-            String name = p.getFirst("Filters.member." + i + ".Name");
-            if (name == null) { break; }
-            filters.add(Map.entry(name, memberList(p, "Filters.member." + i + ".Values")));
+            String prefix = "Filters.member." + i;
+            String name = p.getFirst(prefix + ".Name");
+            boolean hasValues = p.containsKey(prefix + ".Values") || p.containsKey(prefix + ".Values.member.1");
+            if (name == null && !hasValues) { break; }
+            filters.add(new AbstractMap.SimpleImmutableEntry<>(name,
+                    hasValues ? memberList(p, prefix + ".Values") : null));
         }
         String maxRecords = p.getFirst("MaxRecords");
         Integer limit = null;
-        if (maxRecords != null && !maxRecords.isBlank()) {
+        if (maxRecords != null) {
             try {
                 limit = Integer.parseInt(maxRecords);
             } catch (NumberFormatException e) {
-                throw new AwsException("ValidationError", "MaxRecords '" + maxRecords + "' is not a valid integer.", 400);
+                throw new AwsException("MalformedInput", "MaxRecords '" + maxRecords + "' is not a valid integer.", 400);
             }
         }
         PaginatedResult<AutoScalingService.TagDescription> page = service.describeTags(region, filters,
@@ -1954,9 +1958,9 @@ public class AutoScalingQueryHandler {
                 break;
             }
             if (deviceName == null || deviceName.isBlank()) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value null at '" + prefix
-                                + ".DeviceName' failed to satisfy constraint: Member must not be null", 400);
+                throw SmithyValidationErrors.validationError(
+                        "Value null at '" + prefix
+                                + ".DeviceName' failed to satisfy constraint: Member must not be null");
             }
             LaunchConfigurationBlockDeviceMapping mapping = new LaunchConfigurationBlockDeviceMapping();
             mapping.setDeviceName(deviceName);
@@ -2032,14 +2036,14 @@ public class AutoScalingQueryHandler {
     private boolean requiredBoolParam(MultivaluedMap<String, String> p, String key) {
         String val = p.getFirst(key);
         if (val == null || val.isBlank()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value null at '" + key
-                            + "' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value null at '" + key
+                            + "' failed to satisfy constraint: Member must not be null");
         }
         if (!"true".equalsIgnoreCase(val) && !"false".equalsIgnoreCase(val)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + val + "' at '" + key
-                            + "' failed to satisfy constraint: Member must be a valid boolean", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + val + "' at '" + key
+                            + "' failed to satisfy constraint: Member must be a valid boolean");
         }
         return parseOptionalBoolean(val, key);
     }

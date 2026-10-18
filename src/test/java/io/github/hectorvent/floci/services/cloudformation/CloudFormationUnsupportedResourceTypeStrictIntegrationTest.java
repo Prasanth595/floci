@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import static io.github.hectorvent.floci.services.cloudformation.CloudFormationLambdaMissingS3CodeIntegrationTest.CFN_AUTH;
 import static io.github.hectorvent.floci.services.cloudformation.CloudFormationLambdaMissingS3CodeIntegrationTest.createStack;
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 
 /**
@@ -52,6 +53,8 @@ class CloudFormationUnsupportedResourceTypeStrictIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"))
-            .body(containsString("Resource type AWS::Fake::Thing is not supported by Floci."));
+            .body(containsString("The following resource(s) failed to create: [MyThing]. Rollback requested by user."));
+        assertThat(CfnStackWaits.failedResourceReason(stackName, CFN_AUTH),
+                containsString("Resource type AWS::Fake::Thing is not supported by Floci."));
     }
 }

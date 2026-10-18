@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
@@ -339,9 +340,9 @@ public class SesSuppressionService {
             String constraint = nested
                     ? "Member must satisfy constraint: [Member must satisfy enum value set: [BOUNCE, COMPLAINT]]"
                     : "Member must satisfy enum value set: [BOUNCE, COMPLAINT]";
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at '" + fieldName + "' failed to satisfy constraint: "
-                            + constraint, 400);
+            throw SmithyValidationErrors.badRequest(
+                    "Value at '" + fieldName + "' failed to satisfy constraint: "
+                            + constraint);
         }
     }
 }

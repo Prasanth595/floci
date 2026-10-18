@@ -243,7 +243,8 @@ Not emulated yet:
 
 ## Hot-Reloading via Reactive S3 Sync
 
-Floci supports an automatic hot-reloading mechanism when functions are deployed via S3. This follows the standard AWS behavior where S3 and Lambda interact, but is optimized for a seamless local development experience.
+Floci supports automatic hot reload for S3 deployments as a local development convenience.
+AWS normally copies the deployment package: overwriting its S3 object alone does not redeploy the function.
 
 When a Lambda function is created using an S3 bucket and key, Floci maintains a link between the function and its source object. Any subsequent update to that S3 object (e.g., via `s3:PutObject`) automatically triggers a reactive synchronization:
 
@@ -253,6 +254,9 @@ When a Lambda function is created using an S3 bucket and key, Floci maintains a 
 4.  **Reload**: The very next invocation starts a fresh container with the updated code.
 
 This allows you to update your Lambda code by simply re-uploading your ZIP to S3, without having to manually call `UpdateFunctionCode` or restart any containers.
+
+Published versions retain their own code snapshots. Reactive sync updates only `$LATEST`;
+publication and extraction share the per-function lock so a version cannot capture a partial update.
 
 ### Example
 
@@ -273,8 +277,8 @@ aws s3 cp updated-function.zip s3://my-bucket/function.zip
 aws lambda invoke --function-name my-function out.json
 ```
 
-!!! note "Standard Behavior"
-    This mechanism requires no custom configuration or non-standard magic strings. It works with standard AWS SDKs and CLI tools, providing a "live" development feel while staying within the AWS API contract.
+!!! note "Local development behavior"
+    This mechanism requires no custom configuration or special strings. It uses standard AWS SDK and CLI calls; automatic redeployment after an S3 upload is a Floci convenience.
 
 ## Hot-Reload via Bind Mount
 
@@ -813,6 +817,12 @@ is a permanent diff rather than a cosmetic omission.
 `LoggingConfig` is replaced wholesale on update, not merged — an update naming only
 `LogFormat` resets `LogGroup` to the default.
 
+A function's execution environments write their logs, `START`, `END` and `REPORT`
+included, to the `LogGroup` its `LoggingConfig` names, creating the group when it does not
+exist, and `AWS_LAMBDA_LOG_GROUP_NAME` names that group. Once a group is named, which several
+functions can share, each stream's name carries the function's name, as on AWS:
+`2026/10/16/my-fn[$LATEST]<id>` rather than the default group's `2026/10/16/[$LATEST]<id>`.
+
 `DurableConfig` requires `ExecutionTimeout` on create. A durable function created without
 a `Timeout` gets `min(ExecutionTimeout, 900)`. It always logs in JSON format, and
 `LogFormat: Text` is rejected. On update the members are merged, and a function created
@@ -820,12 +830,11 @@ without `DurableConfig` cannot gain one. CloudFormation and Terraform (`durable_
 the function to add or remove it. See Durable Functions for the execution itself.
 
 `LogGroup` is validated against AWS's documented constraint: 1-512 characters matching
-`[.\-_/#A-Za-z0-9]+`. `ApplicationLogLevel` and `SystemLogLevel` are accepted with any
-`LogFormat` but are only ever stored — and therefore only ever returned — when the
-resolved format is `JSON`; supplying them with `LogFormat=Text` is not an error, it is
-simply a no-op. That is Floci's own call rather than probed AWS behaviour: it keeps the
-request path consistent with Floci's response shape, which never surfaces the levels for
-Text.
+`[.\-_/#A-Za-z0-9]+`. `ApplicationLogLevel` and `SystemLogLevel` belong to `LogFormat=JSON`:
+a log level under Text, whether `LogFormat` names Text or is left to that default, is refused
+on create and on update with `InvalidParameterValueException` ("LogLevel is not supported when
+LogFormat is set to "Text". Remove LogLevel from your request or change the LogFormat to
+"JSON" and try again."), as Lambda refuses it (measured in eu-west-1, 2026-10-18).
 
 `VpcConfig` is omitted entirely while the function is not attached to a VPC.
 Subnets that EC2 does not know about are still accepted and returned; only `VpcId`

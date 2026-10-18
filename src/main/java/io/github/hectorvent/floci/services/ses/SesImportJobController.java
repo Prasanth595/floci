@@ -29,7 +29,6 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readRequiredStringField;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
@@ -70,18 +69,19 @@ public class SesImportJobController {
             }
             JsonNode request = strictReader.readTree(body);
             requireJsonObject(request);
-            JsonNode source = requireObjectOrAbsent(request, "ImportDataSource");
-            if (!source.isObject()) {
+            SesV2RequestShapes.check("CreateImportJob", request);
+            JsonNode source = request.path("ImportDataSource");
+            if (source.isMissingNode() || source.isNull()) {
                 throw new AwsException("BadRequestException", "ImportDataSource is required.", 400);
             }
             String s3Url = readRequiredStringField(source, "S3Url");
             String dataFormat = readRequiredStringField(source, "DataFormat");
-            JsonNode destination = requireObjectOrAbsent(request, "ImportDestination");
-            if (!destination.isObject()) {
+            JsonNode destination = request.path("ImportDestination");
+            if (destination.isMissingNode() || destination.isNull()) {
                 throw new AwsException("BadRequestException", "ImportDestination is required.", 400);
             }
-            JsonNode suppression = requireObjectOrAbsent(destination, "SuppressionListDestination");
-            JsonNode contactList = requireObjectOrAbsent(destination, "ContactListDestination");
+            JsonNode suppression = destination.path("SuppressionListDestination");
+            JsonNode contactList = destination.path("ContactListDestination");
             if (suppression.isObject() == contactList.isObject()) {
                 throw new AwsException("BadRequestException",
                         "ImportDestination must contain exactly one of SuppressionListDestination "

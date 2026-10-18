@@ -44,6 +44,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -80,10 +81,11 @@ public class ContainerLifecycleManager {
     /** Host interface a port marked loopback-only publishes on. */
     private static final String LOOPBACK_HOST_IP = "127.0.0.1";
 
+    private final Semaphore teardownSlots = new Semaphore(8, true);
+
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
-    private final PortAllocator portAllocator;
     private final EmulatorConfig config;
     private final long archiveRetryBackoffMillis;
 
@@ -97,22 +99,19 @@ public class ContainerLifecycleManager {
     public ContainerLifecycleManager(DockerClient dockerClient,
                                      ImageCacheService imageCacheService,
                                      ContainerDetector containerDetector,
-                                     PortAllocator portAllocator,
                                      EmulatorConfig config) {
-        this(dockerClient, imageCacheService, containerDetector, portAllocator, config,
+        this(dockerClient, imageCacheService, containerDetector, config,
                 RetryingTarCopier.DEFAULT_BACKOFF_MS);
     }
 
     ContainerLifecycleManager(DockerClient dockerClient,
                               ImageCacheService imageCacheService,
                               ContainerDetector containerDetector,
-                              PortAllocator portAllocator,
                               EmulatorConfig config,
                               long archiveRetryBackoffMillis) {
         this.dockerClient = dockerClient;
         this.imageCacheService = imageCacheService;
         this.containerDetector = containerDetector;
-        this.portAllocator = portAllocator;
         this.config = config;
         this.archiveRetryBackoffMillis = archiveRetryBackoffMillis;
     }
@@ -483,6 +482,10 @@ public class ContainerLifecycleManager {
      *        SIGTERM before Docker sends SIGKILL. Must be a non-negative integer.
      */
     public void stopAndRemove(String containerId, Closeable logStream, int stopTimeoutSeconds) {
+        withTeardownSlot(() -> stopAndRemoveAdmitted(containerId, logStream, stopTimeoutSeconds));
+    }
+
+    private void stopAndRemoveAdmitted(String containerId, Closeable logStream, int stopTimeoutSeconds) {
         LOG.infov("Stopping container {0}", containerId);
 
         boolean stoppedOrMissing = false;
@@ -536,6 +539,10 @@ public class ContainerLifecycleManager {
      * only once the container is gone; when removal fails it is left open for the retry.
      */
     public void stopAndRemoveStrict(String containerId, Closeable logStream) {
+        withTeardownSlot(() -> stopAndRemoveStrictAdmitted(containerId, logStream));
+    }
+
+    private void stopAndRemoveStrictAdmitted(String containerId, Closeable logStream) {
         LOG.infov("Stopping container {0}", containerId);
 
         Exception stopFailure = null;
@@ -568,6 +575,15 @@ public class ContainerLifecycleManager {
         // Closed only once the container is stopped and gone, as in stopAndRemove, so the follower
         // can drain the final tail.
         closeLogStreamIfPresent(logStream);
+    }
+
+    private void withTeardownSlot(Runnable stopAndRemove) {
+        teardownSlots.acquireUninterruptibly();
+        try {
+            stopAndRemove.run();
+        } finally {
+            teardownSlots.release();
+        }
     }
 
     private void closeLogStreamIfPresent(Closeable logStream) {
@@ -1251,14 +1267,9 @@ public class ContainerLifecycleManager {
             for (Map.Entry<Integer, Integer> entry : spec.portBindings().entrySet()) {
                 int containerPort = entry.getKey();
                 int hostPort = entry.getValue();
-
-                // 0 means dynamic allocation
-                if (hostPort == 0) {
-                    hostPort = portAllocator.allocateAny();
-                }
-
                 ports.bind(ExposedPort.tcp(containerPort), bindingFor(spec, containerPort, hostPort));
-                LOG.debugv("Port binding: {0} -> {1}", String.valueOf(containerPort), String.valueOf(hostPort));
+                LOG.debugv("Port binding: {0} -> {1}", String.valueOf(containerPort),
+                        hostPort == 0 ? "dynamic" : String.valueOf(hostPort));
             }
             hostConfig.withPortBindings(ports);
         } else if (spec.hasPortBindings()) {
@@ -1327,17 +1338,20 @@ public class ContainerLifecycleManager {
      * form of the same decision, for a port that is an implementation detail and must never leave
      * the host. A port in neither binds every interface, which is Docker's own default and what
      * every caller that does not ask has always got.
+     *
+     * <p>A host port of 0 leaves the port to the daemon, and the endpoint is read back from
+     * inspect after start. A port Floci picked itself would be probed where Floci runs, not where
+     * the daemon binds it: on Docker Desktop that is the VM, whose ephemeral range lies inside the
+     * Mac's, so a VM socket on the same number fails the start with "address already in use".
      */
     private static Ports.Binding bindingFor(ContainerSpec spec, int containerPort, int hostPort) {
         String hostIp = spec.portBindingHostIps() == null
                 ? null
                 : spec.portBindingHostIps().get(containerPort);
-        if (hostIp != null && !hostIp.isBlank()) {
-            return Ports.Binding.bindIpAndPort(hostIp, hostPort);
+        if (hostIp == null || hostIp.isBlank()) {
+            hostIp = spec.loopbackPortBindings().contains(containerPort) ? LOOPBACK_HOST_IP : null;
         }
-        return spec.loopbackPortBindings().contains(containerPort)
-                ? Ports.Binding.bindIpAndPort(LOOPBACK_HOST_IP, hostPort)
-                : Ports.Binding.bindPort(hostPort);
+        return new Ports.Binding(hostIp, hostPort == 0 ? null : String.valueOf(hostPort));
     }
 
     /**

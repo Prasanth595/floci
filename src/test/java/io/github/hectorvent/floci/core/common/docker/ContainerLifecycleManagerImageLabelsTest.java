@@ -40,14 +40,10 @@ class ContainerLifecycleManagerImageLabelsTest {
     ContainerDetector containerDetector;
 
     @Mock
-    PortAllocator portAllocator;
-
-    @Mock
     EmulatorConfig config;
 
     private ContainerLifecycleManager manager() {
-        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector,
-                portAllocator, config);
+        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, config);
     }
 
     private void imageInspectReturns(Map<String, String> labels) {

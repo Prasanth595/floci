@@ -3,12 +3,15 @@ package io.github.hectorvent.floci.services.lambdaweb;
 import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebEnvironmentManager.Environment;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
+import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -60,7 +63,18 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     private static final String APP = """
             const http = require('node:http');
             const [host, port] = process.env.AWS_LAMBDA_HTTP_ENDPOINT.split(':');
+            console.log('starting');
             http.createServer((req, res) => {
+              if (req.url.startsWith('/log')) {
+                console.info({route: 'log', main: require.main === module, argv: process.argv.slice(1)});
+                console.debug('below the level');
+                console.error(new Error('logged error'));
+                process.stdout.write('raw line\\n');
+                process.stdout.write('   \\n');
+                process.stdout.write('last line\\n');
+                res.end('logged');
+                return;
+              }
               if (req.url.startsWith('/slow')) { setTimeout(() => res.end('late'), 8000); return; }
               if (req.url.startsWith('/wait')) { setTimeout(() => res.end('waited'), 3000); return; }
               if (req.url.startsWith('/stream')) {
@@ -99,6 +113,11 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     LambdaWebEnvironmentManager environments;
 
     private String functionName;
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     @BeforeEach
     void requireDocker() {
@@ -179,6 +198,38 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 .body("headers.authorization", nullValue())
                 .body("headers.x-amz-security-token", nullValue())
                 .body("headers.x-amz-date", equalTo("20260101T000000Z"));
+    }
+
+    @Test
+    @Timeout(180)
+    void theOutputGoesToTheLocalAndTheCentralizedLogGroupAsJsonEvents() throws Exception {
+        String domain = createFunction(30);
+        Response logged = given().header("Host", domain).when().get("/log");
+        logged.then().statusCode(200);
+        String logStream = logged.header("lambda-web-logstream");
+        String group = "/aws/lambda/web/" + functionName;
+
+        List<String> local = awaitLogEvents(group + ".local", logStream);
+        assertEquals(5, local.size(), local.toString());
+        JsonPath starting = JsonPath.from(local.getFirst());
+        assertEquals("INFO", starting.getString("level"));
+        assertEquals("starting", starting.getString("message"));
+        assertEquals("us-east-1", starting.getString("region"));
+        assertFalse(local.getFirst().contains("requestId"), local.getFirst());
+        JsonPath info = JsonPath.from(local.stream().filter(event -> event.contains("\"route\"")).findFirst().orElseThrow());
+        assertEquals(logged.header("lambda-web-request-id"), info.getString("requestId"));
+        assertEquals("dev", info.getString("endpointName"));
+        assertEquals(false, info.getBoolean("message.main"));
+        assertEquals(List.of("/var/runtime/index.js"), info.getList("message.argv"));
+        JsonPath error = JsonPath.from(local.stream().filter(event -> event.contains("ERROR")).findFirst().orElseThrow());
+        assertEquals("Error", error.getString("message.errorType"));
+        assertEquals("logged error", error.getString("message.errorMessage"));
+        assertEquals("Error: logged error", error.getList("message.stackTrace").getFirst());
+        assertTrue(local.contains("raw line\n"), local.toString());
+        assertTrue(local.stream().allMatch(event -> event.endsWith("\n")), local.toString());
+
+        List<String> centralized = awaitLogEvents(group, logStream + "-000000000000-us-east-1");
+        assertEquals(new HashSet<>(local), new HashSet<>(centralized));
     }
 
     @Test
@@ -366,6 +417,29 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 .when().put(BASE + "/web-functions")
                 .then().statusCode(202)
                 .extract().path("endpoint.domainName");
+    }
+
+    /**
+     * The messages of a log stream once the last output of {@code /log} on stdout and on stderr is in it, or what it
+     * holds after 15 seconds. The output of one stream arrives in order, so nothing written before comes later.
+     */
+    private static List<String> awaitLogEvents(String logGroup, String logStream) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        List<String> messages = logEvents(logGroup, logStream);
+        while (!(messages.contains("last line\n") && messages.stream().anyMatch(event -> event.contains("\"ERROR\"")))
+                && System.nanoTime() < deadline) {
+            Thread.sleep(200);
+            messages = logEvents(logGroup, logStream);
+        }
+        return messages;
+    }
+
+    private static List<String> logEvents(String logGroup, String logStream) {
+        List<String> messages = RestAssuredJsonUtils.awsAction("Logs_20140328", "GetLogEvents",
+                        "{\"logGroupName\": \"%s\", \"logStreamName\": \"%s\", \"startFromHead\": true}"
+                                .formatted(logGroup, logStream))
+                .then().extract().jsonPath().getList("events.message", String.class);
+        return messages == null ? List.of() : messages;
     }
 
     /** Sends one raw HTTP/1.1 request with {@code Connection: close} and reads until the server closes. */

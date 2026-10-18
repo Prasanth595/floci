@@ -11,7 +11,7 @@ import static org.hamcrest.Matchers.equalTo;
  */
 final class SesV2SerializationErrors {
 
-    static final String AUTH = "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
+    static final String AUTH = authFor("us-east-1");
     static final String STRUCTURE = "Start of structure or map found where not expected.";
     static final String LIST = "Start of list found where not expected";
     static final String NUMBER = "NUMBER_VALUE can not be converted to a String";
@@ -21,10 +21,19 @@ final class SesV2SerializationErrors {
     private SesV2SerializationErrors() {
     }
 
+    /** An Authorization header signed for {@code region}, for a test that needs its own region state. */
+    static String authFor(String region) {
+        return "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region + "/email/aws4_request";
+    }
+
     static void assertError(String method, String path, String body, String type, String message) {
+        assertError(AUTH, method, path, body, type, message);
+    }
+
+    static void assertError(String auth, String method, String path, String body, String type, String message) {
         given()
             .contentType("application/json")
-            .header("Authorization", AUTH)
+            .header("Authorization", auth)
             .body(body)
         .when()
             .request(method, path)
@@ -36,5 +45,10 @@ final class SesV2SerializationErrors {
 
     static void assertSerializationException(String method, String path, String body, String message) {
         assertError(method, path, body, "SerializationException", message);
+    }
+
+    static void assertSerializationException(String auth, String method, String path, String body,
+                                             String message) {
+        assertError(auth, method, path, body, "SerializationException", message);
     }
 }

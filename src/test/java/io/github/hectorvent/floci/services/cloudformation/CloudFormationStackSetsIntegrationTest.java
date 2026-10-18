@@ -675,7 +675,8 @@ class CloudFormationStackSetsIntegrationTest {
             .header("Authorization", auth(ADMIN, "cloudformation"))
         .when().post("/")
         .then().statusCode(200)
-            .body(containsString("<DetailedStatus>FAILED</DetailedStatus>"));
+            .body(containsString("<DetailedStatus>FAILED</DetailedStatus>"))
+            .body(containsString("<StatusReason>Missing TemplateURL</StatusReason>"));
 
         // ...so the operation reports FAILED rather than a false SUCCEEDED.
         given()

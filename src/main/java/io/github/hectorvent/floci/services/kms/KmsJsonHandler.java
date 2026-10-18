@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
 import io.github.hectorvent.floci.services.kms.model.KmsGrant;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
@@ -248,9 +249,9 @@ public class KmsJsonHandler {
         String name = request.path("Name").isMissingNode() ? null : request.path("Name").asText(null);
         JsonNode constraintsNode = request.path("Constraints");
         if (!constraintsNode.isMissingNode() && !constraintsNode.isNull() && !constraintsNode.isObject()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'constraints' failed to satisfy constraint: "
-                            + "Member must be a structure", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value at 'constraints' failed to satisfy constraint: "
+                            + "Member must be a structure");
         }
         Map<String, Object> constraints = constraintsNode.isObject()
                 ? objectMapper.convertValue(constraintsNode, Map.class)
@@ -673,11 +674,11 @@ public class KmsJsonHandler {
     private static String readDataKeySpec(JsonNode request) {
         String spec = request.path("KeySpec").asText(null);
         if (spec != null && !"AES_256".equals(spec) && !"AES_128".equals(spec)) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value '" + spec
+            throw SmithyValidationErrors.validationException("Value '" + spec
                     + "' at 'keySpec' failed to satisfy constraint: Member must satisfy enum value set: [RSA_2048, "
                     + "RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521, ECC_SECG_P256K1, "
                     + "ECC_NIST_EDWARDS25519, SYMMETRIC_DEFAULT, HMAC_224, HMAC_256, HMAC_384, HMAC_512, SM2, "
-                    + "ML_DSA_44, ML_DSA_65, ML_DSA_87]", 400);
+                    + "ML_DSA_44, ML_DSA_65, ML_DSA_87]");
         }
         return spec;
     }
@@ -693,12 +694,12 @@ public class KmsJsonHandler {
 
     private static void validateRange(String member, int value, int min, int max) {
         if (value < min) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value '" + value + "' at '"
-                    + member + "' failed to satisfy constraint: Member must have value greater than or equal to " + min, 400);
+            throw SmithyValidationErrors.validationException("Value '" + value + "' at '"
+                    + member + "' failed to satisfy constraint: Member must have value greater than or equal to " + min);
         }
         if (max < value) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value '" + value + "' at '"
-                    + member + "' failed to satisfy constraint: Member must have value less than or equal to " + max, 400);
+            throw SmithyValidationErrors.validationException("Value '" + value + "' at '"
+                    + member + "' failed to satisfy constraint: Member must have value less than or equal to " + max);
         }
     }
 
@@ -706,18 +707,18 @@ public class KmsJsonHandler {
         String name = Character.toLowerCase(member.charAt(0)) + member.substring(1);
         JsonNode value = request.path(member);
         if (value.isMissingNode() || value.isNull()) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value null at '" + name
-                    + "' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException("Value null at '" + name
+                    + "' failed to satisfy constraint: Member must not be null");
         }
         String keyId = value.asText();
         String pattern = "Value '" + keyId + "' at '" + name
                 + "' failed to satisfy constraint: Member must satisfy regular expression pattern: ^\\p{ASCII}+$";
         if (keyId.isEmpty()) {
-            throw new AwsException("ValidationException", "2 validation errors detected: Value '' at '" + name
-                    + "' failed to satisfy constraint: Member must have length greater than or equal to 1; " + pattern, 400);
+            throw SmithyValidationErrors.validationException(List.of("Value '' at '" + name
+                    + "' failed to satisfy constraint: Member must have length greater than or equal to 1", pattern));
         }
         if (!keyId.chars().allMatch(c -> c < 128)) {
-            throw new AwsException("ValidationException", "1 validation error detected: " + pattern, 400);
+            throw SmithyValidationErrors.validationException(pattern);
         }
     }
 
@@ -726,8 +727,8 @@ public class KmsJsonHandler {
         String name = Character.toLowerCase(member.charAt(0)) + member.substring(1);
         JsonNode value = request.path(member);
         if (value.isMissingNode() || value.isNull()) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value " + (sensitive ? "" : "null ")
-                    + "at '" + name + "' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException("Value " + (sensitive ? "" : "null ")
+                    + "at '" + name + "' failed to satisfy constraint: Member must not be null");
         }
         byte[] blob = decodeBlob(request, member);
         KmsService.validateBlobLength(name, blob, max);

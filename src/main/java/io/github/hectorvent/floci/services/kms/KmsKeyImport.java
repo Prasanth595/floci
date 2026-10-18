@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.kms;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 import org.jboss.logging.Logger;
 
@@ -48,10 +49,10 @@ final class KmsKeyImport {
             case "RSA_4096" -> 4096;
             case "SM2" -> throw new AwsException("UnsupportedOperationException",
                     "WrappingKeySpec SM2 is not supported.", 400);
-            default -> throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + wrappingKeySpec + "' at 'wrappingKeySpec' failed to "
+            default -> throw SmithyValidationErrors.validationException(
+                    "Value '" + wrappingKeySpec + "' at 'wrappingKeySpec' failed to "
                             + "satisfy constraint: Member must satisfy enum value set: "
-                            + "[RSA_2048, RSA_3072, RSA_4096, SM2]", 400);
+                            + "[RSA_2048, RSA_3072, RSA_4096, SM2]");
         };
         try {
             KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
@@ -118,11 +119,11 @@ final class KmsKeyImport {
                     "AWS KMS stopped supporting the RSAES_PKCS1_V1_5 wrapping algorithm on October 10, 2023. "
                             + "Use RSA_AES_KEY_WRAP_SHA_1, RSA_AES_KEY_WRAP_SHA_256, "
                             + "RSAES_OAEP_SHA_1 or RSAES_OAEP_SHA_256.", 400);
-            default -> throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + wrappingAlgorithm + "' at 'wrappingAlgorithm' failed "
+            default -> throw SmithyValidationErrors.validationException(
+                    "Value '" + wrappingAlgorithm + "' at 'wrappingAlgorithm' failed "
                             + "to satisfy constraint: Member must satisfy enum value set: "
                             + "[RSAES_OAEP_SHA_256, RSAES_OAEP_SHA_1, RSA_AES_KEY_WRAP_SHA_256, "
-                            + "RSA_AES_KEY_WRAP_SHA_1, SM2PKE, RSAES_PKCS1_V1_5]", 400);
+                            + "RSA_AES_KEY_WRAP_SHA_1, SM2PKE, RSAES_PKCS1_V1_5]");
         }
     }
 

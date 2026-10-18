@@ -1054,6 +1054,69 @@ Under [enforcement](#iam-enforcement-mode) these actions are evaluated against t
 ARN, which when `UserName` is omitted is the ARN of the user who signed the request, resolved from
 the access key in the credential.
 
+### Delegation Requests
+
+IAM temporary delegation lets an AWS Partner ask a customer for scoped, time-limited access to the
+customer's account. The partner files a request, the customer claims and answers it, and an accepted
+request releases an exchange token the partner trades for credentials.
+
+The deep link `CreateDelegationRequest` returns points at the IAM console on the host of the
+request's own partition, so a partner in China or GovCloud sends the customer to a console that
+exists there. AWS publishes the field's purpose and its length but no format, and Floci serves no
+approval page of its own: the customer side of the workflow is the API.
+
+| Action | Description |
+|--------|-------------|
+| CreateDelegationRequest | Files a request for the calling account, returning its id and a console deep link. |
+| AssociateDelegationRequest | Claims an unassigned request for the calling identity. |
+| AcceptDelegationRequest | Approves a claimed request, recording the approver. |
+| RejectDelegationRequest | Refuses a request, keeping the explanation as `RejectionReason`. |
+| UpdateDelegationRequest | Adds notes and forwards the request for administrator approval. |
+| GetDelegationRequest | Returns one request, with an optional permission check. |
+| ListDelegationRequests | Lists the requests the calling account owns. |
+
+A request moves through the states AWS publishes: `UNASSIGNED`, `ASSIGNED`, `PENDING_APPROVAL`,
+`ACCEPTED`, `FINALIZED`, `REJECTED` and `EXPIRED`. A new request is `UNASSIGNED` whether or not it
+names a target account, claiming it makes it `ASSIGNED`, an update forwards it to
+`PENDING_APPROVAL`, and acceptance from either state makes it `ACCEPTED`. A rejected request cannot
+be accepted or updated afterwards.
+
+Expiry follows the two windows AWS documents, and is applied when a request is next read rather than
+by a sweeper: a day for an unclaimed request, a week for every other state, including the terminal
+ones. A request past its window reads back as `EXPIRED`.
+
+A delegation request is the one IAM record two accounts share, so visibility follows the rules on
+`GetDelegationRequest`: a request with no owner can be read by any account, and one naming a target
+account only from that account. Floci decides this at account granularity, there being no
+per-identity permission on a request to consult. `ListDelegationRequests` leaves out a request that
+has no owner even when it names the listing account, as AWS documents, so a partner does not list
+its own filings.
+
+`RequestorWorkflowId` is unique per partner: reusing one is `EntityAlreadyExists`, which is the
+failure the reference describes for it, and the uniqueness check shares a lock with the write that
+follows it so two creates racing one workflow id cannot both pass. Each member is held to the length
+and pattern it declares, which means an empty `Description` is a value rather than an omission: the
+member is required and its pattern permits an empty string, so only leaving it out altogether is
+refused. A member that breaks the format or constraints it declares answers `ValidationError`, which
+the reference publishes as a common error for every IAM operation while listing it on none of them,
+so these operations answer it the way the rest of IAM does. The `InvalidInput` they model is kept
+for a value that cannot be read as the member's type at all, such as a `SessionDuration` that is not
+a number or a boolean that is neither `true` nor `false`. An operation asked to move a request out
+of a state it is no longer in answers `ConcurrentModification`: no modeled error says "wrong state",
+and `AcceptDelegationRequest` models only `NoSuchEntity`, `ServiceFailure` and
+`ConcurrentModification`, so the conflict is the closest of the three. The same lock serializes
+those transitions, so two callers claiming one request leave a single owner.
+
+Four things are deliberately not modeled. `SendDelegationToken` and STS `GetDelegatedAccessToken`
+are not dispatched yet, so no request reaches `FINALIZED`. IAM publishes no SNS notification for a
+state change, so `NotificationChannel` is validated and stored but nothing reads it.
+`GetHumanReadableSummary` is undispatched, its summary being LLM-generated on AWS.
+`PermissionCheckResult` answers `UNSURE` when `DelegationPermissionCheck` is asked for, which the
+enum models, because a delegation request carries no permission for Floci to evaluate. Policy
+templates and permission boundaries are registered by AWS out of band, with no API, so
+`PolicyTemplateArn` is kept as given and resolved against nothing, and `LimitExceeded` is modeled
+with no published quota behind it, so no limit is enforced.
+
 ## AWS Managed Policies
 
 Floci seeds a catalog of commonly-used AWS managed policies at startup. These are attachable immediately without any setup:
@@ -1153,14 +1216,37 @@ An S3 object operation is checked as the action the S3 documentation gives it:
     `s3:PutObject`.
   - `AbortMultipartUpload` is checked as `s3:AbortMultipartUpload`.
   - `ListParts` is checked as `s3:ListMultipartUploadParts`.
+- **Creating an object:** a `PutObject`, `CopyObject` or `CreateMultipartUpload` also needs
+  the action for each setting it applies to the new object, as the S3 user guide's permissions
+  table marks them conditionally required:
+  - `s3:PutObjectTagging` for tags: the `x-amz-tagging` header, which a copy applies only with
+    `x-amz-tagging-directive: REPLACE`, or a tagged source's tags, which a copy keeps under the
+    default `COPY`;
+  - `s3:PutObjectAcl` for a canned ACL or a grant header;
+  - `s3:PutObjectRetention` for `x-amz-object-lock-mode` or `x-amz-object-lock-retain-until-date`;
+  - `s3:PutObjectLegalHold` for `x-amz-object-lock-legal-hold`.
+
+  S3's own access check under `floci.services.s3.enforce-auth`, which evaluates bucket policies
+  and ACLs, checks only `s3:PutObject` for these operations.
 - **Restore and select:** `RestoreObject` is checked as `s3:RestoreObject`, and
   `SelectObjectContent` as `s3:GetObject`, or `s3:GetObjectVersion` when it names a version.
-- **Object lock:** object retention and legal hold use their own actions: `s3:GetObjectRetention`,
-  `s3:PutObjectRetention`, `s3:GetObjectLegalHold` and `s3:PutObjectLegalHold`.
+- **Attributes:** `GetObjectAttributes` needs `s3:GetObject` and `s3:GetObjectAttributes`, as its
+  API reference says.
+- **Copying:** `CopyObject` and `UploadPartCopy` also need `s3:GetObject` on the source object, or
+  `s3:GetObjectVersion` when `x-amz-copy-source` names a version, as their API references say. It
+  is checked against the request's credential, a presigned URL's included.
+- **Object lock:**
+  - Object retention and legal hold use their own actions: `s3:GetObjectRetention`,
+    `s3:PutObjectRetention`, `s3:GetObjectLegalHold` and `s3:PutObjectLegalHold`.
+  - A `PutObjectRetention` or `DeleteObject` that sends `x-amz-bypass-governance-retention: true`
+    also needs `s3:BypassGovernanceRetention`, as their API references say. The S3 user guide says
+    the permission does not apply to annotation operations, so deleting an annotation does not
+    need it.
 - **Annotations:** object annotations use the `s3:*ObjectAnnotation` actions, and
   `s3:ListObjectAnnotations` when no annotation name is given.
 - **Versions:** a `versionId` selects the version action AWS checks.
-  - Reading or heading a version needs `s3:GetObjectVersion`; `s3:GetObject` is not needed.
+  - Reading or heading a version needs `s3:GetObjectVersion`; `s3:GetObject` is not needed. Its
+    attributes need `s3:GetObjectVersion` and `s3:GetObjectVersionAttributes`.
   - Deleting a version needs `s3:DeleteObjectVersion`, so a deny on it stops permanent deletes
     while a plain delete still adds a delete marker.
   - A version's ACL, tags and annotations use `s3:GetObjectVersionAcl`, `s3:PutObjectVersionAcl`,
@@ -1498,7 +1584,9 @@ floci populates:
   be gated on tags an object does not have yet.
 - `s3:RequestObjectTag/<key>`: a tag the request asks to attach. `s3:PutObject` reads these
   from the `x-amz-tagging` header, or its query parameter when the header is absent,
-  and `s3:PutObjectTagging` from the `<Tagging>` body. Any pair
+  and `s3:PutObjectTagging` from the `<Tagging>` body. A `CopyObject` offers them only with
+  `x-amz-tagging-directive: REPLACE`: under the default `COPY` the copy keeps the source's tags and
+  ignores the header. Any pair
   that does not decode is dropped, so a policy conditioned on the key denies such a request. Where
   enforcement lets it through, the handler still answers a malformed header with
   `400 InvalidTag`.
@@ -1509,6 +1597,15 @@ floci populates:
   omitted or empty tag set still follows the absent-key rules above. Existing object tags
   do not contribute to this requested set. See the [AWS object-tag policy guidance](https://docs.aws.amazon.com/AmazonS3/latest/userguide/tagging-and-policies.html).
 - `s3:versionid`: the `versionId` of the request, for the version actions it selects.
+- `s3:object-lock-mode`, `s3:object-lock-retain-until-date`,
+  `s3:object-lock-remaining-retention-days` and `s3:object-lock-legal-hold`: the Object Lock
+  settings a request applies, for `s3:PutObject` (from its `x-amz-object-lock-*` headers),
+  `s3:PutObjectRetention` (the `<Retention>` body) and `s3:PutObjectLegalHold` (the `<LegalHold>`
+  body). AWS does not document how it counts the remaining retention days; floci counts a part
+  day as a whole one, so a Deny on retention longer than N days refuses a date a few hours past
+  N days.
+- An object creation offers its tag and Object Lock keys to each action it is checked as: its
+  `s3:PutObject` and the extra actions its settings need.
 - A `PutObject` carrying `If-Match` is authorized as `s3:GetObject` as well, and that second
   check is made without the object's tags in the context, as measured on AWS. `CopyObject` and
   `CompleteMultipartUpload`, the other operations the S3 user guide lists for `If-Match`, get the
