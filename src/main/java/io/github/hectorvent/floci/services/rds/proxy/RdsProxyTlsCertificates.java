@@ -11,16 +11,12 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.security.KeyStore;
 import java.security.PrivateKey;
-import java.security.SecureRandom;
-import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.time.Clock;
 import java.time.Instant;
@@ -170,7 +166,7 @@ public class RdsProxyTlsCertificates {
                     CertificateGenerator.LeafUsage.SERVER, notAfter);
             X509Certificate certificate = Pem.parseCertificate(generated.certificatePem());
             PrivateKey privateKey = Pem.parsePrivateKey(generated.privateKeyPem());
-            SSLContext context = buildSslContext(certificate, privateKey);
+            SSLContext context = certificateAuthority.serverSslContext(certificate, privateKey);
             writeMetadata(tlsDir.resolve(METADATA_NAME), sanList);
             current = new ServerCertificate(context, Set.copyOf(sans), generated.notAfter());
         } catch (Exception e) {
@@ -189,21 +185,6 @@ public class RdsProxyTlsCertificates {
             renewAt = renewAt.minusSeconds(60);
         }
         return !renewAt.isAfter(clock.instant());
-    }
-
-    private SSLContext buildSslContext(X509Certificate certificate, PrivateKey privateKey) throws Exception {
-        char[] password = new char[0];
-        KeyStore keyStore = KeyStore.getInstance("PKCS12");
-        keyStore.load(null, password);
-        keyStore.setKeyEntry("floci-rds-proxy", privateKey, password,
-                new Certificate[]{certificate, certificateAuthority.certificate()});
-
-        KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-        keyManagerFactory.init(keyStore, password);
-
-        SSLContext context = SSLContext.getInstance("TLS");
-        context.init(keyManagerFactory.getKeyManagers(), null, new SecureRandom());
-        return context;
     }
 
     private Path tlsDir() {
