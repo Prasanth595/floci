@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -407,7 +408,7 @@ class WafV2CfnProvisionerTest {
     }
 
     @Test
-    void renamedIpSetReplacesAndDeletesThePriorSet() {
+    void renamedIpSetRecordsThePriorSetAndCommittedCleanupDeletesIt() {
         IpSet existing = ipSet("blocklist", "ip-old", "REGIONAL", "lock-1");
         IpSet created = ipSet("blocklist-v2", "ip-new", "REGIONAL", "lock-2");
         created.setArn("arn:new");
@@ -417,15 +418,24 @@ class WafV2CfnProvisionerTest {
         StackResource resource = ipSetResource();
         resource.setPhysicalId("blocklist|ip-old|REGIONAL");
 
-        provisioner.provision(resource, ipSetProps("blocklist-v2"), context());
+        provisioner.provision(resource, ipSetProps("blocklist-v2"),
+                updateContext("blocklist|ip-old|REGIONAL"));
 
         assertEquals("blocklist-v2|ip-new|REGIONAL", resource.getPhysicalId());
         assertEquals("arn:new", resource.getAttributes().get("Arn"));
+        assertTrue(provisioner.hasReplacementUpdate(resource));
+        assertEquals("blocklist|ip-old|REGIONAL", provisioner.updateCleanupPhysicalId(resource));
+        verify(wafV2, never()).deleteIpSet(any(), anyString(), anyString(), anyString());
+
+        UpdateCleanupResult result = provisioner.completeUpdate(resource);
+
+        assertTrue(result.complete());
         verify(wafV2).deleteIpSet("REGIONAL", "ip-old", "blocklist", "lock-1");
+        assertFalse(provisioner.hasReplacementUpdate(resource));
     }
 
     @Test
-    void replacementTracksNewIpSetEvenWhenOldDeleteFails() {
+    void committedCleanupOfAnIpSetStillReportsThePriorSetWhenItsDeleteFails() {
         IpSet existing = ipSet("blocklist", "ip-old", "REGIONAL", "lock-1");
         IpSet created = ipSet("blocklist-v2", "ip-new", "REGIONAL", "lock-2");
         created.setArn("arn:new");
@@ -436,16 +446,90 @@ class WafV2CfnProvisionerTest {
                 .when(wafV2).deleteIpSet("REGIONAL", "ip-old", "blocklist", "lock-1");
         StackResource resource = ipSetResource();
         resource.setPhysicalId("blocklist|ip-old|REGIONAL");
+        provisioner.provision(resource, ipSetProps("blocklist-v2"),
+                updateContext("blocklist|ip-old|REGIONAL"));
 
-        provisioner.provision(resource, ipSetProps("blocklist-v2"), context());
+        UpdateCleanupResult result = provisioner.completeUpdate(resource);
 
+        assertTrue(result.applicable());
+        assertFalse(result.complete());
+        assertEquals("blocklist|ip-old|REGIONAL", result.previousPhysicalId());
+        assertEquals(1, result.attempts());
+        assertEquals("WAFAssociatedItemException", result.failureReason());
         assertEquals("blocklist-v2|ip-new|REGIONAL", resource.getPhysicalId());
-        assertEquals("arn:new", resource.getAttributes().get("Arn"));
+        assertTrue(provisioner.hasReplacementUpdate(resource));
     }
 
     @Test
-    void ipSetWithoutNameFailsBeforeCallingWafV2() {
-        assertMissingIpSetPropertyFails("Name");
+    void rollbackOfAnIpSetReplacementRestoresThePriorSetAndDeletesTheReplacement() {
+        IpSet existing = ipSet("blocklist", "ip-old", "REGIONAL", "lock-1");
+        IpSet created = ipSet("blocklist-v2", "ip-new", "REGIONAL", "lock-2");
+        created.setArn("arn:new");
+        when(wafV2.listIpSets("REGIONAL")).thenReturn(List.of(existing, created));
+        when(wafV2.createIpSet(any(), eq("REGIONAL"), eq("blocklist-v2"), eq("us-east-1")))
+                .thenReturn(created);
+        StackResource resource = ipSetResource();
+        resource.setPhysicalId("blocklist|ip-old|REGIONAL");
+        provisioner.provision(resource, ipSetProps("blocklist-v2"),
+                updateContext("blocklist|ip-old|REGIONAL"));
+
+        assertTrue(provisioner.rollbackUpdate(resource));
+
+        assertEquals("blocklist|ip-old|REGIONAL", resource.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(resource));
+        verify(wafV2).deleteIpSet("REGIONAL", "ip-new", "blocklist-v2", "lock-2");
+    }
+
+    @Test
+    void ipSetWithoutNameGeneratesOneOnCreate() {
+        ObjectNode props = ipSetProps("blocklist");
+        props.remove("Name");
+        when(wafV2.createIpSet(any(), eq("REGIONAL"), anyString(), eq("us-east-1")))
+                .thenAnswer(invocation -> {
+                    IpSet created = ipSet(invocation.getArgument(2), "ip-123", "REGIONAL", "lock-1");
+                    created.setArn("arn:generated");
+                    return created;
+                });
+        StackResource resource = ipSetResource();
+
+        provisioner.provision(resource, props, context());
+
+        ArgumentCaptor<String> name = ArgumentCaptor.forClass(String.class);
+        verify(wafV2).createIpSet(any(), eq("REGIONAL"), name.capture(), eq("us-east-1"));
+        assertFalse(name.getValue().isBlank());
+        assertEquals(name.getValue() + "|ip-123|REGIONAL", resource.getPhysicalId());
+        assertEquals("arn:generated", resource.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void ipSetWithoutNameReusesTheExistingNameOnUpdate() {
+        IpSet existing = ipSet("blocklist", "ip-123", "REGIONAL", "lock-1");
+        IpSet updated = ipSet("blocklist", "ip-123", "REGIONAL", "lock-2");
+        updated.setArn("arn:updated");
+        when(wafV2.listIpSets("REGIONAL")).thenReturn(List.of(existing));
+        when(wafV2.getIpSet("REGIONAL", "ip-123", "blocklist")).thenReturn(updated);
+        StackResource resource = ipSetResource();
+        resource.setPhysicalId("blocklist|ip-123|REGIONAL");
+        ObjectNode props = ipSetProps("blocklist");
+        props.remove("Name");
+
+        provisioner.provision(resource, props, context());
+
+        verify(wafV2).updateIpSet(eq("REGIONAL"), eq("ip-123"), any(), anyList(),
+                eq("blocklist"), eq("lock-1"));
+        verify(wafV2, never()).createIpSet(any(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void ipSetWithUnknownIpAddressVersionFailsBeforeCallingWafV2() {
+        ObjectNode props = ipSetProps("blocklist");
+        props.put("IPAddressVersion", "IPV5");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(ipSetResource(), props, context()));
+
+        assertEquals("WAFInvalidParameterException", failure.getErrorCode());
+        verifyNoInteractions(wafV2);
     }
 
     @Test

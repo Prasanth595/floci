@@ -20,8 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 /**
  * AWS::WAFv2::IPSet through a stack: Ref is {@code name|id|scope}, {@code Fn::GetAtt} resolves the
  * real {@code Arn} and {@code Id} rather than literal placeholders, an {@code Addresses} change
- * updates in place keeping the id, a rename replaces the set, and deleting the stack deletes it.
- * Every assertion reads WAFv2 back, not only the stack.
+ * updates in place keeping the id, a rename replaces the set, an omitted {@code Name} still gets a
+ * generated one, and deleting the stack deletes it. Every assertion reads WAFv2 back, not only the
+ * stack.
  */
 @QuarkusTest
 class CloudFormationWafV2IpSetIntegrationTest {
@@ -111,6 +112,46 @@ class CloudFormationWafV2IpSetIntegrationTest {
             .body(containsString("<ResourceStatus>CREATE_FAILED</ResourceStatus>"))
             .body(containsString(
                     "<ResourceStatusReason>AWS::WAFv2::IPSet requires Addresses</ResourceStatusReason>"));
+    }
+
+    @Test
+    void createStackWithoutIpSetNameStillCreatesTheSet() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-wafv2-ipset-anon-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "IpSet": {
+                      "Type": "AWS::WAFv2::IPSet",
+                      "Properties": {
+                        "Scope": "REGIONAL",
+                        "IPAddressVersion": "IPV4",
+                        "Addresses": ["203.0.113.10/32"]
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "IpSetRef": {"Value": {"Ref": "IpSet"}},
+                    "IpSetArn": {"Value": {"Fn::GetAtt": ["IpSet", "Arn"]}},
+                    "IpSetId": {"Value": {"Fn::GetAtt": ["IpSet", "Id"]}}
+                  }
+                }
+                """;
+
+        cfn("CreateStack", stackName, template);
+        String created = describeStack(stackName)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .extract().asString();
+
+        String ref = output(created, "IpSetRef");
+        String generatedName = ref.substring(0, ref.indexOf('|'));
+        assertFalse(generatedName.isBlank(), "an IP set without Name must still get a generated one");
+        ipSet(generatedName, output(created, "IpSetId"))
+            .body("IPSet.ARN", equalTo(output(created, "IpSetArn")));
+
+        cfn("DeleteStack", stackName, null);
+
+        listIpSets().body("IPSets.ARN", not(hasItem(output(created, "IpSetArn"))));
     }
 
     private static String template(String name, String addresses) {

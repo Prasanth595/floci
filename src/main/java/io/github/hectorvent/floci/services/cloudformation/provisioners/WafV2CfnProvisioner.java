@@ -100,18 +100,27 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * {@code Name} is optional and AWS generates one when the template omits it, so the Web ACL arm's
+     * rule applies: reuse the existing set's name on an update, generate one only on a create.
      * {@code Name} and {@code Scope} are create-only, so a changed one leaves a new
-     * {@code name|id|scope} id and the prior set is deleted the way a Web ACL replacement is;
-     * {@code Addresses}, {@code Description} and {@code Tags} update in place, and
-     * {@code IPAddressVersion} is never passed to the update, which cannot change it on AWS either.
+     * {@code name|id|scope} id and the prior set goes to {@link ReplacementCleanup}, which deletes it
+     * once the update commits or points the resource back at it on a rollback. {@code Addresses},
+     * {@code Description} and {@code Tags} update in place, and {@code IPAddressVersion} is never
+     * passed to the update, which cannot change it on AWS either.
      */
     private void provisionIpSet(StackResource resource, JsonNode props, ProvisionContext ctx) {
         JsonNode resolved = ctx.engine().resolveNode(props);
         String scope = required(text(resolved, "Scope"), IP_SET, "Scope");
-        String name = required(text(resolved, "Name"), IP_SET, "Name");
-        required(text(resolved, "IPAddressVersion"), IP_SET, "IPAddressVersion");
+        String ipAddressVersion = ipAddressVersion(resolved);
         List<String> addresses = requiredAddresses(resolved);
+        Map<String, String> attributesBefore = new HashMap<>(resource.getAttributes());
         IpSet existing = findExistingIpSet(resource.getPhysicalId());
+        String name = text(resolved, "Name");
+        if (name == null || name.isBlank()) {
+            name = existing == null
+                    ? ctx.generatePhysicalName(resource.getLogicalId(), 128, false)
+                    : existing.getName();
+        }
         if (existing != null && existing.getName().equals(name) && existing.getScope().equals(scope)) {
             wafV2Service.updateIpSet(scope, existing.getId(), text(resolved, "Description"), addresses,
                     name, existing.getLockToken());
@@ -122,21 +131,11 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
         }
         IpSet desired = new IpSet();
         desired.setDescription(text(resolved, "Description"));
-        desired.setIpAddressVersion(text(resolved, "IPAddressVersion"));
+        desired.setIpAddressVersion(ipAddressVersion);
         desired.setAddresses(addresses);
         desired.setTags(tags(resolved));
-        IpSet created = wafV2Service.createIpSet(desired, scope, name, ctx.region());
-        setIpSetReferences(resource, created);
-        if (existing != null) {
-            try {
-                wafV2Service.deleteIpSet(existing.getScope(), existing.getId(), existing.getName(),
-                        existing.getLockToken());
-            } catch (RuntimeException e) {
-                // old set may still be referenced by a web ACL; new set is already tracked
-                LOG.warnv("WAFv2 CFN replacement cleanup of IP set {0}|{1}|{2} tolerated: {3}",
-                        existing.getName(), existing.getId(), existing.getScope(), e.getMessage());
-            }
-        }
+        setIpSetReferences(resource, wafV2Service.createIpSet(desired, scope, name, ctx.region()));
+        ReplacementCleanup.record(resource, ctx, attributesBefore);
     }
 
     @Override
@@ -205,17 +204,20 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        if (!WEB_ACL_ASSOCIATION.equals(resource.getResourceType())) {
-            return false;
-        }
-        if (ReplacementCleanup.rollback(resource, this::delete)) {
-            // The replacement overwrote this association on the same resource, then its delete disassociated it.
-            String[] pair = associationPair(resource.getPhysicalId());
-            if (pair != null) {
-                wafV2Service.associateWebAcl(pair[1], pair[0]);
+        if (WEB_ACL_ASSOCIATION.equals(resource.getResourceType())) {
+            if (ReplacementCleanup.rollback(resource, this::delete)) {
+                // The replacement overwrote this association on the same resource, then its delete disassociated it.
+                String[] pair = associationPair(resource.getPhysicalId());
+                if (pair != null) {
+                    wafV2Service.associateWebAcl(pair[1], pair[0]);
+                }
             }
+            return true;
         }
-        return true;
+        if (IP_SET.equals(resource.getResourceType())) {
+            return ReplacementCleanup.rollback(resource, this::delete);
+        }
+        return false;
     }
 
     private static String[] associationPair(String physicalId) {
@@ -266,6 +268,16 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
         List<String> addresses = new ArrayList<>();
         node.forEach(address -> addresses.add(address.asText()));
         return addresses;
+    }
+
+    /** Checked here rather than only on create, because an in-place update never sends it to WAFv2. */
+    private String ipAddressVersion(JsonNode props) {
+        String version = required(text(props, "IPAddressVersion"), IP_SET, "IPAddressVersion");
+        if (!"IPV4".equals(version) && !"IPV6".equals(version)) {
+            throw new AwsException("WAFInvalidParameterException",
+                    "Field: IP_ADDRESS_VERSION, Parameter: " + version + ", Reason: must be IPV4 or IPV6.", 400);
+        }
+        return version;
     }
 
     private static String required(String value, String resourceType, String property) {
