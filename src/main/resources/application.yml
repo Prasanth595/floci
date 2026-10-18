@@ -743,6 +743,7 @@ floci:
       backend: stub
       proxy:
         passthrough: false
+        error-body-timeout-millis: 1000
         # url: http://localhost:11434/v1
         # api-key: sk-...
         # default-model: llama3
