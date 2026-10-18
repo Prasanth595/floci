@@ -65,6 +65,29 @@ class CloudFormationElbV2SubnetMappingsIntegrationTest {
         }
     }
 
+    /** {@code Subnets} and {@code SubnetMappings} together fail the stack, as ELBv2 refuses both. */
+    @Test
+    void subnetsAndSubnetMappingsTogetherFailTheStack() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "nlb-both-" + suffix;
+        String name = "nlb-both-" + suffix;
+        String template = template(name, "{\"SubnetId\": {\"Ref\": \"SubnetA\"}}")
+                .replace("\"SubnetMappings\":", "\"Subnets\": [{\"Ref\": \"SubnetB\"}], \"SubnetMappings\":");
+        try {
+            request(CFN_AUTH, "CreateStack", "StackName", stack, "TemplateBody", template).statusCode(200);
+            CfnStackWaits.awaitStatus(stack, "ROLLBACK_COMPLETE");
+            String events = request(CFN_AUTH, "DescribeStackEvents", "StackName", stack).statusCode(200)
+                    .extract().asString();
+            List<String> reasons = XmlParser.extractAll(events, "ResourceStatusReason");
+            assertTrue(reasons.stream().anyMatch(r -> r.contains("either subnets or subnet mappings, not both")),
+                    String.join(" | ", reasons));
+            request(ELB_AUTH, "DescribeLoadBalancers", "Names.member.1", name).statusCode(400)
+                    .body(containsString("LoadBalancerNotFound"));
+        } finally {
+            request(CFN_AUTH, "DeleteStack", "StackName", stack);
+        }
+    }
+
     /** A second mapping an {@code Fn::If} drops leaves the balancer on the first mapping's subnet. */
     @Test
     void aMappingAnFnIfDropsIsLeftOut() {

@@ -612,6 +612,40 @@ class ElbV2CfnProvisionerTest {
         assertNull(lb.getAttributes().get(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR));
     }
 
+    /**
+     * {@code Subnets} and {@code SubnetMappings} together fail the resource with the error ELBv2's
+     * CreateLoadBalancer gives for both, before any load balancer is created.
+     */
+    @Test
+    void subnetsAndSubnetMappingsTogetherAreRefusedBeforeTheLoadBalancerIsCreated() {
+        ObjectNode props = mapper.createObjectNode().put("Name", "nlb").put("Type", "network");
+        props.putArray("Subnets").add("subnet-1");
+        props.putArray("SubnetMappings").addObject().put("SubnetId", "subnet-2");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Nlb"), props, ctx()));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals("You can specify either subnets or subnet mappings, not both", e.getMessage());
+        verify(elb, never()).createLoadBalancer(anyString(), anyString(), any(), any(), any(), anyList(), anyList(), any());
+    }
+
+    /** The same on an update of a kept load balancer, before it is moved anywhere. */
+    @Test
+    void anUpdateWithSubnetsAndSubnetMappingsTogetherLeavesTheKeptLoadBalancerAlone() {
+        ObjectNode props = mapper.createObjectNode().put("Name", "web");
+        props.putArray("Subnets").add("subnet-1").add("subnet-3");
+        props.putArray("SubnetMappings").addObject().put("SubnetId", "subnet-3");
+        StackResource lb = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        lb.getAttributes().put("LoadBalancerName", "web");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(lb, props, ctx(LB_ARN)));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        verify(elb, never()).createLoadBalancer(anyString(), anyString(), any(), any(), any(), anyList(), anyList(), any());
+        verify(elb, never()).setSubnets(anyString(), anyString(), anyList());
+    }
+
     @Test
     void anInPlaceListenerUpdateIsNotRolledBackHere() {
         when(elb.describeListeners(REGION, null, List.of(LISTENER_ARN))).thenReturn(List.of(listener(LB_ARN)));

@@ -189,15 +189,18 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     /**
      * The template's subnets: {@code Subnets}, or else the {@code SubnetId} of each
      * {@code SubnetMappings} entry, the form a Network Load Balancer uses to give a zone an Elastic IP.
-     * {@code SubnetId} is required in a mapping, so one without it fails the resource before anything
-     * is created or moved, with the error the resource schema gives. A blank one is passed on as given
-     * for ELBv2 to refuse as an unknown subnet; dropping it would create or move the balancer without it.
+     * Setting both fails the resource with the error CreateLoadBalancer gives, as the resource allows
+     * one or the other. {@code SubnetId} is required in a mapping, so one without it fails the
+     * resource before anything is created or moved, with the error the resource schema gives. A blank
+     * one is passed on as given for ELBv2 to refuse as an unknown subnet; dropping it would create or
+     * move the balancer without it.
      */
     private static List<String> templateSubnets(JsonNode props, ProvisionContext ctx) {
         List<String> subnets = ctx.resolveStringList(props, "Subnets");
-        if (!subnets.isEmpty() || props == null || !props.has("SubnetMappings")) {
+        if (props == null || !props.has("SubnetMappings")) {
             return subnets;
         }
+        List<String> mapped = new ArrayList<>();
         // A mapping, or its SubnetId, that an Fn::If drops with AWS::NoValue is left out, as on AWS.
         JsonNode mappings = ctx.engine().resolveNodeOmittingNoValue(props.get("SubnetMappings"));
         if (mappings != null && mappings.isArray()) {
@@ -207,10 +210,14 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
                     throw new AwsException("InvalidRequest",
                             "Model validation failed (#/SubnetMappings/" + i + ": required key [SubnetId] not found)", 400);
                 }
-                subnets.add(subnetId);
+                mapped.add(subnetId);
             }
         }
-        return subnets;
+        if (!subnets.isEmpty() && !mapped.isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "You can specify either subnets or subnet mappings, not both", 400);
+        }
+        return subnets.isEmpty() ? mapped : subnets;
     }
 
     /**
