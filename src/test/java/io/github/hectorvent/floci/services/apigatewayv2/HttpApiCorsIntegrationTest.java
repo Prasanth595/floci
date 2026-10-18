@@ -11,14 +11,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -78,7 +73,7 @@ class HttpApiCorsIntegrationTest {
     @Test
     @Order(1)
     void createApis() {
-        corsApiId = createProxyApi("http-api-cors", """
+        corsApiId = HttpProxyApiFixtures.createProxyApi("http-api-cors", """
                 ,"corsConfiguration":{
                   "allowOrigins":["%s"],
                   "allowMethods":["GET","POST","DELETE"],
@@ -86,8 +81,8 @@ class HttpApiCorsIntegrationTest {
                   "exposeHeaders":["x-request-id"],
                   "maxAge":3600,
                   "allowCredentials":true
-                }""".formatted(APP_ORIGIN));
-        plainApiId = createProxyApi("http-api-no-cors", "");
+                }""".formatted(APP_ORIGIN), "$default", backendPort, "/hello");
+        plainApiId = HttpProxyApiFixtures.createProxyApi("http-api-no-cors", "", "$default", backendPort, "/hello");
 
         given()
                 .contentType(ContentType.JSON)
@@ -337,7 +332,7 @@ class HttpApiCorsIntegrationTest {
      */
     @Test
     @Order(10)
-    void apiGatewaysOwnAnswersOnARoute() {
+    void apiGatewaysOwnAnswersOnARoute() throws Exception {
         String integrationId = given()
                 .contentType(ContentType.JSON)
                 .body("{\"integrationType\":\"AWS_PROXY\",\"integrationUri\":"
@@ -358,9 +353,10 @@ class HttpApiCorsIntegrationTest {
         given()
                 .contentType(ContentType.JSON)
                 .body("""
-                        {"FunctionName":"%s","Runtime":"python3.13","Handler":"index.handler",
+                        {"FunctionName":"%s","Runtime":"nodejs20.x","Handler":"index.handler",
                          "Role":"arn:aws:iam::000000000000:role/lambda-role","Code":{"ZipFile":"%s"}}
-                        """.formatted(THROTTLED_FUNCTION, functionZip()))
+                        """.formatted(THROTTLED_FUNCTION,
+                                WebSocketTestSupport.createLambdaZip("exports.handler = async () => 'ok';")))
                 .when().post("/2015-03-31/functions")
                 .then().statusCode(201);
         given()
@@ -421,48 +417,5 @@ class HttpApiCorsIntegrationTest {
         given().when().delete("/v2/apis/" + corsApiId).then().statusCode(204);
         given().when().delete("/v2/apis/" + plainApiId).then().statusCode(204);
         given().when().delete("/2015-03-31/functions/" + THROTTLED_FUNCTION).then().statusCode(204);
-    }
-
-    private static String functionZip() {
-        ByteArrayOutputStream zip = new ByteArrayOutputStream();
-        try (ZipOutputStream entries = new ZipOutputStream(zip)) {
-            entries.putNextEntry(new ZipEntry("index.py"));
-            entries.write("def handler(e, c):\n    return 'ok'\n".getBytes(StandardCharsets.UTF_8));
-            entries.closeEntry();
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
-        return Base64.getEncoder().encodeToString(zip.toByteArray());
-    }
-
-    /**
-     * An HTTP API whose {@code GET /hello} is an HTTP_PROXY integration on the fixture backend,
-     * deployed to {@code $default}. {@code extraFields} is appended to the CreateApi body.
-     */
-    private static String createProxyApi(String name, String extraFields) {
-        String apiId = given()
-                .contentType(ContentType.JSON)
-                .body("{\"name\":\"" + name + "\",\"protocolType\":\"HTTP\"" + extraFields + "}")
-                .when().post("/v2/apis")
-                .then().statusCode(201)
-                .extract().path("apiId");
-        given()
-                .contentType(ContentType.JSON)
-                .body("{\"stageName\":\"$default\",\"autoDeploy\":true}")
-                .when().post("/v2/apis/" + apiId + "/stages")
-                .then().statusCode(201);
-        String integrationId = given()
-                .contentType(ContentType.JSON)
-                .body("{\"integrationType\":\"HTTP_PROXY\",\"integrationUri\":\"http://127.0.0.1:"
-                        + backendPort + "/hello\",\"payloadFormatVersion\":\"1.0\"}")
-                .when().post("/v2/apis/" + apiId + "/integrations")
-                .then().statusCode(201)
-                .extract().path("integrationId");
-        given()
-                .contentType(ContentType.JSON)
-                .body("{\"routeKey\":\"GET /hello\",\"target\":\"integrations/" + integrationId + "\"}")
-                .when().post("/v2/apis/" + apiId + "/routes")
-                .then().statusCode(201);
-        return apiId;
     }
 }
