@@ -169,7 +169,7 @@ class CloudFormationEventsRuleTargetTest {
     private static Target onlyTarget(String logicalId) {
         List<Target> targets = eventBridge.listTargetsByRule(request -> request.rule(physicalId(logicalId))).targets();
         assertThat(targets).hasSize(1);
-        return targets.getFirst();
+        return targets.get(0);
     }
 
     /** On AWS, template validation's reasons are read through DescribeEvents, the handler's on the stack events. */
