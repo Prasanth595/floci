@@ -71,6 +71,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 console.error(new Error('logged error'));
                 process.stdout.write('raw line\\n');
                 process.stdout.write('   \\n');
+                process.stdout.write('last line\\n');
                 res.end('logged');
                 return;
               }
@@ -208,8 +209,8 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         String logStream = logged.header("lambda-web-logstream");
         String group = "/aws/lambda/web/" + functionName;
 
-        List<String> local = awaitLogEvents(group + ".local", logStream, 4);
-        assertEquals(4, local.size(), local.toString());
+        List<String> local = awaitLogEvents(group + ".local", logStream);
+        assertEquals(5, local.size(), local.toString());
         JsonPath starting = JsonPath.from(local.getFirst());
         assertEquals("INFO", starting.getString("level"));
         assertEquals("starting", starting.getString("message"));
@@ -227,7 +228,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         assertTrue(local.contains("raw line\n"), local.toString());
         assertTrue(local.stream().allMatch(event -> event.endsWith("\n")), local.toString());
 
-        List<String> centralized = awaitLogEvents(group, logStream + "-000000000000-us-east-1", 4);
+        List<String> centralized = awaitLogEvents(group, logStream + "-000000000000-us-east-1");
         assertEquals(new HashSet<>(local), new HashSet<>(centralized));
     }
 
@@ -418,17 +419,19 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 .extract().path("endpoint.domainName");
     }
 
-    /** The messages of a log stream once it holds {@code count}, or what it holds after 15 seconds. */
-    private static List<String> awaitLogEvents(String logGroup, String logStream, int count) throws InterruptedException {
+    /**
+     * The messages of a log stream once the last output of {@code /log} on stdout and on stderr is in it, or what it
+     * holds after 15 seconds. The output of one stream arrives in order, so nothing written before comes later.
+     */
+    private static List<String> awaitLogEvents(String logGroup, String logStream) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
         List<String> messages = logEvents(logGroup, logStream);
-        while (messages.size() < count && System.nanoTime() < deadline) {
+        while (!(messages.contains("last line\n") && messages.stream().anyMatch(event -> event.contains("\"ERROR\"")))
+                && System.nanoTime() < deadline) {
             Thread.sleep(200);
             messages = logEvents(logGroup, logStream);
         }
-        // Anything past the expected events would show up by now.
-        Thread.sleep(500);
-        return logEvents(logGroup, logStream);
+        return messages;
     }
 
     private static List<String> logEvents(String logGroup, String logStream) {
