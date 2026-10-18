@@ -575,7 +575,7 @@ before provisioning:
   substituted into resource properties via `Ref`. Where a property takes a list (a Lambda function's
   `Layers` or `Architectures`, a layer's `CompatibleRuntimes` or `CompatibleArchitectures`), a `Ref` to
   a `CommaDelimitedList`, `List<...>` or SSM list parameter is a list, and a `Ref` to a `String` or
-  `Number` parameter is refused as a string, as are `Fn::Select`, `Fn::Join`, `Fn::Sub`, a
+  `Number` parameter is refused as a string, as are `Fn::Select`, `Fn::Join`, `Fn::Sub`, `Fn::Base64`, a
   pseudo-parameter but `AWS::NotificationARNs`, and an `Fn::If` choosing one of these:
   `Property [Architectures] expected type: JSONArray, found: String`.
 - **`AWS::SSM::Parameter::Value<String>`-typed parameters** are resolved at deploy time: the value the

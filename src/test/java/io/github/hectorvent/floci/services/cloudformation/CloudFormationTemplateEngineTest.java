@@ -261,7 +261,7 @@ class CloudFormationTemplateEngineTest {
 
         for (String string : List.of("\"x86_64\"", "5", "true", "{\"Ref\": \"Str\"}", "{\"Ref\": \"Num\"}",
                 "{\"Ref\": \"AWS::Region\"}", "{\"Fn::Select\": [0, {\"Ref\": \"Csv\"}]}",
-                "{\"Fn::Join\": [\",\", {\"Ref\": \"Csv\"}]}", "{\"Fn::Sub\": \"x86_64\"}",
+                "{\"Fn::Join\": [\",\", {\"Ref\": \"Csv\"}]}", "{\"Fn::Sub\": \"x86_64\"}", "{\"Fn::Base64\": \"x86_64\"}",
                 "{\"Fn::If\": [\"Yes\", \"x86_64\", {\"Ref\": \"AWS::NoValue\"}]}")) {
             assertTrue(e.yieldsString(json(string)), string);
         }

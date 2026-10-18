@@ -606,8 +606,8 @@ public class CloudFormationTemplateEngine {
      * a list is expected, "expected type: JSONArray, found: String" (measured, eu-west-1,
      * 2026-10-18): a literal scalar, a {@code Ref} to a parameter whose type is not a list
      * ({@code String}, {@code Number}, ...) or to a pseudo-parameter but
-     * {@code AWS::NotificationARNs}, {@code Fn::Select}, {@code Fn::Join}, {@code Fn::Sub}, or an
-     * {@code Fn::If} choosing one of these. A {@code Ref} to a {@code CommaDelimitedList},
+     * {@code AWS::NotificationARNs}, {@code Fn::Select}, {@code Fn::Join}, {@code Fn::Sub},
+     * {@code Fn::Base64}, or an {@code Fn::If} choosing one of these. A {@code Ref} to a {@code CommaDelimitedList},
      * {@code List<...>} or SSM list parameter is a list, though it resolves to the comma-joined
      * text. What only provisioning can tell (a resource's {@code Ref}, {@code Fn::GetAtt},
      * {@code Fn::ImportValue}, {@code Fn::FindInMap}) is not reported here.
@@ -630,7 +630,7 @@ public class CloudFormationTemplateEngine {
         if (node.has("Fn::If")) {
             return yieldsString(selectIfBranch(node.get("Fn::If")));
         }
-        return node.has("Fn::Select") || node.has("Fn::Join") || node.has("Fn::Sub");
+        return node.has("Fn::Select") || node.has("Fn::Join") || node.has("Fn::Sub") || node.has("Fn::Base64");
     }
 
     /** The parameter types whose value is a list: CommaDelimitedList, List<...> and their SSM forms. */

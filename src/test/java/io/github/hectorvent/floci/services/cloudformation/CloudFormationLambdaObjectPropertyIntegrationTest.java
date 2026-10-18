@@ -251,15 +251,16 @@ class CloudFormationLambdaObjectPropertyIntegrationTest {
 
     /**
      * Measured on CloudFormation (eu-west-1, 2026-10-18): where a list is expected, a Ref to a String
-     * or Number parameter, Ref AWS::Region, Fn::Select, Fn::Join, Fn::Sub and an Fn::If choosing a
-     * literal string fail validation with "found: String", while an Fn::If choosing a Ref to a
+     * or Number parameter, Ref AWS::Region, Fn::Select, Fn::Join, Fn::Sub, Fn::Base64 and an Fn::If
+     * choosing a literal string fail validation with "found: String", while an Fn::If choosing a Ref to a
      * CommaDelimitedList is a list. A nested stack's own parameter types decide for its resources.
      */
     @Test
     void aListPropertyThatYieldsAStringFailsTheCreate() {
         for (String architectures : List.of("{\"Ref\": \"Str\"}", "{\"Ref\": \"Num\"}", "{\"Ref\": \"AWS::Region\"}",
                 "{\"Fn::Select\": [0, {\"Ref\": \"Csv\"}]}", "{\"Fn::Join\": [\",\", {\"Ref\": \"Csv\"}]}",
-                "{\"Fn::Sub\": \"x86_64\"}", "{\"Fn::If\": [\"Yes\", \"x86_64\", {\"Ref\": \"AWS::NoValue\"}]}")) {
+                "{\"Fn::Sub\": \"x86_64\"}", "{\"Fn::Base64\": \"x86_64\"}",
+                "{\"Fn::If\": [\"Yes\", \"x86_64\", {\"Ref\": \"AWS::NoValue\"}]}")) {
             String stack = stackName("yields-string");
             submit("CreateStack", stack, template(LIST_SECTIONS, ",\"Architectures\": " + architectures));
             assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status(), architectures);
