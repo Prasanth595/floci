@@ -37,11 +37,9 @@ class ServiceQuotasTest {
                     .serviceCode("ec2").quotaCode(STANDARD_CODE)).quota();
             assertStandardMetadata(quota);
             assertThat(quota.value()).isNotNull().isGreaterThanOrEqualTo(0.0);
-            // Controlled launchers may supply an expectation independently of the emulator environment.
-            String expectedValue = System.getenv("FLOCI_TEST_EXPECTED_STANDARD_ON_DEMAND_VCPUS");
-            if (expectedValue != null) {
-                assertThat(quota.value()).isEqualTo(Double.parseDouble(expectedValue));
-            }
+            String expectedValue = System.getenv().getOrDefault(
+                    "FLOCI_TEST_EXPECTED_STANDARD_ON_DEMAND_VCPUS", "5");
+            assertThat(quota.value()).isEqualTo(Double.parseDouble(expectedValue));
             List<List<ServiceQuota>> pages = client.listServiceQuotasPaginator(request -> request
                     .serviceCode("ec2").maxResults(1)).stream().map(page -> page.quotas()).toList();
             assertCatalogPages(pages, quota);

@@ -18,7 +18,8 @@ EC2's `L-1216C47A` ("Running On-Demand Standard (A, C, D, H, I, M, R, T, Z)
 instances") reports a configurable applied value through `GetServiceQuota` and
 `ListServiceQuotas`. Set `FLOCI_SERVICES_SERVICEQUOTAS_STANDARD_ON_DEMAND_VCPUS` to
 change that value for all local accounts and regions. Use a nonnegative integer;
-negative values are rejected. It defaults to 5. The AWS
+negative values prevent Floci from starting, even when Service Quotas is disabled.
+It defaults to 5. The AWS
 default read actions always return 5. This setting does not enforce a vCPU
 admission limit on EC2.
 

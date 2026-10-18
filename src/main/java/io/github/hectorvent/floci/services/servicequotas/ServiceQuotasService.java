@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.ServiceQuotasStartupValidator;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
@@ -91,10 +92,7 @@ public class ServiceQuotasService {
     public ServiceQuotasService(StorageFactory storageFactory, ObjectMapper objectMapper, EmulatorConfig config) {
         this.objectMapper = objectMapper;
         this.standardOnDemandVcpus = config.services().servicequotas().standardOnDemandVcpus();
-        if (standardOnDemandVcpus < 0) {
-            throw new IllegalArgumentException(
-                    "floci.services.servicequotas.standard-on-demand-vcpus must be nonnegative");
-        }
+        ServiceQuotasStartupValidator.validateStandardOnDemandVcpus(standardOnDemandVcpus);
         this.requestedQuotaStore = storageFactory.create("servicequotas",
                 "servicequotas-requested-changes.json",
                 new TypeReference<Map<String, ObjectNode>>() {});
