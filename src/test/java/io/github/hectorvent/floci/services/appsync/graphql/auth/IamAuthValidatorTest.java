@@ -14,7 +14,9 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -48,6 +50,7 @@ class IamAuthValidatorTest {
     private static final String HOST = "appsync.us-east-1.amazonaws.com";
     private static final String REGION = "us-east-1";
     private static final String BODY = "{ hello }";
+    private static final Instant NOW = Instant.parse("2026-10-17T22:16:18Z");
 
     @Mock
     IamService iamService;
@@ -58,7 +61,8 @@ class IamAuthValidatorTest {
     void setUp() {
         validator = new IamAuthValidator(
                 iamService,
-                new IamPolicyEvaluator(new ObjectMapper()));
+                new IamPolicyEvaluator(new ObjectMapper()),
+                Clock.fixed(NOW, ZoneOffset.UTC));
         lenient().when(iamService.findSecretKey("AKIAGOOD")).thenReturn(Optional.of("good-secret"));
         lenient().when(iamService.findSecretKey("AKIDDENY")).thenReturn(Optional.of("deny-secret"));
     }
@@ -78,7 +82,7 @@ class IamAuthValidatorTest {
         when(iamService.resolveCallerArn("AKIAGOOD"))
                 .thenReturn(Optional.of("arn:aws:iam::000000000000:user/alice"));
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, NOW);
 
         Map<String, Object> identity = validator.validateRequest(
                 authorization(signed), "api-1", infoWith(signed));
@@ -93,7 +97,7 @@ class IamAuthValidatorTest {
     void knownRequestDenyThrows401() throws Exception {
         when(iamService.resolveCallerContext("AKIDDENY")).thenReturn(CallerContext.of(List.of(DENY)));
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, "AKIDDENY", "deny-secret", REGION, Instant.now());
+                "api-1", HOST, BODY, "AKIDDENY", "deny-secret", REGION, NOW);
 
         AppSyncTransportException ex = assertThrows(AppSyncTransportException.class,
                 () -> validator.validateRequest(authorization(signed), "api-1", infoWith(signed)));
@@ -105,7 +109,7 @@ class IamAuthValidatorTest {
     @Test
     void knownKeyWithBadSignatureIsABadRequestNamingTheCanonicalRequest() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, "AKIAGOOD", "wrong-secret", REGION, Instant.now());
+                "api-1", HOST, BODY, "AKIAGOOD", "wrong-secret", REGION, NOW);
 
         AppSyncTransportException ex = assertRejected(signed, 400, "BadRequestException");
         assertTrue(ex.getMessage().startsWith("The request signature we calculated does not match the signature you"
@@ -120,7 +124,7 @@ class IamAuthValidatorTest {
     @Test
     void tamperedBodyAfterSigningIsABadRequest() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, NOW);
         AuthRequestInfo tampered = new AuthRequestInfo("{ hello }", null, Map.of(), List.of("10.0.0.1"),
                 "req-1", "000000000000", "us-east-1", signed, "{ hello, tampered }");
 
@@ -158,7 +162,7 @@ class IamAuthValidatorTest {
     @Test
     void theDateMustBeInTheBasicFormatAndTheCredentialHaveFiveParts() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, NOW);
         Map<String, String> dated = new LinkedHashMap<>(signed);
         dated.remove("X-Amz-Date");
         dated.put("Date", "Sat, 17 Oct 2026 22:15:13 GMT");
@@ -175,16 +179,16 @@ class IamAuthValidatorTest {
     @Test
     void aSignatureFromTheFutureIsNotYetCurrent() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now().plusSeconds(600));
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, NOW.plusSeconds(600));
 
-        assertTrue(assertRejected(signed, 400, "BadRequestException").getMessage()
-                .startsWith("Signature not yet current: " + signed.get("X-Amz-Date") + " is still later than "));
+        assertEquals("Signature not yet current: 20261017T222618Z is still later than 20261017T222118Z"
+                + " (20261017T221618Z + 5 min.)", assertRejected(signed, 400, "BadRequestException").getMessage());
     }
 
     @Test
     void theHostMustBeSignedBeforeTheScopeIsChecked() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, NOW);
         Map<String, String> unsignedHost = withCredential(signed,
                 credential(signed).replace("/appsync/", "/execute-api/"));
         unsignedHost.put("Authorization", unsignedHost.get("Authorization").replace("host;x-amz-date", "x-amz-date"));
@@ -196,7 +200,7 @@ class IamAuthValidatorTest {
     @Test
     void everyScopeFaultIsNamedAtOnce() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, NOW);
         String[] scope = credential(signed).split("/");
         String faulty = String.join("/", scope[0], "20200101", scope[2], "execute-api", "aws5_request");
 
@@ -209,7 +213,7 @@ class IamAuthValidatorTest {
     @Test
     void aSignedHeaderMustBeInTheRequestBeforeTheHostOrTheCredentialIsChecked() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, NOW);
         Map<String, String> missing = withCredential(signed, "AKIAGOOD/x/y");
         missing.put("Authorization", missing.get("Authorization").replace("host;x-amz-date", "x-amz-date;X-Extra"));
 
@@ -220,7 +224,7 @@ class IamAuthValidatorTest {
     @Test
     void theHostIsCheckedBeforeTheCredentialParts() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, NOW);
         Map<String, String> unsignedHost = withCredential(signed, "AKIAGOOD/x/y");
         unsignedHost.put("Authorization", unsignedHost.get("Authorization").replace("host;x-amz-date", "x-amz-date"));
 
@@ -258,7 +262,7 @@ class IamAuthValidatorTest {
     @Test
     void unknownAccessKeyNeverResolvesToRoot() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, "AKIAUNKNOWN", "whatever-secret", REGION, Instant.now());
+                "api-1", HOST, BODY, "AKIAUNKNOWN", "whatever-secret", REGION, NOW);
 
         assertRefused(signed, "The security token included in the request is invalid.");
     }
@@ -267,16 +271,16 @@ class IamAuthValidatorTest {
     void expiredSignatureIsRejected() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
                 "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION,
-                Instant.now().minusSeconds(3600));
+                NOW.minusSeconds(3600));
 
-        assertTrue(assertRejected(signed, 400, "BadRequestException").getMessage()
-                .startsWith("Signature expired: " + signed.get("X-Amz-Date") + " is now earlier than "));
+        assertEquals("Signature expired: 20261017T211618Z is now earlier than 20261017T221118Z"
+                + " (20261017T221618Z - 5 min.)", assertRejected(signed, 400, "BadRequestException").getMessage());
     }
 
     @Test
     void legacyTestKeyMustStillBeSigned() throws Exception {
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, "test", "test", REGION, Instant.now());
+                "api-1", HOST, BODY, "test", "test", REGION, NOW);
 
         Map<String, Object> identity = validator.validateRequest(
                 authorization(signed), "api-1", infoWith(signed));
@@ -322,7 +326,7 @@ class IamAuthValidatorTest {
     void temporaryCredentialSignedButNoSessionTokenIsRefused() throws Exception {
         when(iamService.findSecretKey("ASIANOTOKEN")).thenReturn(Optional.of("session-secret"));
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, "ASIANOTOKEN", "session-secret", REGION, Instant.now());
+                "api-1", HOST, BODY, "ASIANOTOKEN", "session-secret", REGION, NOW);
 
         assertRefused(signed, "The security token included in the request is invalid.");
     }
@@ -382,7 +386,7 @@ class IamAuthValidatorTest {
     private static Map<String, String> signedWithSessionToken(String accessKeyId, String secretKey, String token)
             throws Exception {
         Map<String, String> signed = new java.util.LinkedHashMap<>(AppSyncRequestSigner.signedHeaders(
-                "api-1", HOST, BODY, accessKeyId, secretKey, REGION, Instant.now()));
+                "api-1", HOST, BODY, accessKeyId, secretKey, REGION, NOW));
         signed.put("X-Amz-Security-Token", token);
         return signed;
     }

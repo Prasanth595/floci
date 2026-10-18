@@ -16,6 +16,7 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Clock;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -62,11 +63,17 @@ public class IamAuthValidator {
 
     private final IamService iamService;
     private final IamPolicyEvaluator iamPolicyEvaluator;
+    private final Clock clock;
 
     @Inject
     public IamAuthValidator(IamService iamService, IamPolicyEvaluator iamPolicyEvaluator) {
+        this(iamService, iamPolicyEvaluator, Clock.systemUTC());
+    }
+
+    IamAuthValidator(IamService iamService, IamPolicyEvaluator iamPolicyEvaluator, Clock clock) {
         this.iamService = iamService;
         this.iamPolicyEvaluator = iamPolicyEvaluator;
+        this.clock = clock;
     }
 
     public Map<String, Object> validateRequest(String authorization, String apiId, AuthRequestInfo info) {
@@ -218,8 +225,8 @@ public class IamAuthValidator {
         }
     }
 
-    private static void checkSigningTime(Instant signedAt) {
-        Instant now = Instant.now();
+    private void checkSigningTime(Instant signedAt) {
+        Instant now = clock.instant();
         Instant earliest = now.minusSeconds(SigV4SignedRequest.MAX_CLOCK_SKEW_SECONDS);
         Instant latest = now.plusSeconds(SigV4SignedRequest.MAX_CLOCK_SKEW_SECONDS);
         if (signedAt.isBefore(earliest)) {
