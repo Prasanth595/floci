@@ -17,14 +17,13 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -35,14 +34,13 @@ import static org.mockito.Mockito.when;
  * its maximum execution time. Once it has timed out it runs no further state, and the first
  * outcome published, the timeout or one the execution reached in time, is the one that stands.
  *
- * <p>Most cases run on a test clock that Wait states and slow integrations move forward, so they
- * take no real time. The two that need the synchronous caller's own wait to expire run on the real
- * clock with a 100 ms limit.
+ * <p>Every case runs on a test clock that Wait states and slow integrations move forward, so none
+ * takes real time. What the synchronous caller does once its own wait runs out is exercised by
+ * calling that step directly.
  */
 class AslExecutorSyncTimeoutTest {
 
     private static final Duration MAX_EXECUTION_TIME = Duration.ofSeconds(1);
-    private static final Duration SHORT_REAL_MAX_EXECUTION_TIME = Duration.ofMillis(100);
     private static final String FUNCTION_ARN = "arn:aws:lambda:us-east-1:000000000000:function:slow";
     private static final Set<String> TERMINAL_EVENTS =
             Set.of("ExecutionSucceeded", "ExecutionFailed", "ExecutionTimedOut", "ExecutionAborted");
@@ -62,11 +60,6 @@ class AslExecutorSyncTimeoutTest {
             .expressMaxExecutionTime(MAX_EXECUTION_TIME)
             .nanoTime(testNanos::get)
             .sleeper(testNanos::addAndGet)
-            .build();
-    private final AslExecutor realTimeExecutor = AslExecutorFixture.builder()
-            .lambdaExecutor(lambdaExecutor)
-            .functionStore(functionStore)
-            .expressMaxExecutionTime(SHORT_REAL_MAX_EXECUTION_TIME)
             .build();
     private final List<HistoryEvent> history = new CopyOnWriteArrayList<>();
 
@@ -158,44 +151,45 @@ class AslExecutorSyncTimeoutTest {
     }
 
     @Test
+    void callerTimeoutLeavesAnExecutionThatAlreadyEndedAsItWas() {
+        Execution execution = execution(stateMachine(WAIT_THEN_PASS));
+        execution.setStatus("SUCCEEDED");
+        AtomicInteger updates = new AtomicInteger();
+
+        executor.answerTimedOutUnlessEnded(execution, history, (updated, events) -> updates.incrementAndGet());
+
+        assertEquals("SUCCEEDED", execution.getStatus());
+        assertEquals(0, updates.get());
+    }
+
+    @Test
+    void callerTimeoutEndsAStillRunningExecutionTimedOut() {
+        Execution execution = execution(stateMachine(WAIT_THEN_PASS));
+        AtomicInteger updates = new AtomicInteger();
+
+        executor.answerTimedOutUnlessEnded(execution, history, (updated, events) -> updates.incrementAndGet());
+
+        assertEquals("TIMED_OUT", execution.getStatus());
+        assertNotNull(execution.getStopDate());
+        assertEquals(1, updates.get());
+    }
+
+    @Test
     void lateOutcomeAfterTheCallerWasAnsweredKeepsTheTimeout() {
-        CountDownLatch release = new CountDownLatch(1);
         lambdaAnswers(invocation -> {
-            awaitQuietly(release);
+            advance(Duration.ofSeconds(2));
             return new InvokeResult(200, null, bytes("{}"), null, "late-success");
         });
         StateMachine stateMachine = stateMachine(lambdaTask());
         Execution execution = execution(stateMachine);
 
-        realTimeExecutor.executeSync(stateMachine, execution, history, (updated, events) -> {
+        // The caller's wait ran out first; the worker's late outcome arrives after it.
+        executor.answerTimedOutUnlessEnded(execution, history, (updated, events) -> {
         });
-        assertEquals("TIMED_OUT", execution.getStatus());
-        release.countDown();
+        executor.executeSync(stateMachine, execution, history, (updated, events) -> {
+        });
 
-        awaitTerminalEvent();
         assertEndedTimedOut(execution);
-    }
-
-    @Test
-    void executionThatSucceededInTimeIsNotReportedTimedOut() {
-        StateMachine stateMachine = stateMachine("""
-                {"StartAt":"Done","States":{"Done":{"Type":"Pass","End":true}}}
-                """);
-        Execution execution = execution(stateMachine);
-        CountDownLatch release = new CountDownLatch(1);
-        AtomicBoolean first = new AtomicBoolean(true);
-
-        // The worker publishes SUCCEEDED at once, then is held in its update until past the limit.
-        realTimeExecutor.executeSync(stateMachine, execution, history, (updated, events) -> {
-            if (first.getAndSet(false)) {
-                awaitQuietly(release);
-            }
-        });
-        String reported = execution.getStatus();
-        release.countDown();
-
-        assertEquals("SUCCEEDED", reported);
-        assertEquals("ExecutionSucceeded", history.getLast().getType());
     }
 
     private void advance(Duration duration) {
@@ -219,14 +213,6 @@ class AslExecutorSyncTimeoutTest {
     private void assertEndedTimedOut(Execution execution) {
         assertEquals("TIMED_OUT", execution.getStatus());
         assertEquals("ExecutionTimedOut", history.getLast().getType());
-    }
-
-    private static void awaitQuietly(CountDownLatch latch) {
-        try {
-            latch.await(10, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
     }
 
     private static String lambdaTask() {

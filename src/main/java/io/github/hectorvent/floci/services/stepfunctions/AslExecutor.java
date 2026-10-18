@@ -512,19 +512,27 @@ public class AslExecutor {
                     () -> doExecute(sm, exec, history, onUpdate, maxExecutionDeadlineNanos)));
             f.get(maxExecutionDeadlineNanos - nanoTime.getAsLong(), TimeUnit.NANOSECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
-            // The worker ends itself at the same deadline. This answers the caller when it has not
-            // yet, and never replaces an outcome the worker already published.
-            synchronized (exec) {
-                if (hasEnded(exec)) {
-                    return;
-                }
-                exec.setStopDate(System.currentTimeMillis() / 1000.0);
-                exec.setStatus("TIMED_OUT");
-            }
-            onUpdate.accept(exec, history);
+            answerTimedOutUnlessEnded(exec, history, onUpdate);
         } catch (Exception e) {
             LOG.warnv("Sync execution wait failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
         }
+    }
+
+    /**
+     * Answers a synchronous caller whose wait ran out. The worker ends itself at the same deadline;
+     * this publishes TIMED_OUT when it has not yet, and never replaces an outcome the worker already
+     * published.
+     */
+    void answerTimedOutUnlessEnded(Execution exec, List<HistoryEvent> history,
+                                   BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+        synchronized (exec) {
+            if (hasEnded(exec)) {
+                return;
+            }
+            exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            exec.setStatus("TIMED_OUT");
+        }
+        onUpdate.accept(exec, history);
     }
 
     /**
