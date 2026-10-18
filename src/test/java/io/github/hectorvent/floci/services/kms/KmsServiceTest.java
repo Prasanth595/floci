@@ -4043,5 +4043,9 @@ class KmsServiceTest {
 
         String aliasArn = "arn:aws:kms:" + REGION + ":000000000000:alias/team:payments";
         assertEquals(key.getKeyId(), kmsService.describeKey(aliasArn, REGION).getKeyId());
+
+        // Another service's ARN naming the same alias is not a KMS alias ARN.
+        assertThrows(AwsException.class, () -> kmsService.describeKey(
+                "arn:aws:sns:" + REGION + ":000000000000:alias/team:payments", REGION));
     }
 }

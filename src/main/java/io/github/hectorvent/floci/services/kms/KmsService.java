@@ -2104,8 +2104,9 @@ public class KmsService implements ResourceProvider {
         String id = keyIdOrArn;
         // Alias arn
         if (id.contains(":alias/")) {
-            // The alias name follows the ARN's fifth ':' and may itself contain ':'.
-            String aliasName = AwsArnUtils.isArn(id) ? AwsArnUtils.parse(id).resource()
+            // A KMS alias ARN's name follows its fifth ':' and may itself contain ':'. Anything
+            // else carrying ":alias/" keeps the old reading and finds no alias of that name.
+            String aliasName = AwsArnUtils.isArnFor(id, "kms") ? AwsArnUtils.parse(id).resource()
                     : id.substring(id.lastIndexOf(":") + 1);
             String aliasKey = region + "::" + aliasName;
             id = aliasStore.get(aliasKey)

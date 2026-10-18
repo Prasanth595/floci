@@ -327,8 +327,9 @@ public class KinesisEventSourcePoller implements Resettable {
 
     /**
      * The stream name from a stream ARN ({@code .../stream/S}) or a stream-consumer ARN
-     * ({@code .../stream/S/consumer/C:123}): the segment right after {@code stream/}, as
-     * {@code KinesisJsonHandler} reads it.
+     * ({@code .../stream/S/consumer/C:123}): the segment right after {@code stream/}. Only a
+     * {@code /consumer/} suffix is dropped; any other suffix stays part of the name, so a
+     * malformed ARN names no stream rather than a real one.
      */
     static String streamNameFromArn(String arn) {
         int streamIdx = arn.indexOf(":stream/");
@@ -336,7 +337,7 @@ public class KinesisEventSourcePoller implements Resettable {
             return arn.substring(arn.lastIndexOf("/") + 1);
         }
         String after = arn.substring(streamIdx + ":stream/".length());
-        int slash = after.indexOf('/');
-        return slash >= 0 ? after.substring(0, slash) : after;
+        int consumer = after.indexOf("/consumer/");
+        return consumer >= 0 ? after.substring(0, consumer) : after;
     }
 }

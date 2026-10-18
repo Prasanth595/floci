@@ -476,5 +476,7 @@ class KinesisEventSourcePollerTest {
                 "arn:aws:kinesis:us-east-1:000000000000:stream/orders"));
         assertEquals("orders", KinesisEventSourcePoller.streamNameFromArn(
                 "arn:aws:kinesis:us-east-1:000000000000:stream/orders/consumer/reader:1700000000"));
+        assertEquals("orders/not-a-consumer", KinesisEventSourcePoller.streamNameFromArn(
+                "arn:aws:kinesis:us-east-1:000000000000:stream/orders/not-a-consumer"));
     }
 }
