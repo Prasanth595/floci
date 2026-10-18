@@ -3,12 +3,14 @@ package io.github.hectorvent.floci.services.kinesis;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -26,7 +28,11 @@ import static org.hamcrest.Matchers.equalTo;
 class KinesisListShardsTokenExpiryIntegrationTest {
 
     private static final String KINESIS_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final String STREAM_NAME = "kinesis-expiry-test";
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -38,14 +44,22 @@ class KinesisListShardsTokenExpiryIntegrationTest {
         given()
             .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
             .contentType(KINESIS_CONTENT_TYPE)
-            .body("{\"StreamName\": \"kinesis-expiry-test\", \"ShardCount\": 2}")
+            .body("{\"StreamName\": \"" + STREAM_NAME + "\", \"ShardCount\": 2}")
         .when()
             .post("/")
         .then()
             .statusCode(200);
+        cleanup.register(() -> given()
+            .header("X-Amz-Target", "Kinesis_20131202.DeleteStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + STREAM_NAME + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200));
 
         ObjectNode first = MAPPER.createObjectNode();
-        first.put("StreamName", "kinesis-expiry-test");
+        first.put("StreamName", STREAM_NAME);
         first.put("MaxResults", 1);
         Response firstPage = given()
             .header("X-Amz-Target", "Kinesis_20131202.ListShards")

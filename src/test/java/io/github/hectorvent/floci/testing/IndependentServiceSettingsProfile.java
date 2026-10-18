@@ -40,11 +40,11 @@ import java.util.Map;
  * Bedrock AgentCore data plane on an invocation, IAM's account alias actions, Kinesis ListShards,
  * Neptune cluster creation, Route53 VPC association and authorization, CloudFront origin fetches,
  * Cognito app client validation, and the Scheduler dispatcher. Each class is the only one here
- * that calls its service, so no override reaches another class, and neither does anything a class
- * leaves behind.
+ * that calls its service, so no override reaches another class. Each class also deletes what it
+ * creates, so a class that joins later finds nothing left behind.
  *
- * <p>A class joins only if no other class here calls its service. One that shares a service with
- * a class already here takes a profile of its own.
+ * <p>A class joins only if no other class here calls its service, and it deletes what it creates.
+ * One that shares a service with a class already here takes a profile of its own.
  */
 public class IndependentServiceSettingsProfile implements QuarkusTestProfile {
 

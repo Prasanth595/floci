@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.route53;
 
 import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.time.Duration;
 
@@ -25,6 +27,9 @@ import static org.hamcrest.Matchers.containsString;
 class Route53VpcAssociationTransientErrorIntegrationTest {
 
     private static final String XML = "application/xml";
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @Test
     void associationOverlapReturnsPriorRequestNotCompleteThenRetrySucceeds() {
@@ -92,7 +97,7 @@ class Route53VpcAssociationTransientErrorIntegrationTest {
                 .then();
     }
 
-    private static String createPrivateZone(String name, String callerReference, String vpcId) {
+    private String createPrivateZone(String name, String callerReference, String vpcId) {
         String create = """
                 <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
                   <Name>%s</Name>
@@ -105,7 +110,9 @@ class Route53VpcAssociationTransientErrorIntegrationTest {
                 .post("/2013-04-01/hostedzone")
                 .then().statusCode(201)
                 .extract().header("Location");
-        return location.substring(location.lastIndexOf('/') + 1);
+        String zoneId = location.substring(location.lastIndexOf('/') + 1);
+        cleanup.register(() -> given().delete("/2013-04-01/hostedzone/" + zoneId).then().statusCode(200));
+        return zoneId;
     }
 
     private static String vpcRequest(String root, String vpcId) {

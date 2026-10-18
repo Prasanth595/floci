@@ -2,11 +2,13 @@ package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.jwtPayload;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
@@ -26,6 +28,9 @@ class CognitoTokenValidityLimitsOffIntegrationTest {
 
     private static final String PASSWORD = "Perm1234!";
 
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
@@ -36,6 +41,9 @@ class CognitoTokenValidityLimitsOffIntegrationTest {
         String poolId = cognitoJson("CreateUserPool", """
                 {"PoolName": "ShortTokensPool"}
                 """).path("UserPool").path("Id").asText();
+        cleanup.register(() -> cognitoAction("DeleteUserPool", """
+                {"UserPoolId": "%s"}
+                """.formatted(poolId)).then().statusCode(200));
         JsonNode client = cognitoJson("CreateUserPoolClient", """
                 {"UserPoolId": "%s", "ClientName": "short-tokens",
                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],

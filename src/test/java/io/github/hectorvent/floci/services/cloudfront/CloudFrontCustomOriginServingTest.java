@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.OriginRequestPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
 import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
@@ -21,6 +22,7 @@ import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -76,6 +78,9 @@ class CloudFrontCustomOriginServingTest {
     @Inject
     CloudFrontService cloudFrontService;
 
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
     private HttpServer originServer;
 
     @AfterEach
@@ -114,7 +119,7 @@ class CloudFrontCustomOriginServingTest {
 
         Distribution distribution = new Distribution();
         distribution.setConfig(config);
-        Distribution created = cloudFrontService.createDistribution(distribution, Map.of());
+        Distribution created = createDistribution(distribution);
 
         given()
             .urlEncodingEnabled(false)
@@ -187,7 +192,7 @@ class CloudFrontCustomOriginServingTest {
         ResponseHeadersPolicy policy = new ResponseHeadersPolicy();
         policy.setName("custom-origin-policy-" + System.nanoTime());
         policy.setConfig(policyConfig);
-        ResponseHeadersPolicy createdPolicy = cloudFrontService.createResponseHeadersPolicy(policy);
+        ResponseHeadersPolicy createdPolicy = createResponseHeadersPolicy(policy);
 
         Origin customOrigin = new Origin();
         customOrigin.setId("custom-origin");
@@ -202,7 +207,7 @@ class CloudFrontCustomOriginServingTest {
         config.setDefaultCacheBehavior(behavior);
         Distribution distribution = new Distribution();
         distribution.setConfig(config);
-        Distribution created = cloudFrontService.createDistribution(distribution, Map.of());
+        Distribution created = createDistribution(distribution);
 
         Response response = given()
                 .header("Host", created.getDomainName())
@@ -237,7 +242,7 @@ class CloudFrontCustomOriginServingTest {
         ResponseHeadersPolicy removeOnly = new ResponseHeadersPolicy();
         removeOnly.setName("remove-server-date-" + System.nanoTime());
         removeOnly.setConfig(Map.of("RemoveHeadersConfig", List.of("Server", "Date")));
-        removeOnly = cloudFrontService.createResponseHeadersPolicy(removeOnly);
+        removeOnly = createResponseHeadersPolicy(removeOnly);
         DefaultCacheBehavior removeOnlyBehavior = defaultBehavior("custom-origin");
         removeOnlyBehavior.setResponseHeadersPolicyId(removeOnly.getId());
         DistributionConfig removeOnlyConfig = new DistributionConfig();
@@ -246,8 +251,7 @@ class CloudFrontCustomOriginServingTest {
         removeOnlyConfig.setDefaultCacheBehavior(removeOnlyBehavior);
         Distribution removeOnlyDistribution = new Distribution();
         removeOnlyDistribution.setConfig(removeOnlyConfig);
-        Distribution removeOnlyCreated =
-                cloudFrontService.createDistribution(removeOnlyDistribution, Map.of());
+        Distribution removeOnlyCreated = createDistribution(removeOnlyDistribution);
 
         Response removeOnlyResponse = given()
                 .header("Host", removeOnlyCreated.getDomainName())
@@ -264,8 +268,7 @@ class CloudFrontCustomOriginServingTest {
         AtomicReference<ReceivedRequest> received = new AtomicReference<>();
         AtomicInteger hits = new AtomicInteger();
         startRecordingOrigin(received, hits);
-        Distribution created = cloudFrontService.createDistribution(
-                customOriginDistribution(allMethodsBehavior()), Map.of());
+        Distribution created = createDistribution(customOriginDistribution(allMethodsBehavior()));
 
         String json = "{\"name\":\"widget\",\"note\":\"café\"}";
         given()
@@ -341,8 +344,7 @@ class CloudFrontCustomOriginServingTest {
     void streamsALargeOriginResponseWithItsLength() throws Exception {
         byte[] video = randomBytes(3 * 1024 * 1024 + 1);
         startServingOrigin(video, true);
-        Distribution created = cloudFrontService.createDistribution(
-                customOriginDistribution(allMethodsBehavior()), Map.of());
+        Distribution created = createDistribution(customOriginDistribution(allMethodsBehavior()));
 
         Response response = given().header("Host", created.getDomainName()).when().get("/video.bin");
 
@@ -355,8 +357,7 @@ class CloudFrontCustomOriginServingTest {
     void passesAChunkedOriginResponseThroughChunked() throws Exception {
         byte[] video = randomBytes(3 * 1024 * 1024 + 1);
         startServingOrigin(video, false);
-        Distribution created = cloudFrontService.createDistribution(
-                customOriginDistribution(allMethodsBehavior()), Map.of());
+        Distribution created = createDistribution(customOriginDistribution(allMethodsBehavior()));
 
         Response response = given().header("Host", created.getDomainName()).when().get("/video.bin");
 
@@ -369,8 +370,7 @@ class CloudFrontCustomOriginServingTest {
     void streamsALargeViewerBodyToTheOriginWithItsLength() throws Exception {
         AtomicReference<ReceivedRequest> received = new AtomicReference<>();
         startRecordingOrigin(received, new AtomicInteger());
-        Distribution created = cloudFrontService.createDistribution(
-                customOriginDistribution(allMethodsBehavior()), Map.of());
+        Distribution created = createDistribution(customOriginDistribution(allMethodsBehavior()));
         byte[] upload = randomBytes(3 * 1024 * 1024 + 1);
 
         given()
@@ -390,8 +390,7 @@ class CloudFrontCustomOriginServingTest {
     void forwardsAChunkedViewerBodyChunked() throws Exception {
         AtomicReference<ReceivedRequest> received = new AtomicReference<>();
         startRecordingOrigin(received, new AtomicInteger());
-        Distribution created = cloudFrontService.createDistribution(
-                customOriginDistribution(allMethodsBehavior()), Map.of());
+        Distribution created = createDistribution(customOriginDistribution(allMethodsBehavior()));
         byte[] upload = randomBytes(200_001);
 
         int status = assertTimeoutPreemptively(Duration.ofSeconds(60),
@@ -431,8 +430,7 @@ class CloudFrontCustomOriginServingTest {
             exchange.close();
         });
         originServer.start();
-        Distribution created = cloudFrontService.createDistribution(
-                customOriginDistribution(allMethodsBehavior()), Map.of());
+        Distribution created = createDistribution(customOriginDistribution(allMethodsBehavior()));
 
         for (int i = 0; i < CloudFrontOriginHttpClient.MAX_CONNECTIONS + 10; i++) {
             disconnectViewerBeforeOriginHeaders(created.getDomainName(), i, pendingResponses);
@@ -464,7 +462,7 @@ class CloudFrontCustomOriginServingTest {
                 "ErrorCode", "404", "ResponseCode", "200", "ResponsePagePath", "/errors/404.html"));
         Distribution distribution = customOriginDistribution(allMethodsBehavior());
         distribution.getConfig().setCustomErrorResponses(List.of(errorPage));
-        Distribution created = cloudFrontService.createDistribution(distribution, Map.of());
+        Distribution created = createDistribution(distribution);
 
         assertTimeoutPreemptively(Duration.ofSeconds(60), () -> {
             for (int i = 0; i < CloudFrontOriginHttpClient.MAX_CONNECTIONS + 10; i++) {
@@ -482,8 +480,8 @@ class CloudFrontCustomOriginServingTest {
         AtomicReference<ReceivedRequest> received = new AtomicReference<>();
         startRangeOrigin(video, received);
         // CachingDisabled forwards no viewer headers, but CloudFront still forwards a range GET.
-        Distribution created = cloudFrontService.createDistribution(
-                customOriginDistribution(policyBehavior(CACHING_DISABLED, null)), Map.of());
+        Distribution created = createDistribution(
+                customOriginDistribution(policyBehavior(CACHING_DISABLED, null)));
 
         Response response = given().header("Host", created.getDomainName())
                 .header("Range", "bytes=100-199").header("If-Range", "\"v1\"")
@@ -502,8 +500,7 @@ class CloudFrontCustomOriginServingTest {
         AtomicReference<ReceivedRequest> received = new AtomicReference<>();
         AtomicInteger hits = new AtomicInteger();
         startRecordingOrigin(received, hits);
-        Distribution created = cloudFrontService.createDistribution(
-                customOriginDistribution(allMethodsBehavior()), Map.of());
+        Distribution created = createDistribution(customOriginDistribution(allMethodsBehavior()));
 
         for (String method : List.of("POST", "PUT", "PATCH", "DELETE")) {
             given()
@@ -551,7 +548,7 @@ class CloudFrontCustomOriginServingTest {
                 "ErrorCode", "500", "ResponseCode", "503", "ResponsePagePath", "/errors/500.html"));
         Distribution distribution = customOriginDistribution(allMethodsBehavior());
         distribution.getConfig().setCustomErrorResponses(List.of(errorPage));
-        Distribution created = cloudFrontService.createDistribution(distribution, Map.of());
+        Distribution created = createDistribution(distribution);
 
         given()
             .header("Host", created.getDomainName())
@@ -583,7 +580,7 @@ class CloudFrontCustomOriginServingTest {
         config.setCacheBehaviors(List.of(readOnly));
         Distribution distribution = new Distribution();
         distribution.setConfig(config);
-        Distribution created = cloudFrontService.createDistribution(distribution, Map.of());
+        Distribution created = createDistribution(distribution);
 
         for (String method : List.of("POST", "PUT", "PATCH", "DELETE")) {
             given()
@@ -598,8 +595,8 @@ class CloudFrontCustomOriginServingTest {
         assertEquals(0, hits.get());
 
         // A behavior without AllowedMethods keeps CloudFront's GET/HEAD minimum.
-        Distribution defaultsOnly = cloudFrontService.createDistribution(
-                customOriginDistribution(defaultBehavior("custom-origin")), Map.of());
+        Distribution defaultsOnly = createDistribution(
+                customOriginDistribution(defaultBehavior("custom-origin")));
         given()
             .header("Host", defaultsOnly.getDomainName())
             .body("ignored")
@@ -627,19 +624,18 @@ class CloudFrontCustomOriginServingTest {
         publicKey.setEncodedKey("-----BEGIN PUBLIC KEY-----\n"
                 + Base64.getMimeEncoder().encodeToString(keyPair.getPublic().getEncoded())
                 + "\n-----END PUBLIC KEY-----");
-        publicKey = cloudFrontService.createPublicKey(publicKey);
+        publicKey = createPublicKey(publicKey);
         KeyGroup keyGroup = new KeyGroup();
         keyGroup.setName("kg-" + suffix);
         keyGroup.setItems(List.of(publicKey.getId()));
-        keyGroup = cloudFrontService.createKeyGroup(keyGroup);
+        keyGroup = createKeyGroup(keyGroup);
 
         DefaultCacheBehavior behavior = allMethodsBehavior();
         behavior.setTrustedKeyGroups(List.of(keyGroup.getId()));
         behavior.setCachePolicyId(CACHING_DISABLED);
         behavior.setOriginRequestPolicyId(
                 CloudFrontService.MANAGED_ALL_VIEWER_ORIGIN_REQUEST_POLICY_ID);
-        Distribution created = cloudFrontService.createDistribution(
-                customOriginDistribution(behavior), Map.of());
+        Distribution created = createDistribution(customOriginDistribution(behavior));
 
         given()
             .header("Host", created.getDomainName())
@@ -685,8 +681,7 @@ class CloudFrontCustomOriginServingTest {
         startRecordingOrigin(received, hits);
         DefaultCacheBehavior behavior = policyBehavior(CACHING_DISABLED,
                 CloudFrontService.MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID);
-        Distribution created = cloudFrontService.createDistribution(
-                customOriginDistribution(behavior, originVerifyHeader()), Map.of());
+        Distribution created = createDistribution(customOriginDistribution(behavior, originVerifyHeader()));
 
         Response response = given()
             .header("Host", created.getDomainName())
@@ -725,8 +720,7 @@ class CloudFrontCustomOriginServingTest {
         AtomicInteger hits = new AtomicInteger();
         startRecordingOrigin(received, hits);
         DefaultCacheBehavior behavior = policyBehavior(CACHING_DISABLED, null);
-        Distribution created = cloudFrontService.createDistribution(
-                customOriginDistribution(behavior, originVerifyHeader()), Map.of());
+        Distribution created = createDistribution(customOriginDistribution(behavior, originVerifyHeader()));
 
         given()
             .header("Host", created.getDomainName())
@@ -785,7 +779,7 @@ class CloudFrontCustomOriginServingTest {
                   </ParametersInCacheKeyAndForwardedToOrigin>
                 </CachePolicyConfig>
                 """));
-        cachePolicy = cloudFrontService.createCachePolicy(cachePolicy);
+        cachePolicy = createCachePolicy(cachePolicy);
         OriginRequestPolicy originRequestPolicy = new OriginRequestPolicy();
         originRequestPolicy.setName("forwarding-origin-policy-" + System.nanoTime());
         originRequestPolicy.setConfig(CloudFrontPolicyConfigCodec.parseOriginRequestPolicy("""
@@ -801,9 +795,9 @@ class CloudFrontCustomOriginServingTest {
                   </QueryStringsConfig>
                 </OriginRequestPolicyConfig>
                 """));
-        originRequestPolicy = cloudFrontService.createOriginRequestPolicy(originRequestPolicy);
-        Distribution created = cloudFrontService.createDistribution(customOriginDistribution(
-                policyBehavior(cachePolicy.getId(), originRequestPolicy.getId())), Map.of());
+        originRequestPolicy = createOriginRequestPolicy(originRequestPolicy);
+        Distribution created = createDistribution(customOriginDistribution(
+                policyBehavior(cachePolicy.getId(), originRequestPolicy.getId())));
 
         given()
             .urlEncodingEnabled(false)
@@ -837,8 +831,7 @@ class CloudFrontCustomOriginServingTest {
         forwardedValues.put("Headers", List.of("Authorization"));
         DefaultCacheBehavior behavior = defaultBehavior("custom-origin");
         behavior.setForwardedValues(forwardedValues);
-        Distribution created = cloudFrontService.createDistribution(
-                customOriginDistribution(behavior), Map.of());
+        Distribution created = createDistribution(customOriginDistribution(behavior));
 
         given()
             .header("Host", created.getDomainName())
@@ -860,6 +853,42 @@ class CloudFrontCustomOriginServingTest {
         assertNull(request.header("Accept-Language"));
         assertEquals("Amazon CloudFront", request.header("User-Agent"));
         assertEquals("127.0.0.1:" + originServer.getAddress().getPort(), request.header("Host"));
+    }
+
+    private Distribution createDistribution(Distribution distribution) {
+        Distribution created = cloudFrontService.createDistribution(distribution, Map.of());
+        cleanup.register(() -> cloudFrontService.removeDistribution(created.getId()));
+        return created;
+    }
+
+    private ResponseHeadersPolicy createResponseHeadersPolicy(ResponseHeadersPolicy policy) {
+        ResponseHeadersPolicy created = cloudFrontService.createResponseHeadersPolicy(policy);
+        cleanup.register(() -> cloudFrontService.deleteResponseHeadersPolicy(created.getId(), created.getEtag()));
+        return created;
+    }
+
+    private CachePolicy createCachePolicy(CachePolicy policy) {
+        CachePolicy created = cloudFrontService.createCachePolicy(policy);
+        cleanup.register(() -> cloudFrontService.deleteCachePolicy(created.getId(), created.getEtag()));
+        return created;
+    }
+
+    private OriginRequestPolicy createOriginRequestPolicy(OriginRequestPolicy policy) {
+        OriginRequestPolicy created = cloudFrontService.createOriginRequestPolicy(policy);
+        cleanup.register(() -> cloudFrontService.deleteOriginRequestPolicy(created.getId(), created.getEtag()));
+        return created;
+    }
+
+    private PublicKey createPublicKey(PublicKey key) {
+        PublicKey created = cloudFrontService.createPublicKey(key);
+        cleanup.register(() -> cloudFrontService.deletePublicKey(created.getId(), created.getEtag()));
+        return created;
+    }
+
+    private KeyGroup createKeyGroup(KeyGroup group) {
+        KeyGroup created = cloudFrontService.createKeyGroup(group);
+        cleanup.register(() -> cloudFrontService.deleteKeyGroup(created.getId(), created.getEtag()));
+        return created;
     }
 
     private static void disconnectViewerBeforeOriginHeaders(String host, int requestIndex,
