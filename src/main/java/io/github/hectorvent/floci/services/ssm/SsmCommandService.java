@@ -166,7 +166,7 @@ public class SsmCommandService implements Resettable {
         Map<String, List<String>> parameters = publicShell
                 ? parseShellParameters(request.path("Parameters")) : parseParameters(request.path("Parameters"));
         String comment = request.path("Comment").asText("");
-        int timeoutSeconds = request.path("TimeoutSeconds").asInt(3600);
+        int timeoutSeconds = SsmJsonDeserialization.optionalInteger(request.path("TimeoutSeconds"), 3600);
         validateTimeoutSeconds(timeoutSeconds);
         int executionTimeoutSeconds = publicShell ? shellExecutionTimeout(parameters) : timeoutSeconds;
         int documentTimeoutDefault = publicShell ? DEFAULT_SHELL_EXECUTION_TIMEOUT_SECONDS : timeoutSeconds;

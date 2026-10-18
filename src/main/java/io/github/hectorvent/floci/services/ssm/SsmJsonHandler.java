@@ -38,6 +38,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
+import static io.github.hectorvent.floci.services.ssm.SsmJsonDeserialization.serializationException;
+
 @ApplicationScoped
 public class SsmJsonHandler {
 
@@ -1066,16 +1068,6 @@ public class SsmJsonHandler {
             throw serializationException(node, "Long");
         }
         return node.decimalValue().max(LONG_MIN).min(LONG_MAX).longValue();
-    }
-
-    private static AwsException serializationException(JsonNode node, String targetType) {
-        String token = switch (node.getNodeType()) {
-            case STRING -> "STRING_VALUE";
-            case NUMBER -> "NUMBER_VALUE";
-            case BOOLEAN -> node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE";
-            default -> node.getNodeType().name();
-        };
-        return new AwsException("SerializationException", token + " can not be converted to a " + targetType, 400);
     }
 
     private Response handleLabelParameterVersion(JsonNode request, String region) {
