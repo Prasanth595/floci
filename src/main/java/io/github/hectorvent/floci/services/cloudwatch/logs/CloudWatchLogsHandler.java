@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.AccountPolicy;
@@ -393,11 +394,11 @@ public class CloudWatchLogsHandler {
         }
 
         List<String> logGroupNames = new ArrayList<>();
-        request.path("logGroupNames").forEach(n -> logGroupNames.add(extractLogGroupNameFromArn(n.asText())));
+        request.path("logGroupNames").forEach(n -> logGroupNames.add(resolveQueryLogGroupName(n.asText())));
         if (request.has("logGroupName")) {
-            logGroupNames.add(extractLogGroupNameFromArn(request.path("logGroupName").asText()));
+            logGroupNames.add(resolveQueryLogGroupName(request.path("logGroupName").asText()));
         }
-        request.path("logGroupIdentifiers").forEach(n -> logGroupNames.add(extractLogGroupNameFromArn(n.asText())));
+        request.path("logGroupIdentifiers").forEach(n -> logGroupNames.add(resolveQueryLogGroupName(n.asText())));
 
         long startTime = request.path("startTime").asLong();
         long endTime = request.path("endTime").asLong();
@@ -408,6 +409,19 @@ public class CloudWatchLogsHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("queryId", queryId);
         return Response.ok(response).build();
+    }
+
+    private static String resolveQueryLogGroupName(String identifier) {
+        // Grafana strips only the '*' from DescribeLogGroups' ARN. Keep this tolerance query-only.
+        String resource = AwsArnUtils.resourceIfArnFor(identifier, "logs").orElse("");
+        String prefix = "log-group:";
+        if (resource.startsWith(prefix) && resource.length() > prefix.length() && resource.endsWith(":")) {
+            String name = resource.substring(prefix.length(), resource.length() - 1);
+            if (name.length() <= 512 && LOG_GROUP_NAME.matcher(name).matches()) {
+                return name;
+            }
+        }
+        return extractLogGroupNameFromArn(identifier);
     }
 
     /**
