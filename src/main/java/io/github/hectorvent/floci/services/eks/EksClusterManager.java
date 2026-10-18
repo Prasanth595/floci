@@ -62,7 +62,6 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.File;
@@ -1592,10 +1591,7 @@ public class EksClusterManager
         try {
             DockerClient dockerClient = lifecycleManager.getDockerClient();
             if (dockerClient != null) {
-                dockerClient.copyArchiveToContainerCmd(containerId)
-                        .withHostResource(localFile)
-                        .withRemotePath(AUDIT_POLICY_DIR)
-                        .exec();
+                RetryingTarCopier.copyHostResource(dockerClient, containerId, AUDIT_POLICY_DIR, localFile);
                 LOG.debugv("Injected audit policy file into k3s container {0} for cluster {1}",
                         containerId, clusterName);
             }
@@ -1919,16 +1915,10 @@ public class EksClusterManager
      */
     void copySigningKeysIntoContainer(String containerId, SigningKeyFiles keyFiles, String clusterName) {
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withHostResource(keyFiles.signingKeyPath().toString())
-                    .withRemotePath(WEBHOOK_CONFIG_DIR)
-                    .exec();
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withHostResource(keyFiles.publicKeyPath().toString())
-                    .withRemotePath(WEBHOOK_CONFIG_DIR)
-                    .exec();
+            RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
+                    WEBHOOK_CONFIG_DIR, keyFiles.signingKeyPath().toString());
+            RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
+                    WEBHOOK_CONFIG_DIR, keyFiles.publicKeyPath().toString());
             LOG.debugv("Injected IRSA OIDC signing keypair into k3s container {0} for cluster {1}",
                     containerId, clusterName);
         } catch (Exception e) {
@@ -2001,11 +1991,9 @@ public class EksClusterManager
      */
     void linkContainerdCertsDir(String containerId, String clusterName) {
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(buildContainerdCertsLinkTar()))
-                    .withRemotePath("/")
-                    .exec();
+            byte[] tar = buildContainerdCertsLinkTar();
+            RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId, "/",
+                    "containerd-certs-link", out -> out.write(tar));
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0}: could not link containerd certs.d directory: {1}",
                     clusterName, e.getMessage());
@@ -2071,12 +2059,9 @@ public class EksClusterManager
         writeLocalCopy(Paths.get(config.services().eks().dataPath(), "webhook", clusterName,
                 POD_IDENTITY_MANIFEST_FILE), manifest, clusterName);
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(
-                            tarSingleFile(POD_IDENTITY_MANIFEST_TAR_ENTRY, manifest)))
-                    .withRemotePath(K3S_DATA_DIR)
-                    .exec();
+            byte[] tar = tarSingleFile(POD_IDENTITY_MANIFEST_TAR_ENTRY, manifest);
+            RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId, K3S_DATA_DIR,
+                    POD_IDENTITY_MANIFEST_FILE, out -> out.write(tar));
             LOG.infov("Registered the EKS Pod Identity mutating webhook ({0}) for cluster {1}", url, clusterName);
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0} gets no pod identity injection: could not copy {1} into the k3s "

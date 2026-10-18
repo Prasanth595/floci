@@ -62,6 +62,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -1330,15 +1332,23 @@ class EksClusterManagerTest {
 
         @Test
         void copiesArchiveWithTargetDirectoryAndSymlinkAtContainerRoot() throws Exception {
+            ArgumentCaptor<InputStream> archive = ArgumentCaptor.forClass(InputStream.class);
+            when(copyCmd.withTarInputStream(archive.capture())).thenReturn(copyCmd);
+            ByteArrayOutputStream archiveBytes = new ByteArrayOutputStream();
+            when(copyCmd.exec()).thenAnswer(invocation -> {
+                archive.getValue().transferTo(archiveBytes);
+                return null;
+            });
+
             manager.linkContainerdCertsDir("container-1", "demo");
 
             verify(dockerClient).copyArchiveToContainerCmd("container-1");
             verify(copyCmd).withRemotePath("/");
             verify(copyCmd).exec();
 
-            ArgumentCaptor<InputStream> archive = ArgumentCaptor.forClass(InputStream.class);
-            verify(copyCmd).withTarInputStream(archive.capture());
-            try (TarArchiveInputStream tar = new TarArchiveInputStream(archive.getValue())) {
+            verify(copyCmd).withTarInputStream(any());
+            try (TarArchiveInputStream tar = new TarArchiveInputStream(
+                    new ByteArrayInputStream(archiveBytes.toByteArray()))) {
                 TarArchiveEntry targetDir = tar.getNextEntry();
                 assertNotNull(targetDir);
                 assertEquals("var/lib/rancher/k3s/agent/etc/containerd/certs.d/", targetDir.getName());

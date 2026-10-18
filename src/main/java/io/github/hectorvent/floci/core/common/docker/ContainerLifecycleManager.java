@@ -30,12 +30,8 @@ import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.Lau
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -331,18 +327,8 @@ public class ContainerLifecycleManager {
     private boolean copyCaBundle(String containerId, Path bundle) {
         try {
             byte[] content = Files.readAllBytes(bundle);
-            ByteArrayOutputStream archive = new ByteArrayOutputStream(content.length + 1024);
-            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
-                TarArchiveEntry entry = new TarArchiveEntry(ContainerCaBundle.FILE_NAME);
-                entry.setSize(content.length);
-                tar.putArchiveEntry(entry);
-                tar.write(content);
-                tar.closeArchiveEntry();
-            }
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withRemotePath(ContainerCaBundle.CONTAINER_DIR)
-                    .withTarInputStream(new ByteArrayInputStream(archive.toByteArray()))
-                    .exec();
+            RetryingTarCopier.copyBytes(dockerClient, containerId, ContainerCaBundle.CONTAINER_DIR,
+                    ContainerCaBundle.FILE_NAME, content, 0644);
             LOG.debugv("Copied the CA bundle into container {0} at {1}", containerId, ContainerCaBundle.CONTAINER_PATH);
             return true;
         } catch (Exception e) {

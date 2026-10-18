@@ -276,11 +276,7 @@ public final class UserDataPipeline {
     ) {
         byte[] script = scriptContent.getBytes(StandardCharsets.UTF_8);
         try {
-            byte[] tar = buildSingleFileTar("user-data.sh", script, 0755);
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withRemotePath("/var/lib")
-                    .withTarInputStream(new ByteArrayInputStream(tar))
-                    .exec();
+            RetryingTarCopier.copyBytes(dockerClient, containerId, "/var/lib", "user-data.sh", script, 0755);
 
             String execId = dockerClient.execCreateCmd(containerId)
                     .withCmd(USER_DATA_SCRIPT_PATH)
