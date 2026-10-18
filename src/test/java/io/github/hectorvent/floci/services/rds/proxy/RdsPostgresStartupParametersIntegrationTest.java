@@ -90,6 +90,7 @@ class RdsPostgresStartupParametersIntegrationTest {
         try {
             asMaster(port,
                     "CREATE ROLE app_user LOGIN",
+                    "GRANT rds_iam TO app_user",
                     "CREATE SCHEMA floci_opts AUTHORIZATION app_user",
                     // A database that refuses \' in string literals must still accept the parameters.
                     "ALTER DATABASE appdb SET backslash_quote = off");
@@ -114,7 +115,7 @@ class RdsPostgresStartupParametersIntegrationTest {
         String dbId = "startup-params-iam-escalation-" + Long.toString(System.nanoTime(), 36);
         int port = createIamInstance(dbId);
         try {
-            asMaster(port, "CREATE ROLE app_user LOGIN");
+            asMaster(port, "CREATE ROLE app_user LOGIN", "GRANT rds_iam TO app_user");
 
             for (String options : new String[] {
                     "-c session_authorization=" + MASTER_USER,
@@ -139,6 +140,7 @@ class RdsPostgresStartupParametersIntegrationTest {
             asMaster(port,
                     "CREATE ROLE reader NOLOGIN",
                     "CREATE ROLE app_user LOGIN",
+                    "GRANT rds_iam TO app_user",
                     "GRANT reader TO app_user",
                     "ALTER ROLE app_user SET work_mem = '32MB'",
                     "ALTER ROLE app_user IN DATABASE appdb SET work_mem = '48MB'",

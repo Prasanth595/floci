@@ -22,6 +22,7 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -232,6 +233,18 @@ public class PostgresProtocolHandler {
             // Buffer all backend messages until ReadyForQuery ('Z')
             List<byte[]> bufferedMessages = readUntilReadyForQuery(backendIn);
 
+            // IAM-enabled PostgreSQL roles opt in through actual rds_iam membership. A
+            // superuser is not implicitly a member, and an opted-in role uses IAM rather
+            // than its password. Check before trying defaults or handing over the session.
+            DatabaseRole admittedRole = null;
+            if (iamEnabled && !endsWithErrorResponse(bufferedMessages)) {
+                admittedRole = readDatabaseRole(backendIn, backendOut, clientUsername, isIam, false);
+                if (admittedRole == null || !admittedRole.allowed()) {
+                    refuseDatabaseRole(clientOut, client, backend, clientUsername);
+                    return null;
+                }
+            }
+
             String iamRole = null;
             List<SessionSetting> roleDefaultsAfterHandover = List.of();
             List<byte[]> notices = new ArrayList<>();
@@ -370,8 +383,8 @@ public class PostgresProtocolHandler {
                     }
                 }
 
-                // The role's client_encoding goes last, once the proxy sends no more SQL, and only
-                // if the client did not choose an encoding itself.
+                // Apply the role's encoding only if the client did not choose one. The
+                // remaining role identity query is ASCII under either encoding.
                 if (roleEncoding != null && !clientChoseEncoding(startup.parameters())) {
                     DefaultOutcome outcome = applyDefault(backendIn, backendOut, roleEncoding, clientUsername);
                     if (outcome.failure() != null) {
@@ -389,6 +402,18 @@ public class PostgresProtocolHandler {
 
             if (!notices.isEmpty() && !endsWithErrorResponse(bufferedMessages)) {
                 bufferedMessages = insertBeforeStartupTrailer(bufferedMessages, notices);
+            }
+
+            // Defaults can reopen the backend and handover resolves the role name again.
+            // Bind the final session to the admitted role OID, so dropping/recreating the
+            // name during login cannot hand a token to a different database role.
+            if (iamHandover && !endsWithErrorResponse(bufferedMessages)) {
+                DatabaseRole selectedRole = readDatabaseRole(backendIn, backendOut, clientUsername, true, true);
+                if (selectedRole == null || !selectedRole.allowed() || admittedRole == null
+                        || !selectedRole.oid().equals(admittedRole.oid())) {
+                    refuseDatabaseRole(clientOut, client, backend, clientUsername);
+                    return null;
+                }
             }
 
             // Phase 6: Send AuthenticationOK to client, forward buffered messages, then bridge
@@ -879,6 +904,63 @@ public class PostgresProtocolHandler {
         sendMessage(out, 'Q', sql.getBytes(StandardCharsets.UTF_8), new byte[]{0});
         out.flush();
         return readUntilReadyForQuery(in);
+    }
+
+    /** A real PostgreSQL role identity and its choice of authentication method. */
+    private record DatabaseRole(String oid, boolean allowed) {}
+
+    /**
+     * Follow catalog membership edges, including indirect grants. pg_has_role treats a
+     * superuser as privileged without a grant, which is not an IAM authentication opt-in.
+     * All SQL is ASCII even when the client selected a non-UTF8 encoding, and catalog
+     * objects and operators are qualified independently of the client's search_path.
+     */
+    static String databaseRoleQuery(String role, boolean iam, boolean sessionRole) {
+        String name = sessionRole ? "SESSION_USER" : "pg_catalog.convert_from(pg_catalog.decode('"
+                + HexFormat.of().formatHex(role.getBytes(StandardCharsets.UTF_8)) + "', 'hex'), 'UTF8')";
+        String membership = "EXISTS (SELECT 1 FROM memberships m JOIN pg_catalog.pg_roles i "
+                + "ON i.oid OPERATOR(pg_catalog.=) m.oid "
+                + "WHERE i.rolname OPERATOR(pg_catalog.=) 'rds_iam')";
+        return "WITH RECURSIVE memberships(oid) AS ("
+                + "SELECT a.roleid FROM pg_catalog.pg_auth_members a JOIN pg_catalog.pg_roles r "
+                + "ON r.oid OPERATOR(pg_catalog.=) a.member WHERE r.rolname OPERATOR(pg_catalog.=) " + name
+                + " UNION SELECT a.roleid FROM pg_catalog.pg_auth_members a JOIN memberships m "
+                + "ON a.member OPERATOR(pg_catalog.=) m.oid) "
+                + "SELECT r.oid::pg_catalog.text, r.rolcanlogin AND " + (iam ? "" : "NOT ") + membership
+                + " FROM pg_catalog.pg_roles r WHERE r.rolname OPERATOR(pg_catalog.=) " + name;
+    }
+
+    private static DatabaseRole readDatabaseRole(InputStream in, OutputStream out, String role,
+                                                 boolean iam, boolean sessionRole) throws IOException {
+        List<byte[]> messages = runQuery(in, out, databaseRoleQuery(role, iam, sessionRole));
+        if (firstErrorResponse(messages) != null) {
+            return null;
+        }
+        List<SessionSetting> rows = settingsFromDataRows(messages);
+        if (rows.size() != 1) {
+            return null;
+        }
+        SessionSetting row = rows.getFirst();
+        if (!row.name().matches("[0-9]{1,10}")
+                || !(row.value().equals("t") || row.value().equals("f"))) {
+            return null;
+        }
+        long oid = Long.parseLong(row.name());
+        if (oid == 0 || oid > 4_294_967_295L) {
+            return null;
+        }
+        return new DatabaseRole(row.name(), row.value().equals("t"));
+    }
+
+    private static void refuseDatabaseRole(OutputStream out, Socket client, Socket backend, String user)
+            throws IOException {
+        try {
+            sendErrorResponse(out, "FATAL", "28P01", "password authentication failed for user \"" + user + "\"");
+            out.flush();
+        } finally {
+            closeQuietly(client);
+            closeQuietly(backend);
+        }
     }
 
     static String quoteIdentifier(String identifier) {
