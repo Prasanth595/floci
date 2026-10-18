@@ -11,9 +11,14 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -36,6 +41,7 @@ class HttpApiCorsIntegrationTest {
     private static final String APP_ORIGIN = "https://app.localhost.floci.io";
     private static final String DOMAIN = "cors-probe.localhost.floci.io";
     private static final String BACKEND_BODY = "{\"from\":\"backend\"}";
+    private static final String THROTTLED_FUNCTION = "http-api-cors-throttled";
 
     private static HttpServer backend;
     private static int backendPort;
@@ -172,6 +178,19 @@ class HttpApiCorsIntegrationTest {
                 .header("Access-Control-Max-Age", equalTo("3600"))
                 .header("Access-Control-Expose-Headers", nullValue())
                 .header("Vary", nullValue());
+        // Measured: an OPTIONS request no route matches is answered 204 even when it is not a
+        // preflight, with no CORS header.
+        given()
+                .when().options("/execute-api/" + corsApiId + "/$default/hello")
+                .then()
+                .statusCode(204)
+                .header("Access-Control-Allow-Origin", nullValue());
+        given()
+                .header("Origin", APP_ORIGIN)
+                .when().options("/execute-api/" + corsApiId + "/$default/hello")
+                .then()
+                .statusCode(204)
+                .header("Access-Control-Allow-Origin", nullValue());
     }
 
     /**
@@ -312,8 +331,9 @@ class HttpApiCorsIntegrationTest {
     }
 
     /**
-     * Measured: a function that is gone fails the request with API Gateway's 500, which carries the
-     * CORS headers, while a route without a target answers as an unmatched one, without them.
+     * Measured: a function that is gone fails the request with API Gateway's 500 and one Lambda
+     * throttles with its 503, both carrying the CORS headers, while a route without a target
+     * answers as an unmatched one, without them.
      */
     @Test
     @Order(10)
@@ -335,6 +355,33 @@ class HttpApiCorsIntegrationTest {
                 .body("{\"routeKey\":\"GET /notarget\"}")
                 .when().post("/v2/apis/" + corsApiId + "/routes")
                 .then().statusCode(201);
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"FunctionName":"%s","Runtime":"python3.13","Handler":"index.handler",
+                         "Role":"arn:aws:iam::000000000000:role/lambda-role","Code":{"ZipFile":"%s"}}
+                        """.formatted(THROTTLED_FUNCTION, functionZip()))
+                .when().post("/2015-03-31/functions")
+                .then().statusCode(201);
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"ReservedConcurrentExecutions\":0}")
+                .when().put("/2017-10-31/functions/" + THROTTLED_FUNCTION + "/concurrency")
+                .then().statusCode(200);
+        String throttledIntegrationId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"integrationType\":\"AWS_PROXY\",\"integrationUri\":"
+                        + "\"arn:aws:lambda:us-east-1:000000000000:function:" + THROTTLED_FUNCTION + "\","
+                        + "\"payloadFormatVersion\":\"2.0\"}")
+                .when().post("/v2/apis/" + corsApiId + "/integrations")
+                .then().statusCode(201)
+                .extract().path("integrationId");
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"routeKey\":\"GET /throttled\",\"target\":\"integrations/"
+                        + throttledIntegrationId + "\"}")
+                .when().post("/v2/apis/" + corsApiId + "/routes")
+                .then().statusCode(201);
 
         given()
                 .header("Origin", APP_ORIGIN)
@@ -351,6 +398,14 @@ class HttpApiCorsIntegrationTest {
                 .statusCode(404)
                 .body(containsString("Not Found"))
                 .header("Access-Control-Allow-Origin", nullValue());
+        given()
+                .header("Origin", APP_ORIGIN)
+                .when().get("/execute-api/" + corsApiId + "/$default/throttled")
+                .then()
+                .statusCode(503)
+                .body(containsString("Service Unavailable"))
+                .header("Access-Control-Allow-Origin", equalTo(APP_ORIGIN))
+                .header("Access-Control-Expose-Headers", equalTo("x-request-id"));
     }
 
     @Test
@@ -365,6 +420,19 @@ class HttpApiCorsIntegrationTest {
         given().when().delete("/v2/domainnames/" + DOMAIN).then().statusCode(204);
         given().when().delete("/v2/apis/" + corsApiId).then().statusCode(204);
         given().when().delete("/v2/apis/" + plainApiId).then().statusCode(204);
+        given().when().delete("/2015-03-31/functions/" + THROTTLED_FUNCTION).then().statusCode(204);
+    }
+
+    private static String functionZip() {
+        ByteArrayOutputStream zip = new ByteArrayOutputStream();
+        try (ZipOutputStream entries = new ZipOutputStream(zip)) {
+            entries.putNextEntry(new ZipEntry("index.py"));
+            entries.write("def handler(e, c):\n    return 'ok'\n".getBytes(StandardCharsets.UTF_8));
+            entries.closeEntry();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return Base64.getEncoder().encodeToString(zip.toByteArray());
     }
 
     /**

@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -897,6 +898,19 @@ class ApiGatewayExecuteControllerTest {
             assertNull(response.getHeaderString("Access-Control-Allow-Origin"));
             assertNull(response.getHeaderString("Access-Control-Allow-Methods"));
         }
+    }
+
+    /** A configured list may hold a null entry: it matches nothing and is left out of the header. */
+    @Test
+    void httpApiCorsSkipsANullEntryOfAConfiguredList() {
+        Response response = ApiGatewayExecuteController.withHttpApiCors(
+                new Api.Cors(List.of(APP_ORIGIN), Arrays.asList(null, "GET"), Arrays.asList(null, "x-a"),
+                        null, null, null),
+                "OPTIONS", APP_ORIGIN, "GET", "x-a", Response.noContent().build());
+
+        assertEquals(APP_ORIGIN, response.getHeaderString("Access-Control-Allow-Origin"));
+        assertEquals("GET", response.getHeaderString("Access-Control-Allow-Methods"));
+        assertEquals("x-a", response.getHeaderString("Access-Control-Allow-Headers"));
     }
 
     /** Measured: wildcards allow any method and header, and are sent back as they are. */

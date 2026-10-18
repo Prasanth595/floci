@@ -415,7 +415,8 @@ public final class TestFixtures {
         }
     }
 
-    private static byte[] probeZip() {
+    /** A Node.js deployment package whose handler answers 200, for a function the test only has to create. */
+    static byte[] probeZip() {
         String code = "exports.handler = async () => ({ statusCode: 200 });";
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();

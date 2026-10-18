@@ -77,6 +77,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
@@ -85,6 +86,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
+import java.util.stream.Collectors;
 
 /**
  * Executes API Gateway stage requests, routing them through the configured
@@ -2521,17 +2523,17 @@ public class ApiGatewayExecuteController {
      * on AWS (eu-west-1, 2026-10-16 and 2026-10-18). Once the API has a configuration, AWS drops
      * the CORS headers an integration returns and sets its own on whatever answers: the
      * integration, or API Gateway itself refusing the request (an authorizer's 401 or 403, an
-     * unsigned AWS_IAM call's 403) or failing it (a function that is gone). A request whose
-     * {@code Origin} is allowed gets {@code Access-Control-Allow-Origin}, and
-     * {@code Access-Control-Allow-Credentials} and {@code Access-Control-Expose-Headers} when
-     * configured, whatever its method. An OPTIONS request is a preflight instead: it gets the
-     * origin, credentials, {@code Access-Control-Allow-Methods},
-     * {@code Access-Control-Allow-Headers} and {@code Access-Control-Max-Age}, and only when the
-     * method and every header it asks for are allowed; otherwise, or without
-     * {@code Access-Control-Request-Method}, no CORS header at all. A preflight that gets them always
-     * carries {@code Access-Control-Allow-Headers}, empty when none are configured. Lists are joined
-     * with a bare comma, and AWS adds no {@code Vary} except to a preflight (see
-     * {@link #preflightVariesByOrigin}).
+     * unsigned AWS_IAM call's 403) or failing it (a function that is gone, throttled or not
+     * invocable). A request whose {@code Origin} is allowed gets
+     * {@code Access-Control-Allow-Origin}, and {@code Access-Control-Allow-Credentials} and
+     * {@code Access-Control-Expose-Headers} when configured, whatever its method. An OPTIONS
+     * request is a preflight instead: it gets the origin, credentials,
+     * {@code Access-Control-Allow-Methods}, {@code Access-Control-Allow-Headers} and
+     * {@code Access-Control-Max-Age}, and only when the method and every header it asks for are
+     * allowed; otherwise, or without {@code Access-Control-Request-Method}, no CORS header at all.
+     * A preflight that gets them always carries {@code Access-Control-Allow-Headers}, empty when
+     * none are configured. Lists are joined with a bare comma, and AWS adds no {@code Vary} except
+     * to a preflight (see {@link #preflightVariesByOrigin}).
      */
     private static Response withHttpApiCors(Api.Cors cors, String httpMethod, HttpHeaders headers,
                                             Response response) {
@@ -2567,8 +2569,7 @@ public class ApiGatewayExecuteController {
             }
             builder.header("Access-Control-Allow-Origin", allowOrigin);
             putCorsListHeader(builder, "Access-Control-Allow-Methods", cors.allowMethods());
-            builder.header("Access-Control-Allow-Headers",
-                    cors.allowHeaders() == null ? "" : String.join(",", cors.allowHeaders()));
+            builder.header("Access-Control-Allow-Headers", corsList(cors.allowHeaders()));
             if (Boolean.TRUE.equals(cors.allowCredentials())) {
                 builder.header("Access-Control-Allow-Credentials", "true");
             }
@@ -2599,7 +2600,8 @@ public class ApiGatewayExecuteController {
     }
 
     private static boolean corsAllows(List<String> allowed, String value) {
-        return allowed != null && allowed.stream().anyMatch(item -> "*".equals(item) || item.equalsIgnoreCase(value));
+        return allowed != null && allowed.stream()
+                .anyMatch(item -> item != null && ("*".equals(item) || item.equalsIgnoreCase(value)));
     }
 
     private static boolean corsAllowsEvery(List<String> allowed, String requestedHeaders) {
@@ -2633,9 +2635,15 @@ public class ApiGatewayExecuteController {
 
     private static void putCorsListHeader(Response.ResponseBuilder response, String headerName,
                                           List<String> values) {
-        if (values != null && !values.isEmpty()) {
-            response.header(headerName, String.join(",", values));
+        String list = corsList(values);
+        if (!list.isEmpty()) {
+            response.header(headerName, list);
         }
+    }
+
+    /** A configured list as a CORS header value: its entries joined with a bare comma, null ones left out. */
+    private static String corsList(List<String> values) {
+        return values == null ? "" : values.stream().filter(Objects::nonNull).collect(Collectors.joining(","));
     }
 
     private Response dispatchV2(String httpMethod, String apiId, String stageName,
@@ -2763,14 +2771,14 @@ public class ApiGatewayExecuteController {
                     eventJson.getBytes(), InvocationType.RequestResponse);
             return buildProxyResponse(result, true, !payloadV1);
         } catch (AwsException e) {
-            if (e.getHttpStatus() == 404) {
-                // Measured: a function that is gone fails the request with API Gateway's own 500,
-                // which carries the CORS headers like any response to the route.
-                return Response.status(500)
-                        .entity(jsonMessage("Internal Server Error"))
-                        .type(MediaType.APPLICATION_JSON).build();
-            }
-            throw e;
+            // Measured: API Gateway answers an invocation Lambda refuses itself, with the CORS
+            // headers like any response to the route: 503 when Lambda throttles it, 500 otherwise (a
+            // function that is gone, or one API Gateway may not invoke).
+            LOG.debugv("execute-api v2: invoking {0} failed: {1}", functionName, e.getMessage());
+            boolean throttled = e.getHttpStatus() == 429;
+            return Response.status(throttled ? 503 : 500)
+                    .entity(jsonMessage(throttled ? "Service Unavailable" : "Internal Server Error"))
+                    .type(MediaType.APPLICATION_JSON).build();
         }
     }
 

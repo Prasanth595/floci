@@ -659,19 +659,21 @@ this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 An API with a `corsConfiguration` applies it as AWS does (measured). It ignores the CORS headers an
 integration returns, and sets its own on whatever answers a route: the integration, or API Gateway
 itself refusing the request (a JWT or Lambda authorizer's `401` or `403`, an unsigned call to an
-`AWS_IAM` route's `403`) or failing it (a function that is gone answers `500` `Internal Server
-Error`). A request whose `Origin` is allowed gets `Access-Control-Allow-Origin`, and
-`Access-Control-Allow-Credentials` and `Access-Control-Expose-Headers` when configured, whatever its
-method. A preflight (an `OPTIONS` request with `Origin` and `Access-Control-Request-Method`) gets
-the origin, credentials, `Access-Control-Allow-Methods`, `Access-Control-Allow-Headers` and
-`Access-Control-Max-Age` instead, and only when the method and every header it asks for are allowed;
-otherwise no CORS header at all. A preflight a route matches (an `OPTIONS` or `ANY` route, or
-`$default`) goes through that route, so its authorizer and its integration answer it; one no route
-matches is answered `204` by API Gateway. A preflight that gets them always carries
-`Access-Control-Allow-Headers`, empty when none are configured, and `Vary: origin` unless
-`allowOrigins` is a single exact origin or `*`; no other response gets a `Vary`. Lists are joined
-with a bare comma. A path no route matches, or a route without a target, answers `404` with none of
-them. An API without a configuration leaves CORS to its integrations.
+`AWS_IAM` route's `403`) or failing it (a function that is gone, or that API Gateway may not invoke,
+answers `500` `Internal Server Error`; one Lambda throttles, `503` `Service Unavailable`). An
+`OPTIONS` request no route matches is answered `204`, preflight or not. A request whose `Origin` is
+allowed gets `Access-Control-Allow-Origin`, and `Access-Control-Allow-Credentials` and
+`Access-Control-Expose-Headers` when configured, whatever its method. A preflight (an `OPTIONS`
+request with `Origin` and `Access-Control-Request-Method`) gets the origin, credentials,
+`Access-Control-Allow-Methods`, `Access-Control-Allow-Headers` and `Access-Control-Max-Age` instead,
+and only when the method and every header it asks for are allowed; otherwise no CORS header at all.
+A preflight a route matches (an `OPTIONS` or `ANY` route, or `$default`) goes through that route, so
+its authorizer and its integration answer it; one no route matches is answered `204` by API Gateway.
+A preflight that gets them always carries `Access-Control-Allow-Headers`, empty when none are
+configured, and `Vary: origin` unless `allowOrigins` is a single exact origin or `*`; no other
+response gets a `Vary`. Lists are joined with a bare comma. A path no route matches, or a route
+without a target, answers `404` with none of them. An API without a configuration leaves CORS to its
+integrations.
 
 Routes carrying `authorizationType: AWS_IAM`: including those an OpenAPI import resolves from an
 `awsSigv4` security scheme: require a signed caller; see

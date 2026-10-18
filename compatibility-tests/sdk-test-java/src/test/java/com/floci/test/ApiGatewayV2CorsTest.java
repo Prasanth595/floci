@@ -4,9 +4,12 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.apigatewayv2.ApiGatewayV2Client;
 import software.amazon.awssdk.services.apigatewayv2.model.AuthorizerType;
 import software.amazon.awssdk.services.apigatewayv2.model.IntegrationType;
+import software.amazon.awssdk.services.lambda.LambdaClient;
+import software.amazon.awssdk.services.lambda.model.Runtime;
 
 import java.io.IOException;
 import java.net.URI;
@@ -21,13 +24,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * An HTTP API's CORS configuration on the answers API Gateway gives itself, set up through the SDK.
- * Measured on AWS (eu-west-1, 2026-10-16 and 2026-10-18): a JWT authorizer's 401 and an unsigned
- * AWS_IAM call's 403 carry Access-Control-Allow-Origin and Access-Control-Expose-Headers for an
- * allowed origin and no CORS header for another; a preflight no route matches is answered 204 with
- * the preflight's headers for an allowed origin and with none for another. That preflight always
- * carries Access-Control-Allow-Headers, empty when none are configured, and Vary: origin when the
- * configuration names two origins, none when it names one. None of these requests reaches the
- * integration.
+ * Measured on AWS (eu-west-1, 2026-10-16 and 2026-10-18): a JWT authorizer's 401, an unsigned
+ * AWS_IAM call's 403 and a throttled function's 503 carry Access-Control-Allow-Origin and
+ * Access-Control-Expose-Headers for an allowed origin and no CORS header for another. A preflight
+ * no route matches is answered 204 with the preflight's headers for an allowed origin and with none
+ * for another, and so is an OPTIONS request that is not a preflight. That preflight always carries
+ * Access-Control-Allow-Headers, empty when none are configured, and Vary: origin when the
+ * configuration names two origins, none when it names one.
  */
 @DisplayName("API Gateway v2 HTTP API CORS")
 class ApiGatewayV2CorsTest {
@@ -38,6 +41,8 @@ class ApiGatewayV2CorsTest {
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
     private static ApiGatewayV2Client apiGatewayV2;
+    private static LambdaClient lambda;
+    private static String throttledFunction;
     private static String apiId;
     private static String twoOriginsApiId;
 
@@ -69,6 +74,24 @@ class ApiGatewayV2CorsTest {
                 .authorizationType("JWT").authorizerId(authorizerId).target("integrations/" + integrationId));
         apiGatewayV2.createRoute(request -> request.apiId(apiId).routeKey("GET /iam")
                 .authorizationType("AWS_IAM").target("integrations/" + integrationId));
+
+        lambda = TestFixtures.lambdaClient();
+        throttledFunction = TestFixtures.uniqueName("compat-cors-throttled");
+        String functionArn = lambda.createFunction(request -> request
+                .functionName(throttledFunction)
+                .runtime(Runtime.NODEJS20_X)
+                .role("arn:aws:iam::000000000000:role/lambda-role")
+                .handler("index.handler")
+                .code(code -> code.zipFile(SdkBytes.fromByteArray(TestFixtures.probeZip())))).functionArn();
+        lambda.putFunctionConcurrency(request -> request.functionName(throttledFunction)
+                .reservedConcurrentExecutions(0));
+        String lambdaIntegrationId = apiGatewayV2.createIntegration(request -> request
+                .apiId(apiId)
+                .integrationType(IntegrationType.AWS_PROXY)
+                .integrationUri(functionArn)
+                .payloadFormatVersion("2.0")).integrationId();
+        apiGatewayV2.createRoute(request -> request.apiId(apiId).routeKey("GET /throttled")
+                .target("integrations/" + lambdaIntegrationId));
         apiGatewayV2.createStage(request -> request.apiId(apiId).stageName("$default").autoDeploy(true));
 
         twoOriginsApiId = apiGatewayV2.createApi(request -> request
@@ -89,6 +112,12 @@ class ApiGatewayV2CorsTest {
                 apiGatewayV2.deleteApi(request -> request.apiId(twoOriginsApiId));
             }
             apiGatewayV2.close();
+        }
+        if (lambda != null) {
+            if (throttledFunction != null) {
+                lambda.deleteFunction(request -> request.functionName(throttledFunction));
+            }
+            lambda.close();
         }
     }
 
@@ -125,6 +154,20 @@ class ApiGatewayV2CorsTest {
         HttpResponse<String> other = send(apiId, "OPTIONS", "/anything", OTHER_ORIGIN, "GET");
         assertThat(other.statusCode()).isEqualTo(204);
         assertThat(corsHeaderNames(other)).isEmpty();
+
+        HttpResponse<String> notAPreflight = send(apiId, "OPTIONS", "/anything", null, null);
+        assertThat(notAPreflight.statusCode()).isEqualTo(204);
+        assertThat(corsHeaderNames(notAPreflight)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a throttled function's 503 carries the CORS headers")
+    void aThrottledFunctionsAnswerCarriesTheCorsHeaders() throws IOException, InterruptedException {
+        HttpResponse<String> throttled = send(apiId, "GET", "/throttled", ORIGIN, null);
+        assertThat(throttled.statusCode()).isEqualTo(503);
+        assertThat(throttled.body()).contains("Service Unavailable");
+        assertThat(throttled.headers().firstValue("Access-Control-Allow-Origin")).contains(ORIGIN);
+        assertThat(throttled.headers().firstValue("Access-Control-Expose-Headers")).contains("x-probe");
     }
 
     @Test
@@ -144,8 +187,10 @@ class ApiGatewayV2CorsTest {
         URI uri = URI.create(TestFixtures.endpoint() + "/execute-api/" + api + "/$default" + path);
         HttpRequest.Builder request = HttpRequest.newBuilder(uri)
                 .timeout(Duration.ofSeconds(10))
-                .method(method, HttpRequest.BodyPublishers.noBody())
-                .header("Origin", origin);
+                .method(method, HttpRequest.BodyPublishers.noBody());
+        if (origin != null) {
+            request.header("Origin", origin);
+        }
         if (requestMethod != null) {
             request.header("Access-Control-Request-Method", requestMethod);
         }
