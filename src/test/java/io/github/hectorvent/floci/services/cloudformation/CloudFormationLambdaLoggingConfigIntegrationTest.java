@@ -98,6 +98,32 @@ class CloudFormationLambdaLoggingConfigIntegrationTest {
             .body("LoggingConfig.ApplicationLogLevel", nullValue());
     }
 
+    /**
+     * Measured on CloudFormation (eu-west-1, 2026-10-18): a valid log level under Text passes the
+     * template's validation but Lambda refuses it, so the update fails and the function keeps its
+     * configuration.
+     */
+    @Test
+    void aLogLevelUnderTextFailsTheUpdate() {
+        String stackName = "cfn-lambda-logging-text-level-" + Long.toString(System.nanoTime(), 36);
+        registerDeletion(stackName);
+        deploy("CreateStack", stackName, template(""));
+        String created = functionName(stackName);
+
+        submit("UpdateStack", stackName, template("""
+                ,"LoggingConfig": {"LogFormat": "Text", "ApplicationLogLevel": "WARN"}
+                """));
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
+        assertNotEquals("UPDATE_COMPLETE", state.status(), state.reason());
+        given()
+        .when()
+            .get(LAMBDA + created + "/configuration")
+        .then()
+            .statusCode(200)
+            .body("LoggingConfig.LogFormat", equalTo("Text"))
+            .body("LoggingConfig.ApplicationLogLevel", nullValue());
+    }
+
     private void registerDeletion(String stackName) {
         cleanup.register(() -> {
             submit("DeleteStack", stackName, null);

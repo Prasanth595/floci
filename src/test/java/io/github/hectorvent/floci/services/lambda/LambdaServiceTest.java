@@ -3014,7 +3014,9 @@ class LambdaServiceTest {
         assertEquals(new LambdaService.LoggingSettings("JSON", null, null, null),
                 LambdaService.loggingSettings(Map.of(), true));
         assertEquals(new LambdaService.LoggingSettings("Text", null, null, "/shared/app"),
-                LambdaService.loggingSettings(Map.of("ApplicationLogLevel", "WARN", "LogGroup", "/shared/app"), false));
+                LambdaService.loggingSettings(Map.of("LogGroup", "/shared/app"), false));
+        assertEquals(new LambdaService.LoggingSettings("JSON", "WARN", null, null),
+                LambdaService.loggingSettings(Map.of("ApplicationLogLevel", "WARN"), true));
         assertEquals(new LambdaService.LoggingSettings("JSON", "WARN", null, null),
                 LambdaService.loggingSettings(Map.of("LogFormat", "JSON", "ApplicationLogLevel", "WARN",
                         "LogGroup", ""), false));
@@ -3026,6 +3028,21 @@ class LambdaServiceTest {
                 Map.of("LogFormat", "Text", "ApplicationLogLevel", "LOUD"), false));
 
         assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void loggingSettingsRefuseALogLevelUnderText() {
+        for (Map<String, String> logging : List.of(
+                Map.of("LogFormat", "Text", "ApplicationLogLevel", "WARN"),
+                Map.of("LogFormat", "Text", "SystemLogLevel", "WARN"),
+                Map.of("ApplicationLogLevel", "WARN"))) {
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> LambdaService.loggingSettings(logging, false), logging.toString());
+
+            assertEquals("InvalidParameterValueException", refused.getErrorCode());
+            assertEquals("LogLevel is not supported when LogFormat is set to \"Text\". Remove LogLevel from your "
+                    + "request or change the LogFormat to \"JSON\" and try again.", refused.getMessage());
+        }
     }
 
     @Test

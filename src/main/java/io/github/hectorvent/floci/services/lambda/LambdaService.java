@@ -2722,11 +2722,26 @@ public class LambdaService implements ResourceProvider {
                     400);
         }
         validateEnum(logging.get("LogFormat"), "loggingConfig.logFormat", List.of("JSON", "Text"));
+        // In the order Lambda lists them in the message (measured, eu-west-1, 2026-10-18).
         validateEnum(logging.get("ApplicationLogLevel"), "loggingConfig.applicationLogLevel",
-                List.of("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"));
+                List.of("FATAL", "TRACE", "WARN", "ERROR", "INFO", "DEBUG"));
         validateEnum(logging.get("SystemLogLevel"), "loggingConfig.systemLogLevel",
-                List.of("DEBUG", "INFO", "WARN"));
+                List.of("WARN", "INFO", "DEBUG"));
+        // Measured on Lambda (eu-west-1, 2026-10-18): either level under Text, named or the default
+        // format, is refused on create and update alike, not stored and not ignored.
+        if ("Text".equals(logFormat(logging, durable)) && (nonBlank(logging.get("ApplicationLogLevel")) != null
+                || nonBlank(logging.get("SystemLogLevel")) != null)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "LogLevel is not supported when LogFormat is set to \"Text\". Remove LogLevel from your "
+                            + "request or change the LogFormat to \"JSON\" and try again.", 400);
+        }
         validateLogGroup(logging.get("LogGroup"));
+    }
+
+    /** The LogFormat a LoggingConfig names, else the function's default: JSON if durable, Text otherwise. */
+    private static String logFormat(Map<?, ?> logging, boolean durable) {
+        String named = nonBlank(logging.get("LogFormat"));
+        return named != null ? named : durable ? "JSON" : "Text";
     }
 
     static void validateEnum(Object value, String field, List<String> allowed) {
@@ -2914,11 +2929,8 @@ public class LambdaService implements ResourceProvider {
      * LoggingConfig is replaced wholesale, not merged: AWS resets any member the request omits
      * back to its default, so an update that names only LogFormat drops a previously set LogGroup.
      *
-     * <p>ApplicationLogLevel and SystemLogLevel are JSON-format-only: {@link #putLoggingConfig}
-     * never surfaces them for a Text-format function. Storing them anyway would leave state
-     * that is accepted, persisted and then never observable through any read path — the same
-     * accepted-then-forgotten shape this fix removes elsewhere — so they are only kept when the
-     * resolved format is JSON.
+     * <p>ApplicationLogLevel and SystemLogLevel are JSON-format-only: {@link #validateLoggingConfig}
+     * refuses either under Text, as Lambda does, so they are only ever stored for JSON.
      */
     private static void applyLoggingConfig(LambdaFunction fn, Object value) {
         if (!(value instanceof Map<?, ?> logging)) {
@@ -2938,26 +2950,21 @@ public class LambdaService implements ResourceProvider {
 
     /**
      * What Lambda stores for a LoggingConfig, once it is valid: an omitted LogFormat is the
-     * function's default, JSON for a durable function and Text otherwise, the two log levels count
-     * only in JSON, and a blank value is an omitted one, an omitted LogGroup meaning
-     * {@code /aws/lambda/<name>}. An invalid value is refused even where it would not be stored,
-     * a log level under Text included, so a comparison of these settings cannot pass it as
-     * unchanged.
+     * function's default, JSON for a durable function and Text otherwise, and a blank value is an
+     * omitted one, an omitted LogGroup meaning {@code /aws/lambda/<name>}. An invalid value is
+     * refused as Lambda refuses it, a log level under Text included, so a comparison of these
+     * settings cannot pass it as unchanged.
      */
     public static LoggingSettings loggingSettings(Map<?, ?> logging, boolean durable) {
         validateLoggingConfig(logging, durable);
-        String format = logging.get("LogFormat") instanceof String f && !f.isBlank() ? f : durable ? "JSON" : "Text";
-        boolean json = "JSON".equals(format);
-        return new LoggingSettings(format,
-                json ? nonBlank(logging.get("ApplicationLogLevel")) : null,
-                json ? nonBlank(logging.get("SystemLogLevel")) : null,
-                nonBlank(logging.get("LogGroup")));
+        return new LoggingSettings(logFormat(logging, durable), nonBlank(logging.get("ApplicationLogLevel")),
+                nonBlank(logging.get("SystemLogLevel")), nonBlank(logging.get("LogGroup")));
     }
 
     /** The function's stored logging settings, its default LogFormat when it has none stored. */
     public static LoggingSettings loggingSettings(LambdaFunction fn) {
         return new LoggingSettings(
-                fn.getLogFormat() != null ? fn.getLogFormat() : loggingSettings(Map.of(), fn.isDurable()).logFormat(),
+                fn.getLogFormat() != null ? fn.getLogFormat() : logFormat(Map.of(), fn.isDurable()),
                 fn.getApplicationLogLevel(), fn.getSystemLogLevel(), fn.getLogGroup());
     }
 
