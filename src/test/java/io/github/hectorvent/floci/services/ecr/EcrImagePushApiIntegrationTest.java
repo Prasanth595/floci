@@ -24,6 +24,7 @@ class EcrImagePushApiIntegrationTest {
     private static final String CT = "application/x-amz-json-1.1";
     private static final String PREFIX = "AmazonEC2ContainerRegistry_V20150921.";
     private static final String REPO = "push-api-it/checks";
+    private static final String OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json";
     private static final String DIGEST = "sha256:" + "a".repeat(64);
     private static final String UPLOAD_ID = "6a1f2b3c-0000-4000-8000-000000000000";
 
@@ -64,7 +65,7 @@ class EcrImagePushApiIntegrationTest {
     @Test
     void putImageChecksTheManifestAndItsDigest() {
         call("PutImage", "{\"repositoryName\":\"" + REPO + "\",\"imageManifest\":\"{}\",\"imageTag\":\"v1\","
-                + "\"imageDigest\":\"" + DIGEST + "\"}")
+                + "\"imageManifestMediaType\":\"" + OCI_MANIFEST + "\",\"imageDigest\":\"" + DIGEST + "\"}")
                 .statusCode(400)
                 .body("__type", equalTo("ImageDigestDoesNotMatchException"))
                 .body("message", containsString("sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"));
@@ -72,9 +73,23 @@ class EcrImagePushApiIntegrationTest {
                 .statusCode(400).body("__type", equalTo("InvalidParameterException"));
         call("PutImage", "{\"repositoryName\":\"" + REPO + "\",\"imageManifest\":\"\",\"imageTag\":\"v1\"}")
                 .statusCode(400).body("__type", equalTo("InvalidParameterException"));
-        call("PutImage", "{\"repositoryName\":\"" + REPO + "\",\"imageManifest\":\"{}\",\"imageTag\":\""
-                + "t".repeat(301) + "\"}")
-                .statusCode(400).body("__type", equalTo("InvalidParameterException"));
+        // With no mediaType in the manifest, AWS requires imageManifestMediaType rather than guessing.
+        call("PutImage", "{\"repositoryName\":\"" + REPO + "\",\"imageManifest\":\"{}\",\"imageTag\":\"v1\"}")
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", containsString("imageManifestMediaType"));
+    }
+
+    @Test
+    void putImageRefusesATagOutsideTheTagGrammar() {
+        // Each would otherwise change the registry URL: v1?x writes v1, a slash names another repository.
+        for (String tag : new String[] {"v1?x", "team/v1", "v1#x", ".v1", "-v1", "v 1", "t".repeat(129)}) {
+            call("PutImage", "{\"repositoryName\":\"" + REPO + "\",\"imageManifest\":\"{}\","
+                    + "\"imageManifestMediaType\":\"" + OCI_MANIFEST + "\",\"imageTag\":\"" + tag + "\"}")
+                    .statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"))
+                    .body("message", containsString("imageTag"));
+        }
     }
 
     @Test

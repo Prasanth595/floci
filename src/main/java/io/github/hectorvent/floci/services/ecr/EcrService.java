@@ -40,6 +40,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -61,8 +62,8 @@ public class EcrService implements ResourceProvider {
     private static final Pattern REGISTRY_ID = Pattern.compile("[0-9]{12}");
     private static final Pattern LAYER_DIGEST = Pattern.compile("[a-zA-Z0-9-_+.]+:[a-fA-F0-9]+");
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json";
-    private static final String OCI_INDEX = "application/vnd.oci.image.index.v1+json";
+    /** The OCI distribution spec's tag grammar, which the registry's manifest URL takes. */
+    private static final Pattern IMAGE_TAG = Pattern.compile("[A-Za-z0-9_][A-Za-z0-9._-]{0,127}");
     private static final Pattern CREDENTIAL_ARN = Pattern.compile(
             "arn:" + AwsArnUtils.PARTITION_REGEX + ":secretsmanager:[a-zA-Z0-9-:]+:secret:ecr-pullthroughcache/"
                     + "[a-zA-Z0-9/_+=.@-]+");
@@ -650,8 +651,11 @@ public class EcrService implements ResourceProvider {
         if (imageManifest == null || imageManifest.isEmpty()) {
             throw new AwsException("InvalidParameterException", "imageManifest must not be empty", 400);
         }
-        if (imageTag != null && (imageTag.isEmpty() || imageTag.length() > 300)) {
-            throw new AwsException("InvalidParameterException", "imageTag must be 1 to 300 characters", 400);
+        if (imageTag != null && !IMAGE_TAG.matcher(imageTag).matches()) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid parameter at 'imageTag' failed to satisfy constraint: 'must start with a letter, digit"
+                            + " or underscore, hold only letters, digits, '.', '_' and '-', and be at most 128"
+                            + " characters'", 400);
         }
         String mediaType = manifestMediaType(imageManifest, imageManifestMediaType);
         String digest = "sha256:" + Digests.sha256Hex(imageManifest.getBytes(StandardCharsets.UTF_8));
@@ -664,53 +668,49 @@ public class EcrService implements ResourceProvider {
         String storage = registryRepositoryName(repo, region);
         RegistryHttpClient http = registryManager.httpClient();
 
-        String guarded = null;
-        if (imageTag != null && "IMMUTABLE".equals(repo.getImageTagMutability())) {
-            guarded = immutableTagKey(repo.getRegistryId(), region, repositoryName, imageTag);
-            if (!claimImmutableTag(guarded)) {
-                throw imageTagAlreadyExists(imageTag, repositoryName);
-            }
+        String guarded = imageTag != null && "IMMUTABLE".equals(repo.getImageTagMutability())
+                ? immutableTagKey(repo.getRegistryId(), region, repositoryName, imageTag) : null;
+        if (guarded != null && !claimImmutableTag(guarded)) {
+            throw imageTagAlreadyExists(imageTag, repositoryName);
         }
         try {
-            String existing = http.headManifestDigestStrict(storage, imageTag != null ? imageTag : digest, null);
-            if (digest.equals(existing)) {
-                throw new AwsException("ImageAlreadyExistsException",
-                        "Image with digest '" + digest + "'" + (imageTag != null ? " and tag '" + imageTag + "'" : "")
-                                + " already exists in the repository with name '" + repositoryName
-                                + "' in registry with id '" + repo.getRegistryId() + "'", 400);
-            }
-            if (existing != null && guarded != null) {
-                throw imageTagAlreadyExists(imageTag, repositoryName);
-            }
-            String stored = http.putManifest(storage, imageTag != null ? imageTag : digest, mediaType, imageManifest);
-            String finalDigest = stored != null ? stored : digest;
-            // A retag keeps the image's first push time, as DescribeImages records it.
-            String metaKey = imageMetaKey(region, repo.getRegistryId(), repositoryName, finalDigest);
-            if (imageMetaStore.get(metaKey).isEmpty()) {
-                imageMetaStore.put(metaKey, new ImageMetadata(finalDigest, Instant.now()));
-            }
-
-            Image image = new Image();
-            image.setRegistryId(repo.getRegistryId());
-            image.setRepositoryName(repositoryName);
-            image.setImageId(new ImageIdentifier(imageTag, finalDigest));
-            image.setImageManifest(imageManifest);
-            image.setImageManifestMediaType(mediaType);
-            return image;
-        } catch (RegistryHttpClient.RegistryErrorException e) {
-            throw putImageError(e);
-        } catch (AwsException e) {
-            throw e;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw registryUnavailable(e);
-        } catch (Exception e) {
-            throw registryUnavailable(e);
+            return callRegistry(() -> writeManifest(repo, repositoryName, storage, http, imageManifest, mediaType,
+                    imageTag, digest, guarded, region), EcrService::putImageError);
         } finally {
             if (guarded != null) {
                 releaseImmutableTag(guarded);
             }
         }
+    }
+
+    private Image writeManifest(Repository repo, String repositoryName, String storage, RegistryHttpClient http,
+                                String imageManifest, String mediaType, String imageTag, String digest,
+                                String guarded, String region) throws Exception {
+        String existing = http.headManifestDigestStrict(storage, imageTag != null ? imageTag : digest, null);
+        if (digest.equals(existing)) {
+            throw new AwsException("ImageAlreadyExistsException",
+                    "Image with digest '" + digest + "'" + (imageTag != null ? " and tag '" + imageTag + "'" : "")
+                            + " already exists in the repository with name '" + repositoryName
+                            + "' in registry with id '" + repo.getRegistryId() + "'", 400);
+        }
+        if (existing != null && guarded != null) {
+            throw imageTagAlreadyExists(imageTag, repositoryName);
+        }
+        String stored = http.putManifest(storage, imageTag != null ? imageTag : digest, mediaType, imageManifest);
+        String finalDigest = stored != null ? stored : digest;
+        // A retag keeps the image's first push time, as DescribeImages records it.
+        String metaKey = imageMetaKey(region, repo.getRegistryId(), repositoryName, finalDigest);
+        if (imageMetaStore.get(metaKey).isEmpty()) {
+            imageMetaStore.put(metaKey, new ImageMetadata(finalDigest, Instant.now()));
+        }
+
+        Image image = new Image();
+        image.setRegistryId(repo.getRegistryId());
+        image.setRepositoryName(repositoryName);
+        image.setImageId(new ImageIdentifier(imageTag, finalDigest));
+        image.setImageManifest(imageManifest);
+        image.setImageManifestMediaType(mediaType);
+        return image;
     }
 
     /** Reports which of the given layers the repository holds, with their sizes. */
@@ -763,16 +763,11 @@ public class EcrService implements ResourceProvider {
     public LayerUpload initiateLayerUpload(String repositoryName, String registryId, String region) {
         Repository repo = requireRepo(repositoryName, registryId, region);
         requireRegistry();
-        try {
-            String location = registryManager.httpClient().startUpload(registryRepositoryName(repo, region));
-            String uploadId = layerUploads.open(key(region, repo.getRegistryId(), repositoryName), location);
-            return new LayerUpload(repo.getRegistryId(), repositoryName, uploadId);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw registryUnavailable(e);
-        } catch (Exception e) {
-            throw registryUnavailable(e);
-        }
+        String location = callRegistry(
+                () -> registryManager.httpClient().startUpload(registryRepositoryName(repo, region)),
+                EcrService::registryUnavailable);
+        String uploadId = layerUploads.open(key(region, repo.getRegistryId(), repositoryName), location);
+        return new LayerUpload(repo.getRegistryId(), repositoryName, uploadId);
     }
 
     /** Sends one part of a layer, returning the last byte received. */
@@ -790,18 +785,11 @@ public class EcrService implements ResourceProvider {
             EcrLayerUploads.checkPart(session, partFirstByte, partLastByte, layerPartBlob.length,
                     repo.getRegistryId(), repositoryName, uploadId);
             requireRegistry();
-            try {
-                String next = registryManager.httpClient().patchUpload(session.location(), layerPartBlob, partFirstByte);
-                session.accept(layerPartBlob.length, next, layerUploads.now());
-                return partLastByte;
-            } catch (RegistryHttpClient.RegistryErrorException e) {
-                throw uploadError(e, uploadId, repositoryName);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw registryUnavailable(e);
-            } catch (Exception e) {
-                throw registryUnavailable(e);
-            }
+            String next = callRegistry(
+                    () -> registryManager.httpClient().patchUpload(session.location(), layerPartBlob, partFirstByte),
+                    e -> uploadError(e, uploadId, repositoryName));
+            session.accept(layerPartBlob.length, next, layerUploads.now());
+            return partLastByte;
         }
     }
 
@@ -828,32 +816,26 @@ public class EcrService implements ResourceProvider {
             requireRegistry();
             RegistryHttpClient http = registryManager.httpClient();
             String storage = registryRepositoryName(repo, region);
-            try {
-                if (headBlob(http, storage, digest) != null) {
-                    http.cancelUpload(session.location());
-                    layerUploads.close(uploadId);
-                    throw new AwsException("LayerAlreadyExistsException",
-                            "Layer " + digest + " already exists in the repository with name '" + repositoryName
-                                    + "' in registry with id '" + repo.getRegistryId() + "'", 400);
-                }
-                http.finishUpload(session.location(), digest);
+            if (headBlob(http, storage, digest) != null) {
+                http.cancelUpload(session.location());
                 layerUploads.close(uploadId);
-                return digest;
-            } catch (RegistryHttpClient.RegistryErrorException e) {
+                throw new AwsException("LayerAlreadyExistsException",
+                        "Layer " + digest + " already exists in the repository with name '" + repositoryName
+                                + "' in registry with id '" + repo.getRegistryId() + "'", 400);
+            }
+            callRegistry(() -> {
+                http.finishUpload(session.location(), digest);
+                return null;
+            }, e -> {
                 layerUploads.close(uploadId);
                 if ("DIGEST_INVALID".equals(e.code())) {
-                    throw new AwsException("InvalidLayerException",
+                    return new AwsException("InvalidLayerException",
                             "The layer digest calculated for the upload does not match " + digest, 400);
                 }
-                throw uploadError(e, uploadId, repositoryName);
-            } catch (AwsException e) {
-                throw e;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw registryUnavailable(e);
-            } catch (Exception e) {
-                throw registryUnavailable(e);
-            }
+                return uploadError(e, uploadId, repositoryName);
+            });
+            layerUploads.close(uploadId);
+            return digest;
         }
     }
 
@@ -876,7 +858,7 @@ public class EcrService implements ResourceProvider {
         inFlightImmutableTags.remove(key);
     }
 
-    /** The media type sent, else the manifest's own {@code mediaType}, else OCI's by the manifest's shape. */
+    /** The media type sent, else the manifest's own {@code mediaType}; with neither, the request is refused. */
     private static String manifestMediaType(String manifest, String given) {
         JsonNode root;
         try {
@@ -891,15 +873,35 @@ public class EcrService implements ResourceProvider {
             return given;
         }
         String own = root.path("mediaType").asText("");
-        if (!own.isEmpty()) {
-            return own;
+        if (own.isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "imageManifestMediaType is required when the manifest has no mediaType", 400);
         }
-        return root.has("manifests") ? OCI_INDEX : OCI_MANIFEST;
+        return own;
     }
 
     private Long headBlob(RegistryHttpClient http, String storage, String digest) {
+        return callRegistry(() -> http.headBlob(storage, digest), EcrService::registryUnavailable);
+    }
+
+    /** One call to the backing registry. */
+    @FunctionalInterface
+    private interface RegistryCall<T> {
+        T call() throws Exception;
+    }
+
+    /**
+     * Runs a call to the backing registry, answering a refusal the registry gives with what
+     * {@code refused} maps it to and any other failure with {@code ServerException}.
+     */
+    private static <T> T callRegistry(RegistryCall<T> call,
+                                      Function<RegistryHttpClient.RegistryErrorException, AwsException> refused) {
         try {
-            return http.headBlob(storage, digest);
+            return call.call();
+        } catch (AwsException e) {
+            throw e;
+        } catch (RegistryHttpClient.RegistryErrorException e) {
+            throw refused.apply(e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw registryUnavailable(e);
