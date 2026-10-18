@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
@@ -540,6 +541,16 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
         }
 
+        // PutAccountPolicy also needs the action for the type of policy it creates, as its API
+        // reference says. An unknown type needs nothing more: the handler refuses it.
+        if ("logs:PutAccountPolicy".equals(action)) {
+            String typeAction = accountPolicyTypeAction(arnBuilder.readJsonBody(ctx));
+            if (typeAction != null && abortIfDenied(ctx, caller, principal, typeAction, action, credentialScope,
+                    resources, targetContexts, region, accountId, akid)) {
+                return;
+            }
+        }
+
         // A PutObject carrying If-Match compares against the object it replaces, and S3 authorizes
         // that read as s3:GetObject, WITHOUT the object's tags in the request context. Measured
         // against real AWS: under a GetObject allow conditioned on s3:ExistingObjectTag the
@@ -617,6 +628,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     private static final Set<String> GOVERNANCE_BYPASS_ACTIONS =
             Set.of("s3:PutObjectRetention", "s3:DeleteObject", "s3:DeleteObjectVersion");
+
+    private static String accountPolicyTypeAction(JsonNode body) {
+        if (body == null) {
+            return null;
+        }
+        return switch (body.path("policyType").asText()) {
+            case "DATA_PROTECTION_POLICY" -> "logs:PutDataProtectionPolicy";
+            case "SUBSCRIPTION_FILTER_POLICY" -> "logs:PutSubscriptionFilter";
+            case "TRANSFORMER_POLICY" -> "logs:PutTransformer";
+            case "FIELD_INDEX_POLICY" -> "logs:PutIndexPolicy";
+            case "METRIC_EXTRACTION_POLICY" -> "logs:PutMetricExtractionPolicy";
+            default -> null;
+        };
+    }
 
     // PutObject and CopyObject are any PUT S3Controller does not run as UploadPart or UploadPartCopy,
     // which name both an uploadId and a partNumber; CompleteMultipartUpload is a POST naming its

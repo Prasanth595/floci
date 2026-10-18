@@ -1391,6 +1391,14 @@ ARNs take precedence over plain-name interpretation and must identify a local gr
 is accepted on a canonical local group ARN. These compatibility forms are not a claim that AWS accepts
 them for these APIs. Other Logs actions retain their existing wildcard resource evaluation.
 
+**CloudWatch Logs account policies.** `PutAccountPolicy` also needs the action for the type of
+policy it creates, checked against `*` like `logs:PutAccountPolicy` itself: `logs:PutDataProtectionPolicy`
+for `DATA_PROTECTION_POLICY`, `logs:PutSubscriptionFilter` for `SUBSCRIPTION_FILTER_POLICY`,
+`logs:PutTransformer` for `TRANSFORMER_POLICY`, `logs:PutIndexPolicy` for `FIELD_INDEX_POLICY` and
+`logs:PutMetricExtractionPolicy` for `METRIC_EXTRACTION_POLICY`. Without it the request is refused with
+`AccessDeniedException` and no policy is stored. The `iam:PassRole` a subscription filter policy with a
+`RoleArn` also needs is not checked.
+
 **Secrets Manager secrets.** A request that names a secret by its name, or by a partial ARN without
 the random suffix, is evaluated against the stored secret's full ARN, suffix included, so a
 `secret:<name>-??????` resource, the pattern the Secrets Manager User Guide documents, matches it as

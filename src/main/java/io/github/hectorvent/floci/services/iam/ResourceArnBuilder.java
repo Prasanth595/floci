@@ -1065,7 +1065,8 @@ public class ResourceArnBuilder {
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
-    private JsonNode readJsonBody(ContainerRequestContext ctx) {
+    /** The request's JSON or CBOR body, buffered so the handler still reads it, or null when it has none. */
+    public JsonNode readJsonBody(ContainerRequestContext ctx) {
         Object cached = ctx.getProperty("floci.bufferedJsonBody");
         if (cached instanceof JsonNode node) {
             return node;
