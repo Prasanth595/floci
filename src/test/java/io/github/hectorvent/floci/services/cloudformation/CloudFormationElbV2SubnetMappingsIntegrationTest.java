@@ -16,6 +16,7 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@code SubnetId} is required in a load balancer's {@code SubnetMappings}. A mapping that names no
@@ -53,8 +54,10 @@ class CloudFormationElbV2SubnetMappingsIntegrationTest {
             request(CFN_AUTH, "CreateStack", "StackName", stack, "TemplateBody", template(name, mapping))
                     .statusCode(200);
             CfnStackWaits.awaitStatus(stack, "ROLLBACK_COMPLETE");
-            request(CFN_AUTH, "DescribeStackEvents", "StackName", stack).statusCode(200)
-                    .body(containsString(reason));
+            String events = request(CFN_AUTH, "DescribeStackEvents", "StackName", stack).statusCode(200)
+                    .extract().asString();
+            List<String> reasons = XmlParser.extractAll(events, "ResourceStatusReason");
+            assertTrue(reasons.stream().anyMatch(r -> r.contains(reason)), String.join(" | ", reasons));
             request(ELB_AUTH, "DescribeLoadBalancers", "Names.member.1", name).statusCode(400)
                     .body(containsString("LoadBalancerNotFound"));
         } finally {
