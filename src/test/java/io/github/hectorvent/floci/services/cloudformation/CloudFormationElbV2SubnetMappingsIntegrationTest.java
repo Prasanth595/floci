@@ -1,22 +1,26 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * A load balancer whose {@code SubnetMappings} name no subnet fails its stack, as on AWS, rather than
- * being created with no subnets.
+ * {@code SubnetId} is required in a load balancer's {@code SubnetMappings}. A mapping that names no
+ * subnet fails its stack, as on AWS, rather than the balancer being created with no subnets, while a
+ * mapping an {@code Fn::If} drops with {@code AWS::NoValue} is left out.
  */
 @QuarkusTest
 class CloudFormationElbV2SubnetMappingsIntegrationTest {
@@ -31,33 +35,75 @@ class CloudFormationElbV2SubnetMappingsIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
-    /** A mapping with no {@code SubnetId}, and one whose {@code SubnetId} is blank. */
+    /**
+     * A mapping with no {@code SubnetId}, one whose {@code SubnetId} an {@code Fn::If} drops, and one
+     * whose {@code SubnetId} is blank, each with the reason the resource fails with.
+     */
     @ParameterizedTest
-    @ValueSource(strings = {"{\"AllocationId\": \"eipalloc-12345678\"}", "{\"SubnetId\": \"\"}"})
-    void aSubnetMappingThatNamesNoSubnetFailsTheStackWithoutALoadBalancer(String mapping) {
+    @CsvSource(delimiter = '|', value = {
+        "{\"AllocationId\": \"eipalloc-12345678\"}|required key [SubnetId] not found",
+        "{\"SubnetId\": {\"Fn::If\": [\"Never\", {\"Ref\": \"SubnetA\"}, {\"Ref\": \"AWS::NoValue\"}]}}|required key [SubnetId] not found",
+        "{\"SubnetId\": \"\"}|The subnet ID '' does not exist"
+    })
+    void aSubnetMappingThatNamesNoSubnetFailsTheStackWithoutALoadBalancer(String mapping, String reason) {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stack = "nlb-mappings-" + suffix;
         String name = "nlb-" + suffix;
-        String template = """
-            {
-              "Resources": {
-                "Nlb": {
-                  "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
-                  "Properties": {"Name": "%s", "Type": "network", "SubnetMappings": [%s]}
-                }
-              }
-            }
-            """.formatted(name, mapping);
         try {
-            request(CFN_AUTH, "CreateStack", "StackName", stack, "TemplateBody", template).statusCode(200);
-            CfnStackWaits.StackState state = CfnStackWaits.awaitStatus(stack, "ROLLBACK_COMPLETE");
-            assertTrue(state.reason().contains("Nlb"), state.reason());
-
+            request(CFN_AUTH, "CreateStack", "StackName", stack, "TemplateBody", template(name, mapping))
+                    .statusCode(200);
+            CfnStackWaits.awaitStatus(stack, "ROLLBACK_COMPLETE");
+            request(CFN_AUTH, "DescribeStackEvents", "StackName", stack).statusCode(200)
+                    .body(containsString(reason));
             request(ELB_AUTH, "DescribeLoadBalancers", "Names.member.1", name).statusCode(400)
                     .body(containsString("LoadBalancerNotFound"));
         } finally {
             request(CFN_AUTH, "DeleteStack", "StackName", stack);
         }
+    }
+
+    /** A second mapping an {@code Fn::If} drops leaves the balancer on the first mapping's subnet. */
+    @Test
+    void aMappingAnFnIfDropsIsLeftOut() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "nlb-mappings-if-" + suffix;
+        String name = "nlb-if-" + suffix;
+        String mappings = "{\"SubnetId\": {\"Ref\": \"SubnetA\"}}, "
+                + "{\"Fn::If\": [\"Never\", {\"SubnetId\": {\"Ref\": \"SubnetB\"}}, {\"Ref\": \"AWS::NoValue\"}]}";
+        try {
+            request(CFN_AUTH, "CreateStack", "StackName", stack, "TemplateBody", template(name, mappings))
+                    .statusCode(200);
+            CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE");
+            String outputs = request(CFN_AUTH, "DescribeStacks", "StackName", stack).statusCode(200)
+                    .extract().asString();
+            String subnetA = XmlParser.extractPairs(outputs, "member", "OutputKey", "OutputValue").get("SubnetA");
+            String described = request(ELB_AUTH, "DescribeLoadBalancers", "Names.member.1", name).statusCode(200)
+                    .extract().asString();
+            assertEquals(List.of(subnetA), XmlParser.extractAll(described, "SubnetId"));
+        } finally {
+            request(CFN_AUTH, "DeleteStack", "StackName", stack);
+        }
+    }
+
+    /** A VPC with two subnets and a network load balancer with the given mappings. */
+    private static String template(String name, String mappings) {
+        return """
+            {
+              "Conditions": {"Never": {"Fn::Equals": ["a", "b"]}},
+              "Resources": {
+                "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.97.0.0/16"}},
+                "SubnetA": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": {"Ref": "Vpc"},
+                            "CidrBlock": "10.97.1.0/24", "AvailabilityZone": "us-east-1a"}},
+                "SubnetB": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": {"Ref": "Vpc"},
+                            "CidrBlock": "10.97.2.0/24", "AvailabilityZone": "us-east-1b"}},
+                "Nlb": {
+                  "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                  "Properties": {"Name": "%s", "Type": "network", "Scheme": "internal", "SubnetMappings": [%s]}
+                }
+              },
+              "Outputs": {"SubnetA": {"Value": {"Ref": "SubnetA"}}}
+            }
+            """.formatted(name, mappings);
     }
 
     private static ValidatableResponse request(String auth, String action, String... values) {

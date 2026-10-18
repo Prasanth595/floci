@@ -75,6 +75,7 @@ class ElbV2CfnProvisionerTest {
             return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
         // resolveStringList delegates to the real engine method; for the literal arrays these
         // tests use it just walks the array and calls resolve(...) per element, stubbed above.
         when(engine.resolveStringList(any())).thenCallRealMethod();
@@ -589,6 +590,26 @@ class ElbV2CfnProvisionerTest {
                 resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Nlb"), props, ctx()));
 
         assertEquals("SubnetNotFound", e.getErrorCode());
+    }
+
+    /** On an update of a kept load balancer, a blank {@code SubnetId} reaches SetSubnets for ELBv2 to refuse. */
+    @Test
+    void anUpdateWithABlankSubnetIdIsRefusedByTheMoveAndKeepsNoSnapshot() {
+        when(elb.createLoadBalancer(eq(REGION), eq("web"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
+                .thenThrow(new AwsException("DuplicateLoadBalancerName", "exists", 400));
+        when(elb.describeLoadBalancers(REGION, null, List.of("web"), null, null))
+                .thenReturn(List.of(loadBalancerOn("web", "subnet-1", "subnet-2")));
+        doThrow(new AwsException("SubnetNotFound", "The subnet ID ' ' does not exist", 400))
+                .when(elb).setSubnets(REGION, LB_ARN, List.of(" "));
+        ObjectNode props = mapper.createObjectNode().put("Name", "web");
+        props.putArray("SubnetMappings").addObject().put("SubnetId", " ");
+        StackResource lb = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        lb.getAttributes().put("LoadBalancerName", "web");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(lb, props, ctx(LB_ARN)));
+
+        assertEquals("SubnetNotFound", e.getErrorCode());
+        assertNull(lb.getAttributes().get(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR));
     }
 
     @Test

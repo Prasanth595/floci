@@ -198,7 +198,8 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         if (!subnets.isEmpty() || props == null || !props.has("SubnetMappings")) {
             return subnets;
         }
-        JsonNode mappings = ctx.engine().resolveNode(props.get("SubnetMappings"));
+        // A mapping, or its SubnetId, that an Fn::If drops with AWS::NoValue is left out, as on AWS.
+        JsonNode mappings = ctx.engine().resolveNodeOmittingNoValue(props.get("SubnetMappings"));
         if (mappings != null && mappings.isArray()) {
             for (int i = 0; i < mappings.size(); i++) {
                 String subnetId = ctx.resolveOptional(mappings.get(i), "SubnetId");
