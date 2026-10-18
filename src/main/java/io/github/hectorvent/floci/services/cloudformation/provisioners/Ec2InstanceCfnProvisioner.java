@@ -129,7 +129,8 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         // change (tags, and the like) reuses it. Launching unconditionally would leak the prior
         // instance every update. A changed LaunchTemplate reuses it too, where AWS replaces the
         // instance: the change-set preview and the template's own versioning would have to agree on
-        // that property first. What the template declares is reconciled in place instead.
+        // that property first. What the template declares is reconciled in place instead, unless
+        // the ImageId or KeyName it supplies changed, which replaces the instance as above.
         Instance prior = ctx.isUpdate() ? findInstance(region, ctx.priorPhysicalId()) : null;
         if (prior != null && !createOnlyChanged(prior, imageId, subnetId, keyName)
                 && !declaredCreateOnlyChanged(attributesBefore, privateIpAddress, availabilityZone)) {
@@ -447,7 +448,11 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
             replaced = ReplacementCleanup.rollback(resource, this::delete);
         } catch (RuntimeException e) {
             if (!Objects.equals(physicalIdBefore, resource.getPhysicalId())) {
-                restoreSavedDeclarations(resource);
+                try {
+                    restoreSavedDeclarations(resource);
+                } catch (RuntimeException restoreFailure) {
+                    e.addSuppressed(restoreFailure);
+                }
             }
             throw e;
         }

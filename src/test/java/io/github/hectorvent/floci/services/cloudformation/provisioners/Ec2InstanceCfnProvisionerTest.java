@@ -681,6 +681,75 @@ class Ec2InstanceCfnProvisionerTest {
         assertFalse(r.getAttributes().containsKey("__FlociPriorDeclarations"));
     }
 
+    /**
+     * A retried rollback goes through the delete it still owes: whether that delete fails again or
+     * succeeds, the prior instance keeps the records the first attempt put back.
+     */
+    @Test
+    void aRetriedRollbackKeepsThePriorRecordsWhicheverWayTheDeleteGoes() throws Exception {
+        List<Instance> instances = stubLaunches("i-1", "i-2");
+        StackResource r = launchRequiringTokensThenReplace(instances.get(0));
+        when(ec2.terminateInstances("us-east-1", List.of("i-2")))
+                .thenThrow(new AwsException("InternalError", "terminate failed", 500))
+                .thenThrow(new AwsException("InternalError", "terminate failed", 500))
+                .thenReturn(List.of());
+        Map<String, String> declared = Map.of("__FlociDeclaredMetadataOptions", "HttpTokens");
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+        assertEquals("i-1", r.getPhysicalId());
+        assertEquals(declared, declarations(r));
+
+        instances.get(1).setState(InstanceState.terminated());
+        provisioner.terminateTimeoutMillis = 20L;
+        assertTrue(provisioner.rollbackUpdate(r));
+        assertEquals("i-1", r.getPhysicalId());
+        assertEquals(declared, declarations(r));
+        assertFalse(r.getAttributes().containsKey("__FlociPriorDeclarations"));
+    }
+
+    /** A saved copy that cannot be read does not hide the delete failure the rollback reports. */
+    @Test
+    void anUnreadableSavedCopyDoesNotHideTheDeleteFailure() throws Exception {
+        List<Instance> instances = stubLaunches("i-1", "i-2");
+        StackResource r = launchRequiringTokensThenReplace(instances.get(0));
+        r.getAttributes().put("__FlociPriorDeclarations", "{not json");
+        AwsException deleteFailure = new AwsException("InternalError", "terminate failed", 500);
+        doThrow(deleteFailure).when(ec2).terminateInstances("us-east-1", List.of("i-2"));
+
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertEquals(deleteFailure, thrown);
+        assertEquals(1, thrown.getSuppressed().length);
+        assertTrue(thrown.getSuppressed()[0] instanceof IllegalStateException);
+    }
+
+    /**
+     * A launch template change keeps the instance only while what the template supplies to the
+     * createOnly ImageId stays the same; a new image replaces it, as a changed ImageId does.
+     */
+    @Test
+    void aNewTemplateVersionWithAnotherImageStillReplacesTheInstance() throws Exception {
+        LaunchTemplateData first = new LaunchTemplateData();
+        first.setImageId("ami-1");
+        LaunchTemplateData second = new LaunchTemplateData();
+        second.setImageId("ami-2");
+        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, "1", false)).thenReturn(first);
+        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, "2", false)).thenReturn(second);
+        stubLaunches("i-1", "i-2");
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("""
+                {"LaunchTemplate": {"LaunchTemplateId": "lt-1", "Version": "1"}}
+                """), ctx(null));
+
+        provisioner.provision(r, props("""
+                {"LaunchTemplate": {"LaunchTemplateId": "lt-1", "Version": "2"}}
+                """), ctx("i-1"));
+
+        assertEquals("i-2", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+    }
+
     @Test
     void aCommittedOrClearedReplacementDropsTheSavedRecords() throws Exception {
         List<Instance> instances = stubLaunches("i-1", "i-2", "i-3", "i-4");
