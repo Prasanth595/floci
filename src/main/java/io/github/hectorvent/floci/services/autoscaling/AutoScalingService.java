@@ -281,13 +281,7 @@ public class AutoScalingService {
                     + (hopLimit.signum() < 1 ? "greater than or equal to 1" : "less than or equal to 64"));
         }
         requireMetadataEnum(violations, "httpEndpoint", options.getHttpEndpoint(), "disabled", "enabled");
-        if (violations.isEmpty()) {
-            return null;
-        }
-        String prefix = violations.size() == 1
-                ? "1 validation error detected: "
-                : violations.size() + " validation errors detected: ";
-        return new AwsException("ValidationError", prefix + String.join("; ", violations), 400);
+        return violations.isEmpty() ? null : SmithyValidationErrors.validationError(violations);
     }
 
     private static void requireMetadataEnum(List<String> violations, String member, String value,
