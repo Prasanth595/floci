@@ -41,7 +41,7 @@ The `Lambda Web` service model (apiVersion 2025-03-07, `aws lambda-web` in the A
 - **ARNs** given as identifiers must name the request's region and the caller's account, as on AWS. A revision or endpoint ARN resolves by its id or name only.
 - **Page tokens** are base64 cursors that carry the request and the position of the page, not the UUIDs AWS issues. A token reused with other parameters gets the AWS "does not match the request" error, and any other token the "invalid or has expired" error.
 - **Domain names** take the form `<id>.001.lambda-web.<region>.<floci host>` and `<id>.lambda-web.global.<floci host>`, with the host and port of `floci.base-url`. A `PerRegion` endpoint gets one domain per region in `regionalEndpoints`.
-- **Not implemented yet:** SigV4a on `MultiRegion` endpoints, the check that a policy's principal exists, the automatic deletion of revisions past 50, the metadata API, the platform log events, the metrics, and serving a `MultiRegion` or `PerRegion` endpoint in its other regions.
+- **Not implemented yet:** SigV4a on `MultiRegion` endpoints, the check that a policy's principal exists, the automatic deletion of revisions past 50, the metadata API, the metrics, and serving a `MultiRegion` or `PerRegion` endpoint in its other regions.
 
 ### `aws lambda-web deploy`
 
@@ -64,7 +64,7 @@ curl -H "Host: <domainName>" http://localhost:4566/
 
 The `Host` must match the domain exactly, as on AWS: another case or another port is `404` with `lambda-web-error-type: Platform.InvalidEndpoint`.
 
-An execution environment is a `public.ecr.aws/lambda/nodejs:24` container that a request starts when every environment of the endpoint is full. The code is the revision's S3 object unpacked into `/var/task`. Node starts `/var/runtime/index.js` with the flags AWS uses, as on AWS, and that runtime imports `index.js` or the file `AWS_LAMBDA_NODEJS_ENTRYPOINT` names. So `require.main` is not the app's module, as on AWS. The app sees `AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:3000`, `AWS_LAMBDA_INITIALIZATION_TYPE=native-http`, `AWS_EXECUTION_ENV`, `AWS_LAMBDA_FUNCTION_MEMORY_SIZE=2048`, `AWS_LAMBDA_LOG_LEVEL`, `AWS_ACCOUNT_ID`, `AWS_REGION`, credentials and `AWS_ENDPOINT_URL` for Floci, `NODE_PATH`, and its own variables. The server has 10 seconds to listen. An environment that sees no request for `floci.services.lambda.container-idle-timeout-seconds` is stopped with `SIGTERM` and one second, as on scale to zero. A process that exits between requests is replaced by a fresh environment on the next request.
+An execution environment is a `public.ecr.aws/lambda/nodejs:24` container that a request starts when every environment of the endpoint is full. The code is the revision's S3 object unpacked into `/var/task`. Node starts `/var/runtime/index.js` with the flags AWS uses, as on AWS, and that runtime imports `index.js` or the file `AWS_LAMBDA_NODEJS_ENTRYPOINT` names. So `require.main` is not the app's module, as on AWS. The app sees `AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:3000`, `AWS_LAMBDA_INITIALIZATION_TYPE=native-http`, `AWS_EXECUTION_ENV`, `AWS_LAMBDA_FUNCTION_MEMORY_SIZE=2048`, `AWS_LAMBDA_LOG_LEVEL`, `AWS_ACCOUNT_ID`, `AWS_REGION`, credentials and `AWS_ENDPOINT_URL` for Floci, `NODE_PATH`, and its own variables. The server has 9 seconds to listen. An environment that sees no request for `floci.services.lambda.container-idle-timeout-seconds` is stopped with `SIGTERM` and one second, as on scale to zero. Node runs under Docker's init, so a server without a `SIGTERM` handler stops at once, as on AWS. A process that exits between requests is replaced by a fresh environment on the next request.
 
 Each endpoint scales on its own, as on AWS. An environment takes up to the revision's `maxConcurrencyPerEnvironment` requests at once, the least busy one first, so requests rotate over the environments. A request that finds every environment full starts another one, or waits for one that is starting and has room. When the endpoint already runs `maxEnvironments`, an idle environment of another revision makes room, and without one the request is refused with `429` and `Platform.EndpointMaxEnvThrottle`. A `rateLimit` admits a burst of up to `rateLimit` requests that refills at `rateLimit` per second, and refuses the rest with `429` and `Platform.EndpointRequestThrottle`. AWS adjusts the concurrency of each environment under `maxConcurrencyPerEnvironment` from the measured load, so a burst there can spread over more environments than in Floci, and the account quotas are not applied.
 
@@ -85,7 +85,7 @@ The platform answers these cases itself, with the AWS HTML pages and `lambda-web
 | 404 | `Platform.InvalidEndpoint` | The `Host` is a `lambda-web` domain Floci did not mint |
 | 429 | `Platform.EndpointMaxEnvThrottle` | Every environment is full and the endpoint runs `maxEnvironments` |
 | 429 | `Platform.EndpointRequestThrottle` | The requests exceed the endpoint's `rateLimit` |
-| 502 | `Application.TimeoutListenError`, `Application.InitCodeError`, `Runtime.Exit` | The server did not listen within 10 seconds, threw at import, or exited at start |
+| 502 | `Application.TimeoutListenError`, `Application.InitCodeError`, `Runtime.Exit` | The server did not listen within 9 seconds, threw at import, or exited at start |
 | 503 | `Platform.EndpointDisabled` | The endpoint's `rateLimit` is 0 |
 | 503 | `Runtime.OriginRequestError` | The process died while handling the request, or tens of milliseconds before it |
 | 504 | `Runtime.RequestTimeout` | No response within the revision's `timeoutSeconds` |
@@ -99,7 +99,22 @@ What an environment writes goes to the revision's `logGroup`, by default `/aws/l
 
 Console output becomes the JSON events AWS writes, with `timestamp`, `level`, `message`, `region`, and `requestId` and `endpointName` for output made while a request runs. `console.log` and `console.info` are `INFO`, `console.debug` is `DEBUG`, `console.trace` is `TRACE` with the stack, `console.warn` is `WARN` and `console.error` is `ERROR`. One argument that is not a string goes into `message` as JSON, and an `Error` as `errorType`, `errorMessage` and `stackTrace`. Several arguments make one string, formatted as Node prints them. Output written to stdout or stderr directly, and `console.dir`, stays as it is, one event per line. Events below the revision's `applicationLogLevel` are dropped, and direct output counts as `INFO`. `FATAL` drops all console output, as on AWS. Bytes that are not UTF-8 become U+FFFD. A line longer than 262,118 bytes in UTF-8 is cut before the character that would pass it, and a line of only spaces makes no event.
 
-The `platform.*` events that `systemLogLevel` filters are not written yet. The output of an environment that fails before it listens stays in Floci's own log. A stack trace shows the frames of Floci's runtime where AWS shows its own.
+The output of an environment that fails before it listens is written too, as on AWS. A stack trace shows the frames of Floci's runtime where AWS shows its own.
+
+The platform writes the `platform.*` events of the [system log schema](https://docs.aws.amazon.com/lambda/latest/dg/web-functions-logging-system-log-schema.html) to the same stream, and drops those below the revision's `systemLogLevel`:
+
+| Event | When |
+| --- | --- |
+| `platform.initStart` | The environment starts |
+| `platform.initReport` | The server listens, or fails to, with the error type of the `502` page. A server that does not listen also gets an `ERROR` event that says so |
+| `platform.invokeStart` | Right after a successful `initReport` |
+| `platform.requestComplete` | At `DEBUG`, for each request the environment took, with the status, the body bytes and the error type of a `503` or `504` page |
+| `platform.invokeSummary` | Every 60 seconds from `invokeStart`, and once more when the environment ends |
+| `platform.invokeReport` | When the environment ends, as a failure with `Runtime.Exit` or `Runtime.ExitError` when the process exited on its own |
+| `platform.spinDownStart`, `platform.spinDownReport` | When the environment stops, after a failed init too. A process still running one second after `SIGTERM` is a `Runtime.SpinDownTimeout` failure |
+| `platform.logsDropped` | Before the next event, after events were dropped because more than 10,000 were waiting |
+
+CPU time and memory come from the container's cgroup, read at each report. Floci cannot read them once the container has stopped, so the CPU time since the last reading is lost when the process exits on its own, an init that fails because the process exited reports neither, and `spinDownReport` has no CPU time. AWS reports the memory of its whole environment, so its numbers are higher.
 
 ## CloudFormation
 

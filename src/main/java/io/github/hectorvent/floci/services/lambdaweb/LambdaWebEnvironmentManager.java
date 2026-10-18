@@ -58,6 +58,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -70,7 +71,8 @@ import java.util.stream.Stream;
  * started by requests that find no room, reused while requests keep coming and removed after the
  * Lambda idle timeout. Node starts {@code /var/runtime/index.js} with the flags AWS uses, as on AWS. That runtime
  * turns console output into log events and imports {@code index.js}, or the file {@code AWS_LAMBDA_NODEJS_ENTRYPOINT}
- * names, from {@code /var/task}. What the process writes goes to the revision's log group.
+ * names, from {@code /var/task}. What the process writes goes to the revision's log group, with the
+ * {@code platform.*} events of each phase.
  */
 @ApplicationScoped
 public class LambdaWebEnvironmentManager implements ContainerTeardown {
@@ -80,7 +82,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     static final String RUNTIME_DIR = "/var/runtime";
     private static final String RUNTIME_RESOURCE = "lambdaweb/index.mjs";
     static final int MEMORY_MB = 2048;
-    static final Duration LISTEN_TIMEOUT = Duration.ofSeconds(10);
+    static final Duration LISTEN_TIMEOUT = Duration.ofSeconds(9);
+    static final Duration SUMMARY_PERIOD = Duration.ofSeconds(60);
     static final List<String> NODE_FLAGS = List.of("--expose-gc", "--max-http-header-size", "135168",
             "--no-experimental-require-module", "--max-semi-space-size=102", "--max-old-space-size=1024");
     private static final Logger LOG = Logger.getLogger(LambdaWebEnvironmentManager.class);
@@ -94,6 +97,10 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private static final Duration LOG_TAIL_TIMEOUT = Duration.ofSeconds(2);
     private static final Duration EXIT_WATCH_REARM = Duration.ofSeconds(1);
     private static final Duration EXIT_STATUS_TIMEOUT = Duration.ofSeconds(5);
+    private static final int USAGE_TIMEOUT_SECONDS = 2;
+    private static final String[] READ_USAGE = {"/bin/cat", "/sys/fs/cgroup/cpu.stat", "/sys/fs/cgroup/memory.peak"};
+    private static final long SIGKILL_STATUS = 137;
+    private static final long SIGTERM_STATUS = 143;
 
     /**
      * One container of an endpoint's pool. It joins the pool before it starts, so requests that
@@ -111,6 +118,10 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         private volatile int port;
         private volatile String logStream;
         private volatile LambdaWebLogs.Sink logs;
+        private volatile LambdaWebPlatformLog platformLog;
+        private volatile ScheduledFuture<?> summaries;
+        /** Set once the app listens. An exit before that is the start's to report. */
+        private volatile boolean serving;
         private volatile SessionCreds roleCredentials;
         private final AtomicInteger inFlight = new AtomicInteger();
         private final AtomicLong lastUsed = new AtomicLong(System.nanoTime());
@@ -154,8 +165,21 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         }
 
         private void reserve() {
-            inFlight.incrementAndGet();
+            int reserved = inFlight.incrementAndGet();
             lastUsed.set(System.nanoTime());
+            LambdaWebPlatformLog platform = platformLog;
+            if (platform != null) {
+                platform.concurrency(reserved);
+            }
+        }
+
+        /** {@code errorType} names the page the platform answered in place of the app. */
+        public void requestComplete(String requestId, String endpointName, int result, String errorType,
+                                    long durationNanos, long responseBytes) {
+            LambdaWebPlatformLog platform = platformLog;
+            if (platform != null) {
+                platform.requestComplete(requestId, endpointName, result, errorType, durationNanos, responseBytes);
+            }
         }
 
         /**
@@ -360,6 +384,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         if (environment.containerId == null) {
             return;
         }
+        stopSummaries(environment);
         try {
             exitCodeIfStopped(environment.containerId).ifPresent(exitCode ->
                     LOG.infov("The Lambda Web environment {0} had exited with status {1}: {2}",
@@ -367,7 +392,47 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         } catch (RuntimeException e) {
             LOG.debugv(e, "Could not inspect the Lambda Web environment {0}", environment.containerId);
         }
-        stopContainer(environment);
+        LambdaWebPlatformLog platform = environment.platformLog;
+        if (platform == null || !environment.serving) {
+            stopContainer(environment);
+            return;
+        }
+        platform.invokeSummary(usage(environment.containerId), environment.inFlight.get());
+        platform.invokeReport(null);
+        platform.spinDownStart();
+        long stopping = System.nanoTime();
+        Long status = stopForStatus(environment.containerId);
+        try {
+            stopContainer(environment);
+        } finally {
+            platform.spinDownReport(spinDownError(status), System.nanoTime() - stopping);
+        }
+    }
+
+    /** Docker sends SIGKILL once the second after SIGTERM has passed. */
+    private static String spinDownError(Long status) {
+        if (status == null || status == 0 || status == SIGTERM_STATUS) {
+            return null;
+        }
+        return status == SIGKILL_STATUS ? "Runtime.SpinDownTimeout" : "Runtime.ExitError";
+    }
+
+    private Long stopForStatus(String containerId) {
+        try {
+            lifecycleManager.getDockerClient().stopContainerCmd(containerId).withTimeout(1).exec();
+            return lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec().getState()
+                    .getExitCodeLong();
+        } catch (RuntimeException e) {
+            LOG.debugv(e, "Could not stop the Lambda Web environment {0}", containerId);
+            return null;
+        }
+    }
+
+    private static void stopSummaries(Environment environment) {
+        ScheduledFuture<?> summaries = environment.summaries;
+        if (summaries != null) {
+            summaries.cancel(false);
+        }
     }
 
     private void stopContainer(Environment environment) {
@@ -449,6 +514,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                 .withWorkingDir(TASK_DIR)
                 .withMemoryMb(MEMORY_MB)
                 .withLoopbackPortBinding(APP_PORT, 0)
+                .withInit()
                 .withDockerNetwork(config.services().lambda().dockerNetwork())
                 .withHostDockerInternalOnLinux()
                 .withEmbeddedDns()
@@ -462,27 +528,79 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             roleCredentials.ifPresent(creds -> executionRoleCredentials.unregister(accountId, creds.accessKeyId()));
             throw e;
         }
+        LambdaWebPlatformLog platform = null;
         try {
             copyCode(containerId, accountId, region, fn, revision);
             RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, RUNTIME_DIR, "index.js",
                     runtime, 0644);
-            ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
-            EndpointInfo endpoint = info.getEndpoint(APP_PORT);
-            awaitListening(containerId);
             environment.containerId = containerId;
-            environment.host = endpoint.host();
-            environment.port = endpoint.port();
             environment.logStream = LOG_STREAM_DATE.format(Instant.now()) + "/" + fn.functionName + "["
                     + revision.revisionId + "]" + UUID.randomUUID().toString().replace("-", "");
-            environment.roleCredentials = roleCredentials.orElse(null);
-            environment.logs = logs.open(accountId, region, revision.serviceConfig.logGroup, environment.logStream);
+            environment.logs = logs.open(accountId, region, revision.serviceConfig.logGroup, environment.logStream,
+                    revision.serviceConfig.systemLogLevel);
+            platform = new LambdaWebPlatformLog(environment.logs, region, fn.functionName, revision.revisionId,
+                    revision.buildConfig.runtime);
+            environment.platformLog = platform;
+            platform.initStart();
+            ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
             watchExit(environment, true);
+            EndpointInfo endpoint = info.getEndpoint(APP_PORT);
+            awaitListening(containerId, platform);
+            platform.initReport(null, usage(containerId));
+            environment.host = endpoint.host();
+            environment.port = endpoint.port();
+            environment.roleCredentials = roleCredentials.orElse(null);
+            environment.serving = true;
+            platform.invokeStart(environment.inFlight.get());
+            environment.summaries = reaper.scheduleAtFixedRate(() -> summarize(environment),
+                    SUMMARY_PERIOD.toMillis(), SUMMARY_PERIOD.toMillis(), TimeUnit.MILLISECONDS);
             LOG.infov("Started the Lambda Web environment {0} of {1} revision {2} at {3}:{4}",
                     containerId, fn.functionName, revision.revisionId, endpoint.host(), endpoint.port());
         } catch (RuntimeException e) {
+            if (platform != null && e instanceof StartFailure failure) {
+                platform.initReport(failure.page().errorType(), usage(containerId));
+                platform.spinDownStart();
+            }
+            long stopping = System.nanoTime();
             lifecycleManager.stopAndRemove(containerId, null, 1);
+            if (platform != null && e instanceof StartFailure) {
+                platform.spinDownReport(null, System.nanoTime() - stopping);
+            }
             roleCredentials.ifPresent(creds -> executionRoleCredentials.unregister(accountId, creds.accessKeyId()));
             throw e;
+        }
+    }
+
+    private void summarize(Environment environment) {
+        Thread.ofVirtual().name("lambda-web-summary").start(() -> {
+            if (environment.isAlive()) {
+                environment.platformLog.invokeSummary(usage(environment.containerId), environment.inFlight.get());
+            }
+        });
+    }
+
+    /** The CPU time and the peak memory of the container, or null when they cannot be read. */
+    private LambdaWebPlatformLog.Usage usage(String containerId) {
+        try {
+            ContainerExec.Result result = ContainerExec.runMerged(lifecycleManager.getDockerClient(), containerId,
+                    READ_USAGE, USAGE_TIMEOUT_SECONDS);
+            if (result.timedOut() || result.exitCode() != 0) {
+                return null;
+            }
+            long cpuMicros = 0;
+            long memoryBytes = 0;
+            for (String line : result.stdout().split("\n")) {
+                String[] fields = line.trim().split(" ");
+                if (fields.length == 2 && "usage_usec".equals(fields[0])) {
+                    cpuMicros = Long.parseLong(fields[1]);
+                } else if (fields.length == 1 && !fields[0].isEmpty()) {
+                    memoryBytes = Long.parseLong(fields[0]);
+                }
+            }
+            return new LambdaWebPlatformLog.Usage(cpuMicros, memoryBytes);
+        } catch (RuntimeException e) {
+            LOG.debugv(e, "Could not read the usage of the Lambda Web environment {0}", containerId);
+            return null;
         }
     }
 
@@ -562,7 +680,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         }
     }
 
-    private void awaitListening(String containerId) {
+    private void awaitListening(String containerId, LambdaWebPlatformLog platform) {
         long deadline = System.nanoTime() + LISTEN_TIMEOUT.toNanos();
         while (true) {
             Optional<Long> exitCode = exitCodeIfStopped(containerId);
@@ -576,6 +694,10 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                 return;
             }
             if (System.nanoTime() > deadline) {
+                platform.applicationError(LambdaWebErrorPages.TIMEOUT_LISTEN_ERROR.errorType()
+                        + ": nothing was listening on 0.0.0.0:" + APP_PORT + " within " + LISTEN_TIMEOUT.toMillis()
+                        + "ms. Your server must listen on the host and port from the AWS_LAMBDA_HTTP_ENDPOINT"
+                        + " environment variable");
                 throw new StartFailure(LambdaWebErrorPages.TIMEOUT_LISTEN_ERROR);
             }
             try {
@@ -738,6 +860,10 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
 
     /** The environment leaves the pool before waiters hear of the exit, so the request after a failed one starts anew. */
     private void exited(Environment environment, long seenAt) {
+        if (!environment.serving) {
+            environment.sawExit(seenAt);
+            return;
+        }
         boolean running = environment.alive.compareAndSet(true, false);
         if (running) {
             removeFromPool(environment);
@@ -747,12 +873,22 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             return;
         }
         // Docker can take seconds to report the status under load. The reaper stays free to rearm dropped watches.
+        stopSummaries(environment);
         Thread.ofVirtual().name("lambda-web-exit").start(() -> {
+            LambdaWebPlatformLog platform = environment.platformLog;
             try {
+                Integer status = exitStatus(environment.containerId);
                 LOG.infov("The Lambda Web environment {0} exited with status {1}: {2}",
-                        environment.containerId, exitStatus(environment.containerId),
-                        lastLogLines(environment.containerId));
-                lifecycleManager.stopAndRemove(environment.containerId, null, 0);
+                        environment.containerId, status, lastLogLines(environment.containerId));
+                platform.invokeSummary(null, 0);
+                platform.invokeReport(Integer.valueOf(0).equals(status) ? "Runtime.Exit" : "Runtime.ExitError");
+                platform.spinDownStart();
+                long stopping = System.nanoTime();
+                try {
+                    lifecycleManager.stopAndRemove(environment.containerId, null, 0);
+                } finally {
+                    platform.spinDownReport(null, System.nanoTime() - stopping);
+                }
             } finally {
                 forgetCredentials(environment);
             }

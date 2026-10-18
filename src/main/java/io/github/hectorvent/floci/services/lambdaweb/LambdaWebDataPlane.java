@@ -206,7 +206,7 @@ public class LambdaWebDataPlane {
     private void forward(HttpServerRequest request, String host, WebFunctionTarget target,
                          WebFunctionRevision revision, Environment environment, String requestId, boolean firstTry) {
         long started = System.nanoTime();
-        Exchange exchange = new Exchange(request, environment);
+        Exchange exchange = new Exchange(request, environment, requestId, target.endpoint().endpointName, started);
         boolean hasBody = hasRequestBody(request);
         AtomicBoolean bodyIn = new AtomicBoolean(!hasBody);
         AtomicBoolean expired = new AtomicBoolean();
@@ -225,8 +225,10 @@ public class LambdaWebDataPlane {
                     upstream.reset();
                     if (request.response().headWritten()) {
                         request.response().close();
+                        exchange.relayed(LambdaWebErrorPages.REQUEST_TIMEOUT.errorType());
                     } else {
                         page(request, LambdaWebErrorPages.REQUEST_TIMEOUT, requestId, false);
+                        exchange.replaced(LambdaWebErrorPages.REQUEST_TIMEOUT);
                     }
                 }
             };
@@ -251,6 +253,7 @@ public class LambdaWebDataPlane {
                         if (request.response().headWritten()) {
                             if (exchange.finish()) {
                                 request.response().close();
+                                exchange.relayed(null);
                             }
                             return;
                         }
@@ -286,6 +289,7 @@ public class LambdaWebDataPlane {
                     }
                     request.resume();
                     page(request, LambdaWebErrorPages.ORIGIN_REQUEST_ERROR, requestId, false);
+                    exchange.replaced(LambdaWebErrorPages.ORIGIN_REQUEST_ERROR);
                 });
     }
 
@@ -306,26 +310,52 @@ public class LambdaWebDataPlane {
                 return;
             }
             if (piped.succeeded()) {
+                exchange.relayed(null);
                 return;
             }
             if (out.headWritten()) {
                 out.close();
+                exchange.relayed(null);
             } else {
                 page(request, LambdaWebErrorPages.ORIGIN_REQUEST_ERROR, requestId, false);
+                exchange.replaced(LambdaWebErrorPages.ORIGIN_REQUEST_ERROR);
             }
         });
     }
 
-    /** One request against one environment. The first finisher releases the reservation and the deadline. */
+    /**
+     * One request against one environment. The first finisher releases the reservation and the deadline, and reports
+     * the request in {@code platform.requestComplete}.
+     */
     private final class Exchange {
         private final HttpServerRequest request;
         private final Environment environment;
+        private final String requestId;
+        private final String endpointName;
+        private final long started;
         private final AtomicBoolean finished = new AtomicBoolean();
         private long deadline = -1;
 
-        Exchange(HttpServerRequest request, Environment environment) {
+        Exchange(HttpServerRequest request, Environment environment, String requestId, String endpointName,
+                 long started) {
             this.request = request;
             this.environment = environment;
+            this.requestId = requestId;
+            this.endpointName = endpointName;
+            this.started = started;
+        }
+
+        /** The answer of the app, cut when {@code errorType} is set. */
+        void relayed(String errorType) {
+            HttpServerResponse response = request.response();
+            environment.requestComplete(requestId, endpointName, response.getStatusCode(), errorType,
+                    System.nanoTime() - started, response.bytesWritten());
+        }
+
+        /** A page in place of the app's answer. AWS counts none of its bytes. */
+        void replaced(LambdaWebErrorPages.Page page) {
+            environment.requestComplete(requestId, endpointName, page.status(), page.errorType(),
+                    System.nanoTime() - started, 0);
         }
 
         boolean finish() {

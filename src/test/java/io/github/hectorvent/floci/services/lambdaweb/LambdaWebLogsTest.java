@@ -16,6 +16,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -57,7 +58,7 @@ class LambdaWebLogsTest {
         doThrow(notFound()).doReturn("token").when(cloudWatchLogs)
                 .putLogEventsForAccount(eq(ACCOUNT), eq(GROUP), eq(CENTRAL_STREAM), anyList(), eq(REGION));
 
-        logs.open(ACCOUNT, REGION, GROUP, STREAM).accept("first\n");
+        logs.open(ACCOUNT, REGION, GROUP, STREAM, "INFO").accept("first\n");
 
         ArgumentCaptor<List<Map<String, Object>>> local = ArgumentCaptor.forClass(List.class);
         verify(cloudWatchLogs, timeout(5_000).times(2)).putLogEventsForAccount(eq(ACCOUNT), eq(GROUP + ".local"),
@@ -78,7 +79,7 @@ class LambdaWebLogsTest {
         doThrow(new AwsException("InvalidParameterException", "Invalid log group name.", 400)).when(cloudWatchLogs)
                 .createLogGroupForAccount(ACCOUNT, GROUP + ".local", null, null, REGION);
 
-        logs.open(ACCOUNT, REGION, GROUP, STREAM).accept("first\n");
+        logs.open(ACCOUNT, REGION, GROUP, STREAM, "INFO").accept("first\n");
 
         verify(cloudWatchLogs, timeout(5_000)).putLogEventsForAccount(eq(ACCOUNT), eq(GROUP), eq(CENTRAL_STREAM),
                 anyList(), eq(REGION));
@@ -95,7 +96,7 @@ class LambdaWebLogsTest {
             throw new IllegalStateException("the store failed");
         }).doReturn("token").when(cloudWatchLogs)
                 .putLogEventsForAccount(eq(ACCOUNT), eq(GROUP + ".local"), eq(STREAM), anyList(), eq(REGION));
-        LambdaWebLogs.Sink sink = logs.open(ACCOUNT, REGION, GROUP, STREAM);
+        LambdaWebLogs.Sink sink = logs.open(ACCOUNT, REGION, GROUP, STREAM, "INFO");
 
         sink.accept("first\n");
         writing.await(5, TimeUnit.SECONDS);
@@ -104,6 +105,41 @@ class LambdaWebLogsTest {
 
         verify(cloudWatchLogs, timeout(5_000)).putLogEventsForAccount(eq(ACCOUNT), eq(GROUP + ".local"), eq(STREAM),
                 argThat(batch -> batch.size() == 1 && "second\n".equals(batch.getFirst().get("message"))), eq(REGION));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void eventsDroppedWhileTheQueueIsFullAreReportedBeforeTheNextOne() throws Exception {
+        CountDownLatch writing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            writing.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return "token";
+        }).doReturn("token").when(cloudWatchLogs)
+                .putLogEventsForAccount(eq(ACCOUNT), eq(GROUP + ".local"), eq(STREAM), anyList(), eq(REGION));
+        LambdaWebLogs.Sink sink = logs.open(ACCOUNT, REGION, GROUP, STREAM, "INFO");
+        sink.accept("first\n");
+        writing.await(5, TimeUnit.SECONDS);
+
+        for (int i = 0; i < LambdaWebLogs.MAX_QUEUED_EVENTS + 3; i++) {
+            sink.accept("queued\n");
+        }
+        release.countDown();
+        int drained = 1 + LambdaWebLogs.MAX_QUEUED_EVENTS / 1_000;
+        verify(cloudWatchLogs, timeout(5_000).times(drained)).putLogEventsForAccount(eq(ACCOUNT), eq(GROUP + ".local"),
+                eq(STREAM), anyList(), eq(REGION));
+        sink.accept("after\n");
+
+        ArgumentCaptor<List<Map<String, Object>>> batches = ArgumentCaptor.forClass(List.class);
+        verify(cloudWatchLogs, timeout(5_000).times(drained + 1)).putLogEventsForAccount(eq(ACCOUNT),
+                eq(GROUP + ".local"), eq(STREAM), batches.capture(), eq(REGION));
+        List<String> messages = batches.getAllValues().stream().flatMap(List::stream)
+                .map(event -> (String) event.get("message")).toList();
+        String dropped = messages.get(messages.size() - 2);
+        assertTrue(dropped.contains("\"level\":\"WARN\",\"type\":\"platform.logsDropped\""), dropped);
+        assertTrue(dropped.endsWith("\"droppedRecords\":3,\"droppedBytes\":21}}"), dropped);
+        assertEquals("after\n", messages.getLast());
     }
 
     private static AwsException notFound() {

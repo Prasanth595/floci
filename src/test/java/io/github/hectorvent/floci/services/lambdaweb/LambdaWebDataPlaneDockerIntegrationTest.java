@@ -34,6 +34,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -64,6 +65,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
             const http = require('node:http');
             const [host, port] = process.env.AWS_LAMBDA_HTTP_ENDPOINT.split(':');
             console.log('starting');
+            if (process.env.MODE === 'throw') { throw new Error('init boom'); }
             http.createServer((req, res) => {
               if (req.url.startsWith('/log')) {
                 console.info({route: 'log', main: require.main === module, argv: process.argv.slice(1)});
@@ -209,7 +211,10 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         String logStream = logged.header("lambda-web-logstream");
         String group = "/aws/lambda/web/" + functionName;
 
-        List<String> local = awaitLogEvents(group + ".local", logStream);
+        List<String> all = awaitLogEvents(group + ".local", logStream);
+        assertEquals(List.of("platform.initStart", "platform.initReport", "platform.invokeStart"),
+                types(all), all.toString());
+        List<String> local = all.stream().filter(event -> !isPlatformEvent(event)).toList();
         assertEquals(5, local.size(), local.toString());
         JsonPath starting = JsonPath.from(local.getFirst());
         assertEquals("INFO", starting.getString("level"));
@@ -229,7 +234,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         assertTrue(local.stream().allMatch(event -> event.endsWith("\n")), local.toString());
 
         List<String> centralized = awaitLogEvents(group, logStream + "-000000000000-us-east-1");
-        assertEquals(new HashSet<>(local), new HashSet<>(centralized));
+        assertEquals(new HashSet<>(all), new HashSet<>(centralized));
     }
 
     @Test
@@ -398,6 +403,11 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     }
 
     private String createFunction(int timeoutSeconds, int maxConcurrencyPerEnvironment) throws IOException {
+        return createFunction(timeoutSeconds, maxConcurrencyPerEnvironment, "INFO", "serve");
+    }
+
+    private String createFunction(int timeoutSeconds, int maxConcurrencyPerEnvironment, String systemLogLevel,
+                                  String mode) throws IOException {
         functionName = "dp-docker-" + Long.toString(System.nanoTime(), 36);
         s3Service.createBucket(BUCKET, "us-east-1");
         s3Service.putObject(BUCKET, functionName + ".zip", zip(APP), "application/zip", Map.of());
@@ -409,14 +419,133 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                                            "runtimeConfig": {"runtime": "nodejs24.x"}},
                            "serviceConfig": {"executionRoleArn": "%s", "timeoutSeconds": %d,
                                              "maxConcurrencyPerEnvironment": %d,
-                                             "environmentVariables": {"CUSTOM": "yes"}}},
+                                             "environmentVariables": {"CUSTOM": "yes", "MODE": "%s"},
+                                             "telemetryConfig": {"loggingConfig": {"systemLogLevel": "%s"}}}},
                          "endpointConfig": {"endpointName": "dev", "endpointType": "HomeRegion",
                                             "authType": "ApplicationManaged", "autoDeploymentMode": "LatestRevision"}}
                         """.formatted(functionName, BUCKET, functionName, ROLE, timeoutSeconds,
-                        maxConcurrencyPerEnvironment))
+                        maxConcurrencyPerEnvironment, mode, systemLogLevel))
                 .when().put(BASE + "/web-functions")
                 .then().statusCode(202)
                 .extract().path("endpoint.domainName");
+    }
+
+    @Test
+    @Timeout(180)
+    void platformEventsFollowAnEnvironmentFromItsStartToItsEnd() throws Exception {
+        String domain = createFunction(30, 64, "DEBUG", "serve");
+        String group = "/aws/lambda/web/" + functionName + ".local";
+        Response served = given().header("Host", domain).when().get("/status/201");
+        served.then().statusCode(201);
+        String crashed = served.header("lambda-web-logstream");
+        given().header("Host", domain).when().get("/crash").then().statusCode(503);
+
+        List<String> crash = awaitLogEvents(group, crashed, events -> types(events).contains("platform.spinDownReport")
+                && types(events).stream().filter("platform.requestComplete"::equals).count() == 2);
+        JsonPath initStart = platformEvent(crash, "platform.initStart");
+        String instanceId = initStart.getString("record.instanceId");
+        assertEquals("INFO", initStart.getString("level"));
+        assertEquals("us-east-1", initStart.getString("region"));
+        assertEquals(functionName, initStart.getString("record.functionName"));
+        assertEquals("nodejs24.x:nodejs.web24.v30", initStart.getString("record.runtimeVersion"));
+        assertEquals("arn:aws:lambda:us-east-1::runtime/nodejs24.x/version/nodejs.web24.v30",
+                initStart.getString("record.runtimeVersionArn"));
+        assertEquals("native-http", initStart.getString("record.initializationType"));
+        JsonPath initReport = platformEvent(crash, "platform.initReport");
+        assertEquals("success", initReport.getString("record.status"));
+        assertEquals(instanceId, initReport.getString("record.instanceId"));
+        assertTrue(initReport.getInt("record.metrics.maxMemoryUsageMb") > 0, initReport.prettify());
+        List<JsonPath> requests = crash.stream().filter(event -> event.contains("platform.requestComplete"))
+                .map(JsonPath::from).toList();
+        assertEquals(2, requests.size(), crash.toString());
+        JsonPath ok = requests.stream().filter(event -> event.getInt("record.result") == 201).findFirst().orElseThrow();
+        assertEquals("DEBUG", ok.getString("level"));
+        assertEquals(served.header("lambda-web-request-id"), ok.getString("record.requestId"));
+        assertEquals("dev", ok.getString("record.endpointName"));
+        assertEquals(11, ok.getInt("record.metrics.responseBytes"));
+        assertFalse(ok.getMap("record").containsKey("errorType"), ok.prettify());
+        JsonPath failed = requests.stream().filter(event -> event.getInt("record.result") == 503).findFirst().orElseThrow();
+        assertEquals("Runtime.OriginRequestError", failed.getString("record.errorType"));
+        assertEquals(0, failed.getInt("record.metrics.responseBytes"));
+        JsonPath crashReport = platformEvent(crash, "platform.invokeReport");
+        assertEquals("WARN", crashReport.getString("level"));
+        assertEquals("failure", crashReport.getString("record.status"));
+        assertEquals("Runtime.ExitError", crashReport.getString("record.errorType"));
+        assertEquals("success", platformEvent(crash, "platform.spinDownReport").getString("record.status"));
+
+        String stopped = given().header("Host", domain).when().get("/").then().statusCode(200)
+                .extract().header("lambda-web-logstream");
+        environments.discard(environments.environmentOf(stopped));
+        List<String> stop = awaitLogEvents(group, stopped, events -> types(events).contains("platform.spinDownReport"));
+        assertEquals(List.of("platform.initStart", "platform.initReport", "platform.invokeStart",
+                "platform.requestComplete", "platform.invokeSummary", "platform.invokeReport",
+                "platform.spinDownStart", "platform.spinDownReport"), types(stop), stop.toString());
+        JsonPath stopReport = platformEvent(stop, "platform.invokeReport");
+        assertEquals("INFO", stopReport.getString("level"));
+        assertEquals("success", stopReport.getString("record.status"));
+        assertEquals(1, stopReport.getInt("record.metrics.totalRequests"));
+        assertEquals(1, platformEvent(stop, "platform.invokeSummary").getInt("record.metrics.requests"));
+        assertEquals("success", platformEvent(stop, "platform.spinDownReport").getString("record.status"));
+    }
+
+    @Test
+    @Timeout(180)
+    void anAppThatFailsAtImportWritesItsOutputAndAFailedInitReport() throws Exception {
+        String domain = createFunction(30, 64, "WARN", "throw");
+        String group = "/aws/lambda/web/" + functionName + ".local";
+        given().header("Host", domain).when().get("/").then().statusCode(502)
+                .header("lambda-web-error-type", "Application.InitCodeError");
+
+        List<String> events = awaitLogEvents(group, awaitLogStream(group), each -> types(each).contains(
+                "platform.initReport") && each.stream().anyMatch(event -> event.contains("init boom")));
+        assertEquals(List.of("platform.initReport"), types(events), events.toString());
+        JsonPath initReport = platformEvent(events, "platform.initReport");
+        assertEquals("WARN", initReport.getString("level"));
+        assertEquals("failure", initReport.getString("record.status"));
+        assertEquals("Application.InitCodeError", initReport.getString("record.errorType"));
+        assertTrue(events.stream().anyMatch(event -> event.contains("\"message\":\"starting\"")), events.toString());
+        assertTrue(events.stream().anyMatch(event -> event.contains("init boom")), events.toString());
+    }
+
+    private static boolean isPlatformEvent(String event) {
+        return event.startsWith("{") && event.contains("\"type\":\"platform.");
+    }
+
+    private static List<String> types(List<String> events) {
+        return events.stream().filter(LambdaWebDataPlaneDockerIntegrationTest::isPlatformEvent)
+                .map(event -> JsonPath.from(event).getString("type")).toList();
+    }
+
+    private static JsonPath platformEvent(List<String> events, String type) {
+        return events.stream().filter(LambdaWebDataPlaneDockerIntegrationTest::isPlatformEvent)
+                .map(JsonPath::from).filter(event -> type.equals(event.getString("type")))
+                .findFirst().orElseThrow(() -> new AssertionError("No " + type + " in " + events));
+    }
+
+    /** The messages of a log stream once they are {@code complete}, or what it holds after 15 seconds. */
+    private static List<String> awaitLogEvents(String logGroup, String logStream, Predicate<List<String>> complete)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        List<String> messages = logEvents(logGroup, logStream);
+        while (!complete.test(messages) && System.nanoTime() < deadline) {
+            Thread.sleep(200);
+            messages = logEvents(logGroup, logStream);
+        }
+        return messages;
+    }
+
+    private static String awaitLogStream(String logGroup) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        while (true) {
+            List<String> streams = RestAssuredJsonUtils.awsAction("Logs_20140328", "DescribeLogStreams",
+                            "{\"logGroupName\": \"%s\"}".formatted(logGroup))
+                    .then().extract().jsonPath().getList("logStreams.logStreamName", String.class);
+            if (streams != null && !streams.isEmpty()) {
+                return streams.getFirst();
+            }
+            assertTrue(System.nanoTime() < deadline, "No log stream in " + logGroup);
+            Thread.sleep(200);
+        }
     }
 
     /**
