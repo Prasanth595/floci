@@ -97,6 +97,50 @@ class CloudWatchLogsQueryIdentifiersIntegrationTest {
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"arn::logs:::", "arn::logs:us-east-1:000000000000:",
+            "arn:bogus:logs:us-east-1:000000000000:", "arn:aws:logs::000000000000:",
+            "arn:aws:logs: :000000000000:", "arn:aws:logs:us east 1:000000000000:",
+            "arn:aws:logs:us-east-1::", "arn:aws:logs:us-east-1:123:",
+            "arn:aws:logs:us-east-1:abcdefghijkl:"})
+    void incompleteOrInvalidArnFieldsAreNotSilentlyRewritten(String prefix) {
+        seed("us-east-1");
+
+        startQuery(List.of(prefix + "log-group:" + group + ":")).then().statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"logGroupName", "logGroupNames"})
+    void nameSelectorsDoNotAcceptTheTrailingColonArnTolerance(String selector) {
+        seed("us-east-1");
+        String identifier = describedArn.replace("*", "");
+        Object value = "logGroupName".equals(selector) ? identifier : List.of(identifier);
+
+        logs("StartQuery", Map.of(selector, value, "startTime", timestamp / 1000 - 1,
+                "endTime", timestamp / 1000 + 1, "queryString", "fields @message | limit 2"))
+                .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"logGroupName,name", "logGroupName,arn", "logGroupName,wildcard",
+            "logGroupNames,name", "logGroupNames,arn", "logGroupNames,wildcard"})
+    void nameSelectorsKeepTheirExistingIdentifierForms(String selector, String form) {
+        String arn = seed("us-east-1");
+        String identifier = switch (form) {
+            case "name" -> group;
+            case "arn" -> arn;
+            case "wildcard" -> describedArn;
+            default -> throw new IllegalArgumentException(form);
+        };
+        Object value = "logGroupName".equals(selector) ? identifier : List.of(identifier);
+
+        String queryId = logs("StartQuery", Map.of(selector, value, "startTime", timestamp / 1000 - 1,
+                "endTime", timestamp / 1000 + 1, "queryString", "fields @message | limit 2"))
+                .then().statusCode(200).extract().path("queryId");
+        assertSingleEvent(queryId);
+    }
+
     @Test
     void anArnForAnAbsentGroupStillFails() {
         String arn = seed("us-east-1");
@@ -124,6 +168,10 @@ class CloudWatchLogsQueryIdentifiersIntegrationTest {
 
     private void assertSingleEvent(List<String> identifiers) {
         String queryId = startQuery(identifiers).then().statusCode(200).extract().path("queryId");
+        assertSingleEvent(queryId);
+    }
+
+    private void assertSingleEvent(String queryId) {
         Response results = logs("GetQueryResults", Map.of("queryId", queryId)).then().statusCode(200)
                 .body("status", equalTo("Complete"))
                 .body("results", hasSize(1))

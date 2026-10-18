@@ -23,12 +23,15 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class CloudWatchLogsHandler {
 
     private static final Pattern LOG_GROUP_NAME = Pattern.compile("[._/#A-Za-z0-9-]+");
+    private static final Pattern QUERY_LOG_GROUP_ARN_WITH_COLON = Pattern.compile("arn:"
+            + AwsArnUtils.PARTITION_REGEX + ":logs:[a-z0-9-]+:[0-9]{12}:log-group:(" + LOG_GROUP_NAME.pattern() + "):");
 
     private final CloudWatchLogsService logsService;
     private final CloudWatchLogsCrossAccountService crossAccountService;
@@ -394,9 +397,9 @@ public class CloudWatchLogsHandler {
         }
 
         List<String> logGroupNames = new ArrayList<>();
-        request.path("logGroupNames").forEach(n -> logGroupNames.add(resolveQueryLogGroupName(n.asText())));
+        request.path("logGroupNames").forEach(n -> logGroupNames.add(extractLogGroupNameFromArn(n.asText())));
         if (request.has("logGroupName")) {
-            logGroupNames.add(resolveQueryLogGroupName(request.path("logGroupName").asText()));
+            logGroupNames.add(extractLogGroupNameFromArn(request.path("logGroupName").asText()));
         }
         request.path("logGroupIdentifiers").forEach(n -> logGroupNames.add(resolveQueryLogGroupName(n.asText())));
 
@@ -412,12 +415,11 @@ public class CloudWatchLogsHandler {
     }
 
     private static String resolveQueryLogGroupName(String identifier) {
-        // Grafana strips only the '*' from DescribeLogGroups' ARN. Keep this tolerance query-only.
-        String resource = AwsArnUtils.resourceIfArnFor(identifier, "logs").orElse("");
-        String prefix = "log-group:";
-        if (resource.startsWith(prefix) && resource.length() > prefix.length() && resource.endsWith(":")) {
-            String name = resource.substring(prefix.length(), resource.length() - 1);
-            if (name.length() <= 512 && LOG_GROUP_NAME.matcher(name).matches()) {
+        // Grafana strips only the '*' from DescribeLogGroups' ARN. Keep this tolerance identifier-only.
+        Matcher arn = QUERY_LOG_GROUP_ARN_WITH_COLON.matcher(identifier == null ? "" : identifier);
+        if (arn.matches()) {
+            String name = arn.group(1);
+            if (name.length() <= 512) {
                 return name;
             }
         }
