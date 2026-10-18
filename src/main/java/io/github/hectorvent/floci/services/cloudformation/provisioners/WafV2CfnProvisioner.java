@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.wafv2.WafV2Service;
+import io.github.hectorvent.floci.services.wafv2.model.IpSet;
 import io.github.hectorvent.floci.services.wafv2.model.WebAcl;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -22,6 +23,7 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
     private static final Logger LOG = Logger.getLogger(WafV2CfnProvisioner.class);
     private static final String WEB_ACL = "AWS::WAFv2::WebACL";
     private static final String WEB_ACL_ASSOCIATION = "AWS::WAFv2::WebACLAssociation";
+    private static final String IP_SET = "AWS::WAFv2::IPSet";
 
     private final WafV2Service wafV2Service;
 
@@ -32,13 +34,17 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(WEB_ACL, WEB_ACL_ASSOCIATION);
+        return Set.of(WEB_ACL, WEB_ACL_ASSOCIATION, IP_SET);
     }
 
     @Override
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
         if (WEB_ACL_ASSOCIATION.equals(resource.getResourceType())) {
             provisionAssociation(resource, props, ctx);
+            return;
+        }
+        if (IP_SET.equals(resource.getResourceType())) {
+            provisionIpSet(resource, props, ctx);
             return;
         }
         JsonNode resolved = ctx.engine().resolveNode(props);
@@ -57,7 +63,7 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
         if (existing != null && existing.getName().equals(name) && existing.getScope().equals(scope)) {
             wafV2Service.updateWebAcl(desired, scope, existing.getId(), name, existing.getLockToken());
             acl = wafV2Service.getWebAcl(scope, existing.getId(), name);
-            reconcileTags(acl, desired.getTags());
+            reconcileTags(acl.getArn(), desired.getTags());
         } else {
             acl = wafV2Service.createWebAcl(desired, scope, name, ctx.region());
             setReferences(resource, acl);
@@ -93,10 +99,54 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
         ReplacementCleanup.record(resource, ctx, attributesBefore);
     }
 
+    /**
+     * {@code Name} and {@code Scope} are create-only, so a changed one leaves a new
+     * {@code name|id|scope} id and the prior set is deleted the way a Web ACL replacement is;
+     * {@code Addresses}, {@code Description} and {@code Tags} update in place, and
+     * {@code IPAddressVersion} is never passed to the update, which cannot change it on AWS either.
+     */
+    private void provisionIpSet(StackResource resource, JsonNode props, ProvisionContext ctx) {
+        JsonNode resolved = ctx.engine().resolveNode(props);
+        String scope = required(text(resolved, "Scope"), IP_SET, "Scope");
+        String name = required(text(resolved, "Name"), IP_SET, "Name");
+        required(text(resolved, "IPAddressVersion"), IP_SET, "IPAddressVersion");
+        List<String> addresses = requiredAddresses(resolved);
+        IpSet existing = findExistingIpSet(resource.getPhysicalId());
+        if (existing != null && existing.getName().equals(name) && existing.getScope().equals(scope)) {
+            wafV2Service.updateIpSet(scope, existing.getId(), text(resolved, "Description"), addresses,
+                    name, existing.getLockToken());
+            IpSet updated = wafV2Service.getIpSet(scope, existing.getId(), name);
+            reconcileTags(updated.getArn(), tags(resolved));
+            setIpSetReferences(resource, updated);
+            return;
+        }
+        IpSet desired = new IpSet();
+        desired.setDescription(text(resolved, "Description"));
+        desired.setIpAddressVersion(text(resolved, "IPAddressVersion"));
+        desired.setAddresses(addresses);
+        desired.setTags(tags(resolved));
+        IpSet created = wafV2Service.createIpSet(desired, scope, name, ctx.region());
+        setIpSetReferences(resource, created);
+        if (existing != null) {
+            try {
+                wafV2Service.deleteIpSet(existing.getScope(), existing.getId(), existing.getName(),
+                        existing.getLockToken());
+            } catch (RuntimeException e) {
+                // old set may still be referenced by a web ACL; new set is already tracked
+                LOG.warnv("WAFv2 CFN replacement cleanup of IP set {0}|{1}|{2} tolerated: {3}",
+                        existing.getName(), existing.getId(), existing.getScope(), e.getMessage());
+            }
+        }
+    }
+
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         if (WEB_ACL_ASSOCIATION.equals(resourceType)) {
             deleteAssociation(physicalId);
+            return;
+        }
+        if (IP_SET.equals(resourceType)) {
+            deleteIpSet(physicalId);
             return;
         }
         WebAcl existing = findExisting(physicalId);
@@ -104,6 +154,17 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
             wafV2Service.deleteWebAcl(existing.getScope(), existing.getId(), existing.getName(),
                     existing.getLockToken());
         }
+    }
+
+    private void deleteIpSet(String physicalId) {
+        IpSet existing = findExistingIpSet(physicalId);
+        if (existing == null) {
+            return;
+        }
+        CfnDeletes.safeDelete("WAFv2 IP set", physicalId,
+                () -> wafV2Service.deleteIpSet(existing.getScope(), existing.getId(), existing.getName(),
+                        existing.getLockToken()),
+                "WAFNonexistentItemException");
     }
 
     /**
@@ -179,6 +240,11 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
             tokens.forEach(token -> tokenDomains.add(token.asText()));
         }
         acl.setTokenDomains(tokenDomains);
+        acl.setTags(tags(props));
+        return acl;
+    }
+
+    private Map<String, String> tags(JsonNode props) {
         Map<String, String> tags = new LinkedHashMap<>();
         JsonNode tagNodes = props.path("Tags");
         if (tagNodes.isArray()) {
@@ -189,8 +255,17 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
                 }
             }
         }
-        acl.setTags(tags);
-        return acl;
+        return tags;
+    }
+
+    private List<String> requiredAddresses(JsonNode props) {
+        JsonNode node = props.get("Addresses");
+        if (node == null || node.isNull() || !node.isArray()) {
+            throw new AwsException("ValidationError", IP_SET + " requires Addresses", 400);
+        }
+        List<String> addresses = new ArrayList<>();
+        node.forEach(address -> addresses.add(address.asText()));
+        return addresses;
     }
 
     private static String required(String value, String resourceType, String property) {
@@ -200,14 +275,14 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
         return value;
     }
 
-    private void reconcileTags(WebAcl existing, Map<String, String> desired) {
-        List<String> removed = wafV2Service.listTagsForResource(existing.getArn()).keySet().stream()
+    private void reconcileTags(String resourceArn, Map<String, String> desired) {
+        List<String> removed = wafV2Service.listTagsForResource(resourceArn).keySet().stream()
                 .filter(key -> !desired.containsKey(key)).toList();
         if (!removed.isEmpty()) {
-            wafV2Service.untagResource(existing.getArn(), removed);
+            wafV2Service.untagResource(resourceArn, removed);
         }
         if (!desired.isEmpty()) {
-            wafV2Service.tagResource(existing.getArn(), desired);
+            wafV2Service.tagResource(resourceArn, desired);
         }
     }
 
@@ -222,12 +297,29 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
                 .orElse(null);
     }
 
+    private IpSet findExistingIpSet(String physicalId) {
+        String[] parts = physicalId == null ? new String[0] : physicalId.split("\\|", -1);
+        if (parts.length != 3) {
+            return null;
+        }
+        return wafV2Service.listIpSets(parts[2]).stream()
+                .filter(ipSet -> parts[1].equals(ipSet.getId()))
+                .findFirst()
+                .orElse(null);
+    }
+
     private void setReferences(StackResource resource, WebAcl acl) {
         resource.setPhysicalId(acl.getName() + "|" + acl.getId() + "|" + acl.getScope());
         resource.getAttributes().put("Arn", acl.getArn());
         resource.getAttributes().put("Capacity", Long.toString(acl.getCapacity()));
         resource.getAttributes().put("Id", acl.getId());
         resource.getAttributes().put("LabelNamespace", acl.getLabelNamespace());
+    }
+
+    private void setIpSetReferences(StackResource resource, IpSet ipSet) {
+        resource.setPhysicalId(ipSet.getName() + "|" + ipSet.getId() + "|" + ipSet.getScope());
+        resource.getAttributes().put("Arn", ipSet.getArn());
+        resource.getAttributes().put("Id", ipSet.getId());
     }
 
     private String text(JsonNode node, String field) {
