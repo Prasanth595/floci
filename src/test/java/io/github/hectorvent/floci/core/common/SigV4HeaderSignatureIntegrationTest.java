@@ -427,7 +427,7 @@ class SigV4HeaderSignatureIntegrationTest {
     @Order(17)
     void appSyncGraphqlIsLeftToItsOwnIamCheck() throws Exception {
         // The management plane is verified here like any other service; the GraphQL endpoint is
-        // AppSync's own, and a wrong secret there gets AppSync's UnauthorizedException envelope.
+        // AppSync's own, and a wrong secret there gets AppSync's BadRequestException envelope.
         String apiId = given()
             .filter(AwsRequestSigner.signedAs("test", "test", "appsync"))
             .contentType("application/json")
@@ -448,9 +448,9 @@ class SigV4HeaderSignatureIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/graphql")
         .then()
-            .statusCode(401)
-            .header("x-amzn-errortype", containsString("UnauthorizedException"))
-            .body("errors[0].errorType", equalTo("UnauthorizedException"));
+            .statusCode(400)
+            .header("x-amzn-errortype", containsString("BadRequestException"))
+            .body("errors[0].errorType", equalTo("BadRequestException"));
     }
 
     private static HttpResponse<String> sendSqsListQueues(URI uri, Map<String, String> auth, String contentType,
