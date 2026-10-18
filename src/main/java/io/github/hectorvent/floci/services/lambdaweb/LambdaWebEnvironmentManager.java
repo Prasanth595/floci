@@ -103,7 +103,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private static final long SIGKILL_STATUS = 137;
     private static final long SIGTERM_STATUS = 143;
     /** Where index.mjs writes the error type of an app that fails to load. */
-    private static final String INIT_ERROR_FILE = RUNTIME_DIR + "/init-error";
+    private static final String INIT_ERROR_FILE = "/tmp/floci-init-error";
     private static final int INIT_ERROR_MAX_BYTES = 64;
     /** Longer than the data plane waits to see an exit, so a request the exit failed is counted. */
     private static final Duration EXCHANGES_WAIT = Duration.ofSeconds(2);

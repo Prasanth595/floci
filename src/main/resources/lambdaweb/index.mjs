@@ -95,7 +95,8 @@ if (LEVELS.INFO < minimum) {
 
 // AWS writes one ERROR event in place of Node's stack when the app fails to load. Floci reads the
 // error type from INIT_ERROR_FILE once the process is gone, so any exit status of the app keeps its meaning.
-const INIT_ERROR_FILE = '/var/runtime/init-error';
+// /tmp is writable by any user, also in an image that does not run as root.
+const INIT_ERROR_FILE = '/tmp/floci-init-error';
 const entry = process.env.AWS_LAMBDA_NODEJS_ENTRYPOINT || 'index.js';
 try {
   await import(pathToFileURL(path.resolve('/var/task', entry)).href);
@@ -109,6 +110,10 @@ try {
         + ' AWS_LAMBDA_NODEJS_ENTRYPOINT environment variable must point to your entry file'
       : '')));
   }
-  fs.writeFileSync(INIT_ERROR_FILE, errorType);
+  try {
+    fs.writeFileSync(INIT_ERROR_FILE, errorType);
+  } catch (ignored) {
+    // A full disk leaves Floci with Runtime.ExitError, without a stack trace AWS would not write.
+  }
   process.exit(1);
 }
