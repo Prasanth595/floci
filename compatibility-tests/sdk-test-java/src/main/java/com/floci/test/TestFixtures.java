@@ -930,6 +930,24 @@ public final class TestFixtures {
         }
     }
 
+    /** The stack's status once it is no longer {@code *_IN_PROGRESS}, or its last status at the timeout. */
+    public static String awaitStackTerminal(CloudFormationClient cfn, String stackName, Duration timeout)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            String status = cfn.describeStacks(request -> request.stackName(stackName))
+                    .stacks().get(0).stackStatusAsString();
+            if (!status.endsWith("_IN_PROGRESS")) {
+                return status;
+            }
+            long remainingNanos = deadline - System.nanoTime();
+            if (remainingNanos <= 0) {
+                return status;
+            }
+            Thread.sleep(Math.min(500, Math.max(1, Duration.ofNanos(remainingNanos).toMillis())));
+        }
+    }
+
     public static GlueClient glueClient() {
         return GlueClient.builder()
                 .endpointOverride(ENDPOINT)
