@@ -32,6 +32,7 @@ class CloudFormationLambdaObjectPropertyTest {
     private static final String LIST_STACK = TestFixtures.uniqueName("compat-cfn-object-list");
     private static final String LAYERS_STACK = TestFixtures.uniqueName("compat-cfn-layers-object");
     private static final String DELIMITED_STACK = TestFixtures.uniqueName("compat-cfn-comma-delimited");
+    private static final String STRING_PARAMETER_STACK = TestFixtures.uniqueName("compat-cfn-string-parameter");
 
     private static CloudFormationClient cfn;
 
@@ -48,6 +49,7 @@ class CloudFormationLambdaObjectPropertyTest {
             cfn.deleteStack(request -> request.stackName(LIST_STACK));
             cfn.deleteStack(request -> request.stackName(LAYERS_STACK));
             cfn.deleteStack(request -> request.stackName(DELIMITED_STACK));
+            cfn.deleteStack(request -> request.stackName(STRING_PARAMETER_STACK));
             cfn.close();
         }
     }
@@ -109,6 +111,37 @@ class CloudFormationLambdaObjectPropertyTest {
             assertThat(lambda.getFunctionConfiguration(request -> request.functionName(function)).architectures())
                     .containsExactly(Architecture.ARM64);
         }
+    }
+
+    /**
+     * Measured on AWS (eu-west-1, 2026-10-18): a {@code Ref} to a {@code String} parameter is a
+     * string, so a list property refuses it, though the same value from a {@code CommaDelimitedList}
+     * parameter is a list.
+     */
+    @Test
+    @DisplayName("a list property from a String parameter fails the stack")
+    void aListPropertyFromAStringParameterFailsTheStack() throws InterruptedException {
+        cfn.createStack(request -> request.stackName(STRING_PARAMETER_STACK).templateBody("""
+                {
+                  "Parameters": {"Archs": {"Type": "String", "Default": "x86_64"}},
+                  "Resources": {
+                    "Fn": {
+                      "Type": "AWS::Lambda::Function",
+                      "Properties": {
+                        "Runtime": "python3.14",
+                        "Handler": "index.handler",
+                        "Role": "%s",
+                        "Code": {"ZipFile": "def handler(e, c): return 'ok'"},
+                        "Architectures": {"Ref": "Archs"}
+                      }
+                    }
+                  }
+                }
+                """.formatted(ROLE)));
+        assertThat(TestFixtures.awaitStackTerminal(cfn, STRING_PARAMETER_STACK, DEPLOY_TIMEOUT))
+                .isEqualTo("ROLLBACK_COMPLETE");
+        assertThat(reasons(STRING_PARAMETER_STACK)).anyMatch(reason ->
+                reason.contains("Property [Architectures] expected type: JSONArray, found: String"));
     }
 
     private static List<String> reasons(String stackName) {

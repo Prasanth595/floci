@@ -795,7 +795,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     /**
      * The list-of-strings property {@code source}, or null when the template leaves it out,
      * {@code Ref: AWS::NoValue} directly or through {@code Fn::If} included. A literal of another
-     * type is refused (see {@link #requireType}). An intrinsic is read through
+     * type is refused (see {@link #requireType}), and so is an intrinsic that yields a string (see
+     * {@link CloudFormationTemplateEngine#yieldsString}). Any other intrinsic is read through
      * {@link CloudFormationTemplateEngine#resolveStringList}, as CloudFormation reads a {@code Ref}
      * to a {@code CommaDelimitedList} parameter, which the engine resolves to the comma-joined text,
      * and {@code Fn::Split} (measured, eu-west-1, 2026-10-18).
@@ -814,7 +815,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             if (resolved == null || resolved.isNull() || resolved.isMissingNode()) {
                 return null;
             }
-            if (resolved.isObject()) {
+            if (resolved.isObject() || (!resolved.isArray() && engine.yieldsString(raw))) {
                 requireType(source, resolved, JsonNodeType.ARRAY);
             }
         }

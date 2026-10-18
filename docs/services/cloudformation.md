@@ -572,7 +572,12 @@ Parameters passed to `CreateStack` / `UpdateStack` (and echoed back by `Describe
 before provisioning:
 
 - **`String`, `Number`, `CommaDelimitedList`, and `List<...>`** parameter types are accepted and
-  substituted into resource properties via `Ref`.
+  substituted into resource properties via `Ref`. Where a property takes a list (a Lambda function's
+  `Layers` or `Architectures`, a layer's `CompatibleRuntimes` or `CompatibleArchitectures`), a `Ref` to
+  a `CommaDelimitedList`, `List<...>` or SSM list parameter is a list, and a `Ref` to a `String` or
+  `Number` parameter is refused as a string, as are `Fn::Select`, `Fn::Join`, `Fn::Sub`, a
+  pseudo-parameter but `AWS::NotificationARNs`, and an `Fn::If` choosing one of these:
+  `Property [Architectures] expected type: JSONArray, found: String`.
 - **`AWS::SSM::Parameter::Value<String>`-typed parameters** are resolved at deploy time: the value the
   caller supplies is treated as an SSM parameter *name*, and floci substitutes the current value of
   that SSM parameter into the template. This is the pattern CDK uses to pull bootstrap values (image

@@ -1572,6 +1572,19 @@ public class CloudFormationService implements ResourceProvider {
         return buildTemplateSummary(template);
     }
 
+    /** Each parameter the template declares, with its {@link #parameterType}. */
+    private static Map<String, String> parameterTypes(JsonNode template) {
+        Map<String, String> types = new HashMap<>();
+        template.path("Parameters").properties()
+                .forEach(entry -> types.put(entry.getKey(), parameterType(entry.getValue())));
+        return types;
+    }
+
+    /** A parameter declaration's {@code Type}, {@code String} when the template leaves it out. */
+    private static String parameterType(JsonNode declaration) {
+        return declaration.hasNonNull("Type") ? declaration.get("Type").asText() : "String";
+    }
+
     private TemplateSummary buildTemplateSummary(JsonNode template) {
         String description = template.hasNonNull("Description") ? template.get("Description").asText() : null;
         String version = template.hasNonNull("AWSTemplateFormatVersion")
@@ -1588,7 +1601,7 @@ public class CloudFormationService implements ResourceProvider {
                         p.hasNonNull("Default") ? p.get("Default").asText() : null,
                         p.path("NoEcho").asBoolean(false),
                         p.hasNonNull("Description") ? p.get("Description").asText() : null,
-                        p.hasNonNull("Type") ? p.get("Type").asText() : "String"));
+                        parameterType(p)));
             });
         }
 
@@ -1956,6 +1969,7 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, String> givenParams = resolveDefaultParameters(template, params);
             stack.replaceParameters(givenParams);
             Map<String, String> resolvedParams = resolveSsmParameters(template, givenParams, region);
+            Map<String, String> parameterTypes = parameterTypes(template);
             stack.setResolvedParameters(new LinkedHashMap<>(resolvedParams));
 
             // Resolve conditions first
@@ -2006,7 +2020,8 @@ public class CloudFormationService implements ResourceProvider {
                             name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
                             value -> dynamicReferences.resolveDynamicReferences(value, region, false),
                             (name, output, outputRegion, roleArn) ->
-                                    resolveStackOutput(accountId, name, output, outputRegion, roleArn));
+                                    resolveStackOutput(accountId, name, output, outputRegion, roleArn),
+                            parameterTypes);
 
                     StackResource resource = stack.getResources().get(logicalId);
                     StackResource previousResource = resource;
@@ -2174,7 +2189,8 @@ public class CloudFormationService implements ResourceProvider {
                     name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
                     value -> dynamicReferences.resolveDynamicReferences(value, region, false),
                     (name, output, outputRegion, roleArn) ->
-                            resolveStackOutput(accountId, name, output, outputRegion, roleArn));
+                            resolveStackOutput(accountId, name, output, outputRegion, roleArn),
+                    parameterTypes);
 
             // Resolve outputs before mutating stack/global export state, so failed updates do not
             // leave stale or partially registered exports behind.
