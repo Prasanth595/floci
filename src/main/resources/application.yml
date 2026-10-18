@@ -54,7 +54,7 @@ quarkus:
       # catalog (sagemaker/instance-type-catalog.yaml), KMS reads its AWS managed
       # key catalog (kms/aws-managed-keys.yaml), AppSync's GraphQL
       # parser reads its message bundles, Lambda Web Functions copy their
-      # runtime (lambdaweb/index.cjs) into each environment, EC2 security group enforcement builds
+      # runtime (lambdaweb/index.mjs) into each environment, EC2 security group enforcement builds
       # its helper image from docker/*.Dockerfile, and API Gateway's Velocity
       # engine reads its default properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
@@ -69,7 +69,7 @@ quarkus:
         - pricing-snapshots/**
         - ui/*.html
         - appsync/*.mjs
-        - lambdaweb/*.cjs
+        - lambdaweb/*.mjs
         - ec2/*.yaml
         - docker/*.Dockerfile
         - sagemaker/*.yaml

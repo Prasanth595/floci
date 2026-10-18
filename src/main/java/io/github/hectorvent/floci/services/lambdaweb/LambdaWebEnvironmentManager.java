@@ -78,7 +78,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     static final int APP_PORT = 3000;
     static final String TASK_DIR = "/var/task";
     static final String RUNTIME_DIR = "/var/runtime";
-    private static final String RUNTIME_RESOURCE = "lambdaweb/index.cjs";
+    private static final String RUNTIME_RESOURCE = "lambdaweb/index.mjs";
     static final int MEMORY_MB = 2048;
     static final Duration LISTEN_TIMEOUT = Duration.ofSeconds(10);
     static final List<String> NODE_FLAGS = List.of("--expose-gc", "--max-http-header-size", "135168",

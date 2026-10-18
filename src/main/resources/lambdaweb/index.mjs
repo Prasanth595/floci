@@ -1,12 +1,11 @@
-'use strict';
 // The runtime entry Floci starts as /var/runtime/index.js, where AWS starts its own. It turns
 // console output into the JSON log events AWS writes, with the request each one belongs to,
 // filters the output by applicationLogLevel, then imports the app.
-const { AsyncLocalStorage } = require('node:async_hooks');
-const http = require('node:http');
-const path = require('node:path');
-const { pathToFileURL } = require('node:url');
-const util = require('node:util');
+import { AsyncLocalStorage } from 'node:async_hooks';
+import http from 'node:http';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import util from 'node:util';
 
 // FATAL is above ERROR. Node has no console method for it, so it drops every console call.
 const LEVELS = { TRACE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4, FATAL: 5 };
@@ -75,7 +74,7 @@ patch('warn', 'WARN', writeErr);
 patch('error', 'ERROR', writeErr);
 console.trace = function (...args) {
   if (LEVELS.TRACE >= minimum) {
-    const frames = String(new Error().stack).split('\n').slice(1).filter((frame) => !frame.includes(__filename));
+    const frames = String(new Error().stack).split('\n').slice(1).filter((frame) => !frame.includes(import.meta.url));
     writeOut(line('TRACE', { traceMessage: util.format(...args), stackTrace: frames }));
   }
 };
@@ -94,4 +93,4 @@ if (LEVELS.INFO < minimum) {
 }
 
 const entry = process.env.AWS_LAMBDA_NODEJS_ENTRYPOINT || 'index.js';
-import(pathToFileURL(path.resolve('/var/task', entry)).href);
+await import(pathToFileURL(path.resolve('/var/task', entry)).href);
