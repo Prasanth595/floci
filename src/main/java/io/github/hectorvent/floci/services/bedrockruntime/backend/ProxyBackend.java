@@ -29,8 +29,8 @@ import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
@@ -149,19 +149,15 @@ public class ProxyBackend implements BedrockBackend {
      * Sends the request and returns once a successful status arrives, leaving the body to the
      * caller. The cancellation monitor keeps running until {@link UpstreamCall#finish()}, so a
      * caller disconnect still closes the upstream while its body is read. An error status is
-     * thrown here, after a deadline-bounded read of its body: the request timeout stops at the
-     * headers, so nothing else bounds a backend that stalls mid-error-body.
+     * thrown here, after a read of its body that a timer cuts off at the deadline: the request
+     * timeout stops at the headers, so nothing else bounds a backend that stalls mid-error-body.
      */
     private UpstreamCall send(String modelId, HttpRequest request, String subject) {
         // A stalled upstream must be closed on caller disconnect without waiting for another token.
         RoutingContext context = currentRequest.getCurrent();
         CompletableFuture<HttpResponse<InputStream>> pending = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream());
         AtomicBoolean complete = new AtomicBoolean();
-        AtomicLong errorReadDeadlineNanos = new AtomicLong();
-        Thread monitor = monitorCancellation(() -> {
-            long deadline = errorReadDeadlineNanos.get();
-            return context.response().closed() || (deadline != 0 && System.nanoTime() - deadline >= 0);
-        }, complete, () -> {
+        Thread monitor = monitorCancellation(context.response()::closed, complete, () -> {
             pending.thenAccept(response -> closeBody(response.body()));
             pending.cancel(true);
         });
@@ -192,7 +188,12 @@ public class ProxyBackend implements BedrockBackend {
             return call;
         }
         // Collecting error details must not delay a known upstream failure indefinitely.
-        errorReadDeadlineNanos.set(System.nanoTime() + errorBodyReadTimeout.toNanos());
+        CompletableFuture.delayedExecutor(errorBodyReadTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                .execute(() -> {
+                    if (!complete.get()) {
+                        closeBody(response.body());
+                    }
+                });
         String errorBody;
         try {
             errorBody = new String(response.body().readNBytes(8192), StandardCharsets.UTF_8);

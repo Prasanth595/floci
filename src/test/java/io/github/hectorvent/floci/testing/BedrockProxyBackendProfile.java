@@ -21,7 +21,7 @@ import java.util.Map;
  *   <li>{@code proxy.passthrough=true} forwards a model id with no mapping as it is.
  *   {@code BedrockProxyPassthroughIntegrationTest}, {@code BedrockProxyCancellationIntegrationTest}
  *   and {@code BedrockProxyLoggingIntegrationTest} rely on it.</li>
- *   <li>{@code proxy.error-body-timeout-millis=100} shortens the deadline for collecting an
+ *   <li>{@code proxy.error-body-timeout-millis=10} shortens the deadline for collecting an
  *   upstream error body, so the stalled-error-body tests do not each wait the one-second default.
  *   {@code BedrockProxyLoggingIntegrationTest} relies on it.</li>
  * </ul>
@@ -49,6 +49,6 @@ public class BedrockProxyBackendProfile implements QuarkusTestProfile {
                 "floci.services.bedrock-runtime.proxy.api-key", "test-key",
                 "floci.services.bedrock-runtime.proxy.model-mapping", MAPPED_MODEL_ID + "=claude-3-haiku",
                 "floci.services.bedrock-runtime.proxy.passthrough", "true",
-                "floci.services.bedrock-runtime.proxy.error-body-timeout-millis", "100");
+                "floci.services.bedrock-runtime.proxy.error-body-timeout-millis", "10");
     }
 }
