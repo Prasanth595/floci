@@ -1192,7 +1192,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             if (action == null || !action.startsWith("s3:")) {
                 return;
             }
-            String eventName = mapS3ActionToEventName(action, ctx.getMethod());
+            String eventName = mapS3ActionToEventName(action, ctx.getMethod(),
+                    ctx.getUriInfo().getQueryParameters().keySet());
             if (eventName == null) {
                 return;
             }
@@ -1239,16 +1240,14 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     // Package-private for unit testing.
-    static String mapS3ActionToEventName(String action, String httpMethod) {
+    static String mapS3ActionToEventName(String action, String httpMethod, Set<String> queryParameters) {
         if (action == null) return null;
         // Action set sourced from IamActionRegistry — see that file for any
         // additions. HEAD on an object is bucketed under s3:GetObject by the
-        // registry, so we distinguish via httpMethod. The POST operations checked as
-        // s3:PutObject or s3:GetObject (multipart create and complete, Select) cannot
-        // be told apart from the action, so they get no name rather than a wrong one.
-        // The GetObjectAttributes actions are the operation its own check refuses.
+        // registry, so we distinguish via httpMethod. The GetObjectAttributes actions
+        // are the operation its own check refuses.
         if ("POST".equalsIgnoreCase(httpMethod)) {
-            return null;
+            return postObjectEventName(action, queryParameters);
         }
         return switch (action) {
             case "s3:GetObject", "s3:GetObjectVersion" ->
@@ -1264,6 +1263,28 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             case "s3:GetObjectTagging", "s3:GetObjectVersionTagging" -> "GetObjectTagging";
             case "s3:PutObjectTagging", "s3:PutObjectVersionTagging" -> "PutObjectTagging";
             case "s3:DeleteObjectTagging", "s3:DeleteObjectVersionTagging" -> "DeleteObjectTagging";
+            default -> null;
+        };
+    }
+
+    /**
+     * The operation a denied POST on an object names. Its action alone is not enough: CreateMultipartUpload
+     * and CompleteMultipartUpload are both checked as {@code s3:PutObject}, and SelectObjectContent as
+     * {@code s3:GetObject}. The sub-resource that chose the action in {@code IamActionRegistry} names the
+     * operation, and {@code ?uploads}, which S3Controller runs ahead of an {@code uploadId}, makes a
+     * request naming both a create. A POST naming none gets no name rather than a wrong one.
+     */
+    private static String postObjectEventName(String action, Set<String> queryParameters) {
+        return switch (action) {
+            case "s3:PutObject" -> {
+                if (queryParameters.contains("uploads")) {
+                    yield "CreateMultipartUpload";
+                }
+                yield queryParameters.contains("uploadId") ? "CompleteMultipartUpload" : null;
+            }
+            case "s3:RestoreObject" -> queryParameters.contains("restore") ? "RestoreObject" : null;
+            case "s3:GetObject", "s3:GetObjectVersion" ->
+                    queryParameters.contains("select") ? "SelectObjectContent" : null;
             default -> null;
         };
     }

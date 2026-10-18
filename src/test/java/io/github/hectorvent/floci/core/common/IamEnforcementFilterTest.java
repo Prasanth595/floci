@@ -2032,6 +2032,21 @@ class IamEnforcementFilterTest {
     }
 
     @Test
+    void aDeniedPostIsRecordedAsTheOperationItsSubResourceSelects() {
+        // CreateMultipartUpload and CompleteMultipartUpload are both checked as s3:PutObject, so the
+        // event is named from the request's sub-resource. An upload placing a legal hold also needs
+        // s3:PutObjectLegalHold, and a conditional complete needs s3:GetObject.
+        MultivaluedHashMap<String, String> create = new MultivaluedHashMap<>();
+        create.putSingle("uploads", "");
+        assertEquals("CreateMultipartUpload", deniedExtraActionEvent("POST", create,
+                "x-amz-object-lock-legal-hold", "ON", "s3:PutObject", "s3:PutObjectLegalHold"));
+        MultivaluedHashMap<String, String> complete = new MultivaluedHashMap<>();
+        complete.putSingle("uploadId", "u1");
+        assertEquals("CompleteMultipartUpload", deniedExtraActionEvent("POST", complete,
+                "If-Match", "\"etag\"", "s3:PutObject", "s3:GetObject"));
+    }
+
+    @Test
     void theGovernanceBypassDecisionIsRecordedForS3ToHonour() {
         // S3Controller lets a delete bypass a lock only as far as this check approved it, so a lock set
         // after the check is refused rather than bypassed without the permission.
