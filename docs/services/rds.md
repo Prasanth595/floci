@@ -899,7 +899,8 @@ On native database endpoints with IAM authentication enabled, membership in
 precedence over the role's password. Roles without that membership continue to use
 passwords. These database-role checks apply independently of Floci's IAM policy
 enforcement setting. Disabling IAM database authentication restores ordinary
-password authentication for new connections.
+password authentication for new connections. Password attempts refused because of that membership report
+`PAM authentication failed` with SQLSTATE `28000`.
 
 The IAM session runs as the token's role: `current_user` and `session_user` both
 report it, and objects it creates belong to it. A missing role or a role without

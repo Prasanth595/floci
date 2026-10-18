@@ -114,6 +114,11 @@ class RdsJdbcCompatTest {
         assertThatThrownBy(() -> openPostgresConnection(USERNAME, ungrantedToken))
                 .isInstanceOf(SQLException.class).hasMessageContaining("password authentication failed");
 
+        assertThatThrownBy(() -> openPostgresConnection(IAM_USERNAME, PASSWORD))
+                .isInstanceOfSatisfying(SQLException.class,
+                        exception -> assertThat(exception.getSQLState()).isEqualTo("28000"))
+                .hasMessageContaining("PAM authentication failed for user \"" + IAM_USERNAME + "\"");
+
         String token = rds.utilities().generateAuthenticationToken(GenerateAuthenticationTokenRequest.builder()
                 .hostname(TestFixtures.proxyHost())
                 .port(proxyPort)
@@ -394,7 +399,7 @@ class RdsJdbcCompatTest {
 
     private static void createIamRole(Connection connection) throws SQLException {
         try (Statement statement = connection.createStatement()) {
-            statement.execute("CREATE ROLE " + IAM_USERNAME + " LOGIN");
+            statement.execute("CREATE ROLE " + IAM_USERNAME + " LOGIN PASSWORD '" + PASSWORD + "'");
             statement.execute("GRANT rds_iam TO " + IAM_USERNAME);
         }
     }

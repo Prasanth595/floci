@@ -152,14 +152,14 @@ class RdsPostgresIamRoleIntegrationTest {
             Properties password = login("app_user", APP_PASSWORD);
             assertUser(port, password, "app_user");
             asMaster(port, "GRANT rds_iam TO app_user");
-            refused(port, password);
+            pamRefused(port, password);
             assertUser(port, token(port, "app_user"), "app_user");
             rds("ModifyDBInstance").formParam("DBInstanceIdentifier", id)
                     .formParam("EnableIAMDatabaseAuthentication", false).post("/").then().statusCode(200);
             assertUser(port, password, "app_user");
             rds("ModifyDBInstance").formParam("DBInstanceIdentifier", id)
                     .formParam("EnableIAMDatabaseAuthentication", true).post("/").then().statusCode(200);
-            refused(port, password);
+            pamRefused(port, password);
             asMaster(port, "REVOKE rds_iam FROM app_user");
             assertUser(port, password, "app_user");
         } finally {
@@ -178,7 +178,7 @@ class RdsPostgresIamRoleIntegrationTest {
                  Statement sql = admin.createStatement()) {
                 sql.execute("GRANT rds_iam TO " + MASTER);
                 assertUser(port, iam, MASTER);
-                refused(port, login(MASTER, PASSWORD));
+                pamRefused(port, login(MASTER, PASSWORD));
                 // The established administrative session remains usable after a grant.
                 sql.execute("REVOKE rds_iam FROM " + MASTER);
             }
@@ -198,7 +198,7 @@ class RdsPostgresIamRoleIntegrationTest {
                     "GRANT iam_group TO app_user");
             Properties iam = token(port, "app_user");
             assertUser(port, iam, "app_user");
-            refused(port, login("app_user", APP_PASSWORD));
+            pamRefused(port, login("app_user", APP_PASSWORD));
             asMaster(port, "REVOKE rds_iam FROM iam_group");
             refused(port, iam);
             assertUser(port, login("app_user", APP_PASSWORD), "app_user");
@@ -223,7 +223,7 @@ class RdsPostgresIamRoleIntegrationTest {
                             + "FUNCTION = shadow.name_equals_text)");
             Properties password = login(name, APP_PASSWORD);
             password.setProperty("options", "-c search_path=shadow,pg_catalog -c client_encoding=LATIN1");
-            refused(port, password);
+            pamRefused(port, password);
             Properties iam = token(port, name);
             iam.setProperty("options", "-c search_path=shadow,pg_catalog -c client_encoding=LATIN1");
             iam.setProperty("allowEncodingChanges", "true");
@@ -231,6 +231,14 @@ class RdsPostgresIamRoleIntegrationTest {
         } finally {
             delete(id);
         }
+    }
+
+    private static void pamRefused(int port, Properties properties) {
+        SQLException exception = assertThrows(SQLException.class, () -> connect(port, properties).close());
+        assertAll(
+                () -> assertEquals("28000", exception.getSQLState()),
+                () -> assertEquals("FATAL: PAM authentication failed for user \""
+                        + properties.getProperty("user") + "\"", exception.getMessage()));
     }
 
     private static void refused(int port, Properties properties) {

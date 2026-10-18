@@ -258,6 +258,7 @@ public class PostgresProtocolHandler {
                 admittedRole = readDatabaseRole(backendIn, backendOut, clientUsername, isIam, false, databaseIamAuthentication);
                 if (admittedRole == null || !admittedRole.allowed()) {
                     refuseDatabaseRole(clientOut, client, backend, clientUsername,
+                            admittedRole != null && admittedRole.pamRequired(),
                             admittedRole == null ? "catalog lookup failed"
                                     : !databaseIamAuthentication ? "LOGIN required"
                                     : isIam ? "LOGIN and rds_iam membership required"
@@ -432,7 +433,7 @@ public class PostgresProtocolHandler {
                 DatabaseRole selectedRole = readDatabaseRole(backendIn, backendOut, clientUsername, true, true, databaseIamAuthentication);
                 if (selectedRole == null || !selectedRole.allowed() || admittedRole == null
                         || !selectedRole.oid().equals(admittedRole.oid())) {
-                    refuseDatabaseRole(clientOut, client, backend, clientUsername,
+                    refuseDatabaseRole(clientOut, client, backend, clientUsername, false,
                             selectedRole == null ? "final catalog lookup failed"
                                     : !selectedRole.allowed() ? (databaseIamAuthentication
                                             ? "final LOGIN and rds_iam membership required" : "final LOGIN required")
@@ -932,7 +933,7 @@ public class PostgresProtocolHandler {
     }
 
     /** A real PostgreSQL role identity and its choice of authentication method. */
-    private record DatabaseRole(String oid, boolean allowed) {}
+    private record DatabaseRole(String oid, boolean allowed, boolean pamRequired) {}
 
     /**
      * Follow catalog membership edges, including indirect grants. pg_has_role treats a
@@ -955,12 +956,14 @@ public class PostgresProtocolHandler {
         String membership = "EXISTS (SELECT 1 FROM memberships m JOIN pg_catalog.pg_roles i "
                 + "ON i.oid OPERATOR(pg_catalog.=) m.oid "
                 + "WHERE i.rolname OPERATOR(pg_catalog.=) 'rds_iam')";
+        String admission = iam ? "r.rolcanlogin AND " + membership
+                : "CASE WHEN " + membership + " THEN 'pam' WHEN r.rolcanlogin THEN 't' ELSE 'f' END";
         return "WITH RECURSIVE memberships(oid) AS ("
                 + "SELECT a.roleid FROM pg_catalog.pg_auth_members a JOIN pg_catalog.pg_roles r "
                 + "ON r.oid OPERATOR(pg_catalog.=) a.member WHERE r.rolname OPERATOR(pg_catalog.=) " + name
                 + " UNION SELECT a.roleid FROM pg_catalog.pg_auth_members a JOIN memberships m "
                 + "ON a.member OPERATOR(pg_catalog.=) m.oid) "
-                + "SELECT r.oid::pg_catalog.text, r.rolcanlogin AND " + (iam ? "" : "NOT ") + membership
+                + "SELECT r.oid::pg_catalog.text, " + admission
                 + " FROM pg_catalog.pg_roles r WHERE r.rolname OPERATOR(pg_catalog.=) " + name;
     }
 
@@ -979,8 +982,9 @@ public class PostgresProtocolHandler {
             return null;
         }
         SessionSetting row = rows.getFirst();
+        boolean pamRequired = databaseIamAuthentication && !iam && row.value().equals("pam");
         if (!row.name().matches("[0-9]{1,10}")
-                || !(row.value().equals("t") || row.value().equals("f"))) {
+                || !(row.value().equals("t") || row.value().equals("f") || pamRequired)) {
             logDatabaseRoleRefusal(role, "invalid catalog row format");
             return null;
         }
@@ -989,14 +993,16 @@ public class PostgresProtocolHandler {
             logDatabaseRoleRefusal(role, "invalid database role OID");
             return null;
         }
-        return new DatabaseRole(row.name(), row.value().equals("t"));
+        return new DatabaseRole(row.name(), row.value().equals("t"), pamRequired);
     }
 
-    private static void refuseDatabaseRole(OutputStream out, Socket client, Socket backend, String user, String reason)
+    private static void refuseDatabaseRole(OutputStream out, Socket client, Socket backend, String user,
+                                             boolean pamRequired, String reason)
             throws IOException {
         logDatabaseRoleRefusal(user, reason);
         try {
-            sendErrorResponse(out, "FATAL", "28P01", "password authentication failed for user \"" + user + "\"");
+            sendErrorResponse(out, "FATAL", pamRequired ? "28000" : "28P01",
+                    (pamRequired ? "PAM" : "password") + " authentication failed for user \"" + user + "\"");
             out.flush();
         } finally {
             closeQuietly(client);

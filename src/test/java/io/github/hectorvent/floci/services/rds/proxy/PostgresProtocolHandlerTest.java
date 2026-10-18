@@ -1548,6 +1548,20 @@ class PostgresProtocolHandlerTest {
         });
     }
 
+    @ParameterizedTest
+    @CsvSource({"false,true,pam,28000", "true,true,pam,28P01", "false,false,pam,28P01",
+            "false,true,f,28P01", "false,true,unexpected,28P01"})
+    void pamRefusalIsConfinedToNativePasswordMembership(boolean iam, boolean databaseIam,
+                                                        String admission, String code) throws Exception {
+        runAdmissionRefused(iam, databaseIam, "approle", (in, out) -> {
+            assertEquals(PostgresProtocolHandler.databaseRoleQuery("approle", iam, false, databaseIam), readSimpleQuery(in));
+            writeDataRow(out, "100", admission);
+            writeCommandComplete(out, "SELECT 1");
+            writeReadyForQuery(out);
+            assertEquals(-1, in.read(), "no defaults or handover may follow refusal");
+        }, code);
+    }
+
     @Test
     void roleRefusalLogsSanitizedIdentityWithoutBackendSecrets() throws Exception {
         String user = "app\nrole\r";
@@ -1575,6 +1589,11 @@ class PostgresProtocolHandlerTest {
     }
 
     private void runAdmissionRefused(boolean iam, boolean databaseIam, String user, BackendScript script) throws Exception {
+        runAdmissionRefused(iam, databaseIam, user, script, "28P01");
+    }
+
+    private void runAdmissionRefused(boolean iam, boolean databaseIam, String user, BackendScript script,
+                                     String code) throws Exception {
         AtomicReference<Throwable> backendFailure = new AtomicReference<>();
         AtomicReference<Throwable> authFailure = new AtomicReference<>();
         AtomicReference<PostgresProtocolHandler.AuthenticatedSession> result = new AtomicReference<>();
@@ -1608,7 +1627,9 @@ class PostgresProtocolHandlerTest {
                 writePassword(out, iam ? rdsToken(user) : "adminpass");
                 Map<Character, String> refusal = readErrorResponse(in);
                 assertEquals("FATAL", refusal.get('S'));
-                assertEquals("28P01", refusal.get('C'));
+                assertEquals(code, refusal.get('C'));
+                assertEquals((code.equals("28000") ? "PAM" : "password")
+                        + " authentication failed for user \"" + user + "\"", refusal.get('M'));
                 assertEquals(-1, in.read(), "neither AuthenticationOK nor ReadyForQuery may follow refusal");
                 authThread.join(5_000);
                 backendThread.join(5_000);
