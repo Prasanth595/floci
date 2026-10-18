@@ -677,14 +677,14 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                         @Override
                         public void onComplete() {
                             super.onComplete();
-                            streams.values().forEach(lines -> deliver(environment, lines.flush()));
+                            streams.values().forEach(lines -> lines.flush().forEach(event -> deliver(environment, event)));
                             exited(environment, System.nanoTime());
                         }
 
                         @Override
                         public void onError(Throwable throwable) {
                             super.onError(throwable);
-                            streams.values().forEach(lines -> deliver(environment, lines.flush()));
+                            streams.values().forEach(lines -> lines.flush().forEach(event -> deliver(environment, event)));
                             LOG.debugv(throwable, "The exit watch of the Lambda Web environment {0} dropped",
                                     environment.containerId);
                             rearmExitWatch(environment);
@@ -720,7 +720,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
 
     /** AWS writes no event for a line that is empty or only spaces. */
     private static void deliver(Environment environment, String event) {
-        if (event != null && !event.isBlank()) {
+        if (!event.isBlank()) {
             environment.logs.accept(event);
         }
     }
