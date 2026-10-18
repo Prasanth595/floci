@@ -380,6 +380,14 @@ HTTP 404 `UnknownOperationException`. IAM policies use the `cloudwatch` action p
 Metric streams are stored as definitions with their `running` or `stopped` state. Floci never
 delivers metrics to the Firehose delivery stream a metric stream names.
 
+### SNS alarm actions
+
+State transitions publish to same-account standard SNS topics in `AlarmActions`, `OKActions`, or
+`InsufficientDataActions`, including transitions from `SetAlarmState`. Unchanged states and
+`ActionsEnabled=false` suppress notifications. Scaling action retries remain independent.
+Failures are logged per target without blocking other targets. Notifications include a
+single-metric `Trigger`; durable retries, FIFO topics, and metric-math payloads are not covered.
+
 ### Metric-math alarm definitions
 
 `PutMetricAlarm` stores the `Metrics` query definitions and `DescribeAlarms` returns them over
