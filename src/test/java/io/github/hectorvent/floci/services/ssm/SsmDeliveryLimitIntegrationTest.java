@@ -30,6 +30,10 @@ class SsmDeliveryLimitIntegrationTest extends SsmCommandIntegrationFixture {
             Response rejected = send(document, instance, timeout);
             assertEquals(400, rejected.statusCode());
             assertEquals("ValidationException", rejected.jsonPath().getString("__type"));
+            assertEquals("1 validation error detected: Value '" + timeout
+                    + "' at 'timeoutSeconds' failed to satisfy constraint: "
+                    + "Member must have value less than or equal to 2592000",
+                    rejected.jsonPath().getString("message"));
             assertTrue(ownedCommands(instance).isEmpty());
             verifyNoInteractions(executor);
             Response retry = send(document, instance, 30);
@@ -61,7 +65,11 @@ class SsmDeliveryLimitIntegrationTest extends SsmCommandIntegrationFixture {
     void omissionAndExistingMinimumRemainUnchanged(String document) {
         String instance = "i-limit-" + UUID.randomUUID();
         try {
-            assertEquals(400, send(document, instance, 29).statusCode());
+            Response rejected = send(document, instance, 29);
+            assertEquals(400, rejected.statusCode());
+            assertEquals("ValidationException", rejected.jsonPath().getString("__type"));
+            assertEquals("1 validation error detected: Value '29' at 'timeoutSeconds' failed to satisfy constraint: "
+                    + "Member must have value greater than or equal to 30", rejected.jsonPath().getString("message"));
             assertTrue(ownedCommands(instance).isEmpty());
             verifyNoInteractions(executor);
             Response response = send(document, instance, null);

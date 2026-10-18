@@ -298,10 +298,8 @@ public class SsmCommandService implements Resettable {
                     "Value '" + timeoutSeconds + "' at 'timeoutSeconds' failed to satisfy constraint: Member must have value greater than or equal to 30");
         }
         if (timeoutSeconds > MAX_TIMEOUT_SECONDS) {
-            throw new AwsException(
-                    "ValidationException",
-                    "1 validation error detected: Value '" + timeoutSeconds + "' at 'timeoutSeconds' failed to satisfy constraint: Member must have value less than or equal to 2592000",
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + timeoutSeconds + "' at 'timeoutSeconds' failed to satisfy constraint: Member must have value less than or equal to 2592000");
         }
     }
 
