@@ -759,7 +759,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         } catch (NotFoundException expected) {
             // The app exited on its own, so index.mjs wrote no error type.
         } catch (IOException | RuntimeException e) {
-            LOG.debugv(e, "Could not read the init error of the Lambda Web environment {0}", containerId);
+            LOG.warnv(e, "Could not read the init error of the Lambda Web environment {0}", containerId);
         }
         return switch (errorType) {
             case "Application.InitCodeError" -> LambdaWebErrorPages.INIT_CODE_ERROR;

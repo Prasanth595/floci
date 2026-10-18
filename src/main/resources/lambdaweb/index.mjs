@@ -98,9 +98,16 @@ if (LEVELS.INFO < minimum) {
 // /tmp is writable by any user, also in an image that does not run as root.
 const INIT_ERROR_FILE = '/tmp/floci-init-error';
 const entry = process.env.AWS_LAMBDA_NODEJS_ENTRYPOINT || 'index.js';
+// A runtime image could carry the file from a container that failed before.
+try {
+  fs.rmSync(INIT_ERROR_FILE, { force: true });
+} catch (ignored) {
+  // The app still runs. Only a failed start would get the old error type.
+}
 try {
   await import(pathToFileURL(path.resolve('/var/task', entry)).href);
 } catch (error) {
+  // AWS goes by the code alone, also for an error the app throws itself.
   const missing = error?.code === 'MODULE_NOT_FOUND' || error?.code === 'ERR_MODULE_NOT_FOUND';
   const errorType = missing ? 'Runtime.ImportCodeError' : 'Application.InitCodeError';
   const reason = error instanceof Error ? error.message : String(error);
