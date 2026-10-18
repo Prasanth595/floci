@@ -539,6 +539,58 @@ class ElbV2CfnProvisionerTest {
         assertEquals(LB_ARN, r.getPhysicalId());
     }
 
+    /**
+     * {@code SubnetId} is required in a {@code SubnetMapping}. A mapping without one fails the
+     * resource before any load balancer is created, rather than leaving a balancer with no subnets.
+     */
+    @Test
+    void aSubnetMappingWithoutASubnetIdIsRefusedBeforeTheLoadBalancerIsCreated() {
+        ObjectNode props = mapper.createObjectNode().put("Name", "nlb").put("Type", "network");
+        props.putArray("SubnetMappings").addObject().put("AllocationId", "eipalloc-1");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Nlb"), props, ctx()));
+
+        assertEquals("InvalidRequest", e.getErrorCode());
+        assertTrue(e.getMessage().contains("#/SubnetMappings/0: required key [SubnetId] not found"), e.getMessage());
+        verify(elb, never()).createLoadBalancer(anyString(), anyString(), any(), any(), any(), anyList(), anyList(), any());
+    }
+
+    /** The same mapping on an update of a kept load balancer fails before it is moved anywhere. */
+    @Test
+    void anUpdateWithASubnetMappingWithoutASubnetIdLeavesTheKeptLoadBalancerAlone() {
+        ObjectNode props = mapper.createObjectNode().put("Name", "web");
+        ArrayNode mappings = props.putArray("SubnetMappings");
+        mappings.addObject().put("SubnetId", "subnet-1");
+        mappings.addObject().put("PrivateIPv4Address", "10.0.2.10");
+        StackResource lb = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        lb.getAttributes().put("LoadBalancerName", "web");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(lb, props, ctx(LB_ARN)));
+
+        assertTrue(e.getMessage().contains("#/SubnetMappings/1: required key [SubnetId] not found"), e.getMessage());
+        verify(elb, never()).createLoadBalancer(anyString(), anyString(), any(), any(), any(), anyList(), anyList(), any());
+        verify(elb, never()).setSubnets(anyString(), anyString(), anyList());
+    }
+
+    /**
+     * A blank {@code SubnetId} is passed on as given, so ELBv2 refuses it as an unknown subnet
+     * rather than the mapping being dropped and the balancer created without it.
+     */
+    @Test
+    void aBlankSubnetIdIsPassedOnRatherThanDropped() {
+        when(elb.createLoadBalancer(eq(REGION), eq("nlb"), isNull(), eq("network"), isNull(),
+                eq(List.of(" ")), anyList(), any()))
+                .thenThrow(new AwsException("SubnetNotFound", "The subnet ID ' ' does not exist", 400));
+        ObjectNode props = mapper.createObjectNode().put("Name", "nlb").put("Type", "network");
+        props.putArray("SubnetMappings").addObject().put("SubnetId", " ");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Nlb"), props, ctx()));
+
+        assertEquals("SubnetNotFound", e.getErrorCode());
+    }
+
     @Test
     void anInPlaceListenerUpdateIsNotRolledBackHere() {
         when(elb.describeListeners(REGION, null, List.of(LISTENER_ARN))).thenReturn(List.of(listener(LB_ARN)));

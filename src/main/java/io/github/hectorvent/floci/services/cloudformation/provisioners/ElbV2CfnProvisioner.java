@@ -189,6 +189,9 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     /**
      * The template's subnets: {@code Subnets}, or else the {@code SubnetId} of each
      * {@code SubnetMappings} entry, the form a Network Load Balancer uses to give a zone an Elastic IP.
+     * {@code SubnetId} is required in a mapping, so one without it fails the resource before anything
+     * is created or moved, with the error the resource schema gives. A blank one is passed on as given
+     * for ELBv2 to refuse as an unknown subnet; dropping it would create or move the balancer without it.
      */
     private static List<String> templateSubnets(JsonNode props, ProvisionContext ctx) {
         List<String> subnets = ctx.resolveStringList(props, "Subnets");
@@ -197,11 +200,13 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         }
         JsonNode mappings = ctx.engine().resolveNode(props.get("SubnetMappings"));
         if (mappings != null && mappings.isArray()) {
-            for (JsonNode mapping : mappings) {
-                String subnetId = ctx.resolveOptional(mapping, "SubnetId");
-                if (subnetId != null && !subnetId.isBlank()) {
-                    subnets.add(subnetId);
+            for (int i = 0; i < mappings.size(); i++) {
+                String subnetId = ctx.resolveOptional(mappings.get(i), "SubnetId");
+                if (subnetId == null) {
+                    throw new AwsException("InvalidRequest",
+                            "Model validation failed (#/SubnetMappings/" + i + ": required key [SubnetId] not found)", 400);
                 }
+                subnets.add(subnetId);
             }
         }
         return subnets;
