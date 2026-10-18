@@ -63,7 +63,7 @@ public final class EcsLinuxParameters {
      * The {@code linuxParameters} rules RegisterTaskDefinition applies whatever the launch type,
      * before Fargate's own, with the messages and in the order measured on AWS (eu-west-1,
      * 2026-10-03, 2026-10-16 and 2026-10-18). First, for every container, the JSON type of every
-     * member (see {@link #checkTypes}); then every capability one the KernelCapabilities reference
+     * member, against ECS's model (see {@link EcsRequestShapes}); then every capability one the KernelCapabilities reference
      * lists, in any case and without the {@code CAP_} prefix; every device with a host path and only
      * read, write and mknod as permissions, as written; every tmpfs mount with a container path, a
      * size above zero and options the reference lists; a shared memory size above zero; and swap
@@ -75,7 +75,8 @@ public final class EcsLinuxParameters {
             return;
         }
         for (ContainerDefinition def : containerDefs) {
-            checkTypes(def.getUnparsed() == null ? null : def.getUnparsed().get("linuxParameters"));
+            EcsRequestShapes.check("LinuxParameters",
+                    def.getUnparsed() == null ? null : def.getUnparsed().get("linuxParameters"));
         }
         for (ContainerDefinition def : containerDefs) {
             Map<?, ?> parameters = of(def);
@@ -281,135 +282,6 @@ public final class EcsLinuxParameters {
                 spec.withMemorySwappiness(swappiness.longValue());
             }
         }
-    }
-
-    /**
-     * Refuses a member of the wrong JSON type with the InvalidParameterException
-     * RegisterTaskDefinition's deserializer gives, before any rule on the values (measured with raw
-     * requests, eu-west-1, 2026-10-18). A null member is absent. Where an object is expected, a
-     * scalar is "Unexpected field type", or "Unexpected value type in payload" for a device or a
-     * tmpfs mount in its list, and a null list member is an empty object; where a list is expected,
-     * a scalar is "Unexpected field type"; where a string, an integer or a boolean is expected, an
-     * object is "Start of structure or map found where not expected", a number in a string is
-     * "NUMBER_VALUE cannot be converted to String", a string or a boolean in an integer
-     * "STRING_VALUE cannot be converted to Integer" or "TRUE_VALUE ...", a number in a boolean
-     * "NUMBER_VALUE cannot be converted to Boolean", and a string in a boolean is read case-blind as
-     * true or false or else "Unexpected token received from parser". A list where none is expected
-     * is refused with no message at all.
-     */
-    private static void checkTypes(Object linuxParameters) {
-        if (linuxParameters == null) {
-            return;
-        }
-        for (Map.Entry<?, ?> member : object(linuxParameters, "Unexpected field type").entrySet()) {
-            Object value = member.getValue();
-            if (value == null) {
-                continue;
-            }
-            switch (String.valueOf(member.getKey())) {
-                case "capabilities" -> {
-                    for (Object names : object(value, "Unexpected field type").values()) {
-                        stringList(names);
-                    }
-                }
-                case "devices" -> {
-                    for (Object item : list(value)) {
-                        if (item != null) {
-                            Map<?, ?> device = object(item, "Unexpected value type in payload");
-                            string(device.get("hostPath"));
-                            string(device.get("containerPath"));
-                            stringList(device.get("permissions"));
-                        }
-                    }
-                }
-                case "tmpfs" -> {
-                    for (Object item : list(value)) {
-                        if (item != null) {
-                            Map<?, ?> mount = object(item, "Unexpected value type in payload");
-                            string(mount.get("containerPath"));
-                            integerValue(mount.get("size"));
-                            stringList(mount.get("mountOptions"));
-                        }
-                    }
-                }
-                case "initProcessEnabled" -> booleanValue(value);
-                case "sharedMemorySize", "maxSwap", "swappiness" -> integerValue(value);
-                default -> {
-                }
-            }
-        }
-    }
-
-    private static Map<?, ?> object(Object value, String scalarMessage) {
-        if (value instanceof Map<?, ?> object) {
-            return object;
-        }
-        throw value instanceof List<?> ? listNotExpected() : invalidParameter(scalarMessage);
-    }
-
-    private static List<?> list(Object value) {
-        if (value instanceof List<?> items) {
-            return items;
-        }
-        throw value instanceof Map<?, ?> ? objectNotExpected() : invalidParameter("Unexpected field type");
-    }
-
-    private static void stringList(Object value) {
-        if (value != null) {
-            list(value).forEach(EcsLinuxParameters::string);
-        }
-    }
-
-    private static void string(Object value) {
-        if (value == null || value instanceof String) {
-            return;
-        }
-        throw notConvertible(value, "String");
-    }
-
-    private static void integerValue(Object value) {
-        if (value == null || value instanceof Number) {
-            return;
-        }
-        throw notConvertible(value, "Integer");
-    }
-
-    private static void booleanValue(Object value) {
-        if (value == null || value instanceof Boolean) {
-            return;
-        }
-        if (value instanceof String text) {
-            if (bool(text) == null) {
-                throw invalidParameter("Unexpected token received from parser");
-            }
-            return;
-        }
-        throw notConvertible(value, "Boolean");
-    }
-
-    private static AwsException notConvertible(Object value, String type) {
-        if (value instanceof Map<?, ?>) {
-            return objectNotExpected();
-        }
-        if (value instanceof List<?>) {
-            return listNotExpected();
-        }
-        String token = value instanceof Boolean flag ? (flag ? "TRUE_VALUE" : "FALSE_VALUE")
-                : value instanceof Number ? "NUMBER_VALUE" : "STRING_VALUE";
-        return invalidParameter(token + " cannot be converted to " + type);
-    }
-
-    private static AwsException objectNotExpected() {
-        return invalidParameter("Start of structure or map found where not expected");
-    }
-
-    /** AWS answers a list where none is expected with the exception type alone. */
-    private static AwsException listNotExpected() {
-        return invalidParameter(null);
-    }
-
-    private static AwsException invalidParameter(String message) {
-        return new AwsException("InvalidParameterException", message, 400);
     }
 
     private static void rejectOnFargate(boolean present, String parameter) {

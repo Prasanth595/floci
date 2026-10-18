@@ -1,7 +1,7 @@
 """Shared generator for the vendored request shapes a service's request check reads.
 
-`regen_dynamodb_shapes.py` and `regen_sesv2_shapes.py` each name a botocore model and an output
-file and hand the rest to `main()`. The output keeps only what `RequestShapeModel` reads: the input
+`regen_dynamodb_shapes.py`, `regen_sesv2_shapes.py` and `regen_ecs_shapes.py` each name a botocore
+model and an output file and hand the rest to `main()`. The output keeps only what `RequestShapeModel` reads: the input
 shape of every operation, reduced to the members carried in the JSON body, and for every shape
 reachable from one, its type and the shapes of its members, list elements or map values.
 

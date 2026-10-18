@@ -2228,7 +2228,7 @@ public interface EmulatorConfig {
         Optional<List<String>> hostVolumeRoots();
 
         /**
-         * When true, bypasses the {@link #hostVolumeRoots()} allowlist check for host volumes,
+         * When true, bypasses the {@link #hostVolumeRoots()} allowlist check for host volumes and devices,
          * allowing any absolute path. Traversal segments, the bare root "/", and the Docker
          * socket (or any ancestor directory that contains it) are still always rejected.
          */
