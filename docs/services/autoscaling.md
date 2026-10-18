@@ -165,6 +165,15 @@ imply an atomic transaction spanning Auto Scaling and EC2 after a process crash.
 | `DescribeMetricCollectionTypes` | Returns standard metric and granularity names |
 | `DescribeAutoScalingNotificationTypes` | Returns all notification type names |
 
+## Suspended Process Reasons
+
+`DescribeAutoScalingGroups` returns `SuspensionReason` alongside every suspended
+process. Floci uses the generic description `Suspended by local configuration.`
+for the current suspension state. It does not record an actor, timestamp or
+administrative suspension history. Resuming a process removes that process and
+its reason from the response. This also applies to saved groups containing the
+existing list of suspended process names.
+
 ## Capacity Reconciler (Phase 2)
 
 Floci runs a background reconciler (10 s fixed rate) that keeps each group's InService instance count aligned with `DesiredCapacity`:

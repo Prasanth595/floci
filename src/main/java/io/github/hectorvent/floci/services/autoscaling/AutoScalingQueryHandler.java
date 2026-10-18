@@ -344,7 +344,8 @@ public class AutoScalingQueryHandler {
 
         xml.start("SuspendedProcesses");
         for (String sp : asg.getSuspendedProcesses()) {
-            xml.start("member").elem("ProcessName", sp).end("member");
+            xml.start("member").elem("ProcessName", sp)
+                    .elem("SuspensionReason", "Suspended by local configuration.").end("member");
         }
         xml.end("SuspendedProcesses");
 
