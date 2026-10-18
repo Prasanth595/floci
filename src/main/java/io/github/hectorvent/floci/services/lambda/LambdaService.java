@@ -2924,7 +2924,6 @@ public class LambdaService implements ResourceProvider {
         if (!(value instanceof Map<?, ?> logging)) {
             return;
         }
-        validateLoggingConfig(value, fn.isDurable());
         LoggingSettings settings = loggingSettings(logging, fn.isDurable());
         fn.setLogFormat(settings.logFormat());
         fn.setApplicationLogLevel(settings.applicationLogLevel());
@@ -2938,11 +2937,15 @@ public class LambdaService implements ResourceProvider {
     }
 
     /**
-     * What Lambda stores for a LoggingConfig: an omitted LogFormat is the function's default, JSON
-     * for a durable function and Text otherwise, the two log levels count only in JSON, and a blank
-     * value is an omitted one, an omitted LogGroup meaning {@code /aws/lambda/<name>}.
+     * What Lambda stores for a LoggingConfig, once it is valid: an omitted LogFormat is the
+     * function's default, JSON for a durable function and Text otherwise, the two log levels count
+     * only in JSON, and a blank value is an omitted one, an omitted LogGroup meaning
+     * {@code /aws/lambda/<name>}. An invalid value is refused even where it would not be stored,
+     * a log level under Text included, so a comparison of these settings cannot pass it as
+     * unchanged.
      */
     public static LoggingSettings loggingSettings(Map<?, ?> logging, boolean durable) {
+        validateLoggingConfig(logging, durable);
         String format = logging.get("LogFormat") instanceof String f && !f.isBlank() ? f : durable ? "JSON" : "Text";
         boolean json = "JSON".equals(format);
         return new LoggingSettings(format,

@@ -3017,7 +3017,15 @@ class LambdaServiceTest {
                 LambdaService.loggingSettings(Map.of("ApplicationLogLevel", "WARN", "LogGroup", "/shared/app"), false));
         assertEquals(new LambdaService.LoggingSettings("JSON", "WARN", null, null),
                 LambdaService.loggingSettings(Map.of("LogFormat", "JSON", "ApplicationLogLevel", "WARN",
-                        "SystemLogLevel", " ", "LogGroup", ""), false));
+                        "LogGroup", ""), false));
+    }
+
+    @Test
+    void loggingSettingsRefuseAnInvalidLevelEvenUnderText() {
+        AwsException refused = assertThrows(AwsException.class, () -> LambdaService.loggingSettings(
+                Map.of("LogFormat", "Text", "ApplicationLogLevel", "LOUD"), false));
+
+        assertEquals("ValidationException", refused.getErrorCode());
     }
 
     @Test

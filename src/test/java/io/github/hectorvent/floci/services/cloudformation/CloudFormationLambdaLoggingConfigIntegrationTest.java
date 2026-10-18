@@ -1,12 +1,16 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * {@code AWS::Lambda::Function.LoggingConfig} through CloudFormation. Measured on AWS (eu-west-1,
@@ -21,9 +25,13 @@ class CloudFormationLambdaLoggingConfigIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
     private static final String LAMBDA = "/2015-03-31/functions/";
 
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
     @Test
     void loggingConfigIsCreatedUpdatedAndRemovedInPlace() {
         String stackName = "cfn-lambda-logging-" + Long.toString(System.nanoTime(), 36);
+        registerDeletion(stackName);
 
         deploy("CreateStack", stackName, template("""
                 ,"LoggingConfig": {"LogGroup": "/floci/cfn-a"}
@@ -64,6 +72,39 @@ class CloudFormationLambdaLoggingConfigIntegrationTest {
             .body("LoggingConfig.LogGroup", equalTo("/aws/lambda/" + created));
     }
 
+    /**
+     * A log level outside the enum fails the update, as Lambda refuses it, even under Text where
+     * Lambda would not store a level: it must not pass the update check as an unchanged
+     * LoggingConfig, and the function keeps its configuration.
+     */
+    @Test
+    void anInvalidLogLevelFailsTheUpdate() {
+        String stackName = "cfn-lambda-logging-level-" + Long.toString(System.nanoTime(), 36);
+        registerDeletion(stackName);
+        deploy("CreateStack", stackName, template(""));
+        String created = functionName(stackName);
+
+        submit("UpdateStack", stackName, template("""
+                ,"LoggingConfig": {"LogFormat": "Text", "ApplicationLogLevel": "VERBOSE"}
+                """));
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
+        assertNotEquals("UPDATE_COMPLETE", state.status(), state.reason());
+        given()
+        .when()
+            .get(LAMBDA + created + "/configuration")
+        .then()
+            .statusCode(200)
+            .body("LoggingConfig.LogFormat", equalTo("Text"))
+            .body("LoggingConfig.ApplicationLogLevel", nullValue());
+    }
+
+    private void registerDeletion(String stackName) {
+        cleanup.register(() -> {
+            submit("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        });
+    }
+
     private static String template(String loggingConfig) {
         return """
                 {
@@ -85,19 +126,26 @@ class CloudFormationLambdaLoggingConfigIntegrationTest {
     }
 
     private static void deploy(String action, String stackName, String template) {
-        given()
+        submit(action, stackName, template);
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
+        assertEquals("CreateStack".equals(action) ? "CREATE_COMPLETE" : "UPDATE_COMPLETE", state.status(),
+                state.reason());
+    }
+
+    private static void submit(String action, String stackName, String template) {
+        RequestSpecification request = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
             .formParam("Action", action)
-            .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
+            .formParam("StackName", stackName);
+        if (template != null) {
+            request.formParam("TemplateBody", template);
+        }
+        request
         .when()
             .post("/")
         .then()
             .statusCode(200);
-        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
-        assertEquals("CreateStack".equals(action) ? "CREATE_COMPLETE" : "UPDATE_COMPLETE", state.status(),
-                state.reason());
     }
 
     private static String functionName(String stackName) {

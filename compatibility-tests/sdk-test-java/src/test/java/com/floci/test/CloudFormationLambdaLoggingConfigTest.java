@@ -38,11 +38,8 @@ class CloudFormationLambdaLoggingConfigTest {
     @AfterAll
     static void cleanup() {
         if (cfn != null) {
-            try {
-                cfn.deleteStack(request -> request.stackName(STACK_NAME));
-            } catch (Exception ignored) {
-                // Cleanup only. A failed delete must not hide the test result.
-            }
+            // DeleteStack answers for a stack that is gone too, so a failure here is a real one.
+            cfn.deleteStack(request -> request.stackName(STACK_NAME));
             cfn.close();
         }
         if (lambda != null) {
