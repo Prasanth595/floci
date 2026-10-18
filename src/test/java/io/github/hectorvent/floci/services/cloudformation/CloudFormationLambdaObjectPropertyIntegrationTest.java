@@ -60,6 +60,39 @@ class CloudFormationLambdaObjectPropertyIntegrationTest {
             .body("TracingConfig.Mode", equalTo("Active"));
     }
 
+    /**
+     * Measured on AWS (eu-west-1, 2026-10-18): {@code Ref: AWS::NoValue}, directly or chosen by
+     * {@code Fn::If}, leaves the property out, and the stack is created.
+     */
+    @Test
+    void aPropertyLeftOutWithNoValueIsNotRefused() {
+        String direct = stackName("novalue");
+        submit("CreateStack", direct, template(
+                ",\"VpcConfig\": {\"Ref\": \"AWS::NoValue\"}, \"TracingConfig\": {\"Ref\": \"AWS::NoValue\"}"));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(direct, CFN_AUTH).status());
+
+        String conditional = stackName("novalue-if");
+        submit("CreateStack", conditional, """
+                {
+                  "Conditions": {"Never": {"Fn::Equals": ["a", "b"]}},
+                  "Resources": {
+                    "Fn": {
+                      "Type": "AWS::Lambda::Function",
+                      "Properties": {
+                        "Runtime": "python3.14",
+                        "Handler": "index.handler",
+                        "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                        "Code": {"ZipFile": "def handler(e, c): return 'ok'"},
+                        "DeadLetterConfig": {"Fn::If": ["Never",
+                            {"TargetArn": "arn:aws:sqs:us-east-1:000000000000:none"}, {"Ref": "AWS::NoValue"}]}
+                      }
+                    }
+                  }
+                }
+                """);
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(conditional, CFN_AUTH).status());
+    }
+
     private String stackName(String purpose) {
         String name = "cfn-lambda-object-" + purpose + "-" + Long.toString(System.nanoTime(), 36);
         cleanup.register(() -> {
