@@ -2912,6 +2912,7 @@ public class DynamoDbService {
             throw new AwsException("ValidationException",
                     "Invalid UpdateExpression: The expression can not be empty;", 400);
         }
+        requireClosedParentheses(expression, "");
         // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs of
         // whitespace (newlines, tabs, multiple spaces) so clause-keyword dispatch and the
         // comma-separated action parsing below work regardless of formatting. Normalize
@@ -3775,6 +3776,41 @@ public class DynamoDbService {
                 }
             }
         }
+    }
+
+    // DynamoDB reads an unclosed call or group to the end of the expression and reports the
+    // raw text from its last token on, trailing whitespace included. UpdateItem wraps the
+    // error in the validation envelope, TransactWriteItems does not.
+    static void requireClosedParentheses(String expression, String envelope) {
+        int depth = 0;
+        int lastToken = 0;
+        for (int i = 0; i < expression.length(); i++) {
+            char c = expression.charAt(i);
+            if (Character.isWhitespace(c)) {
+                continue;
+            }
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+                if (depth < 0) {
+                    return;
+                }
+            }
+            if (i == 0 || isUpdatePunctuation(c) || isUpdatePunctuation(expression.charAt(i - 1))
+                    || Character.isWhitespace(expression.charAt(i - 1))) {
+                lastToken = i;
+            }
+        }
+        if (depth > 0) {
+            throw new AwsException("ValidationException",
+                    envelope + "Invalid UpdateExpression: Syntax error; token: \"<EOF>\", near: \""
+                            + expression.substring(lastToken) + "\"", 400);
+        }
+    }
+
+    private static boolean isUpdatePunctuation(char c) {
+        return "()[],.=+-".indexOf(c) >= 0;
     }
 
     static int findNextComma(String s) {
