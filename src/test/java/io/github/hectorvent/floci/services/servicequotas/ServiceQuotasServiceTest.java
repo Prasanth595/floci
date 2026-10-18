@@ -5,8 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.HashMap;
 import java.util.List;
@@ -19,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ServiceQuotasServiceTest {
@@ -32,6 +36,36 @@ class ServiceQuotasServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().servicequotas().standardOnDemandVcpus()).thenReturn(5);
         return config;
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {-1, Integer.MIN_VALUE})
+    void rejectsNegativeVcpuSettingsBeforeOpeningStorage(int value) {
+        EmulatorConfig config = defaultConfig();
+        when(config.services().servicequotas().standardOnDemandVcpus()).thenReturn(value);
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> new ServiceQuotasService(storageFactory, new ObjectMapper(), config));
+        assertTrue(error.getMessage().contains("floci.services.servicequotas.standard-on-demand-vcpus"));
+        verifyNoInteractions(storageFactory);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, Integer.MAX_VALUE})
+    void nonnegativeBoundarySettingsApplyWithoutChangingAwsDefaults(int value) {
+        EmulatorConfig config = defaultConfig();
+        when(config.services().servicequotas().standardOnDemandVcpus()).thenReturn(value);
+        ServiceQuotasService configured = new ServiceQuotasService(
+                new InMemoryStorageFactory(ACCOUNT_ID), new ObjectMapper(), config);
+        String code = "L-1216C47A";
+        assertEquals((double) value, configured.getServiceQuota("ec2", code, "us-east-1", ACCOUNT_ID)
+                .path("Quota").path("Value").asDouble());
+        assertEquals((double) value, configured.listServiceQuotas("ec2", code, null, null, "us-east-1", ACCOUNT_ID)
+                .path("Quotas").get(0).path("Value").asDouble());
+        assertEquals(5.0, configured.getAwsDefaultServiceQuota("ec2", code, "us-east-1", ACCOUNT_ID)
+                .path("Quota").path("Value").asDouble());
+        assertEquals(5.0, configured.listAwsDefaultServiceQuotas("ec2", code, null, null, "us-east-1", ACCOUNT_ID)
+                .path("Quotas").get(0).path("Value").asDouble());
     }
 
     @Test

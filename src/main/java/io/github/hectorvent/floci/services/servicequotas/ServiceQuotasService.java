@@ -91,6 +91,10 @@ public class ServiceQuotasService {
     public ServiceQuotasService(StorageFactory storageFactory, ObjectMapper objectMapper, EmulatorConfig config) {
         this.objectMapper = objectMapper;
         this.standardOnDemandVcpus = config.services().servicequotas().standardOnDemandVcpus();
+        if (standardOnDemandVcpus < 0) {
+            throw new IllegalArgumentException(
+                    "floci.services.servicequotas.standard-on-demand-vcpus must be nonnegative");
+        }
         this.requestedQuotaStore = storageFactory.create("servicequotas",
                 "servicequotas-requested-changes.json",
                 new TypeReference<Map<String, ObjectNode>>() {});

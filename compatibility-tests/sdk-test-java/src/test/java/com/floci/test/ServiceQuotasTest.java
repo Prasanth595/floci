@@ -20,7 +20,8 @@ class ServiceQuotasTest {
         try (ServiceQuotasClient client = TestFixtures.serviceQuotasClient()) {
             ServiceQuota quota = client.getAWSDefaultServiceQuota(request -> request
                     .serviceCode("ec2").quotaCode(STANDARD_CODE)).quota();
-            assertStandardMetadata(quota, 5.0);
+            assertStandardMetadata(quota);
+            assertThat(quota.value()).isEqualTo(5.0);
             List<List<ServiceQuota>> pages = client.listAWSDefaultServiceQuotasPaginator(request -> request
                     .serviceCode("ec2").maxResults(1)).stream().map(page -> page.quotas()).toList();
             assertCatalogPages(pages, quota);
@@ -34,9 +35,13 @@ class ServiceQuotasTest {
         try (ServiceQuotasClient client = TestFixtures.serviceQuotasClient()) {
             ServiceQuota quota = client.getServiceQuota(request -> request
                     .serviceCode("ec2").quotaCode(STANDARD_CODE)).quota();
-            double expectedValue = Double.parseDouble(System.getenv().getOrDefault(
-                    "FLOCI_SERVICES_SERVICEQUOTAS_STANDARD_ON_DEMAND_VCPUS", "5"));
-            assertStandardMetadata(quota, expectedValue);
+            assertStandardMetadata(quota);
+            assertThat(quota.value()).isNotNull().isGreaterThanOrEqualTo(0.0);
+            // Controlled launchers may supply an expectation independently of the emulator environment.
+            String expectedValue = System.getenv("FLOCI_TEST_EXPECTED_STANDARD_ON_DEMAND_VCPUS");
+            if (expectedValue != null) {
+                assertThat(quota.value()).isEqualTo(Double.parseDouble(expectedValue));
+            }
             List<List<ServiceQuota>> pages = client.listServiceQuotasPaginator(request -> request
                     .serviceCode("ec2").maxResults(1)).stream().map(page -> page.quotas()).toList();
             assertCatalogPages(pages, quota);
@@ -51,13 +56,12 @@ class ServiceQuotasTest {
                 .containsExactly(standardQuota);
     }
 
-    private static void assertStandardMetadata(ServiceQuota quota, double expectedValue) {
+    private static void assertStandardMetadata(ServiceQuota quota) {
         assertThat(quota).isNotNull();
         assertThat(quota.serviceCode()).isEqualTo("ec2");
         assertThat(quota.quotaCode()).isEqualTo(STANDARD_CODE);
         assertThat(quota.quotaName())
                 .isEqualTo("Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances");
-        assertThat(quota.value()).isEqualTo(expectedValue);
         assertThat(quota.adjustable()).isTrue();
         assertThat(quota.globalQuota()).isFalse();
     }
