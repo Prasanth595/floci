@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -32,6 +33,7 @@ import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -39,7 +41,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.LogRecord;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -1500,10 +1504,11 @@ class PostgresProtocolHandlerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"replaced", "revoked", "missing", "malformed", "error"})
-    void finalRoleAdmissionRefusesChangedOrUnverifiableSessionIdentity(String fault) throws Exception {
-        assertAdmissionRefused(true, (in, out) -> {
-            assertEquals(PostgresProtocolHandler.databaseRoleQuery("approle", true, false), readSimpleQuery(in));
+    @CsvSource({"true,replaced", "true,revoked", "true,missing", "true,malformed", "true,error",
+            "false,replaced", "false,revoked", "false,missing", "false,malformed", "false,error"})
+    void finalRoleAdmissionRefusesChangedOrUnverifiableSessionIdentity(boolean databaseIam, String fault) throws Exception {
+        assertAdmissionRefused(true, databaseIam, "approle", (in, out) -> {
+            assertEquals(PostgresProtocolHandler.databaseRoleQuery("approle", true, false, databaseIam), readSimpleQuery(in));
             writeDataRow(out, "100", "t");
             writeCommandComplete(out, "SELECT 1");
             writeReadyForQuery(out);
@@ -1514,7 +1519,7 @@ class PostgresProtocolHandlerTest {
             writeParameterStatus(out, "session_authorization", "approle");
             writeCommandComplete(out, "SET");
             writeReadyForQuery(out);
-            assertEquals(PostgresProtocolHandler.databaseRoleQuery("approle", true, true), readSimpleQuery(in));
+            assertEquals(PostgresProtocolHandler.databaseRoleQuery("approle", true, true, databaseIam), readSimpleQuery(in));
             switch (fault) {
                 case "replaced" -> writeDataRow(out, "101", "t");
                 case "revoked" -> writeDataRow(out, "100", "f");
@@ -1543,7 +1548,33 @@ class PostgresProtocolHandlerTest {
         });
     }
 
+    @Test
+    void roleRefusalLogsSanitizedIdentityWithoutBackendSecrets() throws Exception {
+        String user = "app\nrole\r";
+        List<LogRecord> records = LogCapture.capture(PostgresProtocolHandler.class, () ->
+                assertDoesNotThrow(() -> runAdmissionRefused(true, false, user, (in, out) -> {
+                    assertEquals(PostgresProtocolHandler.databaseRoleQuery(user, true, false, false), readSimpleQuery(in));
+                    writeErrorResponse(out, "ERROR", "XX000", "SECRET_SQL X-Amz-Credential=SECRET_TOKEN");
+                    writeReadyForQuery(out);
+                    assertEquals(-1, in.read());
+                })));
+        List<String> logs = records.stream().map(record -> MessageFormat.format(record.getMessage(), record.getParameters())).toList();
+        assertTrue(logs.stream().anyMatch(line -> line.contains("user approle: catalog query returned an error")));
+        assertFalse(logs.stream().anyMatch(line -> line.contains("SECRET_") || line.contains("X-Amz-")
+                || line.contains("\n") || line.contains("\r")));
+    }
+
     private void assertAdmissionRefused(boolean iam, BackendScript script) throws Exception {
+        assertAdmissionRefused(iam, true, "approle", script);
+    }
+
+    private void assertAdmissionRefused(boolean iam, boolean databaseIam, String user, BackendScript script) {
+        List<LogRecord> records = LogCapture.capture(PostgresProtocolHandler.class, () ->
+                assertDoesNotThrow(() -> runAdmissionRefused(iam, databaseIam, user, script)));
+        assertTrue(records.stream().anyMatch(record -> record.getMessage().contains("PostgreSQL role admission refused")));
+    }
+
+    private void runAdmissionRefused(boolean iam, boolean databaseIam, String user, BackendScript script) throws Exception {
         AtomicReference<Throwable> backendFailure = new AtomicReference<>();
         AtomicReference<Throwable> authFailure = new AtomicReference<>();
         AtomicReference<PostgresProtocolHandler.AuthenticatedSession> result = new AtomicReference<>();
@@ -1565,16 +1596,16 @@ class PostgresProtocolHandlerTest {
                         result.set(PostgresProtocolHandler.authenticate(proxyClient, () -> backend,
                                 "dbadmin", "adminpass", "postgres", true, testSigV4Validator(),
                                 testBinding(), testTlsCertificates(),
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5_000, true));
+                                (loginUser, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5_000, true, databaseIam));
                     } catch (Throwable failure) {
                         authFailure.set(failure);
                     }
                 });
                 DataOutputStream out = new DataOutputStream(ourClient.getOutputStream());
                 DataInputStream in = new DataInputStream(ourClient.getInputStream());
-                writeStartup(out, "approle", "postgres");
+                writeStartup(out, user, "postgres");
                 readCleartextPasswordChallenge(in);
-                writePassword(out, iam ? rdsToken("approle") : "adminpass");
+                writePassword(out, iam ? rdsToken(user) : "adminpass");
                 Map<Character, String> refusal = readErrorResponse(in);
                 assertEquals("FATAL", refusal.get('S'));
                 assertEquals("28P01", refusal.get('C'));

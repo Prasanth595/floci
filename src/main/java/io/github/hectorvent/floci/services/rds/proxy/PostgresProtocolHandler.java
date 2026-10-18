@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import org.jboss.logging.Logger;
 
 import javax.crypto.Mac;
@@ -122,6 +123,21 @@ public class PostgresProtocolHandler {
                                       int handshakeTimeoutMillis,
                                       boolean forwardStartupParameters) throws IOException {
 
+        return authenticate(client, backendConnector, masterUsername, masterPassword, dbName,
+                iamEnabled, sigV4, binding, tlsCertificates, passwordValidator,
+                handshakeTimeoutMillis, forwardStartupParameters, true);
+    }
+
+    /** Standard DB Proxy IAM does not enroll the backend role in database-native IAM. */
+    public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
+                                      String masterUsername, String masterPassword, String dbName,
+                                      boolean iamEnabled, RdsSigV4Validator sigV4,
+                                      RdsProxyBinding binding,
+                                      RdsProxyTlsCertificates tlsCertificates,
+                                      PasswordValidator passwordValidator,
+                                      int handshakeTimeoutMillis, boolean forwardStartupParameters,
+                                      boolean databaseIamAuthentication) throws IOException {
+
         client.setSoTimeout(handshakeTimeoutMillis);
 
         // Phase 1: Read client startup message (possibly preceded by SSL request)
@@ -233,14 +249,19 @@ public class PostgresProtocolHandler {
             // Buffer all backend messages until ReadyForQuery ('Z')
             List<byte[]> bufferedMessages = readUntilReadyForQuery(backendIn);
 
-            // IAM-enabled PostgreSQL roles opt in through actual rds_iam membership. A
+            // Native IAM-enabled PostgreSQL roles opt in through actual rds_iam membership. A
             // superuser is not implicitly a member, and an opted-in role uses IAM rather
-            // than its password. Check before trying defaults or handing over the session.
+            // than its password. Standard DB Proxy checks LOGIN without database IAM opt-in.
+            // Check before trying defaults or handing over the session.
             DatabaseRole admittedRole = null;
             if (iamEnabled && !endsWithErrorResponse(bufferedMessages)) {
-                admittedRole = readDatabaseRole(backendIn, backendOut, clientUsername, isIam, false);
+                admittedRole = readDatabaseRole(backendIn, backendOut, clientUsername, isIam, false, databaseIamAuthentication);
                 if (admittedRole == null || !admittedRole.allowed()) {
-                    refuseDatabaseRole(clientOut, client, backend, clientUsername);
+                    refuseDatabaseRole(clientOut, client, backend, clientUsername,
+                            admittedRole == null ? "catalog lookup failed"
+                                    : !databaseIamAuthentication ? "LOGIN required"
+                                    : isIam ? "LOGIN and rds_iam membership required"
+                                    : "LOGIN without rds_iam membership required");
                     return null;
                 }
             }
@@ -408,10 +429,14 @@ public class PostgresProtocolHandler {
             // Bind the final session to the admitted role OID, so dropping/recreating the
             // name during login cannot hand a token to a different database role.
             if (iamHandover && !endsWithErrorResponse(bufferedMessages)) {
-                DatabaseRole selectedRole = readDatabaseRole(backendIn, backendOut, clientUsername, true, true);
+                DatabaseRole selectedRole = readDatabaseRole(backendIn, backendOut, clientUsername, true, true, databaseIamAuthentication);
                 if (selectedRole == null || !selectedRole.allowed() || admittedRole == null
                         || !selectedRole.oid().equals(admittedRole.oid())) {
-                    refuseDatabaseRole(clientOut, client, backend, clientUsername);
+                    refuseDatabaseRole(clientOut, client, backend, clientUsername,
+                            selectedRole == null ? "final catalog lookup failed"
+                                    : !selectedRole.allowed() ? (databaseIamAuthentication
+                                            ? "final LOGIN and rds_iam membership required" : "final LOGIN required")
+                                    : "role identity changed during handover");
                     return null;
                 }
             }
@@ -916,8 +941,17 @@ public class PostgresProtocolHandler {
      * objects and operators are qualified independently of the client's search_path.
      */
     static String databaseRoleQuery(String role, boolean iam, boolean sessionRole) {
+        return databaseRoleQuery(role, iam, sessionRole, true);
+    }
+
+    static String databaseRoleQuery(String role, boolean iam, boolean sessionRole,
+                                    boolean databaseIamAuthentication) {
         String name = sessionRole ? "SESSION_USER" : "pg_catalog.convert_from(pg_catalog.decode('"
                 + HexFormat.of().formatHex(role.getBytes(StandardCharsets.UTF_8)) + "', 'hex'), 'UTF8')";
+        if (!databaseIamAuthentication) {
+            return "SELECT r.oid::pg_catalog.text, r.rolcanlogin FROM pg_catalog.pg_roles r "
+                    + "WHERE r.rolname OPERATOR(pg_catalog.=) " + name;
+        }
         String membership = "EXISTS (SELECT 1 FROM memberships m JOIN pg_catalog.pg_roles i "
                 + "ON i.oid OPERATOR(pg_catalog.=) m.oid "
                 + "WHERE i.rolname OPERATOR(pg_catalog.=) 'rds_iam')";
@@ -931,29 +965,36 @@ public class PostgresProtocolHandler {
     }
 
     private static DatabaseRole readDatabaseRole(InputStream in, OutputStream out, String role,
-                                                 boolean iam, boolean sessionRole) throws IOException {
-        List<byte[]> messages = runQuery(in, out, databaseRoleQuery(role, iam, sessionRole));
+                                                 boolean iam, boolean sessionRole,
+                                                 boolean databaseIamAuthentication) throws IOException {
+        List<byte[]> messages = runQuery(in, out,
+                databaseRoleQuery(role, iam, sessionRole, databaseIamAuthentication));
         if (firstErrorResponse(messages) != null) {
+            logDatabaseRoleRefusal(role, "catalog query returned an error");
             return null;
         }
         List<SessionSetting> rows = settingsFromDataRows(messages);
         if (rows.size() != 1) {
+            logDatabaseRoleRefusal(role, rows.isEmpty() ? "database role not found" : "unexpected catalog row count");
             return null;
         }
         SessionSetting row = rows.getFirst();
         if (!row.name().matches("[0-9]{1,10}")
                 || !(row.value().equals("t") || row.value().equals("f"))) {
+            logDatabaseRoleRefusal(role, "invalid catalog row format");
             return null;
         }
         long oid = Long.parseLong(row.name());
         if (oid == 0 || oid > 4_294_967_295L) {
+            logDatabaseRoleRefusal(role, "invalid database role OID");
             return null;
         }
         return new DatabaseRole(row.name(), row.value().equals("t"));
     }
 
-    private static void refuseDatabaseRole(OutputStream out, Socket client, Socket backend, String user)
+    private static void refuseDatabaseRole(OutputStream out, Socket client, Socket backend, String user, String reason)
             throws IOException {
+        logDatabaseRoleRefusal(user, reason);
         try {
             sendErrorResponse(out, "FATAL", "28P01", "password authentication failed for user \"" + user + "\"");
             out.flush();
@@ -961,6 +1002,11 @@ public class PostgresProtocolHandler {
             closeQuietly(client);
             closeQuietly(backend);
         }
+    }
+
+    private static void logDatabaseRoleRefusal(String user, String reason) {
+        LOG.infov("PostgreSQL role admission refused for user {0}: {1}",
+                SigV4RequestValidator.sanitizeForLog(user), reason);
     }
 
     static String quoteIdentifier(String identifier) {

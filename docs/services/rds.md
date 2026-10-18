@@ -881,25 +881,31 @@ arn:aws:rds-db:<region>:<account-id>:dbuser:<DbiResourceId>/<db-user-name>
 
 Aurora cluster endpoints and their member instance endpoints use the cluster's `DbClusterResourceId`, including after member reboot or runtime recovery, and connections through an RDS Proxy use the proxy's `prx-…` resource id. A token that fails any of these checks is refused with the engine's ordinary authentication failure; the reason is written to Floci's log.
 
-On PostgreSQL, the token names a database role (`DBUser`). The role must have its
-own `LOGIN` attribute and a direct or indirect grant of `rds_iam`, including when
-logging in as the master user. Create an application role as the master user:
+On native PostgreSQL instance and cluster endpoints, the token names a database
+role (`DBUser`). The role must have its own `LOGIN` attribute and a direct or indirect grant of `rds_iam`, including when
+logging in as the master user. Standard RDS Proxy client IAM connections do not
+require that database IAM grant: the backend role still needs `LOGIN`, and the
+session remains bound to that role's identity. End-to-end DB Proxy IAM is not
+supported by the real database mode. Create an application role for a native
+database endpoint as the master user:
 
 ```sql
 CREATE ROLE app_user LOGIN;
 GRANT rds_iam TO app_user;
 ```
 
-With IAM database authentication enabled, membership in `rds_iam` makes IAM take
+On native database endpoints with IAM authentication enabled, membership in
+`rds_iam` makes IAM take
 precedence over the role's password. Roles without that membership continue to use
 passwords. These database-role checks apply independently of Floci's IAM policy
 enforcement setting. Disabling IAM database authentication restores ordinary
 password authentication for new connections.
 
 The IAM session runs as the token's role: `current_user` and `session_user` both
-report it, and objects it creates belong to it. A missing role, a role without
-`LOGIN`, or a role without `rds_iam` membership is refused with an authentication
-failure. Grant the application any additional database privileges it needs.
+report it, and objects it creates belong to it. A missing role or a role without
+`LOGIN` is refused with an authentication failure. Native database endpoints also
+require `rds_iam` membership. Grant the application any additional database
+privileges it needs.
 
 Underneath, the proxy reaches the container as the master user and hands the session over to the token's role, so an IAM session that talks its way back to the master role, via `RESET SESSION AUTHORIZATION` and its variants, is terminated with `FATAL: permission denied to set session authorization` rather than being allowed to regain superuser. `SET ROLE` is untouched: PostgreSQL still permission-checks it against the token's role, exactly as on RDS. One difference from RDS: the proxy learns of the switch from PostgreSQL's own report, so when several statements are batched into a single query after the switch, their results are returned before the session is closed.
 

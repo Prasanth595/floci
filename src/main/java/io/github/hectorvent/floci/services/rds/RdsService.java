@@ -61,6 +61,7 @@ import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import io.github.hectorvent.floci.services.rds.model.PointInTimeRestoreRequest;
 import io.github.hectorvent.floci.services.rds.model.RdsEvent;
 import io.github.hectorvent.floci.services.rds.model.ReadReplicaRequest;
+import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyBinding;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
@@ -5947,7 +5948,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                 : validateDbPasswordForScope(
                                         proxyAccountId, targetRegion, targetId, user, pw),
                         proxyBinding(engine, proxy.getEndpointHost(), proxy.getProxyPort(),
-                                targetRegion, proxyAccountId, proxy.getDbProxyResourceId()));
+                                targetRegion, proxyAccountId, proxy.getDbProxyResourceId()),
+                        RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY);
             }
             putTargetGroupForAccount(proxyAccountId, proxyKey, updatedTargetGroup);
             if (updatedProxy != null) {
@@ -7991,7 +7993,8 @@ public class RdsService implements Resettable, ResourceProvider {
                         : validateDbPasswordForScope(
                                 accountId, proxyRegion, targetId, user, password),
                 proxyBinding(engine, proxy.getEndpointHost(), proxy.getProxyPort(),
-                        proxyRegion, accountId, proxy.getDbProxyResourceId()));
+                        proxyRegion, accountId, proxy.getDbProxyResourceId()),
+                RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY);
     }
 
     private DbProxyTargetGroup copyProxyTargetGroup(DbProxyTargetGroup source) {

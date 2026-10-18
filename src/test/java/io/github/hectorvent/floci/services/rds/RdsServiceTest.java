@@ -1794,7 +1794,7 @@ class RdsServiceTest {
                     List.of(), List.of("mydb"), 90, 40);
             ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
             verify(proxyManager).startProxy(any(), any(), anyBoolean(), eq(proxy.getProxyPort()), any(), anyInt(),
-                    any(), any(), any(), any(), any(), binding.capture());
+                    any(), any(), any(), any(), any(), binding.capture(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
             assertEquals(proxy.getEndpointHost(), proxy.getEndpoint());
             assertEquals(new RdsProxyBinding(proxy.getEndpointHost(), proxy.getProxyPort(), "us-east-1",
                     "123456789012", proxy.getDbProxyResourceId(), true), binding.getValue());
@@ -1802,7 +1802,7 @@ class RdsServiceTest {
             service.modifyDbProxy(proxy.getDbProxyName(), null, PROXY_AUTH, null, null, null,
                     null, null, null, "us-east-1");
             verify(proxyManager).startProxy(any(), any(), eq(false), eq(proxy.getProxyPort()), any(), anyInt(),
-                    any(), any(), any(), any(), any(), binding.capture());
+                    any(), any(), any(), any(), any(), binding.capture(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
             assertEquals(new RdsProxyBinding(proxy.getEndpointHost(), proxy.getProxyPort(), "us-east-1",
                     "123456789012", proxy.getDbProxyResourceId(), true), binding.getValue());
             clearInvocations(proxyManager);
@@ -6897,7 +6897,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             return null;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
         RdsService service = proxyStoreService(
                 regionResolver, config, proxies, targetGroups, instances, new InMemoryStorage<>());
         DbProxyAuth requiredAuth = new DbProxyAuth(
@@ -6951,7 +6951,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             return null;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
         RdsService service = proxyStoreService(
                 regionResolver, config, proxies, targetGroups, instances, new InMemoryStorage<>());
         DbProxyAuth requiredAuth = new DbProxyAuth(
@@ -7217,7 +7217,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             return null;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
         RdsService service = proxyStoreService(
                 regionResolver, config, proxies, targetGroups, instances, new InMemoryStorage<>());
 
@@ -7334,7 +7334,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             return null;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
         RdsService service = proxyStoreService(
                 regionResolver, config, proxies, targetGroups, instances, new InMemoryStorage<>());
 
@@ -7404,7 +7404,7 @@ class RdsServiceTest {
         verify(proxyManager).startProxy(
                 eq("db-proxy:" + proxy.getDbProxyArn()), eq(DatabaseEngine.MYSQL),
                 anyBoolean(), eq(3306), eq("localhost"), eq(3306), any(),
-                eq("admin"), eq("secret"), eq("app"), any(), any());
+                eq("admin"), eq("secret"), eq("app"), any(), any(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
         verify(proxyManager).stopProxy("db-proxy:" + proxy.getDbProxyArn());
     }
 
@@ -7433,7 +7433,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             throw startupFailure;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
         doAnswer(invocation -> {
             relayRunning.set(false);
             return null;
@@ -7944,7 +7944,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             return null;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
         IllegalStateException deleteFailure =
                 new IllegalStateException("simulated post-mutation target-group delete failure");
         doAnswer(invocation -> {
@@ -8009,7 +8009,7 @@ class RdsServiceTest {
             relayRunning.set(true);
             return null;
         }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(),
-                anyInt(), any(), any(), any(), any(), any(), any());
+                anyInt(), any(), any(), any(), any(), any(), any(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
         IllegalStateException deleteFailure =
                 new IllegalStateException("simulated post-mutation proxy delete failure");
         doAnswer(invocation -> {
@@ -8395,7 +8395,7 @@ class RdsServiceTest {
         assertEquals("insufficient-resource-limits", failed.getStatus());
         verify(proxyManager, never()).startProxy(
                 eq("db-proxy:" + proxy.getDbProxyArn()), any(), anyBoolean(), anyInt(),
-                any(), anyInt(), any(), any(), any(), any(), any(), any());
+                any(), anyInt(), any(), any(), any(), any(), any(), any(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
 
         DbProxy another = service.createDbProxy(
                 "another-proxy", "MYSQL", true, false, "NONE", PROXY_ROLE_ARN,
@@ -8415,7 +8415,7 @@ class RdsServiceTest {
         verify(proxyManager).startProxy(
                 eq("db-proxy:" + proxy.getDbProxyArn()), eq(DatabaseEngine.MYSQL),
                 anyBoolean(), eq(failed.getProxyPort()), any(), anyInt(),
-                any(), any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
     }
 
     @Test
@@ -8506,7 +8506,7 @@ class RdsServiceTest {
         verify(restoredProxyManager).startProxy(eq("db-proxy:" + restored.getDbProxyArn()),
                 eq(DatabaseEngine.POSTGRES),
                 eq(false), anyInt(), eq("127.0.0.1"), eq(15432), any(),
-                eq("admin"), eq("secret"), eq("app"), any(), any());
+                eq("admin"), eq("secret"), eq("app"), any(), any(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
     }
 
     @Test
@@ -8578,7 +8578,7 @@ class RdsServiceTest {
         verify(restoredProxyManager).startProxy(eq("db-proxy:" + proxy.getDbProxyArn()),
                 eq(DatabaseEngine.POSTGRES),
                 eq(false), eq(5432), eq("127.0.0.1"), eq(15432), any(), eq("admin"),
-                eq("target-secret"), eq("app"), validator.capture(), any());
+                eq("target-secret"), eq("app"), validator.capture(), any(), eq(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
         assertTrue(validator.getValue().validate("admin", "target-secret"));
         assertFalse(validator.getValue().validate("admin", "default-secret"));
         assertTrue(rawProxies.get(targetAccount + "/us-east-1::app-proxy").isPresent());
