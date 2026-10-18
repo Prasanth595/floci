@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.*;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.AccountPasswordPolicy;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
@@ -967,10 +968,10 @@ public class IamQueryHandler {
         try {
             return Integer.valueOf(raw.trim());
         } catch (NumberFormatException e) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + raw + "' at '"
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + raw + "' at '"
                             + Character.toLowerCase(name.charAt(0)) + name.substring(1)
-                            + "' failed to satisfy constraint: Member must be an integer", 400);
+                            + "' failed to satisfy constraint: Member must be an integer");
         }
     }
 
@@ -3275,9 +3276,9 @@ public class IamQueryHandler {
      */
     private static void checkListLength(int members, String param, int limit) {
         if (members > limit) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at '" + param + "' failed to satisfy constraint: "
-                            + "Member must have length less than or equal to " + limit, 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value at '" + param + "' failed to satisfy constraint: "
+                            + "Member must have length less than or equal to " + limit);
         }
     }
 
@@ -3301,9 +3302,9 @@ public class IamQueryHandler {
      * outside a range reports the side it fell outside, not the whole range.
      */
     private static AwsException validationError(String value, String at, String constraint) {
-        return new AwsException("ValidationError",
-                "1 validation error detected: Value '" + value + "' at '" + at + "' failed to satisfy constraint: "
-                        + constraint, 400);
+        return SmithyValidationErrors.validationError(
+                "Value '" + value + "' at '" + at + "' failed to satisfy constraint: "
+                        + constraint);
     }
 
     private List<String> getMemberList(MultivaluedMap<String, String> params, String name) {
@@ -3376,10 +3377,10 @@ public class IamQueryHandler {
     private String requireParam(MultivaluedMap<String, String> params, String name) {
         String value = params.getFirst(name);
         if (value == null || value.isBlank()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value null at '"
+            throw SmithyValidationErrors.validationError(
+                    "Value null at '"
                             + Character.toLowerCase(name.charAt(0)) + name.substring(1)
-                            + "' failed to satisfy constraint: Member must not be null", 400);
+                            + "' failed to satisfy constraint: Member must not be null");
         }
         return value;
     }

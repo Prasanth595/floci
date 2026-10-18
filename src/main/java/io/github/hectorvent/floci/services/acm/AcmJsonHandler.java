@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.acm.model.Certificate;
 import io.github.hectorvent.floci.services.acm.model.CertificateOptions;
 import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
@@ -102,9 +103,9 @@ public class AcmJsonHandler {
         }
         JsonNode sanNode = request.path("SubjectAlternativeNames");
         if (sanNode.isArray() && sanNode.isEmpty()) {
-            throw new AwsException("ValidationException",
-                "1 validation error detected: Value '[]' at 'subjectAlternativeNames' failed to satisfy "
-                    + "constraint: Member must have length greater than or equal to 1", 400);
+            throw SmithyValidationErrors.validationException(
+                "Value '[]' at 'subjectAlternativeNames' failed to satisfy "
+                    + "constraint: Member must have length greater than or equal to 1");
         }
         List<String> sans = parseStringList(sanNode);
         ValidationMethod validationMethod = parseValidationMethod(request.path("ValidationMethod").asText(null));

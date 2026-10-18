@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -358,10 +359,10 @@ public class DynamoDbService {
         for (int i = 0; i < keySchema.size(); i++) {
             String keyType = keySchema.get(i).getKeyType();
             if (!"HASH".equals(keyType) && !"RANGE".equals(keyType)) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + keyType
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + keyType
                         + "' at 'keySchema." + (i + 1) + ".member.keyType' failed to satisfy constraint: "
-                        + "Member must satisfy enum value set: [HASH, RANGE]", 400);
+                        + "Member must satisfy enum value set: [HASH, RANGE]");
             }
         }
 
@@ -370,9 +371,9 @@ public class DynamoDbService {
             String repr = "[" + keySchema.stream()
                     .map(k -> "KeySchemaElement(attributeName=" + k.getAttributeName() + ", keyType=" + k.getKeyType() + ")")
                     .collect(Collectors.joining(", ")) + "]";
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + repr + "' at 'keySchema' failed to satisfy constraint: "
-                    + "Member must have length less than or equal to 2", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + repr + "' at 'keySchema' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 2");
         }
 
         // Validate no duplicate attribute names in keySchema
@@ -389,10 +390,10 @@ public class DynamoDbService {
             for (int i = 0; i < attributeDefinitions.size(); i++) {
                 String attrType = attributeDefinitions.get(i).getAttributeType();
                 if (!"B".equals(attrType) && !"N".equals(attrType) && !"S".equals(attrType)) {
-                    throw new AwsException("ValidationException",
-                            "1 validation error detected: Value '" + attrType
+                    throw SmithyValidationErrors.validationException(
+                            "Value '" + attrType
                             + "' at 'attributeDefinitions." + (i + 1) + ".member.attributeType' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [B, N, S]", 400);
+                            + "Member must satisfy enum value set: [B, N, S]");
                 }
             }
         }
@@ -552,24 +553,24 @@ public class DynamoDbService {
             requireVectorIndexMember(index.getDistanceFunction(), memberPath + ".distanceFunction");
             String indexName = index.getIndexName();
             if (indexName == null || indexName.length() < MIN_VECTOR_INDEX_NAME_LENGTH) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + indexName + "' at '"
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + indexName + "' at '"
                         + memberPath + ".indexName' failed to satisfy constraint: "
-                        + "Member must have length greater than or equal to " + MIN_VECTOR_INDEX_NAME_LENGTH, 400);
+                        + "Member must have length greater than or equal to " + MIN_VECTOR_INDEX_NAME_LENGTH);
             }
             String distanceFunction = index.getDistanceFunction();
             if (!VECTOR_DISTANCE_FUNCTIONS.contains(distanceFunction)) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + distanceFunction + "' at '"
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + distanceFunction + "' at '"
                         + memberPath + ".distanceFunction' failed to satisfy constraint: "
-                        + "Member must satisfy enum value set: " + VECTOR_DISTANCE_FUNCTIONS, 400);
+                        + "Member must satisfy enum value set: " + VECTOR_DISTANCE_FUNCTIONS);
             }
             Long dimensions = index.getDimensions();
             if (dimensions < 1) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + dimensions + "' at '"
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + dimensions + "' at '"
                         + memberPath + ".dimensions' failed to satisfy constraint: "
-                        + "Member must have value greater than or equal to 1", 400);
+                        + "Member must have value greater than or equal to 1");
             }
         }
     }
@@ -644,9 +645,9 @@ public class DynamoDbService {
 
     private static void requireVectorIndexMember(Object value, String memberPath) {
         if (value == null) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at '" + memberPath
-                    + "' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at '" + memberPath
+                    + "' failed to satisfy constraint: Member must not be null");
         }
     }
 
@@ -3512,13 +3513,11 @@ public class DynamoDbService {
                     }
 
                     if (index < 0 || index > MAX_DYNAMODB_LIST_INDEX) {
-                        throw new AwsException(
-                                "ValidationException",
-                                "1 validation error detected: Invalid UpdateExpression: "
+                        throw SmithyValidationErrors.validationException(
+                                "Invalid UpdateExpression: "
                                         + "List index is not within the allowable range; index: ["
                                         + indexText
-                                        + "]. The maximum allowed index is 4294967294",
-                                400);
+                                        + "]. The maximum allowed index is 4294967294");
                     }
 
                     tokens.add(index);
@@ -4729,15 +4728,15 @@ public class DynamoDbService {
             return;
         }
         if (pageSize < 1) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + pageSize + "' at '" + field
-                    + "' failed to satisfy constraint: Member must have value greater than or equal to 1", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + pageSize + "' at '" + field
+                    + "' failed to satisfy constraint: Member must have value greater than or equal to 1");
         }
         if (MAX_JOB_PAGE_SIZE < pageSize) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + pageSize + "' at '" + field
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + pageSize + "' at '" + field
                     + "' failed to satisfy constraint: Member must have value less than or equal to "
-                    + MAX_JOB_PAGE_SIZE, 400);
+                    + MAX_JOB_PAGE_SIZE);
         }
     }
 
@@ -4772,10 +4771,10 @@ public class DynamoDbService {
     static void validateBillingMode(JsonNode request, String memberPrefix) {
         JsonNode billingMode = request.path("BillingMode");
         if (billingMode.isTextual() && !VALID_BILLING_MODES.contains(billingMode.asText())) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + billingMode.asText() + "' at '" + memberPrefix
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + billingMode.asText() + "' at '" + memberPrefix
                     + "billingMode' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]", 400);
+                    + "Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]");
         }
     }
 
@@ -4794,26 +4793,26 @@ public class DynamoDbService {
             case "" -> throw new AwsException("ValidationException", "InputFormat is required", 400);
             case "CSV", "ION" -> throw new AwsException("ValidationException",
                     "Unsupported InputFormat: " + inputFormat + ". Floci imports DYNAMODB_JSON only", 400);
-            default -> throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + inputFormat
-                    + "' at 'inputFormat' failed to satisfy constraint: Member must satisfy enum value set: [ION, CSV, DYNAMODB_JSON]", 400);
+            default -> throw SmithyValidationErrors.validationException(
+                    "Value '" + inputFormat
+                    + "' at 'inputFormat' failed to satisfy constraint: Member must satisfy enum value set: [ION, CSV, DYNAMODB_JSON]");
         }
         var compression = request.path("InputCompressionType").asText("NONE");
         switch (compression) {
             case "NONE", "GZIP" -> { }
             case "ZSTD" -> throw new AwsException("ValidationException",
                     "Unsupported InputCompressionType: ZSTD. Floci accepts NONE or GZIP", 400);
-            default -> throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + compression
-                    + "' at 'inputCompressionType' failed to satisfy constraint: Member must satisfy enum value set: [GZIP, ZSTD, NONE]", 400);
+            default -> throw SmithyValidationErrors.validationException(
+                    "Value '" + compression
+                    + "' at 'inputCompressionType' failed to satisfy constraint: Member must satisfy enum value set: [GZIP, ZSTD, NONE]");
         }
         DynamoDbTableNames.requireShortName(request.path("TableCreationParameters").path("TableName").asText(null));
         validateBillingMode(request.path("TableCreationParameters"), "tableCreationParameters.");
         var clientToken = request.path("ClientToken").asText(null);
         if (clientToken != null && clientToken.isBlank()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + clientToken
-                    + "' at 'clientToken' failed to satisfy constraint: Member must have length greater than or equal to 1", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + clientToken
+                    + "' at 'clientToken' failed to satisfy constraint: Member must have length greater than or equal to 1");
         }
         if (clientToken == null || importStore == null) {
             return null;

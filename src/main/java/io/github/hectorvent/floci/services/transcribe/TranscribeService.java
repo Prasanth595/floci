@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.transcribe.model.TranscriptionJob;
@@ -255,10 +256,9 @@ public class TranscribeService implements Resettable {
 
     private void requireNonBlank(String value, String fieldName) {
         if (value == null || value.isBlank()) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value null at '" + fieldName
-                            + "' failed to satisfy constraint: Member must not be null",
-                    400);
+            throw SmithyValidationErrors.badRequest(
+                    "Value null at '" + fieldName
+                            + "' failed to satisfy constraint: Member must not be null");
         }
     }
 

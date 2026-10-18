@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ssm.model.Command;
@@ -156,10 +157,8 @@ public class SsmCommandService implements Resettable {
             throw new AwsException("InvalidInstanceId", "At least one InstanceId is required.", 400);
         }
         if (instanceIds.size() > MAX_INSTANCE_IDS) {
-            throw new AwsException(
-                    "ValidationException",
-                    "1 validation error detected: Value at 'instanceIds' failed to satisfy constraint: Member must have length less than or equal to " + MAX_INSTANCE_IDS,
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value at 'instanceIds' failed to satisfy constraint: Member must have length less than or equal to " + MAX_INSTANCE_IDS);
         }
 
         boolean publicShell = "AWS-RunShellScript".equals(documentName);
@@ -294,10 +293,8 @@ public class SsmCommandService implements Resettable {
 
     private static void validateTimeoutSeconds(int timeoutSeconds) {
         if (timeoutSeconds < MIN_TIMEOUT_SECONDS) {
-            throw new AwsException(
-                    "ValidationException",
-                    "1 validation error detected: Value '" + timeoutSeconds + "' at 'timeoutSeconds' failed to satisfy constraint: Member must have value greater than or equal to 30",
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + timeoutSeconds + "' at 'timeoutSeconds' failed to satisfy constraint: Member must have value greater than or equal to 30");
         }
     }
 

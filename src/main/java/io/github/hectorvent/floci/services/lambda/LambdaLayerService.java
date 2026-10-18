@@ -447,16 +447,16 @@ public class LambdaLayerService {
      */
     public LambdaLayerVersion getLayerVersionByArn(String layerVersionArn) {
         if (layerVersionArn == null || layerVersionArn.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'arn' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'arn' failed to satisfy constraint: "
+                            + "Member must not be null");
         }
         if (layerVersionArn.length() > MAX_LAYER_VERSION_ARN_LENGTH
                 || !LAYER_VERSION_ARN.matcher(layerVersionArn).matches()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + layerVersionArn + "' at 'arn' failed to satisfy"
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + layerVersionArn + "' at 'arn' failed to satisfy"
                             + " constraint: Member must satisfy regular expression pattern: "
-                            + LAYER_VERSION_ARN_PATTERN, 400);
+                            + LAYER_VERSION_ARN_PATTERN);
         }
         // The live service rejects a layer from another partition outright, and with a different
         // error than an unresolvable ARN, so this precedes the lookup.

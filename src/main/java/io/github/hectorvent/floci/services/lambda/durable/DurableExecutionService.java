@@ -1064,10 +1064,10 @@ public class DurableExecutionService implements Resettable {
     static ArnParts parseArn(String executionArn) {
         Matcher matcher = executionArn == null ? null : LambdaArnUtils.DURABLE_EXECUTION_ARN.matcher(executionArn);
         if (matcher == null || !matcher.matches()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + executionArn + "' at 'durableExecutionArn' failed to "
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + executionArn + "' at 'durableExecutionArn' failed to "
                             + "satisfy constraint: Member must satisfy regular expression pattern: "
-                            + LambdaArnUtils.DURABLE_EXECUTION_ARN.pattern(), 400);
+                            + LambdaArnUtils.DURABLE_EXECUTION_ARN.pattern());
         }
         return new ArnParts(executionArn, matcher.group(3), matcher.group(2), matcher.group(4), matcher.group(5),
                 matcher.group(6), matcher.group(7));

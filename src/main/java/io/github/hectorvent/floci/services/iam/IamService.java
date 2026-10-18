@@ -1205,8 +1205,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return;
         }
         String value = roleName == null ? "null" : "'" + roleName + "'";
-        throw new AwsException("ValidationError", "1 validation error detected: Value " + value
-                + " at 'roleName' failed to satisfy constraint: " + constraint, 400);
+        throw SmithyValidationErrors.validationError("Value " + value
+                + " at 'roleName' failed to satisfy constraint: " + constraint);
     }
 
     /**
@@ -1609,10 +1609,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 && !"All".equalsIgnoreCase(scope)
                 && !"AWS".equalsIgnoreCase(scope)
                 && !"Local".equalsIgnoreCase(scope)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + scope + "' at 'scope' failed to "
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + scope + "' at 'scope' failed to "
                             + "satisfy constraint: Member must satisfy enum value set: "
-                            + "[All, AWS, Local]", 400);
+                            + "[All, AWS, Local]");
         }
         String prefix = pathPrefix != null ? pathPrefix : "/";
         boolean blankScope = scope == null || scope.isBlank();
@@ -2753,15 +2753,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private static void validatePassword(String password, String member) {
         if (password == null) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value null at '" + member
-                            + "' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value null at '" + member
+                            + "' failed to satisfy constraint: Member must not be null");
         }
         if (!LOGIN_PROFILE_PASSWORD_PATTERN.matcher(password).matches()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at '" + member
+            throw SmithyValidationErrors.validationError(
+                    "Value at '" + member
                             + "' failed to satisfy constraint: Member must have length less than "
-                            + "or equal to 128 and greater than or equal to 1", 400);
+                            + "or equal to 128 and greater than or equal to 1");
         }
     }
 
@@ -2827,9 +2827,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value null at 'properties' failed to "
-                            + "satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value null at 'properties' failed to "
+                            + "satisfy constraint: Member must not be null");
         }
         String namespace = null;
         for (Map.Entry<String, String> entry : properties.entrySet()) {
@@ -2865,13 +2865,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private String validateAccountPropertyKey(String key) {
         if (key == null || key.isEmpty() || key.length() > MAX_ACCOUNT_PROPERTY_KEY_LENGTH
                 || !ACCOUNT_PROPERTY_KEY_PATTERN.matcher(key).matches()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + key + "' at 'properties' failed "
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + key + "' at 'properties' failed "
                             + "to satisfy constraint: Map keys "
                             + "must satisfy constraint: [Member must have length less than or "
                             + "equal to " + MAX_ACCOUNT_PROPERTY_KEY_LENGTH + ", Member must "
                             + "satisfy regular expression pattern: "
-                            + ACCOUNT_PROPERTY_KEY_PATTERN.pattern() + "]", 400);
+                            + ACCOUNT_PROPERTY_KEY_PATTERN.pattern() + "]");
         }
         int separator = key.indexOf('/');
         if (separator <= 0 || separator != key.lastIndexOf('/') || separator == key.length() - 1) {
@@ -2886,10 +2886,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private void validateAccountPropertyValue(String key, String value) {
         if (value == null || value.isEmpty()
                 || value.length() > MAX_ACCOUNT_PROPERTY_VALUE_LENGTH) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'properties." + key + "' failed to "
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'properties." + key + "' failed to "
                             + "satisfy constraint: Member must have length between 1 and "
-                            + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH, 400);
+                            + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH);
         }
     }
 
@@ -2897,11 +2897,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void setSecurityTokenServicePreferences(String globalEndpointTokenVersion) {
         if (globalEndpointTokenVersion == null
                 || !GLOBAL_ENDPOINT_TOKEN_VERSIONS.contains(globalEndpointTokenVersion)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + globalEndpointTokenVersion
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + globalEndpointTokenVersion
                             + "' at 'globalEndpointTokenVersion' failed to satisfy constraint: "
                             + "Member must satisfy enum value set: ["
-                            + String.join(", ", GLOBAL_ENDPOINT_TOKEN_VERSIONS) + "]", 400);
+                            + String.join(", ", GLOBAL_ENDPOINT_TOKEN_VERSIONS) + "]");
         }
         stsPreferences.put(STS_PREFERENCES_KEY, globalEndpointTokenVersion);
         LOG.infov("Set the global endpoint token version to {0}", globalEndpointTokenVersion);
@@ -3026,9 +3026,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // parsed, which is what makes a whitespace-only chain a malformed certificate rather
             // than silently storing no chain at all.
             if (certificateChain.isEmpty()) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value at 'CertificateChain' failed to satisfy "
-                                + "constraint: Member must have length greater than or equal to 1", 400);
+                throw SmithyValidationErrors.validationError(
+                        "Value at 'CertificateChain' failed to satisfy "
+                                + "constraint: Member must have length greater than or equal to 1");
             }
             parseUploadedChain(certificateChain);
         }
@@ -3086,10 +3086,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     private void checkMaterialLength(String value, String paramName, int limit) {
         if (value != null && value.length() > limit) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at '" + paramName
+            throw SmithyValidationErrors.validationError(
+                    "Value at '" + paramName
                             + "' failed to satisfy constraint: Member must have length less than "
-                            + "or equal to " + limit, 400);
+                            + "or equal to " + limit);
         }
     }
 
@@ -3295,9 +3295,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private void requireStatusFromEnum(String status) {
         if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'status' failed to satisfy "
-                            + "constraint: Member must satisfy enum value set", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'status' failed to satisfy "
+                            + "constraint: Member must satisfy enum value set");
         }
     }
 
@@ -3623,11 +3623,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             }
             if (credentialAgeDays < MIN_CREDENTIAL_AGE_DAYS
                     || credentialAgeDays > MAX_CREDENTIAL_AGE_DAYS) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value '" + credentialAgeDays
+                throw SmithyValidationErrors.validationError(
+                        "Value '" + credentialAgeDays
                                 + "' at 'credentialAgeDays' failed to satisfy constraint: "
                                 + "Member must be between " + MIN_CREDENTIAL_AGE_DAYS + " and "
-                                + MAX_CREDENTIAL_AGE_DAYS, 400);
+                                + MAX_CREDENTIAL_AGE_DAYS);
             }
         }
         synchronized (serviceCredentialLock) {
@@ -3943,10 +3943,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public List<VirtualMfaDevice> listVirtualMfaDevices(String assignmentStatus) {
         String status = assignmentStatus == null || assignmentStatus.isBlank() ? "Any" : assignmentStatus;
         if (!status.equals("Any") && !status.equals("Assigned") && !status.equals("Unassigned")) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + assignmentStatus
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + assignmentStatus
                             + "' at 'assignmentStatus' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [Any, Unassigned, Assigned]", 400);
+                            + "Member must satisfy enum value set: [Any, Unassigned, Assigned]");
         }
         return virtualMfaDevices.scan(k -> true).stream()
                 .filter(d -> switch (status) {

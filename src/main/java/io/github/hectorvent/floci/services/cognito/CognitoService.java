@@ -577,26 +577,17 @@ public class CognitoService implements ResourceProvider {
     private void validatePasswordPolicy(Map<String, Object> passwordPolicy) {
         Object minLengthVal = passwordPolicy.get("MinimumLength");
         if (minLengthVal == null) {
-            throw new AwsException(
-                    "InvalidParameterException",
-                    "1 validation error detected: Value '0' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value greater than or equal to 6",
-                    400
-            );
+            throw validationError(
+                    "Value '0' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value greater than or equal to 6");
         }
         BigInteger minLength = policyInteger(passwordPolicy, "MinimumLength", "minimumLength");
         if (minLength.compareTo(BigInteger.valueOf(6)) < 0) {
-            throw new AwsException(
-                    "InvalidParameterException",
-                    "1 validation error detected: Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value greater than or equal to 6",
-                    400
-            );
+            throw validationError(
+                    "Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value greater than or equal to 6");
         }
         if (minLength.compareTo(BigInteger.valueOf(99)) > 0) {
-            throw new AwsException(
-                    "InvalidParameterException",
-                    "1 validation error detected: Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value less than or equal to 99",
-                    400
-            );
+            throw validationError(
+                    "Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value less than or equal to 99");
         }
 
         if (passwordPolicy.containsKey("TemporaryPasswordValidityDays")) {
@@ -605,18 +596,12 @@ public class CognitoService implements ResourceProvider {
                 BigInteger tempDays = policyInteger(passwordPolicy, "TemporaryPasswordValidityDays",
                         "temporaryPasswordValidityDays");
                 if (tempDays.compareTo(BigInteger.ZERO) < 0) {
-                    throw new AwsException(
-                            "InvalidParameterException",
-                            "1 validation error detected: Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value greater than or equal to 0",
-                            400
-                    );
+                    throw validationError(
+                            "Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value greater than or equal to 0");
                 }
                 if (tempDays.compareTo(BigInteger.valueOf(365)) > 0) {
-                    throw new AwsException(
-                            "InvalidParameterException",
-                            "1 validation error detected: Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value less than or equal to 365",
-                            400
-                    );
+                    throw validationError(
+                            "Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value less than or equal to 365");
                 }
             }
         }
@@ -626,18 +611,12 @@ public class CognitoService implements ResourceProvider {
             if (historySizeVal != null) {
                 BigInteger historySize = policyInteger(passwordPolicy, "PasswordHistorySize", "passwordHistorySize");
                 if (historySize.compareTo(BigInteger.ZERO) < 0) {
-                    throw new AwsException(
-                            "InvalidParameterException",
-                            "1 validation error detected: Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value greater than or equal to 0",
-                            400
-                    );
+                    throw validationError(
+                            "Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value greater than or equal to 0");
                 }
                 if (historySize.compareTo(BigInteger.valueOf(24)) > 0) {
-                    throw new AwsException(
-                            "InvalidParameterException",
-                            "1 validation error detected: Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value less than or equal to 24",
-                            400
-                    );
+                    throw validationError(
+                            "Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value less than or equal to 24");
                 }
             }
         }
@@ -802,10 +781,10 @@ public class CognitoService implements ResourceProvider {
         // to OFF when the member is omitted.
         String mode = mfaConfiguration != null ? mfaConfiguration : "OFF";
         if (!List.of("OPTIONAL", "OFF", "ON").contains(mode)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + mode
+            throw validationError(
+                    "Value '" + mode
                             + "' at 'mfaConfiguration' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [OPTIONAL, OFF, ON]", 400);
+                            + "Member must satisfy enum value set: [OPTIONAL, OFF, ON]");
         }
         // Presence, not value: the live service rejects OFF alongside
         // SoftwareTokenMfaConfiguration{Enabled:false} just as it does Enabled:true, and
@@ -858,25 +837,24 @@ public class CognitoService implements ResourceProvider {
     private static void validateWebAuthnConfiguration(WebAuthnConfiguration configuration) {
         String relyingPartyId = configuration.getRelyingPartyId();
         if (relyingPartyId != null && (relyingPartyId.isEmpty() || relyingPartyId.length() > 127)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value at 'webAuthnConfiguration.relyingPartyId' failed to "
-                            + "satisfy constraint: Member must have length between 1 and 127", 400);
+            throw validationError(
+                    "Value at 'webAuthnConfiguration.relyingPartyId' failed to "
+                            + "satisfy constraint: Member must have length between 1 and 127");
         }
         String userVerification = configuration.getUserVerification();
         if (userVerification != null && !List.of("required", "preferred").contains(userVerification)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + userVerification + "' at "
+            throw validationError(
+                    "Value '" + userVerification + "' at "
                             + "'webAuthnConfiguration.userVerification' failed to satisfy constraint: Member must "
-                            + "satisfy enum value set: [required, preferred]", 400);
+                            + "satisfy enum value set: [required, preferred]");
         }
         String factorConfiguration = configuration.getFactorConfiguration();
         if (factorConfiguration != null
                 && !List.of("SINGLE_FACTOR", "MULTI_FACTOR_WITH_USER_VERIFICATION").contains(factorConfiguration)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + factorConfiguration + "' at "
+            throw validationError(
+                    "Value '" + factorConfiguration + "' at "
                             + "'webAuthnConfiguration.factorConfiguration' failed to satisfy constraint: Member "
-                            + "must satisfy enum value set: [SINGLE_FACTOR, MULTI_FACTOR_WITH_USER_VERIFICATION]",
-                    400);
+                            + "must satisfy enum value set: [SINGLE_FACTOR, MULTI_FACTOR_WITH_USER_VERIFICATION]");
         }
     }
 
@@ -1432,9 +1410,9 @@ public class CognitoService implements ResourceProvider {
             String constraint = authSessionValidity < 3
                     ? "Member must have value greater than or equal to 3"
                     : "Member must have value less than or equal to 15";
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + authSessionValidity
-                            + "' at 'authSessionValidity' failed to satisfy constraint: " + constraint, 400);
+            throw validationError(
+                    "Value '" + authSessionValidity
+                            + "' at 'authSessionValidity' failed to satisfy constraint: " + constraint);
         }
     }
 
@@ -1667,10 +1645,10 @@ public class CognitoService implements ResourceProvider {
 
     private void validateProviderType(String providerType) {
         if (providerType == null || !PROVIDER_TYPES.contains(providerType)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + providerType + "' at 'providerType' failed to "
+            throw validationError(
+                    "Value '" + providerType + "' at 'providerType' failed to "
                             + "satisfy constraint: Member must satisfy enum value set: "
-                            + "[Facebook, SAML, SignInWithApple, LoginWithAmazon, OIDC, Google]", 400);
+                            + "[Facebook, SAML, SignInWithApple, LoginWithAmazon, OIDC, Google]");
         }
     }
 
@@ -2070,8 +2048,12 @@ public class CognitoService implements ResourceProvider {
         }
     }
 
-    private AwsException validationErrors(List<String> errors) {
+    private static AwsException validationErrors(List<String> errors) {
         return SmithyValidationErrors.exception("InvalidParameterException", errors);
+    }
+
+    private static AwsException validationError(String violation) {
+        return SmithyValidationErrors.exception("InvalidParameterException", violation);
     }
 
     /** Mirrors the request model's {@code toString}, which AWS embeds in the length-constraint message. */
@@ -2209,9 +2191,9 @@ public class CognitoService implements ResourceProvider {
 
     private static void validateMessageAction(String messageAction) {
         if (messageAction != null && !MESSAGE_ACTIONS.contains(messageAction)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + messageAction + "' at 'messageAction' failed to "
-                            + "satisfy constraint: Member must satisfy enum value set: [RESEND, SUPPRESS]", 400);
+            throw validationError(
+                    "Value '" + messageAction + "' at 'messageAction' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: [RESEND, SUPPRESS]");
         }
     }
 
@@ -2221,10 +2203,10 @@ public class CognitoService implements ResourceProvider {
             return List.of("SMS");
         }
         if (!DELIVERY_MEDIUMS.containsAll(requested)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + requested + "' at 'desiredDeliveryMediums' failed to "
+            throw validationError(
+                    "Value '" + requested + "' at 'desiredDeliveryMediums' failed to "
                             + "satisfy constraint: Member must satisfy constraint: "
-                            + "[Member must satisfy enum value set: [SMS, EMAIL]]", 400);
+                            + "[Member must satisfy enum value set: [SMS, EMAIL]]");
         }
         return requested;
     }
@@ -2543,8 +2525,8 @@ public class CognitoService implements ResourceProvider {
      */
     public void globalSignOut(String accessToken) {
         if (accessToken == null || accessToken.isEmpty()) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value at 'accessToken' failed to satisfy constraint: Member must not be null", 400);
+            throw validationError(
+                    "Value at 'accessToken' failed to satisfy constraint: Member must not be null");
         }
 
         VerifiedAccessToken token = verifyAccessToken(accessToken);
@@ -2574,8 +2556,8 @@ public class CognitoService implements ResourceProvider {
      */
     public void deleteUser(String accessToken) {
         if (accessToken == null || accessToken.isEmpty()) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value at 'accessToken' failed to satisfy constraint: Member must not be null", 400);
+            throw validationError(
+                    "Value at 'accessToken' failed to satisfy constraint: Member must not be null");
         }
 
         VerifiedAccessToken token = verifyAccessToken(accessToken);
@@ -3719,9 +3701,9 @@ public class CognitoService implements ResourceProvider {
             String constraint = maxResults < 0
                     ? "greater than or equal to 0"
                     : "less than or equal to " + CognitoWebAuthn.MAX_CREDENTIALS_PER_USER;
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + maxResults + "' at 'maxResults' failed to satisfy "
-                            + "constraint: Member must have value " + constraint, 400);
+            throw validationError(
+                    "Value '" + maxResults + "' at 'maxResults' failed to satisfy "
+                            + "constraint: Member must have value " + constraint);
         }
         int pageSize = maxResults == null || maxResults == 0 ? CognitoWebAuthn.MAX_CREDENTIALS_PER_USER : maxResults;
         List<WebAuthnCredential> credentials = adminGetUser(token.poolId(), token.username()).getWebAuthnCredentials();
@@ -5325,11 +5307,9 @@ public class CognitoService implements ResourceProvider {
     }
 
     private static AwsException notAnInteger(Object value, String member) {
-        return new AwsException(
-                "InvalidParameterException",
-                "1 validation error detected: Value '" + value + "' at 'policies.passwordPolicy." + member
-                        + "' failed to satisfy constraint: Member must be an integer",
-                400);
+        return validationError(
+                "Value '" + value + "' at 'policies.passwordPolicy." + member
+                        + "' failed to satisfy constraint: Member must be an integer");
     }
 
     private boolean policyBoolean(Map<String, Object> policy, String key) {

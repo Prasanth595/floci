@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -212,8 +213,8 @@ public class PricingService {
         requireNonEmpty(currencyCode, "CurrencyCode");
         requireSafePathSegment(serviceCode, "ServiceCode");
         if (effectiveDate == null) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'EffectiveDate' failed to satisfy constraint: Member must not be null.", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value at 'EffectiveDate' failed to satisfy constraint: Member must not be null.");
         }
 
         if (!servicesByCode.containsKey(serviceCode)) {
@@ -385,8 +386,8 @@ public class PricingService {
 
     private static void requireNonEmpty(String value, String field) {
         if (value == null || value.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: Member must not be null.", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value at '" + field + "' failed to satisfy constraint: Member must not be null.");
         }
     }
 

@@ -1513,10 +1513,10 @@ public class CloudFormationService implements ResourceProvider {
             return STAGE_ORIGINAL;
         }
         if (!TEMPLATE_STAGE_ENUM.contains(templateStage)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + templateStage + "' at 'templateStage' failed to "
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + templateStage + "' at 'templateStage' failed to "
                             + "satisfy constraint: Member must satisfy enum value set: ["
-                            + String.join(", ", TEMPLATE_STAGE_ENUM) + "]", 400);
+                            + String.join(", ", TEMPLATE_STAGE_ENUM) + "]");
         }
         return templateStage;
     }

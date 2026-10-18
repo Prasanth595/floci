@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.cognito.CognitoService.UserPoolDomainNames;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
@@ -872,11 +873,11 @@ public class CognitoJsonHandler {
         List<Map<String, Object>> values = new ArrayList<>();
         for (JsonNode element : node) {
             if (element.isNull()) {
-                throw new AwsException("InvalidParameterException",
-                        "1 validation error detected: Value '" + node + "' at '"
+                throw SmithyValidationErrors.exception("InvalidParameterException",
+                        "Value '" + node + "' at '"
                                 + Character.toLowerCase(member.charAt(0)) + member.substring(1)
                                 + "' failed to satisfy constraint: Member must satisfy constraint: "
-                                + "[Member must not be null]", 400);
+                                + "[Member must not be null]");
             }
             if (!element.isObject()) {
                 throw new AwsException("SerializationException", "Unexpected value type in payload", 400);

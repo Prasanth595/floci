@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -1056,10 +1057,10 @@ public class LambdaService implements ResourceProvider {
      */
     private void deleteFunctionVersion(String region, String functionName, String qualifier) {
         if (!QUALIFIER.matcher(qualifier).matches()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + qualifier + "' at 'qualifier' failed"
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + qualifier + "' at 'qualifier' failed"
                             + " to satisfy constraint: Member must satisfy regular expression"
-                            + " pattern: " + QUALIFIER_PATTERN, 400);
+                            + " pattern: " + QUALIFIER_PATTERN);
         }
         LambdaFunction fn = getFunction(region, functionName);
         if ("$LATEST".equals(qualifier)) {
@@ -1620,19 +1621,17 @@ public class LambdaService implements ResourceProvider {
                     "FunctionResponseTypes must be a JSON array or null", 400);
         }
         if (types.size() > 1) {
-            throw new AwsException("InvalidParameterValueException",
-                    "1 validation error detected: Value '" + types + "' at 'functionResponseTypes' "
-                            + "failed to satisfy constraint: Member must have length less than or equal to 1",
-                    400);
+            throw SmithyValidationErrors.exception("InvalidParameterValueException",
+                    "Value '" + types + "' at 'functionResponseTypes' "
+                            + "failed to satisfy constraint: Member must have length less than or equal to 1");
         }
         List<String> validated = new ArrayList<>();
         for (Object type : types) {
             if (!FUNCTION_RESPONSE_TYPES.contains(type)) {
-                throw new AwsException("InvalidParameterValueException",
-                        "1 validation error detected: Value '" + types + "' at 'functionResponseTypes' "
+                throw SmithyValidationErrors.exception("InvalidParameterValueException",
+                        "Value '" + types + "' at 'functionResponseTypes' "
                                 + "failed to satisfy constraint: Member must satisfy constraint: "
-                                + "[Member must satisfy enum value set: " + FUNCTION_RESPONSE_TYPES + "]",
-                        400);
+                                + "[Member must satisfy enum value set: " + FUNCTION_RESPONSE_TYPES + "]");
             }
             validated.add((String) type);
         }
@@ -2511,32 +2510,28 @@ public class LambdaService implements ResourceProvider {
             return null;
         }
         if (!(value instanceof List<?> architectures)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "1 validation error detected: Value '" + value + "' at 'architectures' "
-                            + "failed to satisfy constraint: Member must be a list",
-                    400);
+            throw SmithyValidationErrors.exception("InvalidParameterValueException",
+                    "Value '" + value + "' at 'architectures' "
+                            + "failed to satisfy constraint: Member must be a list");
         }
         if (architectures.isEmpty()) {
-            throw new AwsException("InvalidParameterValueException",
-                    "1 validation error detected: Value '[]' at 'architectures' "
-                            + "failed to satisfy constraint: Member must have length greater than or equal to 1",
-                    400);
+            throw SmithyValidationErrors.exception("InvalidParameterValueException",
+                    "Value '[]' at 'architectures' "
+                            + "failed to satisfy constraint: Member must have length greater than or equal to 1");
         }
         if (architectures.size() > 1) {
-            throw new AwsException("InvalidParameterValueException",
-                    "1 validation error detected: Value '" + architectures + "' at 'architectures' "
-                            + "failed to satisfy constraint: Member must have length less than or equal to 1",
-                    400);
+            throw SmithyValidationErrors.exception("InvalidParameterValueException",
+                    "Value '" + architectures + "' at 'architectures' "
+                            + "failed to satisfy constraint: Member must have length less than or equal to 1");
         }
 
         Object architecture = architectures.getFirst();
         if (!FUNCTION_ARCHITECTURES.contains(architecture)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "1 validation error detected: Value '" + architecture
+            throw SmithyValidationErrors.exception("InvalidParameterValueException",
+                    "Value '" + architecture
                             + "' at 'architectures.1.member' "
                             + "failed to satisfy constraint: Member must satisfy enum value set: "
-                            + FUNCTION_ARCHITECTURES,
-                    400);
+                            + FUNCTION_ARCHITECTURES);
         }
         return List.of((String) architecture);
     }
@@ -2636,10 +2631,10 @@ public class LambdaService implements ResourceProvider {
         }
         Object applyOn = snapStart.get("ApplyOn");
         if (applyOn != null && !"None".equals(applyOn) && !"PublishedVersions".equals(applyOn)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + applyOn + "' at 'snapStart.applyOn' failed to "
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + applyOn + "' at 'snapStart.applyOn' failed to "
                             + "satisfy constraint: Member must satisfy enum value set: "
-                            + "[PublishedVersions, None]", 400);
+                            + "[PublishedVersions, None]");
         }
     }
 
@@ -2683,9 +2678,9 @@ public class LambdaService implements ResourceProvider {
         if (number < 1 || number > maximum) {
             String field = "durableConfig." + Character.toLowerCase(member.charAt(0)) + member.substring(1);
             String bound = number < 1 ? "greater than or equal to 1" : "less than or equal to " + maximum;
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + number + "' at '" + field + "' failed to satisfy "
-                            + "constraint: Member must have value " + bound, 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + number + "' at '" + field + "' failed to satisfy "
+                            + "constraint: Member must have value " + bound);
         }
         return (int) number;
     }
@@ -2733,10 +2728,10 @@ public class LambdaService implements ResourceProvider {
         if (value == null || allowed.contains(value)) {
             return;
         }
-        throw new AwsException("ValidationException",
-                "1 validation error detected: Value '" + value + "' at '" + field + "' failed to satisfy "
+        throw SmithyValidationErrors.validationException(
+                "Value '" + value + "' at '" + field + "' failed to satisfy "
                         + "constraint: Member must satisfy enum value set: ["
-                        + String.join(", ", allowed) + "]", 400);
+                        + String.join(", ", allowed) + "]");
     }
 
     /**
@@ -2767,9 +2762,9 @@ public class LambdaService implements ResourceProvider {
             return;
         }
         if (!pattern.matcher(s).matches()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + s + "' at '" + field + "' failed to satisfy "
-                            + "constraint: Member must satisfy regular expression pattern: " + pattern.pattern(), 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + s + "' at '" + field + "' failed to satisfy "
+                            + "constraint: Member must satisfy regular expression pattern: " + pattern.pattern());
         }
     }
 
@@ -2787,10 +2782,9 @@ public class LambdaService implements ResourceProvider {
     /** Enforces a shape's 1-character minimum: an empty string is rejected, and null too when the member is required. */
     private static void validateNonEmpty(String value, String field, boolean required) {
         if ((value == null && required) || (value != null && value.isEmpty())) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + (value == null ? "" : value) + "' at '" + field
-                            + "' failed to satisfy constraint: Member must have length greater than or equal to 1",
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + (value == null ? "" : value) + "' at '" + field
+                            + "' failed to satisfy constraint: Member must have length greater than or equal to 1");
         }
     }
 
@@ -2810,9 +2804,9 @@ public class LambdaService implements ResourceProvider {
     private static void validateS3CodeLocation(String bucket, String key) {
         if (bucket != null) {
             if (bucket.length() < 3) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + bucket + "' at 's3Bucket' failed to satisfy constraint: "
-                                + "Member must have length greater than or equal to 3", 400);
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + bucket + "' at 's3Bucket' failed to satisfy constraint: "
+                                + "Member must have length greater than or equal to 3");
             }
             validateMaxLength(bucket, "s3Bucket", 63);
             validatePattern(bucket, "s3Bucket", S3_BUCKET_PATTERN);
@@ -2832,9 +2826,9 @@ public class LambdaService implements ResourceProvider {
 
     private static void validateMaxItems(List<?> list, String field, int maxItems) {
         if (list.size() > maxItems) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
-                            + "Member must have length less than or equal to " + maxItems, 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value at '" + field + "' failed to satisfy constraint: "
+                            + "Member must have length less than or equal to " + maxItems);
         }
     }
 
@@ -2842,9 +2836,9 @@ public class LambdaService implements ResourceProvider {
         if (!(value instanceof String s) || s.length() <= maxLength) {
             return;
         }
-        throw new AwsException("ValidationException",
-                "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
-                        + "Member must have length less than or equal to " + maxLength, 400);
+        throw SmithyValidationErrors.validationException(
+                "Value at '" + field + "' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to " + maxLength);
     }
 
     /**
@@ -2866,10 +2860,10 @@ public class LambdaService implements ResourceProvider {
             return;
         }
         if (group.length() > 512 || !LOG_GROUP_PATTERN.matcher(group).matches()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + group + "' at 'loggingConfig.logGroup' failed to "
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + group + "' at 'loggingConfig.logGroup' failed to "
                             + "satisfy constraint: Member must satisfy regular expression pattern: "
-                            + "[.\\-_/#A-Za-z0-9]+ or member must have length less than or equal to 512", 400);
+                            + "[.\\-_/#A-Za-z0-9]+ or member must have length less than or equal to 512");
         }
     }
 
@@ -2879,10 +2873,10 @@ public class LambdaService implements ResourceProvider {
      */
     private static void validateRoleArn(String role) {
         if (role == null || !ROLE_ARN_PATTERN.matcher(role).matches()) {
-            throw new AwsException("InvalidParameterValueException",
-                    "1 validation error detected: Value '" + role + "' at 'role' failed to satisfy "
+            throw SmithyValidationErrors.exception("InvalidParameterValueException",
+                    "Value '" + role + "' at 'role' failed to satisfy "
                             + "constraint: Member must satisfy regular expression pattern: "
-                            + ROLE_ARN_PATTERN.pattern(), 400);
+                            + ROLE_ARN_PATTERN.pattern());
         }
     }
 
@@ -2894,19 +2888,19 @@ public class LambdaService implements ResourceProvider {
      */
     private static void validateHandler(String handler) {
         if (handler == null) {
-            throw new AwsException("InvalidParameterValueException",
-                    "1 validation error detected: Value 'null' at 'handler' failed to satisfy "
-                            + "constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.exception("InvalidParameterValueException",
+                    "Value 'null' at 'handler' failed to satisfy "
+                            + "constraint: Member must not be null");
         }
         if (handler.isEmpty()) {
             return;
         }
         if (handler.length() > MAX_HANDLER_LENGTH || !HANDLER_PATTERN.matcher(handler).matches()) {
-            throw new AwsException("InvalidParameterValueException",
-                    "1 validation error detected: Value '" + handler + "' at 'handler' failed to satisfy "
+            throw SmithyValidationErrors.exception("InvalidParameterValueException",
+                    "Value '" + handler + "' at 'handler' failed to satisfy "
                             + "constraint: Member must satisfy regular expression pattern: "
                             + HANDLER_PATTERN.pattern() + " or member must have length less than or equal to "
-                            + MAX_HANDLER_LENGTH, 400);
+                            + MAX_HANDLER_LENGTH);
         }
     }
 
@@ -3897,11 +3891,11 @@ public class LambdaService implements ResourceProvider {
         for (String key : tags.keySet()) {
             if (key.isEmpty() || key.codePointCount(0, key.length()) > MAX_TAG_KEY_LENGTH
                     || !TAG_KEY_PATTERN.matcher(key).matches()) {
-                throw new AwsException("ValidationException", "1 validation error detected: Value '" + tags
+                throw SmithyValidationErrors.validationException("Value '" + tags
                         + "' at 'tags' failed to satisfy constraint: Map keys must satisfy constraint: [Member"
                         + " must have length less than or equal to " + MAX_TAG_KEY_LENGTH + ", Member must have"
                         + " length greater than or equal to 1, Member must satisfy regular expression pattern: "
-                        + TAG_KEY_PATTERN.pattern() + "]", 400);
+                        + TAG_KEY_PATTERN.pattern() + "]");
             }
         }
     }

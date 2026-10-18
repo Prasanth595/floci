@@ -486,9 +486,9 @@ public class EventBridgeService implements ResourceProvider {
                         ? "length greater than or equal to 1" : "length less than or equal to 1600";
             }
             if (field != null) {
-                throw new AwsException("ValidationException", "1 validation error detected: Value '" + value
+                throw SmithyValidationErrors.validationException("Value '" + value
                         + "' at 'targets." + (i + 1) + ".member." + field
-                        + "' failed to satisfy constraint: Member must have " + constraint, 400);
+                        + "' failed to satisfy constraint: Member must have " + constraint);
             }
         }
     }

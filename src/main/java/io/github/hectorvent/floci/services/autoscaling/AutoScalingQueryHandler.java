@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.autoscaling.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -1957,9 +1958,9 @@ public class AutoScalingQueryHandler {
                 break;
             }
             if (deviceName == null || deviceName.isBlank()) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value null at '" + prefix
-                                + ".DeviceName' failed to satisfy constraint: Member must not be null", 400);
+                throw SmithyValidationErrors.validationError(
+                        "Value null at '" + prefix
+                                + ".DeviceName' failed to satisfy constraint: Member must not be null");
             }
             LaunchConfigurationBlockDeviceMapping mapping = new LaunchConfigurationBlockDeviceMapping();
             mapping.setDeviceName(deviceName);
@@ -2035,14 +2036,14 @@ public class AutoScalingQueryHandler {
     private boolean requiredBoolParam(MultivaluedMap<String, String> p, String key) {
         String val = p.getFirst(key);
         if (val == null || val.isBlank()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value null at '" + key
-                            + "' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value null at '" + key
+                            + "' failed to satisfy constraint: Member must not be null");
         }
         if (!"true".equalsIgnoreCase(val) && !"false".equalsIgnoreCase(val)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + val + "' at '" + key
-                            + "' failed to satisfy constraint: Member must be a valid boolean", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + val + "' at '" + key
+                            + "' failed to satisfy constraint: Member must be a valid boolean");
         }
         return parseOptionalBoolean(val, key);
     }

@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -526,9 +527,9 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
                                                        String region) {
         boolean byLastEventTime = "LastEventTime".equals(orderBy);
         if (orderBy != null && !orderBy.isBlank() && !byLastEventTime && !"LogStreamName".equals(orderBy)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + orderBy + "' at 'orderBy' failed to satisfy "
-                            + "constraint: Member must satisfy enum value set: [LogStreamName, LastEventTime]", 400);
+            throw SmithyValidationErrors.exception("InvalidParameterException",
+                    "Value '" + orderBy + "' at 'orderBy' failed to satisfy "
+                            + "constraint: Member must satisfy enum value set: [LogStreamName, LastEventTime]");
         }
         // Matches real AWS: LastEventTime ordering cannot be combined with a name prefix.
         if (byLastEventTime && prefix != null && !prefix.isBlank()) {

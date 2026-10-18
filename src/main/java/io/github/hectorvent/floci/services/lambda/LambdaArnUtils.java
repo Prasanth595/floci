@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 
 import java.util.regex.Pattern;
 
@@ -230,9 +231,9 @@ public final class LambdaArnUtils {
     }
 
     private static AwsException validationFailure(String value, String constraint) {
-        return new AwsException("ValidationException",
-                "1 validation error detected: Value '" + value + "' at 'functionName' failed to satisfy "
-                        + "constraint: " + constraint, 400);
+        return SmithyValidationErrors.validationException(
+                "Value '" + value + "' at 'functionName' failed to satisfy "
+                        + "constraint: " + constraint);
     }
 
     /**

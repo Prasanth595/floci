@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -102,12 +103,12 @@ public class KmsService implements ResourceProvider {
 
     public byte[] generateRandom(int numberOfBytes) {
         if (numberOfBytes < 1) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value '" + numberOfBytes
-                    + "' at 'numberOfBytes' failed to satisfy constraint: Member must have value greater than or equal to 1", 400);
+            throw SmithyValidationErrors.validationException("Value '" + numberOfBytes
+                    + "' at 'numberOfBytes' failed to satisfy constraint: Member must have value greater than or equal to 1");
         }
         if (1024 < numberOfBytes) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value '" + numberOfBytes
-                    + "' at 'numberOfBytes' failed to satisfy constraint: Member must have value less than or equal to 1024", 400);
+            throw SmithyValidationErrors.validationException("Value '" + numberOfBytes
+                    + "' at 'numberOfBytes' failed to satisfy constraint: Member must have value less than or equal to 1024");
         }
         byte[] bytes = new byte[numberOfBytes];
         secureRandom.nextBytes(bytes);
@@ -415,9 +416,9 @@ public class KmsService implements ResourceProvider {
         }
         for (String member : constraints.keySet()) {
             if (!GRANT_CONSTRAINT_MEMBERS.contains(member)) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Unknown parameter in 'constraints': \"" + member
-                                + "\", must be one of: " + String.join(", ", GRANT_CONSTRAINT_MEMBERS), 400);
+                throw SmithyValidationErrors.validationException(
+                        "Unknown parameter in 'constraints': \"" + member
+                                + "\", must be one of: " + String.join(", ", GRANT_CONSTRAINT_MEMBERS));
             }
         }
         for (String encryptionContextMember : List.of("EncryptionContextSubset", "EncryptionContextEquals")) {
@@ -426,15 +427,15 @@ public class KmsService implements ResourceProvider {
                 continue;
             }
             if (!(value instanceof Map<?, ?> map)) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value at 'constraints." + encryptionContextMember
-                                + "' failed to satisfy constraint: Member must be a map of string to string", 400);
+                throw SmithyValidationErrors.validationException(
+                        "Value at 'constraints." + encryptionContextMember
+                                + "' failed to satisfy constraint: Member must be a map of string to string");
             }
             for (Map.Entry<?, ?> entry : map.entrySet()) {
                 if (!(entry.getKey() instanceof String) || !(entry.getValue() instanceof String)) {
-                    throw new AwsException("ValidationException",
-                            "1 validation error detected: Value at 'constraints." + encryptionContextMember
-                                    + "' failed to satisfy constraint: Member must be a map of string to string", 400);
+                    throw SmithyValidationErrors.validationException(
+                            "Value at 'constraints." + encryptionContextMember
+                                    + "' failed to satisfy constraint: Member must be a map of string to string");
                 }
             }
         }
@@ -443,10 +444,10 @@ public class KmsService implements ResourceProvider {
             if (!(sourceArn instanceof String sourceArnValue)
                     || sourceArnValue.length() < 20 || sourceArnValue.length() > 512
                     || !GRANT_CONSTRAINT_SOURCE_ARN_PATTERN.matcher(sourceArnValue).matches()) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value at 'constraints.sourceArn' failed to satisfy "
+                throw SmithyValidationErrors.validationException(
+                        "Value at 'constraints.sourceArn' failed to satisfy "
                                 + "constraint: Member must satisfy regular expression pattern: "
-                                + "^arn:aws[a-z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$", 400); // partition-literal: model pattern quoted in AWS's message
+                                + "^arn:aws[a-z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$"); // partition-literal: model pattern quoted in AWS's message
             }
         }
     }
@@ -474,28 +475,28 @@ public class KmsService implements ResourceProvider {
         }
         for (String operation : operations) {
             if (!GRANT_OPERATIONS.contains(operation)) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + operation + "' at 'operations' failed to satisfy "
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + operation + "' at 'operations' failed to satisfy "
                                 + "constraint: Member must satisfy enum value set: ["
-                                + String.join(", ", GRANT_OPERATIONS) + "]", 400);
+                                + String.join(", ", GRANT_OPERATIONS) + "]");
             }
         }
         if (name != null) {
             if (name.isEmpty()) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + name + "' at 'name' failed to satisfy "
-                                + "constraint: Member must have length greater than or equal to 1", 400);
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + name + "' at 'name' failed to satisfy "
+                                + "constraint: Member must have length greater than or equal to 1");
             }
             if (name.length() > 256) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + name + "' at 'name' failed to satisfy "
-                                + "constraint: Member must have length less than or equal to 256", 400);
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + name + "' at 'name' failed to satisfy "
+                                + "constraint: Member must have length less than or equal to 256");
             }
             if (!GRANT_NAME_PATTERN.matcher(name).matches()) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + name + "' at 'name' failed to satisfy "
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + name + "' at 'name' failed to satisfy "
                                 + "constraint: Member must satisfy regular expression pattern: "
-                                + "^[a-zA-Z0-9:/_-]+$", 400);
+                                + "^[a-zA-Z0-9:/_-]+$");
             }
         }
         validateGrantConstraints(constraints);
@@ -1057,10 +1058,10 @@ public class KmsService implements ResourceProvider {
                                     + "KEY_MATERIAL_DOES_NOT_EXPIRE.", 400);
                 }
             }
-            default -> throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + expirationModel + "' at 'expirationModel' failed to "
+            default -> throw SmithyValidationErrors.validationException(
+                    "Value '" + expirationModel + "' at 'expirationModel' failed to "
                             + "satisfy constraint: Member must satisfy enum value set: "
-                            + "[KEY_MATERIAL_EXPIRES, KEY_MATERIAL_DOES_NOT_EXPIRE]", 400);
+                            + "[KEY_MATERIAL_EXPIRES, KEY_MATERIAL_DOES_NOT_EXPIRE]");
         }
         return effective;
     }
@@ -1101,10 +1102,10 @@ public class KmsService implements ResourceProvider {
                                     + "existing key material to reimport.", 400);
                 }
             }
-            default -> throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + importType + "' at 'importType' failed to "
+            default -> throw SmithyValidationErrors.validationException(
+                    "Value '" + importType + "' at 'importType' failed to "
                             + "satisfy constraint: Member must satisfy enum value set: "
-                            + "[NEW_KEY_MATERIAL, EXISTING_KEY_MATERIAL]", 400);
+                            + "[NEW_KEY_MATERIAL, EXISTING_KEY_MATERIAL]");
         }
     }
 
@@ -1139,10 +1140,10 @@ public class KmsService implements ResourceProvider {
             case EXTERNAL_ORIGIN -> requireImportableSpec(spec);
             case "AWS_CLOUDHSM", "EXTERNAL_KEY_STORE" -> throw new AwsException("UnsupportedOperationException",
                     "Origin " + effective + " is not supported.", 400);
-            default -> throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + origin + "' at 'origin' failed to satisfy "
+            default -> throw SmithyValidationErrors.validationException(
+                    "Value '" + origin + "' at 'origin' failed to satisfy "
                             + "constraint: Member must satisfy enum value set: "
-                            + "[AWS_KMS, EXTERNAL, AWS_CLOUDHSM, EXTERNAL_KEY_STORE]", 400);
+                            + "[AWS_KMS, EXTERNAL, AWS_CLOUDHSM, EXTERNAL_KEY_STORE]");
         };
     }
 
@@ -1838,10 +1839,10 @@ public class KmsService implements ResourceProvider {
             case "RSAES_OAEP_SHA_256" -> KmsKeySpec.Algorithm.RSAES_OAEP_SHA_256;
             case "SM2PKE" -> throw new AwsException("UnsupportedOperationException",
                     "SM2PKE is not supported.", 400);
-            default -> throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + name + "' at 'encryptionAlgorithm' failed to satisfy "
+            default -> throw SmithyValidationErrors.validationException(
+                    "Value '" + name + "' at 'encryptionAlgorithm' failed to satisfy "
                             + "constraint: Member must satisfy enum value set: "
-                            + "[RSAES_OAEP_SHA_1, RSAES_OAEP_SHA_256, SM2PKE, SYMMETRIC_DEFAULT]", 400);
+                            + "[RSAES_OAEP_SHA_1, RSAES_OAEP_SHA_256, SM2PKE, SYMMETRIC_DEFAULT]");
         };
     }
 
@@ -1863,12 +1864,12 @@ public class KmsService implements ResourceProvider {
     static void validateBlobLength(String member, byte[] value, int max) {
         int length = value == null ? 0 : value.length;
         if (length < 1) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value at '" + member
-                    + "' failed to satisfy constraint: Member must have length greater than or equal to 1", 400);
+            throw SmithyValidationErrors.validationException("Value at '" + member
+                    + "' failed to satisfy constraint: Member must have length greater than or equal to 1");
         }
         if (max < length) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value at '" + member
-                    + "' failed to satisfy constraint: Member must have length less than or equal to " + max, 400);
+            throw SmithyValidationErrors.validationException("Value at '" + member
+                    + "' failed to satisfy constraint: Member must have length less than or equal to " + max);
         }
     }
 
@@ -1938,15 +1939,15 @@ public class KmsService implements ResourceProvider {
 
     private static void validateEnumMember(String member, String value, List<String> allowed) {
         if (value == null) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at '" + member + "' failed to satisfy "
-                            + "constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at '" + member + "' failed to satisfy "
+                            + "constraint: Member must not be null");
         }
         if (!allowed.contains(value)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + value + "' at '" + member + "' failed to "
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + value + "' at '" + member + "' failed to "
                             + "satisfy constraint: Member must satisfy enum value set: ["
-                            + String.join(", ", allowed) + "]", 400);
+                            + String.join(", ", allowed) + "]");
         }
     }
 

@@ -319,10 +319,10 @@ public class NativeDynamoDbJsonHandler {
 
     private static void rejectEmptyNonKeyAttributes(JsonNode nonKeyAttrArray, String memberPath) {
         if (nonKeyAttrArray.isArray() && nonKeyAttrArray.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '[]' at '" + memberPath
+            throw SmithyValidationErrors.validationException(
+                    "Value '[]' at '" + memberPath
                     + ".projection.nonKeyAttributes' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1", 400);
+                    + "Member must have length greater than or equal to 1");
         }
     }
 
@@ -332,10 +332,10 @@ public class NativeDynamoDbJsonHandler {
         // carries no AttributeName as the nested member. Only the request shape tells them apart.
         JsonNode vectorAttribute = node.path("VectorAttribute");
         if (vectorAttribute.isObject() && !vectorAttribute.hasNonNull("AttributeName")) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at '" + memberPath
+            throw SmithyValidationErrors.validationException(
+                    "Value null at '" + memberPath
                     + ".vectorAttribute.attributeName' failed to satisfy constraint: "
-                    + "Member must not be null", 400);
+                    + "Member must not be null");
         }
         List<SearchSchemaElement> searchSchema = new ArrayList<>();
         JsonNode searchSchemaArray = node.path("SearchSchema");
@@ -510,16 +510,16 @@ public class NativeDynamoDbJsonHandler {
 
         if (limit != null) {
             if (limit < 1) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + limit
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + limit
                         + "' at 'limit' failed to satisfy constraint: "
-                        + "Member must have value greater than or equal to 1", 400);
+                        + "Member must have value greater than or equal to 1");
             }
             if (limit > 100) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + limit
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + limit
                         + "' at 'limit' failed to satisfy constraint: "
-                        + "Member must have value less than or equal to 100", 400);
+                        + "Member must have value less than or equal to 100");
             }
         }
 
@@ -762,10 +762,10 @@ public class NativeDynamoDbJsonHandler {
         // UpdateItem stops at the first invalid enum and reports one error, unlike PutItem
         // and DeleteItem which aggregate.
         if (!VALID_RETURN_VALUES_UPDATE.contains(returnValues)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + returnValues + "' at 'returnValues' "
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + returnValues + "' at 'returnValues' "
                     + "failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [NONE, ALL_OLD, ALL_NEW, UPDATED_OLD, UPDATED_NEW]", 400);
+                    + "Member must satisfy enum value set: [NONE, ALL_OLD, ALL_NEW, UPDATED_OLD, UPDATED_NEW]");
         }
         requireValidReturnConsumedCapacity(request);
         DynamoDbExpressionSize.checkWrite(updateExpression, "UpdateExpression");
@@ -971,8 +971,8 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private AwsException legacyExpectedValidationError(String detail) {
-        return new AwsException("ValidationException",
-                "1 validation error detected: One or more parameter values were invalid: " + detail, 400);
+        return SmithyValidationErrors.validationException(
+                "One or more parameter values were invalid: " + detail);
     }
 
     /**
@@ -1071,15 +1071,15 @@ public class NativeDynamoDbJsonHandler {
 
         // Validate Limit
         if (limit != null && limit < 1) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'Limit' failed to satisfy constraint: "
-                    + "Member must have value greater than or equal to 1", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value at 'Limit' failed to satisfy constraint: "
+                    + "Member must have value greater than or equal to 1");
         }
 
         // Validate ReturnConsumedCapacity before Select
         String rccQueryError = returnConsumedCapacityError(request);
         if (rccQueryError != null) {
-            throw new AwsException("ValidationException", "1 validation error detected: " + rccQueryError, 400);
+            throw SmithyValidationErrors.validationException(rccQueryError);
         }
 
         // DynamoDB counts KeyConditions as a non-expression parameter only next to a KeyConditionExpression.
@@ -1119,15 +1119,15 @@ public class NativeDynamoDbJsonHandler {
         ExpressionEvaluator.validateSemantics(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
 
         if (select != null && !VALID_SELECT.contains(select)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + select + "' at 'select' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [SPECIFIC_ATTRIBUTES, COUNT, ALL_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES]", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + select + "' at 'select' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [SPECIFIC_ATTRIBUTES, COUNT, ALL_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES]");
         }
 
         boolean hasAttributesToGet = attributesToGet != null && attributesToGet.size() > 0;
         if ("SPECIFIC_ATTRIBUTES".equals(select) && projectionExpression == null && !hasAttributesToGet) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: " + SELECT_NEEDS_PROJECTION, 400);
+            throw SmithyValidationErrors.validationException(
+                    SELECT_NEEDS_PROJECTION);
         }
 
         TableDefinition queryTable = dynamoDbService.requireTableForItemCall(tableName, region);
@@ -1246,7 +1246,7 @@ public class NativeDynamoDbJsonHandler {
 
         String rccScanError = returnConsumedCapacityError(request);
         if (rccScanError != null) {
-            throw new AwsException("ValidationException", "1 validation error detected: " + rccScanError, 400);
+            throw SmithyValidationErrors.validationException(rccScanError);
         }
 
         rejectMixedParameters(request,
@@ -1268,15 +1268,15 @@ public class NativeDynamoDbJsonHandler {
         checkUnusedEav(exprAttrValues, extractColonTokens(filterExpr));
 
         if (select != null && !VALID_SELECT.contains(select)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + select + "' at 'select' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [SPECIFIC_ATTRIBUTES, COUNT, ALL_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES]", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + select + "' at 'select' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [SPECIFIC_ATTRIBUTES, COUNT, ALL_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES]");
         }
         boolean hasAttributesToGetScan = attributesToGetScan != null && attributesToGetScan.size() > 0;
         if ("SPECIFIC_ATTRIBUTES".equals(select)
                 && projectionExpressionScan == null && !hasAttributesToGetScan) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: " + SELECT_NEEDS_PROJECTION, 400);
+            throw SmithyValidationErrors.validationException(
+                    SELECT_NEEDS_PROJECTION);
         }
         DynamoDbAccessPathValidator.validateSelection(select, indexNameScan,
                 projectionExpressionScan, attributesToGetScan);
@@ -1365,9 +1365,9 @@ public class NativeDynamoDbJsonHandler {
         if (topK < 1) {
             // AWS names this member TopK and quotes no value, unlike every other member of this
             // family. Measured on real DynamoDB, eu-west-2, 2026-09-23.
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'TopK' failed to satisfy "
-                    + "constraint: Member must have value greater than or equal to 1", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value at 'TopK' failed to satisfy "
+                    + "constraint: Member must have value greater than or equal to 1");
         }
         // Both bounds answer before the table and the index are resolved: AWS reports the range
         // even for a table that does not exist.
@@ -1476,10 +1476,10 @@ public class NativeDynamoDbJsonHandler {
                     reprs.add(w.toString());
                 }
                 sb.append(String.join(", ", reprs)).append("]}");
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + sb + "' at 'requestItems' failed to satisfy constraint: "
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + sb + "' at 'requestItems' failed to satisfy constraint: "
                         + "Map value must satisfy constraint: [Member must have length less than or equal to 25, "
-                        + "Member must have length greater than or equal to 1]", 400);
+                        + "Member must have length greater than or equal to 1]");
             }
         }
 
@@ -1546,9 +1546,9 @@ public class NativeDynamoDbJsonHandler {
         // BatchGetItem answers an empty map from the validation framework, BatchWriteItem
         // still answers with its own sentence.
         if (!requestItems.fields().hasNext()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'RequestItems' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value at 'RequestItems' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1");
         }
         Map<String, JsonNode> items = new HashMap<>();
         Iterator<Map.Entry<String, JsonNode>> tables = requestItems.fields();
@@ -1581,10 +1581,10 @@ public class NativeDynamoDbJsonHandler {
             }
             JsonNode keysNode = entry.getValue().has("Keys") ? entry.getValue().get("Keys") : null;
             if (keysNode != null && keysNode.size() > 100) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value at 'RequestItems." + entry.getKey()
+                throw SmithyValidationErrors.validationException(
+                        "Value at 'RequestItems." + entry.getKey()
                         + ".member.Keys' failed to satisfy constraint: "
-                        + "Member must have length less than or equal to 100", 400);
+                        + "Member must have length less than or equal to 100");
             }
         }
 
@@ -2196,9 +2196,9 @@ public class NativeDynamoDbJsonHandler {
                     "Invalid ResourceArn: " + resourceArn, 400);
         }
         if (!request.hasNonNull("Policy")) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'policy' failed to satisfy constraint: "
-                    + "Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'policy' failed to satisfy constraint: "
+                    + "Member must not be null");
         }
         String policy = request.path("Policy").asText();
         String expectedRevisionId = request.has("ExpectedRevisionId")
@@ -2250,11 +2250,10 @@ public class NativeDynamoDbJsonHandler {
                 ? KinesisStreamingDestination.PRECISION_MILLISECOND : precisionNode.asText();
         if (!KinesisStreamingDestination.PRECISION_MILLISECOND.equals(precision)
                 && !KinesisStreamingDestination.PRECISION_MICROSECOND.equals(precision)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + precision
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + precision
                             + "' at 'enableKinesisStreamingConfiguration.approximateCreationDateTimePrecision' "
-                            + "failed to satisfy constraint: Member must satisfy enum value set: [MILLISECOND, MICROSECOND]",
-                    400);
+                            + "failed to satisfy constraint: Member must satisfy enum value set: [MILLISECOND, MICROSECOND]");
         }
 
         return Response.ok(kinesisDestinationResponse(

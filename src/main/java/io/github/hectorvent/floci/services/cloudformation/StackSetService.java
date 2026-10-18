@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
@@ -311,12 +312,12 @@ public class StackSetService {
                     "Accounts can be used only with SELF_MANAGED StackSets. Use DeploymentTargets for SERVICE_MANAGED StackSets.", 400);
         }
         if (directAccounts.stream().anyMatch(account -> account == null || !account.matches("[0-9]{12}"))) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + directAccounts
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + directAccounts
                             + "' at 'accounts' failed to satisfy constraint: Member must satisfy constraint: "
                             + "[Member must have length less than or equal to 12, Member must have length "
                             + "greater than or equal to 12, Member must satisfy regular expression pattern: "
-                            + "^[0-9]{12}$]", 400);
+                            + "^[0-9]{12}$]");
         }
         for (String ou : targetOus) validateOuOrRoot(ou);
 

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.DelegationPermission;
@@ -436,9 +437,9 @@ public class DelegationRequestService {
      * them, which is why it appears in no operation's error table and in none of these.
      */
     private static AwsException constraintViolation(String value, String member, String constraint) {
-        return new AwsException("ValidationError", "1 validation error detected: Value "
+        return SmithyValidationErrors.validationError("Value "
                 + (value == null ? "null" : "'" + value + "'") + " at '" + member
-                + "' failed to satisfy constraint: " + constraint, 400);
+                + "' failed to satisfy constraint: " + constraint);
     }
 
     private static AwsException noSuchRequest(String id) {

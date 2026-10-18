@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -1119,30 +1120,30 @@ public class AutoScalingService {
 
     private static void validateLifecycleHookName(String hookName) {
         if (hookName == null) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value null at 'lifecycleHookName' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value null at 'lifecycleHookName' failed to satisfy constraint: "
+                            + "Member must not be null");
         }
         if (hookName.length() > 255) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + hookName
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + hookName
                             + "' at 'lifecycleHookName' failed to satisfy constraint: Member must have length "
-                            + "less than or equal to 255", 400);
+                            + "less than or equal to 255");
         }
         if (!LIFECYCLE_HOOK_NAME_PATTERN.matcher(hookName).matches()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + hookName
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + hookName
                             + "' at 'lifecycleHookName' failed to satisfy constraint: Member must satisfy "
-                            + "regular expression pattern: [A-Za-z0-9\\-_/]+", 400);
+                            + "regular expression pattern: [A-Za-z0-9\\-_/]+");
         }
     }
 
     /** LifecycleActionToken is modeled as a fixed 36-character token (autoscaling/2011-01-01/service-2.json). */
     private static void validateLifecycleActionToken(String token) {
         if (token == null || token.length() != 36) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'lifecycleActionToken' failed to satisfy constraint: "
-                            + "Member must have length equal to 36", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'lifecycleActionToken' failed to satisfy constraint: "
+                            + "Member must have length equal to 36");
         }
     }
 
@@ -1561,20 +1562,19 @@ public class AutoScalingService {
         for (String id : specification.getCapacityReservationIds()) {
             if (id == null || id.isEmpty() || id.length() > 255
                     || !CAPACITY_RESERVATION_ID_PATTERN.matcher(id).matches()) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value '" + id
+                throw SmithyValidationErrors.validationError(
+                        "Value '" + id
                                 + "' at 'capacityReservationSpecification.capacityReservationTarget"
                                 + ".capacityReservationIds' failed to satisfy constraint: Member must have length "
-                                + "between 1 and 255 and satisfy regular expression pattern: [A-Za-z0-9\\-_\\/]+",
-                        400);
+                                + "between 1 and 255 and satisfy regular expression pattern: [A-Za-z0-9\\-_\\/]+");
             }
         }
         for (String arn : specification.getCapacityReservationResourceGroupArns()) {
             if (arn == null || arn.isEmpty() || arn.length() > MAX_RESOURCE_NAME_LENGTH) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value at 'capacityReservationSpecification"
+                throw SmithyValidationErrors.validationError(
+                        "Value at 'capacityReservationSpecification"
                                 + ".capacityReservationTarget.capacityReservationResourceGroupArns' failed to "
-                                + "satisfy constraint: Member must have length between 1 and 1600", 400);
+                                + "satisfy constraint: Member must have length between 1 and 1600");
             }
         }
     }
