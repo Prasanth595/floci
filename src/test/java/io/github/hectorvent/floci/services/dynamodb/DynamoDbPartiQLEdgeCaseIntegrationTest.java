@@ -729,6 +729,24 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("Items.sk.S", containsInAnyOrder("s1"));
     }
 
+    @Test
+    @Order(31)
+    void checksSelectedColumnsAgainstAGsiProjectionAfterTheWhereClause() {
+        String select = "SELECT zz.a, zz.b, aa FROM \"partiql-edge-cases-index\".\"gsi-inc\"";
+
+        statement(select)
+            .statusCode(400)
+            .body("message", equalTo("One or more parameter values were invalid: "
+                    + "Global secondary index gsi-inc does not project [zz, aa]"));
+        statement(select + " WHERE gsiPk='y' AND yy='1'")
+            .statusCode(400)
+            .body("message", equalTo("One or more parameter values were invalid: Secondary index gsi-inc"
+                    + " does not project one or more filter attributes: [yy]"));
+        statement(select + " WHERE gsiPk = 1")
+            .statusCode(400)
+            .body("message", equalTo("Key attribute's data type should match its data type in table's schema: Key gsiPk"));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

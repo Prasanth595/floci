@@ -66,28 +66,12 @@ class DynamoDbPartiQLHandler {
                     "Strongly consistent read is not supported on Global Secondary Indexes", 400);
         }
 
-        // A GSI-qualified statement can only select attributes the index
-        // projects; the message preserves statement order (characterised on
-        // real AWS, eu-west-1, 2026-09-02). An LSI read reaches the co-located
-        // base item, so non-projected columns stay legal there.
-        if (accessPath.isGlobalSecondaryIndex() && !"ALL".equals(accessPath.projectionType())
-                && !stmt.columns().isEmpty()) {
-            Set<String> projected = accessPath.projectedAttributeNames(table);
-            List<String> unprojected = stmt.columns().stream()
-                    .map(Path::root)
-                    .filter(c -> !"*".equals(c))
-                    .filter(c -> !projected.contains(c))
-                    .toList();
-            if (!unprojected.isEmpty()) {
-                throw DynamoDbAccessPathValidator.unprojectedGsiAttributes(accessPath.indexName(), unprojected);
-            }
-        }
-
         DynamoDbPartiQLKeyPlan keys = new DynamoDbPartiQLKeyPlan(stmt.where(), accessPath, table);
         keys.requireKeyTypesMatchSchema();
         keys.requireNoOverlap();
         keys.requireReadsWithinLimit();
         requireFilterAttributesProjected(keys, accessPath, table);
+        requireColumnsProjected(stmt, accessPath, table);
 
         Routing routing = routingOf(stmt.where(), keys, accessPath.partitionKeyName(), accessPath.sortKeyName());
         Supplier<JsonNode> startKey = () -> decodeNextToken(ctx.nextToken(), ctx.tokenBinding());
@@ -497,6 +481,25 @@ class DynamoDbPartiQLHandler {
                             + accessPath.indexName()
                             + " does not project one or more filter attributes: ["
                             + String.join(", ", unprojected) + "]", 400);
+        }
+    }
+
+    // An LSI read reaches the co-located base item, so non-projected columns stay legal there.
+    // AWS lists each root once, in an order of its own that is not the statement order.
+    private static void requireColumnsProjected(Stmt.Select stmt, DynamoDbAccessPath accessPath,
+                                                TableDefinition table) {
+        if (!accessPath.isGlobalSecondaryIndex() || "ALL".equals(accessPath.projectionType())) {
+            return;
+        }
+        Set<String> projected = accessPath.projectedAttributeNames(table);
+        List<String> unprojected = stmt.columns().stream()
+                .map(Path::root)
+                .filter(c -> !"*".equals(c))
+                .filter(c -> !projected.contains(c))
+                .distinct()
+                .toList();
+        if (!unprojected.isEmpty()) {
+            throw DynamoDbAccessPathValidator.unprojectedGsiAttributes(accessPath.indexName(), unprojected);
         }
     }
 
