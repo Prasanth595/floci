@@ -3,8 +3,8 @@ package io.github.hectorvent.floci.services.eks;
 import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.testing.RealEksProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -14,7 +14,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
-import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -25,22 +24,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Docker integration test verifying that freshly created clusters start with no StorageClass,
  * no bundled local-path provisioner, and that CoreDNS remains functional.
+ *
+ * <p>The cluster is started through {@link EksClusterManager} directly, which runs a k3s container
+ * whether or not EKS is mocked. The class runs on {@link RealEksProfile} with the other classes
+ * that run a real cluster.
  */
 @QuarkusTest
-@TestProfile(EksStorageClassDockerIntegrationTest.Profile.class)
+@TestProfile(RealEksProfile.class)
 class EksStorageClassDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksStorageClassDockerIntegrationTest.class);
     private static final String ACCOUNT = "000000000000";
-
-    public static final class Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.eks.mock", "false"
-            );
-        }
-    }
 
     @Inject
     DockerClient dockerClient;
