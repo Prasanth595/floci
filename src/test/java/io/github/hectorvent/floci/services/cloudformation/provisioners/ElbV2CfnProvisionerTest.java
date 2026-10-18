@@ -630,6 +630,21 @@ class ElbV2CfnProvisionerTest {
         verify(elb, never()).createLoadBalancer(anyString(), anyString(), any(), any(), any(), anyList(), anyList(), any());
     }
 
+    /** An empty {@code SubnetMappings} beside {@code Subnets}, as an Fn::If that drops each leaves, is allowed. */
+    @Test
+    void anEmptySubnetMappingsBesideSubnetsIsAllowed() {
+        when(elb.createLoadBalancer(eq(REGION), eq("alb"), isNull(), isNull(), isNull(),
+                eq(List.of("subnet-1", "subnet-2")), anyList(), any())).thenReturn(loadBalancer("alb"));
+        ObjectNode props = mapper.createObjectNode().put("Name", "alb");
+        props.putArray("Subnets").add("subnet-1").add("subnet-2");
+        props.putArray("SubnetMappings");
+
+        StackResource r = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        provisioner.provision(r, props, ctx());
+
+        assertEquals(LB_ARN, r.getPhysicalId());
+    }
+
     /** The same on an update of a kept load balancer, before it is moved anywhere. */
     @Test
     void anUpdateWithSubnetsAndSubnetMappingsTogetherLeavesTheKeptLoadBalancerAlone() {

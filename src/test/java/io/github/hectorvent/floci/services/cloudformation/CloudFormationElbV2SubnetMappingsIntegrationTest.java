@@ -21,7 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * {@code SubnetId} is required in a load balancer's {@code SubnetMappings}. A mapping that names no
  * subnet fails its stack, as on AWS, rather than the balancer being created with no subnets, while a
- * mapping an {@code Fn::If} drops with {@code AWS::NoValue} is left out.
+ * mapping an {@code Fn::If} drops with {@code AWS::NoValue} is left out. {@code Subnets} and
+ * {@code SubnetMappings} together fail it too, as ELBv2 takes one or the other.
  */
 @QuarkusTest
 class CloudFormationElbV2SubnetMappingsIntegrationTest {
