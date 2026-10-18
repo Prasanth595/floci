@@ -138,6 +138,16 @@ class Ec2MetadataTokenTest {
         assertEquals(401, fixture.send("HEAD", "/latest/meta-data/instance-id", null).statusCode());
     }
 
+    /** No route serves HEAD, so with a token the router answers as it would for any unserved method. */
+    @Test
+    void aHeadRequestWithATokenGetsTheRoutersAnswer() throws Exception {
+        setTokenRequirement("required");
+        String token = fixture.putToken("60").body();
+
+        assertEquals(405, fixture.send("HEAD", "/latest/meta-data/instance-id", token).statusCode());
+        assertEquals(404, fixture.send("HEAD", "/latest/meta-data/no-such-item", token).statusCode());
+    }
+
     /** The token check sits ahead of the routes without claiming the methods IMDS does not serve. */
     @Test
     void aMethodImdsDoesNotServeIsStillNotFound() throws Exception {

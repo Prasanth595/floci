@@ -504,7 +504,7 @@ public class Ec2MetadataServer {
     /**
      * An instance whose HttpTokens is required refuses IMDSv1: as AWS does, a GET or HEAD without a
      * token gets 401 before any data is looked up, whatever the path. (No route serves HEAD, so one
-     * with a token still gets the router's 405.)
+     * with a token gets the router's answer: 405 on a path a GET route serves, 404 elsewhere.)
      */
     private void refuseTokenlessReadsWhenTokensAreRequired(RoutingContext ctx) {
         HttpMethod method = ctx.request().method();
