@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -13,6 +16,7 @@ import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -42,12 +46,17 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     // The MetadataOptions members declared last time, the instance's own or its launch template's, so
     // an update can return the ones it no longer declares to their launch defaults.
     private static final String DECLARED_METADATA_OPTIONS_ATTR = "__FlociDeclaredMetadataOptions";
-    // Which launch template the instance was declared with ("none" for none). LaunchTemplate is
-    // createOnly, so naming another one, adding one or dropping it replaces the instance. Its
-    // Version is not compared: the template's own provisioner publishes a version on every stack
-    // update, so a version change is applied to the instance in place.
+    // The launch template, id or name and version, the instance was declared with; absent for none.
+    // LaunchTemplate is createOnly, so an update that changes it or drops it replaces the instance.
+    // One added to an instance that had none keeps it, as the change-set preview reports for a
+    // createOnly property that was absent.
     private static final String DECLARED_LAUNCH_TEMPLATE_ATTR = "__FlociDeclaredLaunchTemplate";
-    private static final String NO_LAUNCH_TEMPLATE = "none";
+    // The __FlociDeclared records as they stood before a replacing update, for rollbackUpdate to put
+    // back with the instance it restores; ReplacementCleanup leaves __Floci attributes alone.
+    private static final String PRIOR_DECLARATIONS_ATTR = "__FlociPriorDeclarations";
+    private static final String DECLARED_PREFIX = "__FlociDeclared";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Logger LOG = Logger.getLogger(Ec2InstanceCfnProvisioner.class);
 
     private final Ec2Service ec2Service;
     /** How long {@link #delete} waits for a terminated instance; package-visible so tests can shorten it. */
@@ -84,9 +93,10 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         // AWS::NoValue resolves to an empty node here, which on AWS means the property is absent
         // (launch without a template), so it must not turn into an InvalidLaunchTemplateId.NotFound.
         LaunchTemplateData.MetadataOptions templateMetadataOptions = null;
-        String launchTemplate = NO_LAUNCH_TEMPLATE;
+        String launchTemplate = null;
         if (ltRef != null && ltRef.isObject() && (ltId != null || ltName != null)) {
-            launchTemplate = ltId != null ? "id:" + ltId : "name:" + ltName;
+            launchTemplate = (ltId != null ? "id:" + ltId : "name:" + ltName)
+                    + "@" + ltRef.path("Version").asText("");
             // A LaunchTemplate the stack references but that does not resolve is a real error, as on
             // AWS: let it fail the resource rather than silently launching with default config.
             LaunchTemplateData ltData = ec2Service.resolveLaunchTemplateData(region, ltId, ltName,
@@ -162,6 +172,9 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
+        if (ctx.isUpdate()) {
+            r.getAttributes().put(PRIOR_DECLARATIONS_ATTR, declarations(attributesBefore));
+        }
         Reservation reservation = ec2Service.runInstances(region, imageId, instanceType, 1, 1, keyName,
                 securityGroupIds, subnetId, null, tags, userData, iamInstanceProfileArn,
                 associatePublicIp, null, 0, null, metadataOptions);
@@ -321,12 +334,14 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Whether a createOnly property the launch does not apply to the instance (PrivateIpAddress,
-     * AvailabilityZone) changed since the last provision. It is compared against the value declared
-     * then and recorded on the resource, not the instance's auto-assigned value, which never matches
-     * a declared one. A property with no recorded prior value is not treated as changed, so adopting
-     * this behavior does not replace instances whose template did not actually change; the value is
-     * recorded from this provision on, and a later change to it then forces replacement.
+     * Whether a createOnly property the instance does not carry (PrivateIpAddress and
+     * AvailabilityZone, which the launch does not apply, and LaunchTemplate) changed since the last
+     * provision. It is compared against the value declared then and recorded on the resource, not
+     * the instance's auto-assigned value, which never matches a declared one; a recorded value that
+     * is now undeclared counts as changed. A property with no recorded prior value is not treated as
+     * changed, so adopting this behavior does not replace instances whose template did not actually
+     * change; the value is recorded from this provision on, and a later change to it then forces
+     * replacement.
      */
     private static boolean declaredCreateOnlyChanged(Map<String, String> priorAttributes,
                                                      String privateIpAddress, String availabilityZone,
@@ -419,17 +434,52 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(PRIOR_DECLARATIONS_ATTR);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(PRIOR_DECLARATIONS_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
+    /**
+     * Undoes a replacement through the cleanup record, and puts back the {@code __FlociDeclared}
+     * records of the instance it restores, so a retried update compares against what that instance
+     * was declared with. A rollback that throws keeps the saved records for the next attempt.
+     */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        return ReplacementCleanup.rollback(resource, this::delete);
+        boolean replaced = ReplacementCleanup.rollback(resource, this::delete);
+        String prior = resource.getAttributes().remove(PRIOR_DECLARATIONS_ATTR);
+        if (replaced && prior != null) {
+            restoreDeclarations(resource, prior);
+        }
+        return replaced;
+    }
+
+    /** The {@code __FlociDeclared} attributes of {@code attributes}, as a JSON object. */
+    private static String declarations(Map<String, String> attributes) {
+        ObjectNode declared = MAPPER.createObjectNode();
+        attributes.forEach((key, value) -> {
+            if (key.startsWith(DECLARED_PREFIX) && value != null) {
+                declared.put(key, value);
+            }
+        });
+        return declared.toString();
+    }
+
+    private static void restoreDeclarations(StackResource resource, String saved) {
+        JsonNode prior;
+        try {
+            prior = MAPPER.readTree(saved);
+        } catch (JsonProcessingException e) {
+            LOG.warnv("Could not restore the declared properties of {0}: {1}", resource.getLogicalId(), e.getMessage());
+            return;
+        }
+        resource.getAttributes().keySet().removeIf(key -> key.startsWith(DECLARED_PREFIX));
+        prior.fields().forEachRemaining(e -> resource.getAttributes().put(e.getKey(), e.getValue().asText()));
     }
 
     /**

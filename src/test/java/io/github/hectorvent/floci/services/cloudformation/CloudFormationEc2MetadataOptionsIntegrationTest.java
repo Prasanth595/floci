@@ -219,6 +219,47 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
         }
     }
 
+    /**
+     * The instance names {@code Fn::GetAtt LatestVersionNumber}, so updating the template changes
+     * its LaunchTemplate property, a replacement property: AWS launches a new instance from the new
+     * version, here without the token requirement.
+     */
+    @Test
+    void aNewVersionOfTheLaunchTemplateReplacesTheInstance() {
+        String stackName = "cfn-metadata-version-" + UUID.randomUUID().toString().substring(0, 8);
+        String template = """
+                {
+                  "Resources": {
+                    "Lt": {
+                      "Type": "AWS::EC2::LaunchTemplate",
+                      "Properties": {"LaunchTemplateData": {"ImageId": "ami-12345678"%s}}
+                    },
+                    "Inst": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {
+                        "LaunchTemplate": {
+                          "LaunchTemplateId": {"Ref": "Lt"},
+                          "Version": {"Fn::GetAtt": ["Lt", "LatestVersionNumber"]}
+                        }
+                      }
+                    }
+                  },
+                  "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
+                }
+                """;
+        try {
+            cfn("CreateStack", stackName, template.formatted(", \"MetadataOptions\": {\"HttpTokens\": \"required\"}"));
+            String instanceId = output(describeStack(stackName, "CREATE_COMPLETE"), "InstanceId");
+
+            cfn("UpdateStack", stackName, template.formatted(""));
+            String replacement = output(describeStack(stackName, "UPDATE_COMPLETE"), "InstanceId");
+            assertNotEquals(instanceId, replacement);
+            assertEquals("optional", describeInstance(replacement).getString(INSTANCE + "metadataOptions.httpTokens"));
+        } finally {
+            cfn("DeleteStack", stackName, null);
+        }
+    }
+
     @Test
     void invalidMetadataOptionsFailTheUpdateBeforeTheInstanceChanges() {
         String stackName = "cfn-metadata-invalid-" + UUID.randomUUID().toString().substring(0, 8);

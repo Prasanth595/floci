@@ -78,7 +78,7 @@ class Ec2InstanceCfnProvisionerTest {
 
         assertEquals("i-1", r.getPhysicalId());
         assertEquals(Set.of("InstanceId", "PrivateIp", "PublicIp", "PrivateDnsName", "PublicDnsName",
-                "AvailabilityZone", "VpcId", "State.Code", "State.Name"), publishedAttributes(r));
+                "AvailabilityZone", "VpcId", "State.Code", "State.Name"), r.getAttributes().keySet());
         assertEquals("10.0.0.5", r.getAttributes().get("PrivateIp"));
         assertEquals("us-east-1a", r.getAttributes().get("AvailabilityZone"));
         assertEquals("vpc-1", r.getAttributes().get("VpcId"));
@@ -117,7 +117,7 @@ class Ec2InstanceCfnProvisionerTest {
 
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx());
 
-        assertEquals(Set.of("InstanceId"), publishedAttributes(r));
+        assertEquals(Set.of("InstanceId"), r.getAttributes().keySet());
     }
 
     @Test
@@ -587,8 +587,8 @@ class Ec2InstanceCfnProvisionerTest {
         when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
                 .thenReturn(List.of(reservationOf(i1)));
 
-        // The template dropped MetadataOptions (CDK's requireImdsv2 turned off), so what it set
-        // last time goes back to the launch default, and what it never set is left alone.
+        // The instance dropped its MetadataOptions, so what it set last time goes back to the launch
+        // default, and what it never set is left alone.
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-1"));
 
         ArgumentCaptor<LaunchTemplateData.MetadataOptions> reset =
@@ -600,26 +600,16 @@ class Ec2InstanceCfnProvisionerTest {
     }
 
     /**
-     * LaunchTemplate is createOnly on AWS::EC2::Instance. Naming another template, adding one or
-     * dropping it replaces the instance; a new version of the same template is applied in place,
-     * because the template's own provisioner publishes a version on every stack update.
+     * LaunchTemplate is createOnly on AWS::EC2::Instance: another version, another template or none
+     * replaces the instance. Adding one to an instance launched without one keeps it, as the stack's
+     * change-set preview reports for a createOnly property that was absent.
      */
     @Test
-    void changingWhichLaunchTemplateTheInstanceUsesReplacesIt() throws Exception {
+    void changingTheInstancesLaunchTemplateReplacesIt() throws Exception {
         LaunchTemplateData data = new LaunchTemplateData();
         data.setImageId("ami-1");
         when(ec2.resolveLaunchTemplateData(eq("us-east-1"), any(), any(), any(), eq(false))).thenReturn(data);
-        Instance i1 = launched("i-1");
-        Instance i2 = launched("i-2");
-        Instance i3 = launched("i-3");
-        Instance i4 = launched("i-4");
-        when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any()))
-                .thenReturn(reservationOf(i1), reservationOf(i2), reservationOf(i3), reservationOf(i4));
-        for (Instance instance : List.of(i1, i2, i3, i4)) {
-            when(ec2.describeInstances("us-east-1", List.of(instance.getInstanceId()), null))
-                    .thenReturn(List.of(reservationOf(instance)));
-        }
+        stubLaunches("i-1", "i-2", "i-3", "i-4");
         StackResource r = resource("Server");
         provisioner.provision(r, props("""
                 {"LaunchTemplate": {"LaunchTemplateId": "lt-1", "Version": "1"}}
@@ -628,17 +618,83 @@ class Ec2InstanceCfnProvisionerTest {
         provisioner.provision(r, props("""
                 {"LaunchTemplate": {"LaunchTemplateId": "lt-1", "Version": "2"}}
                 """), ctx("i-1"));
-        assertEquals("i-1", r.getPhysicalId());
-        provisioner.provision(r, props("""
-                {"LaunchTemplate": {"LaunchTemplateId": "lt-2", "Version": "1"}}
-                """), ctx("i-1"));
         assertEquals("i-2", r.getPhysicalId());
-        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-2"));
+        provisioner.provision(r, props("""
+                {"LaunchTemplate": {"LaunchTemplateId": "lt-2", "Version": "2"}}
+                """), ctx("i-2"));
         assertEquals("i-3", r.getPhysicalId());
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-3"));
+        assertEquals("i-4", r.getPhysicalId());
         provisioner.provision(r, props("""
                 {"LaunchTemplate": {"LaunchTemplateName": "web", "Version": "1"}}
-                """), ctx("i-3"));
+                """), ctx("i-4"));
         assertEquals("i-4", r.getPhysicalId());
+    }
+
+    /**
+     * The engine restores the prior instance when a later resource fails a replacing update; its
+     * records go back with it, so retrying the update decides from what that instance was declared
+     * with rather than from the attempt that was rolled back.
+     */
+    @Test
+    void aRolledBackReplacementPutsBackTheRecordsOfTheInstanceItRestores() throws Exception {
+        LaunchTemplateData data = new LaunchTemplateData();
+        data.setImageId("ami-1");
+        LaunchTemplateData.MetadataOptions required = new LaunchTemplateData.MetadataOptions();
+        required.setHttpTokens("required");
+        data.setMetadataOptions(required);
+        when(ec2.resolveLaunchTemplateData(eq("us-east-1"), any(), any(), any(), eq(false))).thenReturn(data);
+        List<Instance> instances = stubLaunches("i-1", "i-2", "i-3");
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("""
+                {"LaunchTemplate": {"LaunchTemplateId": "lt-1", "Version": "1"}}
+                """), ctx(null));
+        Map<String, String> declared = declarations(r);
+
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-1"));
+        assertEquals("i-2", r.getPhysicalId());
+        instances.get(1).setState(InstanceState.terminated());
+        provisioner.terminateTimeoutMillis = 20L;
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals("i-1", r.getPhysicalId());
+        assertEquals(declared, declarations(r));
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-1"));
+        assertEquals("i-3", r.getPhysicalId());
+    }
+
+    /**
+     * With the same template and version (here {@code $Latest}) the instance is kept, and options
+     * its template stopped declaring go back to their launch defaults.
+     */
+    @Test
+    void reusedInstanceResetsOptionsItsTemplateStopsDeclaring() throws Exception {
+        LaunchTemplateData withTokens = new LaunchTemplateData();
+        withTokens.setImageId("ami-1");
+        LaunchTemplateData.MetadataOptions required = new LaunchTemplateData.MetadataOptions();
+        required.setHttpTokens("required");
+        withTokens.setMetadataOptions(required);
+        LaunchTemplateData withoutTokens = new LaunchTemplateData();
+        withoutTokens.setImageId("ami-1");
+        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, "$Latest", false))
+                .thenReturn(withTokens, withoutTokens);
+        Instance i1 = stubLaunches("i-1").get(0);
+        StackResource r = resource("Server");
+        String template = """
+                {"LaunchTemplate": {"LaunchTemplateId": "lt-1", "Version": "$Latest"}}
+                """;
+        provisioner.provision(r, props(template), ctx(null));
+        LaunchTemplateData.MetadataOptions applied = LaunchTemplateData.MetadataOptions.launchDefaults();
+        applied.setHttpTokens("required");
+        i1.setMetadataOptions(applied);
+
+        provisioner.provision(r, props(template), ctx("i-1"));
+
+        assertEquals("i-1", r.getPhysicalId());
+        ArgumentCaptor<LaunchTemplateData.MetadataOptions> reset =
+                ArgumentCaptor.forClass(LaunchTemplateData.MetadataOptions.class);
+        verify(ec2).modifyInstanceMetadataOptions(eq("us-east-1"), eq("i-1"), reset.capture());
+        assertEquals("optional", reset.getValue().getHttpTokens());
     }
 
     @Test
@@ -820,17 +876,29 @@ class Ec2InstanceCfnProvisionerTest {
         return reservation;
     }
 
-    /** The attribute names Fn::GetAtt can read: the provisioner's own __Floci records are not among them. */
-    private static Set<String> publishedAttributes(StackResource r) {
-        return r.getAttributes().keySet().stream().filter(name -> !name.startsWith("__Floci"))
-                .collect(Collectors.toSet());
+    /** The provisioner's records of what the template declared, by attribute name. */
+    private static Map<String, String> declarations(StackResource r) {
+        return r.getAttributes().entrySet().stream().filter(e -> e.getKey().startsWith("__FlociDeclared"))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
-    private static Instance launched(String instanceId) {
-        Instance instance = new Instance();
-        instance.setInstanceId(instanceId);
-        instance.setImageId("ami-1");
-        return instance;
+    /** One launch per id, in order, each instance then found by DescribeInstances. */
+    private List<Instance> stubLaunches(String... instanceIds) {
+        List<Instance> instances = new ArrayList<>();
+        List<Reservation> reservations = new ArrayList<>();
+        for (String instanceId : instanceIds) {
+            Instance instance = new Instance();
+            instance.setInstanceId(instanceId);
+            instance.setImageId("ami-1");
+            instances.add(instance);
+            reservations.add(reservationOf(instance));
+            when(ec2.describeInstances("us-east-1", List.of(instanceId), null))
+                    .thenReturn(List.of(reservationOf(instance)));
+        }
+        when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any()))
+                .thenReturn(reservations.get(0), reservations.subList(1, reservations.size()).toArray(Reservation[]::new));
+        return instances;
     }
 
     private static Map<String, String> tagEntry(String resourceId, String key, String value) {
