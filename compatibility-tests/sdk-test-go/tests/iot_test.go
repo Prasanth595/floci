@@ -347,6 +347,8 @@ func TestIoT(t *testing.T) {
 		_, err = svc.RegisterCertificateWithoutCA(ctx, &iot.RegisterCertificateWithoutCAInput{CertificatePem: aws.String(string(certPEM))})
 		var exists *iottypes.ResourceAlreadyExistsException
 		require.ErrorAs(t, err, &exists)
+		assert.Equal(t, aws.ToString(registered.CertificateId), aws.ToString(exists.ResourceId))
+		assert.Equal(t, aws.ToString(registered.CertificateArn), aws.ToString(exists.ResourceArn))
 
 		_, err = svc.UpdateCertificate(ctx, &iot.UpdateCertificateInput{CertificateId: registered.CertificateId, NewStatus: iottypes.CertificateStatusInactive})
 		require.NoError(t, err)

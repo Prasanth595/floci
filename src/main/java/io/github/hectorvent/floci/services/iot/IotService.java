@@ -96,6 +96,8 @@ public class IotService {
 
     /** One lock for every policy version write and the policy delete, so a cap check, an append and a delete cannot interleave. */
     private final Object policyWriteLock = new Object();
+    /** Makes the duplicate check and the store write of RegisterCertificateWithoutCA one step. */
+    private final Object certificateRegistrationLock = new Object();
 
     /** certificateId to the partition and key it was last found under; see {@link #findRegisteredCertificate}. */
     private final Map<String, CertificateLocation> certificateLocations = new ConcurrentHashMap<>();
@@ -371,14 +373,17 @@ public class IotService {
             throw new AwsException("InternalFailureException", "Could not read device certificate: " + e.getMessage(), 500);
         }
         String key = certificateKey(region, certificate.getCertificateId());
-        if (certificateStore.get(key).isPresent()) {
-            throw new AwsException("ResourceAlreadyExistsException", "Certificate already exists: " + certificate.getCertificateId(), 409);
-        }
         certificate.setCertificateArn(regionResolver.buildArn("iot", region, "cert/" + certificate.getCertificateId()));
         certificate.setStatus(effectiveStatus);
         certificate.setCertificateMode("SNI_ONLY");
         certificate.setCreationDate(Instant.now());
-        certificateStore.put(key, certificate);
+        synchronized (certificateRegistrationLock) {
+            if (certificateStore.get(key).isPresent()) {
+                throw new AwsException("ResourceAlreadyExistsException", "Certificate already exists: " + certificate.getCertificateId(), 409,
+                        Map.of("resourceId", certificate.getCertificateId(), "resourceArn", certificate.getCertificateArn()));
+            }
+            certificateStore.put(key, certificate);
+        }
         // A device that connected before may now be registered in a second account.
         certificateLocations.remove(certificate.getCertificateId());
         return certificate;

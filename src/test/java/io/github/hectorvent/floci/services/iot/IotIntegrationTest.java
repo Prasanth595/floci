@@ -812,7 +812,7 @@ class IotIntegrationTest {
                 .generateSelfSignedCertificate("no-ca-device", List.of(), KeyAlgorithm.RSA_2048)
                 .certificatePem();
 
-        String certificateId = given()
+        Map<String, String> registered = given()
             .contentType("application/json")
             .body(Map.of("certificatePem", certificatePem, "status", "ACTIVE"))
         .when()
@@ -822,7 +822,8 @@ class IotIntegrationTest {
             .body("certificateId", matchesPattern("[0-9a-f]{64}"))
             .body("certificateArn", containsString(":iot:us-east-1:000000000000:cert/"))
             .extract()
-            .path("certificateId");
+            .path("");
+        String certificateId = registered.get("certificateId");
 
         given()
         .when()
@@ -847,7 +848,9 @@ class IotIntegrationTest {
             .post("/certificate/register-no-ca")
         .then()
             .statusCode(409)
-            .body("__type", equalTo("ResourceAlreadyExistsException"));
+            .body("__type", equalTo("ResourceAlreadyExistsException"))
+            .body("resourceId", equalTo(certificateId))
+            .body("resourceArn", equalTo(registered.get("certificateArn")));
 
         given()
             .contentType("application/json")
