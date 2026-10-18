@@ -49,6 +49,13 @@
 
 `SendCommand` supports the `AWS-RunShellScript` document. For EC2 instances launched by Floci in real Docker mode, Floci creates the command invocation, returns the command response, and then runs the script asynchronously inside the target instance container. Callers observe completion through `GetCommandInvocation`. `stdout`, `stderr`, response code, start time, and end time are recorded on the invocation.
 
+Public `SendCommand` checks the `TimeoutSeconds` JSON field before creating work. A supplied
+non-null value must be an integer token representable as a signed 32-bit integer; fractional
+numbers, strings, booleans, arrays, objects and larger integers are rejected rather than
+converted or replaced with the default. Missing and null fields keep the existing 3,600-second
+default. This enforces the API's declared integer shape; it does not claim a live AWS coercion
+or exact error-message capture. Internal CodeDeploy hook budgets are unchanged.
+
 If the target is not a Floci EC2 container, or if the document is not supported for direct execution, Floci falls back to the SSM agent polling flow. In that mode, `SendCommand` queues an ec2messages payload and the invocation completes after an agent calls `SendReply`.
 
 Background execution retains the issuing account and region. Agent queues and message correlations

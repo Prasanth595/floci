@@ -166,7 +166,7 @@ public class SsmCommandService implements Resettable {
         Map<String, List<String>> parameters = publicShell
                 ? parseShellParameters(request.path("Parameters")) : parseParameters(request.path("Parameters"));
         String comment = request.path("Comment").asText("");
-        int timeoutSeconds = request.path("TimeoutSeconds").asInt(3600);
+        int timeoutSeconds = parseTimeoutSeconds(request.path("TimeoutSeconds"));
         validateTimeoutSeconds(timeoutSeconds);
         int executionTimeoutSeconds = publicShell ? shellExecutionTimeout(parameters) : timeoutSeconds;
         int documentTimeoutDefault = publicShell ? DEFAULT_SHELL_EXECUTION_TIMEOUT_SECONDS : timeoutSeconds;
@@ -290,6 +290,16 @@ public class SsmCommandService implements Resettable {
         return new AwsException("InvalidParameters",
                 "AWS-RunShellScript requires at least one command and string-list parameters; "
                         + "executionTimeout must contain one integer from 1 to 172800.", 400);
+    }
+
+    private static int parseTimeoutSeconds(JsonNode node) {
+        if (node.isMissingNode() || node.isNull()) {
+            return 3600;
+        }
+        if (!node.isIntegralNumber() || !node.canConvertToInt()) {
+            throw new AwsException("ValidationException", "TimeoutSeconds must be an integer.", 400);
+        }
+        return node.intValue();
     }
 
     private static void validateTimeoutSeconds(int timeoutSeconds) {
