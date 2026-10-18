@@ -613,15 +613,19 @@ public class VpcNetworkManager {
         if (vpc == null || !vpc.created) {
             return;
         }
+        disconnect(vpc.networkName, containerId);
+    }
+
+    private void disconnect(String networkId, String containerId) {
         try {
             dockerClient.disconnectFromNetworkCmd()
-                    .withNetworkId(vpc.networkName)
+                    .withNetworkId(networkId)
                     .withContainerId(containerId)
                     .withForce(true)
                     .exec();
         } catch (Exception e) {
             LOG.debugv("Could not disconnect {0} from VPC network {1}: {2}",
-                    containerId, vpc.networkName, e.getMessage());
+                    containerId, networkId, e.getMessage());
         }
     }
 
@@ -820,16 +824,7 @@ public class VpcNetworkManager {
 
     private void removeNetworkWithRetry(String networkName, String flociContainerId, int attempt) {
         if (flociContainerId != null) {
-            try {
-                dockerClient.disconnectFromNetworkCmd()
-                        .withNetworkId(networkName)
-                        .withContainerId(flociContainerId)
-                        .withForce(true)
-                        .exec();
-            } catch (Exception e) {
-                LOG.debugv("Could not disconnect Floci container {0} from VPC network {1}: {2}",
-                        flociContainerId, networkName, e.getMessage());
-            }
+            disconnect(networkName, flociContainerId);
         }
         try {
             dockerClient.removeNetworkCmd(networkName).exec();
@@ -927,15 +922,7 @@ public class VpcNetworkManager {
             return;
         }
         for (String containerId : containers.keySet()) {
-            try {
-                dockerClient.disconnectFromNetworkCmd()
-                        .withNetworkId(listed.getId())
-                        .withContainerId(containerId)
-                        .withForce(true)
-                        .exec();
-            } catch (Exception e) {
-                LOG.debugv("Could not disconnect {0} from {1}: {2}", containerId, listed.getName(), e.getMessage());
-            }
+            disconnect(listed.getId(), containerId);
         }
     }
 
