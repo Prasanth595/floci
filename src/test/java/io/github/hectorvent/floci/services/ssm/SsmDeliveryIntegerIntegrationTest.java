@@ -31,17 +31,17 @@ class SsmDeliveryIntegerIntegrationTest extends SsmCommandIntegrationFixture {
 
     static Stream<Arguments> nonNumericTimeouts() {
         return Stream.of(
-                Arguments.of("\"30\"", "STRING_VALUE"),
-                Arguments.of("\"bad\"", "STRING_VALUE"),
-                Arguments.of("{}", "OBJECT"),
-                Arguments.of("true", "TRUE_VALUE"),
-                Arguments.of("false", "FALSE_VALUE"),
-                Arguments.of("[]", "ARRAY"));
+                Arguments.of("\"30\"", "STRING_VALUE can not be converted to an Integer"),
+                Arguments.of("\"bad\"", "STRING_VALUE can not be converted to an Integer"),
+                Arguments.of("{}", "Start of structure or map found where not expected."),
+                Arguments.of("true", "TRUE_VALUE can not be converted to an Integer"),
+                Arguments.of("false", "FALSE_VALUE can not be converted to an Integer"),
+                Arguments.of("[]", "Start of list found where not expected"));
     }
 
     @ParameterizedTest
     @MethodSource("nonNumericTimeouts")
-    void nonNumericTimeoutIsRejectedBeforeAllocation(String input, String token) throws Exception {
+    void nonNumericTimeoutIsRejectedBeforeAllocation(String input, String expectedMessage) throws Exception {
         String instance = "i-integer-" + UUID.randomUUID();
         try {
             ObjectNode request = request(instance);
@@ -49,7 +49,7 @@ class SsmDeliveryIntegerIntegrationTest extends SsmCommandIntegrationFixture {
             assertAll("serialization rejection leaves owned work unchanged",
                     () -> assertEquals(400, rejected.statusCode()),
                     () -> assertEquals("SerializationException", rejected.jsonPath().getString("__type")),
-                    () -> assertEquals(token + " can not be converted to a Long",
+                    () -> assertEquals(expectedMessage,
                             rejected.jsonPath().getString("message")),
                     () -> assertTrue(RequestScopes.callAs(ACCOUNT, REGION,
                             () -> commandService.listCommands(null, instance, REGION)).isEmpty()),

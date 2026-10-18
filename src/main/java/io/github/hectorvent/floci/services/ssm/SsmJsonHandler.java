@@ -1041,7 +1041,7 @@ public class SsmJsonHandler {
             } else if (l.isTextual()) {
                 labels.add(l.textValue());
             } else {
-                throw serializationException(l, "String");
+                throw serializationException(l, "a String");
             }
         }
         return labels;
@@ -1053,7 +1053,7 @@ public class SsmJsonHandler {
             return null;
         }
         if (!node.isTextual()) {
-            throw serializationException(node, "String");
+            throw serializationException(node, "a String");
         }
         return node.textValue();
     }
@@ -1065,7 +1065,7 @@ public class SsmJsonHandler {
             return null;
         }
         if (!node.isNumber()) {
-            throw serializationException(node, "Long");
+            throw serializationException(node, "a Long");
         }
         return node.decimalValue().max(LONG_MIN).min(LONG_MAX).longValue();
     }

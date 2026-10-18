@@ -12,7 +12,7 @@ final class SsmJsonDeserialization {
             return defaultValue;
         }
         if (!node.isNumber() || Double.isNaN(node.doubleValue())) {
-            throw serializationException(node, "Long");
+            throw serializationException(node, "an Integer");
         }
         double value = node.doubleValue();
         if (value >= Integer.MAX_VALUE) {
@@ -24,13 +24,18 @@ final class SsmJsonDeserialization {
         return node.intValue();
     }
 
-    static AwsException serializationException(JsonNode node, String targetType) {
+    static AwsException serializationException(JsonNode node, String targetDescription) {
         String token = switch (node.getNodeType()) {
             case STRING -> "STRING_VALUE";
             case NUMBER -> "NUMBER_VALUE";
             case BOOLEAN -> node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE";
             default -> node.getNodeType().name();
         };
-        return new AwsException("SerializationException", token + " can not be converted to a " + targetType, 400);
+        String message = switch (node.getNodeType()) {
+            case OBJECT -> "Start of structure or map found where not expected.";
+            case ARRAY -> "Start of list found where not expected";
+            default -> token + " can not be converted to " + targetDescription;
+        };
+        return new AwsException("SerializationException", message, 400);
     }
 }
