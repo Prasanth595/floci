@@ -780,7 +780,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         if (variables == null || variables.isNull() || variables.isMissingNode()) {
             return Map.of();
         }
-        requireType("Variables", variables, JsonNodeType.OBJECT);
+        CfnPropertyTypes.requireType("Variables", variables, JsonNodeType.OBJECT);
         Map<String, String> vars = new HashMap<>();
         variables.fields().forEachRemaining(e -> vars.put(e.getKey(), e.getValue().asText()));
         return vars;
@@ -794,32 +794,15 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * The list-of-strings property {@code source}, or null when the template leaves it out,
-     * {@code Ref: AWS::NoValue} directly or through {@code Fn::If} included. A literal of another
-     * type is refused (see {@link #requireType}), and so is an intrinsic that yields a string (see
-     * {@link CloudFormationTemplateEngine#yieldsString}). Any other intrinsic is read through
-     * {@link CloudFormationTemplateEngine#resolveStringList}, as CloudFormation reads a {@code Ref}
-     * to a {@code CommaDelimitedList} parameter, which the engine resolves to the comma-joined text,
-     * and {@code Fn::Split} (measured, eu-west-1, 2026-10-18).
+     * {@code Ref: AWS::NoValue} directly or through {@code Fn::If} included; see
+     * {@link CfnPropertyTypes#readStringList}.
      */
     private static List<String> resolveStringList(JsonNode props, String source,
                                                   CloudFormationTemplateEngine engine) {
         if (props == null || !props.has(source) || props.get(source).isNull()) {
             return null;
         }
-        JsonNode raw = props.get(source);
-        if (raw.isValueNode()) {
-            requireType(source, raw, JsonNodeType.ARRAY);
-        }
-        if (raw.isObject()) {
-            JsonNode resolved = engine.resolveNodeOmittingNoValue(raw);
-            if (resolved == null || resolved.isNull() || resolved.isMissingNode()) {
-                return null;
-            }
-            if (resolved.isObject() || (!resolved.isArray() && engine.yieldsString(raw))) {
-                requireType(source, resolved, JsonNodeType.ARRAY);
-            }
-        }
-        return engine.resolveStringList(raw);
+        return CfnPropertyTypes.readStringList(source, props.get(source), engine);
     }
 
     private List<Object> resolveObjectListOrEmpty(JsonNode props, String source,
@@ -844,7 +827,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     /**
      * The property {@code source}, or null when the template leaves it out, {@code Ref: AWS::NoValue}
      * directly or through {@code Fn::If} included. A value of another type than {@code expected} is
-     * refused before the function is touched; see {@link #requireType}.
+     * refused before the function is touched; see {@link CfnPropertyTypes#requireType}.
      */
     private static JsonNode resolveTyped(JsonNode props, String source, JsonNodeType expected,
                                          CloudFormationTemplateEngine engine) {
@@ -855,28 +838,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         if (resolved == null || resolved.isNull() || resolved.isMissingNode()) {
             return null;
         }
-        requireType(source, resolved, expected);
+        CfnPropertyTypes.requireType(source, resolved, expected);
         return resolved;
-    }
-
-    /**
-     * Refuses a value of another type than {@code expected} with the message CloudFormation's
-     * property validation gives (measured in eu-west-1, 2026-10-18), where a number or a boolean
-     * reads as a String: "Property [Layers] expected type: JSONArray, found: String".
-     */
-    private static void requireType(String property, JsonNode value, JsonNodeType expected) {
-        if (value.getNodeType() != expected) {
-            throw new AwsException("ValidationError", "Property [" + property + "] expected type: "
-                    + jsonTypeName(expected) + ", found: " + jsonTypeName(value.getNodeType()), 400);
-        }
-    }
-
-    private static String jsonTypeName(JsonNodeType type) {
-        return switch (type) {
-            case OBJECT -> "JSONObject";
-            case ARRAY -> "JSONArray";
-            default -> "String";
-        };
     }
 
     private static Map<String, Object> mapWithNullValue(String key) {

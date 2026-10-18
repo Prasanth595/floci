@@ -280,7 +280,7 @@ public class CloudFormationTemplateEngine {
             if (node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr")) {
                 return objectMapper.valueToTree(resolveList(node));
             }
-            if (isIntrinsic(node) || node.has(GET_STACK_OUTPUT)) {
+            if (callsIntrinsic(node)) {
                 return TextNode.valueOf(resolve(node));
             }
             // Plain object: resolve each field.
@@ -307,7 +307,14 @@ public class CloudFormationTemplateEngine {
         return resolveNode(omitNoValue(node));
     }
 
-    private JsonNode omitNoValue(JsonNode node) {
+    /**
+     * The template node with every {@code AWS::NoValue} that stands for a member, a list item or an
+     * {@code Fn::If} branch left out, and every {@code Fn::If} outside another function replaced by
+     * the branch its condition chooses; other intrinsic calls stay as they are, unresolved. A
+     * {@link MissingNode} when the node itself is {@code AWS::NoValue}. A caller that needs to see how
+     * a member is written, a literal or a call, reads it from here before resolving it.
+     */
+    public JsonNode omitNoValue(JsonNode node) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return node;
         }
@@ -346,6 +353,14 @@ public class CloudFormationTemplateEngine {
             return resolved;
         }
         return node;
+    }
+
+    /**
+     * Whether {@code node} calls an intrinsic function, which {@link #resolveNode} evaluates, rather
+     * than being a literal object whose fields it resolves one by one.
+     */
+    public static boolean callsIntrinsic(JsonNode node) {
+        return node.isObject() && (isIntrinsic(node) || node.has(GET_STACK_OUTPUT));
     }
 
     private static boolean isIntrinsic(JsonNode node) {

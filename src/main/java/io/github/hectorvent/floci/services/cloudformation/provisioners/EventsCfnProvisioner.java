@@ -9,9 +9,11 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnPropertyTypes.Type;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
+import io.github.hectorvent.floci.services.eventbridge.model.EcsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.HttpParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
@@ -50,6 +52,38 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(EventsCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /**
+     * The types AWS::Events::Rule's resource schema gives the target members this provisioner reads
+     * as typed values (describe-type, eu-west-1, 2026-10-18), in the template's spelling.
+     */
+    private static final Type ECS_PARAMETERS = Type.object(Map.ofEntries(
+            Map.entry("CapacityProviderStrategy", Type.list(Type.object(Map.of(
+                    "CapacityProvider", Type.STRING, "Base", Type.INTEGER, "Weight", Type.INTEGER)))),
+            Map.entry("EnableECSManagedTags", Type.BOOLEAN),
+            Map.entry("EnableExecuteCommand", Type.BOOLEAN),
+            Map.entry("Group", Type.STRING),
+            Map.entry("LaunchType", Type.STRING),
+            Map.entry("NetworkConfiguration", Type.object(Map.of("AwsVpcConfiguration", Type.object(Map.of(
+                    "AssignPublicIp", Type.STRING,
+                    "SecurityGroups", Type.list(Type.STRING),
+                    "Subnets", Type.list(Type.STRING)))))),
+            Map.entry("PlacementConstraints", Type.list(Type.object(Map.of(
+                    "Expression", Type.STRING, "Type", Type.STRING)))),
+            Map.entry("PlacementStrategies", Type.list(Type.object(Map.of(
+                    "Field", Type.STRING, "Type", Type.STRING)))),
+            Map.entry("PlatformVersion", Type.STRING),
+            Map.entry("PropagateTags", Type.STRING),
+            Map.entry("ReferenceId", Type.STRING),
+            Map.entry("TagList", Type.list(Type.object(Map.of("Key", Type.STRING, "Value", Type.STRING)))),
+            Map.entry("TaskCount", Type.INTEGER),
+            Map.entry("TaskDefinitionArn", Type.STRING)));
+    private static final Type TARGETS = Type.list(Type.object(Map.of(
+            "RoleArn", Type.STRING,
+            "RetryPolicy", Type.object(Map.of(
+                    "MaximumRetryAttempts", Type.INTEGER, "MaximumEventAgeInSeconds", Type.INTEGER)),
+            "DeadLetterConfig", Type.object(Map.of("Arn", Type.STRING)),
+            "EcsParameters", ECS_PARAMETERS)));
 
     private static final String EVENT_BUS_CREATED_TIME_ATTR = "FlociEventBusCreatedTime";
     private static final String EVENT_BUS_MANAGED_TAG_KEYS_ATTR = "FlociEventBusManagedTagKeys";
@@ -143,6 +177,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         String stateStr = ctx.resolveOptional(props, "State");
         RuleState state = "DISABLED".equals(stateStr) ? RuleState.DISABLED : RuleState.ENABLED;
 
+        // Read before the rule exists, as CloudFormation refuses a target of the wrong type before it
+        // touches the rule.
+        List<Target> targets = declaredTargets(props, ctx);
+
         Rule rule = eventBridgeService.putRule(ruleName, busName, eventPattern, scheduleExpression,
                 state, description, roleArn, Map.of(), ctx.region());
         r.setPhysicalId(ruleName);
@@ -154,49 +192,6 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             r.getAttributes().put("EventBusName", busName);
         }
 
-        // Provision inline targets
-        List<Target> targets = new ArrayList<>();
-        if (props != null && props.has("Targets") && props.get("Targets").isArray()) {
-            for (JsonNode targetNode : props.get("Targets")) {
-                JsonNode resolved = ctx.engine().resolveNode(targetNode);
-                String targetId = resolved.path("Id").asText(null);
-                String targetArn = resolved.path("Arn").asText(null);
-                String input = resolved.path("Input").asText(null);
-                String inputPath = resolved.path("InputPath").asText(null);
-                if (targetId != null && targetArn != null) {
-                    Target target = new Target(targetId, targetArn, input, inputPath);
-                    target.setInputTransformer(InputTransformer.fromJson(resolved.path("InputTransformer")));
-                    JsonNode httpParamsNode = resolved.path("HttpParameters");
-                    if (httpParamsNode.isObject()) {
-                        target.setHttpParameters(MAPPER.convertValue(httpParamsNode, HttpParameters.class));
-                    }
-                    JsonNode sqsParamsNode = resolved.path("SqsParameters");
-                    if (!sqsParamsNode.isMissingNode() && sqsParamsNode.isObject()) {
-                        String messageGroupId = sqsParamsNode.path("MessageGroupId").asText(null);
-                        if (messageGroupId != null) {
-                            SqsParameters sqsParameters = new SqsParameters();
-                            sqsParameters.setMessageGroupId(messageGroupId);
-                            target.setSqsParameters(sqsParameters);
-                        }
-                    }
-                    JsonNode batchParamsNode = resolved.path("BatchParameters");
-                    if (!batchParamsNode.isMissingNode() && batchParamsNode.isObject()) {
-                        JsonNode arrayProperties = batchParamsNode.path("ArrayProperties");
-                        BatchParameters batchParameters = new BatchParameters();
-                        batchParameters.setJobDefinition(batchParamsNode.path("JobDefinition").asText(null));
-                        batchParameters.setJobName(batchParamsNode.path("JobName").asText(null));
-                        if (arrayProperties.isObject()) {
-                            batchParameters.setArrayProperties(jsonObjectToMap(arrayProperties));
-                        }
-                        if (batchParamsNode.has("RetryStrategy")) {
-                            batchParameters.setRetryStrategy(batchParamsNode.get("RetryStrategy"));
-                        }
-                        target.setBatchParameters(batchParameters);
-                    }
-                    targets.add(target);
-                }
-            }
-        }
         if (ctx.isUpdate()) {
             snapshotTargetsBeforeUpdate(r, ruleName, busName, ctx.region());
         }
@@ -209,6 +204,80 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             restoreTargetsAfterFailedUpdate(r, updateFailure);
             throw updateFailure;
         }
+    }
+
+    /**
+     * The rule's {@code Targets}, each carrying what PutTargets would set. An Fn::If that chooses the
+     * whole list works, and AWS::NoValue is left out wherever it stands for a member, a list item or
+     * an Fn::If branch, as CloudFormation leaves them out of the PutTargets call, while a literal ""
+     * stays. The members typed in {@link #TARGETS} are read against the resource schema's types; the
+     * others are resolved as they come.
+     */
+    private List<Target> declaredTargets(JsonNode props, ProvisionContext ctx) {
+        List<Target> targets = new ArrayList<>();
+        if (props == null || !props.has("Targets")) {
+            return targets;
+        }
+        CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(ctx.engine());
+        JsonNode targetNodes = types.read("Targets", props.get("Targets"), TARGETS);
+        types.finish();
+        if (targetNodes == null || !targetNodes.isArray()) {
+            return targets;
+        }
+        for (JsonNode resolved : targetNodes) {
+            String targetId = resolved.path("Id").asText(null);
+            String targetArn = resolved.path("Arn").asText(null);
+            String input = resolved.path("Input").asText(null);
+            String inputPath = resolved.path("InputPath").asText(null);
+            if (targetId == null || targetArn == null) {
+                continue;
+            }
+            Target target = new Target(targetId, targetArn, input, inputPath);
+            target.setInputTransformer(InputTransformer.fromJson(resolved.path("InputTransformer")));
+            JsonNode httpParamsNode = resolved.path("HttpParameters");
+            if (httpParamsNode.isObject()) {
+                target.setHttpParameters(MAPPER.convertValue(httpParamsNode, HttpParameters.class));
+            }
+            JsonNode sqsParamsNode = resolved.path("SqsParameters");
+            if (!sqsParamsNode.isMissingNode() && sqsParamsNode.isObject()) {
+                String messageGroupId = sqsParamsNode.path("MessageGroupId").asText(null);
+                if (messageGroupId != null) {
+                    SqsParameters sqsParameters = new SqsParameters();
+                    sqsParameters.setMessageGroupId(messageGroupId);
+                    target.setSqsParameters(sqsParameters);
+                }
+            }
+            JsonNode batchParamsNode = resolved.path("BatchParameters");
+            if (!batchParamsNode.isMissingNode() && batchParamsNode.isObject()) {
+                JsonNode arrayProperties = batchParamsNode.path("ArrayProperties");
+                BatchParameters batchParameters = new BatchParameters();
+                batchParameters.setJobDefinition(batchParamsNode.path("JobDefinition").asText(null));
+                batchParameters.setJobName(batchParamsNode.path("JobName").asText(null));
+                if (arrayProperties.isObject()) {
+                    batchParameters.setArrayProperties(jsonObjectToMap(arrayProperties));
+                }
+                if (batchParamsNode.has("RetryStrategy")) {
+                    batchParameters.setRetryStrategy(batchParamsNode.get("RetryStrategy"));
+                }
+                target.setBatchParameters(batchParameters);
+            }
+            target.setRoleArn(resolved.path("RoleArn").asText(null));
+            JsonNode ecsParamsNode = resolved.path("EcsParameters");
+            if (ecsParamsNode.isObject()) {
+                target.setEcsParameters(MAPPER.convertValue(
+                        ecsParametersInApiShape(ecsParamsNode), EcsParameters.class));
+            }
+            JsonNode retryPolicyNode = resolved.path("RetryPolicy");
+            if (retryPolicyNode.isObject()) {
+                target.setRetryPolicy(MAPPER.convertValue(retryPolicyNode, Target.RetryPolicy.class));
+            }
+            JsonNode deadLetterConfigNode = resolved.path("DeadLetterConfig");
+            if (deadLetterConfigNode.isObject()) {
+                target.setDeadLetterConfig(MAPPER.convertValue(deadLetterConfigNode, Target.DeadLetterConfig.class));
+            }
+            targets.add(target);
+        }
+        return targets;
     }
 
     /**
@@ -829,6 +898,44 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         CfnDeletes.safeDelete("EventBridge API destination", name,
                 () -> eventBridgeService.deleteApiDestination(name, region),
                 "ResourceNotFoundException");
+    }
+
+    /**
+     * A template's {@code EcsParameters} in the shape PutTargets takes. The resource schema
+     * capitalizes members the EventBridge API spells in camel case ({@code AwsVpcConfiguration},
+     * the placement and capacity provider items) and names two lists differently
+     * ({@code PlacementStrategies}, {@code TagList}); the rest is the same.
+     */
+    private static ObjectNode ecsParametersInApiShape(JsonNode template) {
+        ObjectNode api = template.deepCopy();
+        rename(api, "PlacementStrategies", "PlacementStrategy");
+        rename(api, "TagList", "Tags");
+        if (api.get("NetworkConfiguration") instanceof ObjectNode network) {
+            rename(network, "AwsVpcConfiguration", "awsvpcConfiguration");
+        }
+        renameInItems(api.get("PlacementStrategy"), Map.of("Type", "type", "Field", "field"));
+        renameInItems(api.get("PlacementConstraints"), Map.of("Type", "type", "Expression", "expression"));
+        renameInItems(api.get("CapacityProviderStrategy"),
+                Map.of("CapacityProvider", "capacityProvider", "Weight", "weight", "Base", "base"));
+        return api;
+    }
+
+    private static void renameInItems(JsonNode items, Map<String, String> names) {
+        if (items == null || !items.isArray()) {
+            return;
+        }
+        for (JsonNode item : items) {
+            if (item instanceof ObjectNode object) {
+                names.forEach((from, to) -> rename(object, from, to));
+            }
+        }
+    }
+
+    private static void rename(ObjectNode node, String from, String to) {
+        JsonNode value = node.remove(from);
+        if (value != null) {
+            node.set(to, value);
+        }
     }
 
     /** Copied from the monolith: the shared original serves six other callers and stays there. */
