@@ -14,7 +14,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * An object property of AWS::Lambda::Function that is not an object, through the CloudFormation SDK
+ * A property of AWS::Lambda::Function of the wrong JSON type, through the CloudFormation SDK
  * client. Measured on AWS (eu-west-1, 2026-10-18): the stack fails before the function is touched,
  * "Property [VpcConfig] expected type: JSONObject, found: String" ("found: JSONArray" for a list).
  * AWS reports it from its pre-deployment validation, read through DescribeEvents; Floci, which
@@ -27,6 +27,7 @@ class CloudFormationLambdaObjectPropertyTest {
     private static final Duration DEPLOY_TIMEOUT = Duration.ofSeconds(30);
     private static final String STRING_STACK = TestFixtures.uniqueName("compat-cfn-object-string");
     private static final String LIST_STACK = TestFixtures.uniqueName("compat-cfn-object-list");
+    private static final String LAYERS_STACK = TestFixtures.uniqueName("compat-cfn-layers-object");
 
     private static CloudFormationClient cfn;
 
@@ -41,6 +42,7 @@ class CloudFormationLambdaObjectPropertyTest {
             // DeleteStack answers for a stack that is gone too, so a failure here is a real one.
             cfn.deleteStack(request -> request.stackName(STRING_STACK));
             cfn.deleteStack(request -> request.stackName(LIST_STACK));
+            cfn.deleteStack(request -> request.stackName(LAYERS_STACK));
             cfn.close();
         }
     }
@@ -58,6 +60,15 @@ class CloudFormationLambdaObjectPropertyTest {
         assertThat(TestFixtures.awaitStackTerminal(cfn, LIST_STACK, DEPLOY_TIMEOUT)).isEqualTo("ROLLBACK_COMPLETE");
         assertThat(reasons(LIST_STACK)).anyMatch(reason ->
                 reason.contains("Property [DeadLetterConfig] expected type: JSONObject, found: JSONArray"));
+    }
+
+    @Test
+    @DisplayName("a list property that is an object fails the stack")
+    void aListPropertyThatIsAnObjectFailsTheStack() throws InterruptedException {
+        cfn.createStack(request -> request.stackName(LAYERS_STACK).templateBody(template("\"Layers\": {\"a\": \"b\"}")));
+        assertThat(TestFixtures.awaitStackTerminal(cfn, LAYERS_STACK, DEPLOY_TIMEOUT)).isEqualTo("ROLLBACK_COMPLETE");
+        assertThat(reasons(LAYERS_STACK)).anyMatch(reason ->
+                reason.contains("Property [Layers] expected type: JSONArray, found: JSONObject"));
     }
 
     private static List<String> reasons(String stackName) {

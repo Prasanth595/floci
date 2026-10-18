@@ -6,6 +6,9 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -62,7 +65,8 @@ class CloudFormationLambdaObjectPropertyIntegrationTest {
 
     /**
      * Measured on AWS (eu-west-1, 2026-10-18): {@code Ref: AWS::NoValue}, directly or chosen by
-     * {@code Fn::If}, leaves the property out, and the stack is created.
+     * {@code Fn::If}, leaves the property out, object and list properties alike, and the stack is
+     * created.
      */
     @Test
     void aPropertyLeftOutWithNoValueIsNotRefused() {
@@ -91,6 +95,78 @@ class CloudFormationLambdaObjectPropertyIntegrationTest {
                 }
                 """);
         assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(conditional, CFN_AUTH).status());
+
+        String lists = stackName("novalue-lists");
+        submit("CreateStack", lists, template(",\"Layers\": {\"Ref\": \"AWS::NoValue\"}, "
+                + "\"Architectures\": {\"Ref\": \"AWS::NoValue\"}, \"Environment\": {\"Ref\": \"AWS::NoValue\"}, "
+                + "\"ImageConfig\": {\"Ref\": \"AWS::NoValue\"}"));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(lists, CFN_AUTH).status());
+
+        String conditionalList = stackName("novalue-if-list");
+        submit("CreateStack", conditionalList, """
+                {
+                  "Conditions": {"Never": {"Fn::Equals": ["a", "b"]}},
+                  "Resources": {
+                    "Fn": {
+                      "Type": "AWS::Lambda::Function",
+                      "Properties": {
+                        "Runtime": "python3.14",
+                        "Handler": "index.handler",
+                        "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                        "Code": {"ZipFile": "def handler(e, c): return 'ok'"},
+                        "FileSystemConfigs": {"Fn::If": ["Never", [{"LocalMountPath": "/mnt/x",
+                            "Arn": "arn:aws:elasticfilesystem:us-east-1:000000000000:access-point/fsap-0123456789abcdef0"}],
+                            {"Ref": "AWS::NoValue"}]}
+                      }
+                    }
+                  }
+                }
+                """);
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(conditionalList, CFN_AUTH).status());
+    }
+
+    /**
+     * The other readers of the function and of its layers refuse a value of the wrong type the same
+     * way, each with the message measured for it on AWS (eu-west-1, 2026-10-18).
+     */
+    @Test
+    void everyOtherPropertyOfTheWrongTypeFailsTheCreate() {
+        Map<String, String> functionProperties = new LinkedHashMap<>();
+        functionProperties.put(",\"Environment\": [\"x\"]",
+                "Property [Environment] expected type: JSONObject, found: JSONArray");
+        functionProperties.put(",\"Environment\": {\"Variables\": \"x\"}",
+                "Property [Variables] expected type: JSONObject, found: String");
+        functionProperties.put(",\"ImageConfig\": \"x\"",
+                "Property [ImageConfig] expected type: JSONObject, found: String");
+        functionProperties.put(",\"Layers\": {\"a\": \"b\"}",
+                "Property [Layers] expected type: JSONArray, found: JSONObject");
+        functionProperties.put(",\"Layers\": 5",
+                "Property [Layers] expected type: JSONArray, found: String");
+        functionProperties.put(",\"Architectures\": \"x86_64\"",
+                "Property [Architectures] expected type: JSONArray, found: String");
+        functionProperties.put(",\"FileSystemConfigs\": \"x\"",
+                "Property [FileSystemConfigs] expected type: JSONArray, found: String");
+        functionProperties.forEach((property, reason) -> {
+            String stack = stackName("type");
+            submit("CreateStack", stack, template(property));
+            assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status(), property);
+            assertEventReason(stack, reason);
+        });
+
+        Map<String, String> layerProperties = Map.of(
+                "\"CompatibleRuntimes\": \"python3.14\"",
+                "Property [CompatibleRuntimes] expected type: JSONArray, found: String",
+                "\"CompatibleArchitectures\": {\"a\": \"b\"}",
+                "Property [CompatibleArchitectures] expected type: JSONArray, found: JSONObject");
+        layerProperties.forEach((property, reason) -> {
+            String stack = stackName("layer-type");
+            submit("CreateStack", stack, """
+                    {"Resources": {"L": {"Type": "AWS::Lambda::LayerVersion", "Properties": {
+                      "Content": {"S3Bucket": "none", "S3Key": "none.zip"}, %s}}}}
+                    """.formatted(property));
+            assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status(), property);
+            assertEventReason(stack, reason);
+        });
     }
 
     private String stackName(String purpose) {

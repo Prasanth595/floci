@@ -1556,7 +1556,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("ROLLBACK_COMPLETE"))
-            .body(containsString("FileSystemConfigs must be a list"));
+            .body(containsString("Property [FileSystemConfigs] expected type: JSONArray, found: JSONObject"));
     }
 
     private static String lambdaFileSystemTemplate(String functionName, String accessPointArn,
