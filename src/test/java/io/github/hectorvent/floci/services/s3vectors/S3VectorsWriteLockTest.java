@@ -8,10 +8,10 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.s3vectors.model.VectorBucket;
 import io.github.hectorvent.floci.services.s3vectors.model.VectorData;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -20,7 +20,6 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -46,57 +45,58 @@ class S3VectorsWriteLockTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void bucketAndIndexTagUpdatesPreserveEachOther(boolean copyOnAccess) throws Exception {
+    void vectorWritesPreserveConcurrentIndexCreation(boolean copyOnAccess) throws Exception {
         setUp(copyOnAccess);
         createIndex();
-        overlap(() -> service.replaceBucketTags("bucket", Map.of("bucket", "tag"), REGION),
-                () -> service.replaceIndexTags("bucket", "index", Map.of("index", "tag"), REGION));
-        assertEquals(Map.of("bucket", "tag"), service.getVectorBucket("bucket", REGION).getTags());
-        assertEquals(Map.of("index", "tag"), service.getIndex("bucket", "index", REGION).getTags());
+        overlap(() -> putVector("first"), () -> service.createIndex("bucket", "second", 1,
+                "float32", "cosine", List.of(), REGION));
+        assertEquals("second", service.getIndex("bucket", "second", REGION).getIndexName());
+        assertEquals(1, service.getVectors("bucket", "index", List.of("first"), REGION).size());
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void bucketTagsDoNotOverwriteConcurrentIndexCreation(boolean copyOnAccess) throws Exception {
+    void concurrentVectorWritesPreserveBothVectors(boolean copyOnAccess) throws Exception {
         setUp(copyOnAccess);
-        overlap(() -> service.replaceBucketTags("bucket", Map.of("bucket", "tag"), REGION), this::createIndex);
-        assertEquals(Map.of("bucket", "tag"), service.getVectorBucket("bucket", REGION).getTags());
-        assertEquals("index", service.getIndex("bucket", "index", REGION).getIndexName());
+        createIndex();
+        overlap(() -> putVector("first"), () -> putVector("second"));
+        assertEquals(2, service.getVectors("bucket", "index", List.of("first", "second"), REGION).size());
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void indexTagsPreserveVectorWritesAndDoNotReviveDeletedData(boolean copyOnAccess) throws Exception {
+    void vectorWritesDoNotReviveDeletedVectorsOrIndexes(boolean copyOnAccess) throws Exception {
         setUp(copyOnAccess);
         createIndex();
-        Runnable tagUpdate = () -> service.replaceIndexTags("bucket", "index", Map.of("index", "tag"), REGION);
-        overlap(tagUpdate, () -> service.putVectors("bucket", "index",
-                List.of(new VectorData("key", List.of(1.0f), Map.of())), REGION));
-        assertEquals(Map.of("index", "tag"), service.getIndex("bucket", "index", REGION).getTags());
-        assertEquals(1, service.getVectors("bucket", "index", List.of("key"), REGION).size());
+        putVector("old");
+        overlap(() -> putVector("new"), () -> service.deleteVectors("bucket", "index", List.of("old"), REGION));
+        assertTrue(service.getVectors("bucket", "index", List.of("old"), REGION).isEmpty());
+        assertEquals(1, service.getVectors("bucket", "index", List.of("new"), REGION).size());
 
-        overlap(tagUpdate, () -> service.deleteVectors("bucket", "index", List.of("key"), REGION));
-        assertTrue(service.getVectors("bucket", "index", List.of("key"), REGION).isEmpty());
-
-        overlap(tagUpdate, () -> service.deleteIndex("bucket", "index", REGION));
+        overlap(() -> putVector("new"), () -> service.deleteIndex("bucket", "index", REGION));
         AwsException error = assertThrows(AwsException.class, () -> service.getIndex("bucket", "index", REGION));
         assertEquals("NotFoundException", error.getErrorCode());
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void tagUpdateCannotResurrectADeletedOrRecreatedBucket(boolean copyOnAccess) throws Exception {
+    void indexDeletionCannotResurrectADeletedOrRecreatedBucket(boolean copyOnAccess) throws Exception {
         setUp(copyOnAccess);
-        overlap(() -> service.replaceBucketTags("bucket", Map.of("old", "tag"), REGION),
-                () -> service.deleteVectorBucket("bucket", REGION));
+        createIndex();
+        overlap(() -> service.deleteIndex("bucket", "index", REGION), () -> service.deleteVectorBucket("bucket", REGION));
         assertThrows(AwsException.class, () -> service.getVectorBucket("bucket", REGION));
 
         service.createVectorBucket("bucket", null, REGION);
-        overlap(() -> service.replaceBucketTags("bucket", Map.of("old", "tag"), REGION), () -> {
+        createIndex();
+        overlap(() -> service.deleteIndex("bucket", "index", REGION), () -> {
             service.deleteVectorBucket("bucket", REGION);
             service.createVectorBucket("bucket", null, Map.of("new", "tag"), REGION);
         });
         assertEquals(Map.of("new", "tag"), service.getVectorBucket("bucket", REGION).getTags());
+    }
+
+    private void putVector(String key) {
+        service.putVectors("bucket", "index", List.of(new VectorData(key, List.of(1.0f), Map.of())), REGION);
     }
 
     private void overlap(Runnable first, Runnable second) throws Exception {
@@ -110,9 +110,7 @@ class S3VectorsWriteLockTest {
         try {
             assertTrue(gate.entered.await(5, TimeUnit.SECONDS), "First writer did not reach storage");
             secondThread.start();
-            // Wait for either serialization or the competing write to finish, not a scheduling delay.
-            await().atMost(Duration.ofSeconds(5))
-                    .until(() -> secondThread.getState() == Thread.State.BLOCKED || secondTask.isDone());
+            ThreadStates.awaitBlockedOrDone(secondThread);
         } finally {
             gate.release.countDown();
         }

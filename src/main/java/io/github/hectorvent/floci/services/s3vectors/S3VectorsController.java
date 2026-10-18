@@ -332,7 +332,8 @@ public class S3VectorsController {
                 index.getDataType(),
                 index.getDimension(),
                 index.getDistanceMetric(),
-                new MetadataConfiguration(index.getNonFilterableMetadataKeys()),
+                index.getNonFilterableMetadataKeys().isEmpty()
+                        ? null : new MetadataConfiguration(index.getNonFilterableMetadataKeys()),
                 index.getEncryptionConfiguration()
         );
         return Response.ok(new GetIndexResponse(rep)).build();
@@ -352,8 +353,8 @@ public class S3VectorsController {
                         i.getDataType(),
                         i.getDimension(),
                         i.getDistanceMetric(),
-                        new MetadataConfiguration(i.getNonFilterableMetadataKeys()),
-                        i.getEncryptionConfiguration()
+                        null,
+                        null
                 ))
                 .toList();
         return Response.ok(new ListIndexesResponse(reps, null)).build();

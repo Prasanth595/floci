@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -121,9 +122,10 @@ public class S3VectorsService {
             throw new AwsException("ValidationException", "Unsupported distanceMetric: " + distanceMetric + ". Supported metrics are cosine and euclidean.", 400);
         }
         if (nonFilterableMetadataKeys == null || nonFilterableMetadataKeys.size() > 10
-                || nonFilterableMetadataKeys.stream().anyMatch(key -> key == null || key.isBlank() || key.length() > 63)) {
+                || nonFilterableMetadataKeys.stream().anyMatch(key -> key == null || key.isBlank() || key.length() > 63)
+                || new HashSet<>(nonFilterableMetadataKeys).size() != nonFilterableMetadataKeys.size()) {
             throw new AwsException("ValidationException",
-                    "NonFilterableMetadataKeys must contain at most 10 keys of 1 to 63 characters.", 400);
+                    "NonFilterableMetadataKeys must contain at most 10 unique keys of 1 to 63 characters.", 400);
         }
 
         synchronized (lockFor(bucketName, region)) {
@@ -174,23 +176,6 @@ public class S3VectorsService {
             bucket.getIndexes().remove(indexName);
             store.put(buildStorageKey(region, bucketName), bucket);
             LOG.infov("Deleted Index: {0}", indexName);
-        }
-    }
-
-    public void replaceBucketTags(String bucketName, Map<String, String> tags, String region) {
-        synchronized (lockFor(bucketName, region)) {
-            VectorBucket bucket = getVectorBucket(bucketName, region);
-            bucket.setTags(new ConcurrentHashMap<>(tags));
-            store.put(buildStorageKey(region, bucketName), bucket);
-        }
-    }
-
-    public void replaceIndexTags(String bucketName, String indexName, Map<String, String> tags, String region) {
-        synchronized (lockFor(bucketName, region)) {
-            VectorBucket bucket = getVectorBucket(bucketName, region);
-            VectorIndex index = getIndex(bucket, indexName);
-            index.setTags(new ConcurrentHashMap<>(tags));
-            store.put(buildStorageKey(region, bucketName), bucket);
         }
     }
 

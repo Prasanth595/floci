@@ -35,13 +35,11 @@ class S3VectorsServiceTest {
     }
 
     @Test
-    void persistsCreationTimesConfigurationAndReconciledTags() throws Exception {
+    void persistsCreationTimesConfigurationAndCreationTags() throws Exception {
         Map<String, String> encryption = Map.of("sseType", "aws:kms", "kmsKeyArn", "key");
         VectorBucket bucket = service.createVectorBucket("bucket", encryption, Map.of("old", "value"), REGION);
         VectorIndex index = service.createIndex("bucket", "index", 3, "float32", "cosine", List.of("text"),
                 null, Map.of("old", "value"), REGION);
-        service.replaceBucketTags("bucket", Map.of("new", "value"), REGION);
-        service.replaceIndexTags("bucket", "index", Map.of(), REGION);
 
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         VectorBucket restored = mapper.readValue(mapper.writeValueAsString(bucket), VectorBucket.class);
@@ -50,8 +48,8 @@ class S3VectorsServiceTest {
         assertEquals(index.getCreationTime(), restoredIndex.getCreationTime());
         assertEquals(encryption, restoredIndex.getEncryptionConfiguration());
         assertEquals(List.of("text"), restoredIndex.getNonFilterableMetadataKeys());
-        assertEquals(Map.of("new", "value"), restored.getTags());
-        assertEquals(Map.of(), restoredIndex.getTags());
+        assertEquals(Map.of("old", "value"), restored.getTags());
+        assertEquals(Map.of("old", "value"), restoredIndex.getTags());
     }
 
     @Test
@@ -91,7 +89,7 @@ class S3VectorsServiceTest {
     void invalidMetadataKeysFailBeforeCreatingAnIndex() {
         service.createVectorBucket("bucket", null, REGION);
         for (List<String> keys : List.of(List.of(""), List.of(" "), List.of("a".repeat(64)),
-                Collections.nCopies(11, "key"), Collections.<String>singletonList(null))) {
+                Collections.nCopies(11, "key"), List.of("text", "text"), Collections.<String>singletonList(null))) {
             AwsException error = assertThrows(AwsException.class,
                     () -> service.createIndex("bucket", "index", 3, "float32", "cosine", keys, REGION));
             assertEquals("ValidationException", error.getErrorCode());

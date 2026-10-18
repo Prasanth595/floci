@@ -55,16 +55,16 @@ nearer vector that does not match the filter cannot consume a result slot.
 ## Resource configuration
 
 Vector buckets and indexes retain their creation times, encryption settings, and
-creation-time tags. Get and list responses include creation times; index responses
-also include metadata configuration and encryption settings. Indexes inherit their
-bucket's encryption settings unless overridden. These fields use the existing
-S3 Vectors storage backend.
+creation-time tags. Get and list responses include creation times. `GetIndex`
+returns encryption settings and includes metadata configuration only when
+non-filterable keys are configured. Indexes inherit their bucket's encryption
+settings unless overridden. These fields use the existing S3 Vectors storage backend.
 
 Index dimensions must be between 1 and 4096. Metadata configuration accepts up to
-10 non-filterable keys, each a non-blank string of 1 to 63 characters. Queries reject
-filters on these keys, including filters nested in logical expressions.
+10 unique non-filterable keys, each a non-blank string of 1 to 63 characters.
+Queries reject filters on these keys, including filters nested in logical expressions.
 
-Writes to the same bucket are serialized across tags, indexes, vectors, and bucket
+Writes to the same bucket are serialized across indexes, vectors, and bucket
 deletion so concurrent changes do not overwrite each other or restore deleted data.
 
 Encryption settings are stored and returned; Floci does not perform KMS encryption.

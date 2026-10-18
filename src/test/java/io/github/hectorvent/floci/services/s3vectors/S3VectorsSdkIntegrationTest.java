@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Stream;
 
+import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
@@ -89,7 +90,51 @@ class S3VectorsSdkIntegrationTest {
                 Arguments.of("float32", "cosine", List.of("   "), "NonFilterableMetadataKeys"),
                 Arguments.of("float32", "cosine", Collections.singletonList(null), "NonFilterableMetadataKeys"),
                 Arguments.of("float32", "cosine", List.of("a".repeat(64)), "NonFilterableMetadataKeys"),
+                Arguments.of("float32", "cosine", List.of("text", "text"), "NonFilterableMetadataKeys"),
                 Arguments.of("float32", "cosine", Collections.nCopies(11, "key"), "NonFilterableMetadataKeys"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void configurationAppearsOnlyInGetIndexAndEmptyMetadataIsOmitted(boolean configured) {
+        String name = "response-vectors-" + UUID.randomUUID().toString().substring(0, 8);
+        try (S3VectorsClient vectors = vectors("us-east-1")) {
+            vectors.createVectorBucket(request -> request.vectorBucketName(name));
+            try {
+                vectors.createIndex(request -> {
+                    request.vectorBucketName(name).indexName("index").dimension(3)
+                            .dataType("float32").distanceMetric("cosine");
+                    if (configured) {
+                        request.metadataConfiguration(metadata -> metadata.nonFilterableMetadataKeys("text"));
+                    }
+                });
+                Index index = vectors.getIndex(request -> request.vectorBucketName(name).indexName("index")).index();
+                assertEquals("AES256", index.encryptionConfiguration().sseTypeAsString());
+                if (configured) {
+                    assertEquals(List.of("text"), index.metadataConfiguration().nonFilterableMetadataKeys());
+                } else {
+                    assertNull(index.metadataConfiguration());
+                }
+
+                Map<String, Object> detail = given().baseUri(endpoint.toString()).contentType("application/json")
+                        .body(Map.of("vectorBucketName", name, "indexName", "index"))
+                        .post("/GetIndex").then().statusCode(200).extract().path("index");
+                assertEquals(configured, detail.containsKey("metadataConfiguration"));
+                assertTrue(detail.containsKey("encryptionConfiguration"));
+                // SDK clients ignore unknown fields, so check the wire response as well.
+                Map<String, Object> summary = given().baseUri(endpoint.toString()).contentType("application/json")
+                        .body(Map.of("vectorBucketName", name))
+                        .post("/ListIndexes").then().statusCode(200).extract().path("indexes[0]");
+                assertEquals(index.indexArn(), summary.get("indexArn"));
+                assertFalse(summary.containsKey("metadataConfiguration"));
+                assertFalse(summary.containsKey("encryptionConfiguration"));
+            } finally {
+                for (VectorIndex index : service.listIndexes(name, "us-east-1")) {
+                    vectors.deleteIndex(request -> request.vectorBucketName(name).indexName(index.getIndexName()));
+                }
+                vectors.deleteVectorBucket(request -> request.vectorBucketName(name));
+            }
+        }
     }
 
     @ParameterizedTest
