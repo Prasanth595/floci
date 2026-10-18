@@ -284,6 +284,7 @@ public class LambdaWebDataPlane {
         Future.fromCompletionStage(environment.awaitExit(EXIT_WAIT), vertx.getOrCreateContext())
                 .onComplete(ignored -> {
                     if (retry && environment.exitedBefore(started)) {
+                        environment.exchangeClosed();
                         acquire(request, host, target, revision, requestId, environment);
                         return;
                     }
@@ -343,6 +344,7 @@ public class LambdaWebDataPlane {
             this.requestId = requestId;
             this.endpointName = endpointName;
             this.started = started;
+            environment.exchangeOpened();
         }
 
         /** The answer of the app, cut when {@code errorType} is set. */

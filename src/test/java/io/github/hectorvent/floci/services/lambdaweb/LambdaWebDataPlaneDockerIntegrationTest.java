@@ -471,6 +471,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         assertEquals("WARN", crashReport.getString("level"));
         assertEquals("failure", crashReport.getString("record.status"));
         assertEquals("Runtime.ExitError", crashReport.getString("record.errorType"));
+        assertEquals(2, crashReport.getInt("record.metrics.totalRequests"));
         assertEquals("success", platformEvent(crash, "platform.spinDownReport").getString("record.status"));
 
         String stopped = given().header("Host", domain).when().get("/").then().statusCode(200)

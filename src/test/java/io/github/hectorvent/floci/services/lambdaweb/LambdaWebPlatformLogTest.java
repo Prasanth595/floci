@@ -54,7 +54,7 @@ class LambdaWebPlatformLogTest {
     void aRequestIsReportedWithItsDurationInMillisecondsToThreeDecimals() {
         LambdaWebPlatformLog platform = new LambdaWebPlatformLog(
                 logs.open("111122223333", "eu-west-1", GROUP, STREAM, "DEBUG"), "eu-west-1", "web", "rev-abcde",
-                "nodejs24.x");
+                "nodejs24.x", "INFO");
 
         platform.requestComplete("KXH25FBDZ33GP4TQ4ARAUYSTSA", "dev", 504, "Runtime.RequestTimeout", 3_000_716_400L, 0);
 
@@ -70,13 +70,13 @@ class LambdaWebPlatformLogTest {
     void eventsBelowTheSystemLogLevelAreDroppedAndAFailedReportIsWarn() {
         LambdaWebPlatformLog platform = new LambdaWebPlatformLog(
                 logs.open("111122223333", "eu-west-1", GROUP, STREAM, "WARN"), "eu-west-1", "web", "rev-abcde",
-                "nodejs24.x");
+                "nodejs24.x", "INFO");
         platform.initStart();
         platform.initReport(null, new LambdaWebPlatformLog.Usage(178_400, 142L * 1024 * 1024 + 5));
         platform.invokeStart(1);
         platform.concurrency(3);
 
-        platform.invokeReport("Runtime.ExitError");
+        platform.end(null, "Runtime.ExitError");
 
         JsonPath event = JsonPath.from(firstMessage());
         assertEquals("WARN", event.getString("level"));
@@ -85,6 +85,18 @@ class LambdaWebPlatformLogTest {
         assertEquals(3, event.getInt("record.metrics.concurrentRequests"));
         assertEquals(142, event.getInt("record.metrics.maxMemoryUsageMb"));
         assertTrue(firstMessage().contains("\"totalCpuTimeMs\":0.000,"), firstMessage());
+    }
+
+    @Test
+    void theListenFailureIsDroppedAtFatal() {
+        LambdaWebPlatformLog platform = new LambdaWebPlatformLog(
+                logs.open("111122223333", "eu-west-1", GROUP, STREAM, "DEBUG"), "eu-west-1", "web", "rev-abcde",
+                "nodejs24.x", "FATAL");
+
+        platform.applicationError("Application.TimeoutListenError: nothing was listening");
+        platform.spinDownStart();
+
+        assertEquals("platform.spinDownStart", JsonPath.from(firstMessage()).getString("type"));
     }
 
     @SuppressWarnings("unchecked")

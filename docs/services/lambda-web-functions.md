@@ -106,7 +106,7 @@ The platform writes the `platform.*` events of the [system log schema](https://d
 | Event | When |
 | --- | --- |
 | `platform.initStart` | The environment starts |
-| `platform.initReport` | The server listens, or fails to, with the error type of the `502` page. A server that does not listen also gets an `ERROR` event that says so |
+| `platform.initReport` | The server listens, or fails to, with the error type of the `502` page. A server that does not listen also gets an `ERROR` event that says so, unless `applicationLogLevel` is `FATAL` |
 | `platform.invokeStart` | Right after a successful `initReport` |
 | `platform.requestComplete` | At `DEBUG`, for each request the environment took, with the status, the body bytes and the error type of a `503` or `504` page |
 | `platform.invokeSummary` | Every 60 seconds from `invokeStart`, and once more when the environment ends |

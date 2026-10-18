@@ -101,6 +101,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private static final String[] READ_USAGE = {"/bin/cat", "/sys/fs/cgroup/cpu.stat", "/sys/fs/cgroup/memory.peak"};
     private static final long SIGKILL_STATUS = 137;
     private static final long SIGTERM_STATUS = 143;
+    /** Longer than the data plane waits to see an exit, so a request the exit failed is counted. */
+    private static final Duration EXCHANGES_WAIT = Duration.ofSeconds(2);
 
     /**
      * One container of an endpoint's pool. It joins the pool before it starts, so requests that
@@ -122,6 +124,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         private volatile ScheduledFuture<?> summaries;
         /** Set once the app listens. An exit before that is the start's to report. */
         private volatile boolean serving;
+        /** Requests sent to the environment and not reported yet. Guarded by the environment. */
+        private int openExchanges;
         private volatile SessionCreds roleCredentials;
         private final AtomicInteger inFlight = new AtomicInteger();
         private final AtomicLong lastUsed = new AtomicLong(System.nanoTime());
@@ -173,12 +177,35 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             }
         }
 
+        public synchronized void exchangeOpened() {
+            openExchanges++;
+        }
+
         /** {@code errorType} names the page the platform answered in place of the app. */
         public void requestComplete(String requestId, String endpointName, int result, String errorType,
                                     long durationNanos, long responseBytes) {
             LambdaWebPlatformLog platform = platformLog;
             if (platform != null) {
                 platform.requestComplete(requestId, endpointName, result, errorType, durationNanos, responseBytes);
+            }
+            exchangeClosed();
+        }
+
+        /** Also for a request that goes to another environment, because this one had exited before it was sent. */
+        public synchronized void exchangeClosed() {
+            openExchanges--;
+            notifyAll();
+        }
+
+        private synchronized void awaitExchanges(Duration limit) {
+            long deadline = System.nanoTime() + limit.toNanos();
+            try {
+                for (long left = limit.toMillis(); openExchanges > 0 && left > 0;
+                     left = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())) {
+                    wait(left);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
         }
 
@@ -397,8 +424,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             stopContainer(environment);
             return;
         }
-        platform.invokeSummary(usage(environment.containerId), environment.inFlight.get());
-        platform.invokeReport(null);
+        platform.end(usage(environment.containerId), null);
         platform.spinDownStart();
         long stopping = System.nanoTime();
         Long status = stopForStatus(environment.containerId);
@@ -539,10 +565,10 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             environment.logs = logs.open(accountId, region, revision.serviceConfig.logGroup, environment.logStream,
                     revision.serviceConfig.systemLogLevel);
             platform = new LambdaWebPlatformLog(environment.logs, region, fn.functionName, revision.revisionId,
-                    revision.buildConfig.runtime);
+                    revision.buildConfig.runtime, revision.serviceConfig.applicationLogLevel);
             environment.platformLog = platform;
-            platform.initStart();
             ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
+            platform.initStart();
             watchExit(environment, true);
             EndpointInfo endpoint = info.getEndpoint(APP_PORT);
             awaitListening(containerId, platform);
@@ -550,10 +576,17 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             environment.host = endpoint.host();
             environment.port = endpoint.port();
             environment.roleCredentials = roleCredentials.orElse(null);
-            environment.serving = true;
             platform.invokeStart(environment.inFlight.get());
             environment.summaries = reaper.scheduleAtFixedRate(() -> summarize(environment),
                     SUMMARY_PERIOD.toMillis(), SUMMARY_PERIOD.toMillis(), TimeUnit.MILLISECONDS);
+            Long exitedEarly;
+            synchronized (environment) {
+                environment.serving = true;
+                exitedEarly = environment.exitSeen.getNow(null);
+            }
+            if (exitedEarly != null) {
+                exited(environment, exitedEarly);
+            }
             LOG.infov("Started the Lambda Web environment {0} of {1} revision {2} at {3}:{4}",
                     containerId, fn.functionName, revision.revisionId, endpoint.host(), endpoint.port());
         } catch (RuntimeException e) {
@@ -584,9 +617,10 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         try {
             ContainerExec.Result result = ContainerExec.runMerged(lifecycleManager.getDockerClient(), containerId,
                     READ_USAGE, USAGE_TIMEOUT_SECONDS);
-            if (result.timedOut() || result.exitCode() != 0) {
+            if (result.timedOut()) {
                 return null;
             }
+            // A kernel before 5.19 has no memory.peak. The CPU time still counts.
             long cpuMicros = 0;
             long memoryBytes = 0;
             for (String line : result.stdout().split("\n")) {
@@ -597,7 +631,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                     memoryBytes = Long.parseLong(fields[0]);
                 }
             }
-            return new LambdaWebPlatformLog.Usage(cpuMicros, memoryBytes);
+            return cpuMicros == 0 && memoryBytes == 0 ? null : new LambdaWebPlatformLog.Usage(cpuMicros, memoryBytes);
         } catch (RuntimeException e) {
             LOG.debugv(e, "Could not read the usage of the Lambda Web environment {0}", containerId);
             return null;
@@ -860,9 +894,11 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
 
     /** The environment leaves the pool before waiters hear of the exit, so the request after a failed one starts anew. */
     private void exited(Environment environment, long seenAt) {
-        if (!environment.serving) {
-            environment.sawExit(seenAt);
-            return;
+        synchronized (environment) {
+            if (!environment.serving) {
+                environment.sawExit(seenAt);
+                return;
+            }
         }
         boolean running = environment.alive.compareAndSet(true, false);
         if (running) {
@@ -880,8 +916,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                 Integer status = exitStatus(environment.containerId);
                 LOG.infov("The Lambda Web environment {0} exited with status {1}: {2}",
                         environment.containerId, status, lastLogLines(environment.containerId));
-                platform.invokeSummary(null, 0);
-                platform.invokeReport(Integer.valueOf(0).equals(status) ? "Runtime.Exit" : "Runtime.ExitError");
+                environment.awaitExchanges(EXCHANGES_WAIT);
+                platform.end(null, Integer.valueOf(0).equals(status) ? "Runtime.Exit" : "Runtime.ExitError");
                 platform.spinDownStart();
                 long stopping = System.nanoTime();
                 try {

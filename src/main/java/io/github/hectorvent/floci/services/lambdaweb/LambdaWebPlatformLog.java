@@ -34,6 +34,7 @@ final class LambdaWebPlatformLog {
     private final String functionName;
     private final String revisionId;
     private final String runtime;
+    private final String applicationLogLevel;
     private final String instanceId = UUID.randomUUID().toString();
     private long initStarted;
     private long invokeStarted;
@@ -47,14 +48,16 @@ final class LambdaWebPlatformLog {
     private long cpuAtWindowStart;
     private long peakMemoryMb;
     private boolean serving;
+    private boolean ended;
 
     LambdaWebPlatformLog(LambdaWebLogs.Sink sink, String region, String functionName, String revisionId,
-                         String runtime) {
+                         String runtime, String applicationLogLevel) {
         this.sink = sink;
         this.region = region;
         this.functionName = functionName;
         this.revisionId = revisionId;
         this.runtime = runtime;
+        this.applicationLogLevel = applicationLogLevel;
     }
 
     synchronized void initStart() {
@@ -83,8 +86,11 @@ final class LambdaWebPlatformLog {
         sink.platform(Instant.now(), errorType == null ? "INFO" : "WARN", "platform.initReport", record);
     }
 
-    /** A failure AWS writes in the shape of console output, with the time as Node prints it. */
+    /** A failure AWS writes in the shape of console output, with the time as Node prints it, and drops at FATAL. */
     void applicationError(String message) {
+        if ("FATAL".equals(applicationLogLevel)) {
+            return;
+        }
         ObjectNode event = JSON.createObjectNode();
         Instant now = Instant.now();
         event.put("timestamp", CONSOLE_TIME.format(now));
@@ -137,8 +143,11 @@ final class LambdaWebPlatformLog {
         sink.platform(Instant.now(), "DEBUG", "platform.requestComplete", record);
     }
 
-    /** Closes the window that started at the last summary, or at {@code invokeStart}. */
+    /** Closes the window that started at the last summary, or at {@code invokeStart}, unless the environment ended. */
     synchronized void invokeSummary(Usage usage, int inFlight) {
+        if (ended) {
+            return;
+        }
         read(usage);
         Instant now = Instant.now();
         ObjectNode record = JSON.createObjectNode();
@@ -156,8 +165,13 @@ final class LambdaWebPlatformLog {
         cpuAtWindowStart = cpuMicros;
     }
 
-    /** {@code errorType} is null when Floci stops the environment, and names the exit when the process ends. */
-    synchronized void invokeReport(String errorType) {
+    /**
+     * The last summary and {@code invokeReport}. {@code errorType} is null when Floci stops the environment, and names
+     * the exit when the process ends.
+     */
+    synchronized void end(Usage usage, String errorType) {
+        invokeSummary(usage, 0);
+        ended = true;
         ObjectNode record = status(errorType);
         record.put("instanceId", instanceId);
         ObjectNode metrics = record.putObject("metrics");
