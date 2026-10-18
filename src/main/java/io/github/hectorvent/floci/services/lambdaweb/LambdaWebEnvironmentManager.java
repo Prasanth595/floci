@@ -101,6 +101,9 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private static final String[] READ_USAGE = {"/bin/cat", "/sys/fs/cgroup/cpu.stat", "/sys/fs/cgroup/memory.peak"};
     private static final long SIGKILL_STATUS = 137;
     private static final long SIGTERM_STATUS = 143;
+    /** The statuses index.mjs exits with when the app fails to load. */
+    private static final long INIT_CODE_ERROR_STATUS = 70;
+    private static final long IMPORT_CODE_ERROR_STATUS = 71;
     /** Longer than the data plane waits to see an exit, so a request the exit failed is counted. */
     private static final Duration EXCHANGES_WAIT = Duration.ofSeconds(2);
 
@@ -721,8 +724,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             if (exitCode.isPresent()) {
                 LOG.infov("The Lambda Web environment {0} exited with status {1} before it listened: {2}",
                         containerId, exitCode.get(), lastLogLines(containerId));
-                throw new StartFailure(exitCode.get() == 0
-                        ? LambdaWebErrorPages.RUNTIME_EXIT : LambdaWebErrorPages.INIT_CODE_ERROR);
+                throw new StartFailure(initExitPage(exitCode.get()));
             }
             if (isListening(containerId)) {
                 return;
@@ -741,6 +743,17 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                 throw new StartFailure(LambdaWebErrorPages.TIMEOUT_LISTEN_ERROR);
             }
         }
+    }
+
+    private static LambdaWebErrorPages.Page initExitPage(long exitCode) {
+        if (exitCode == 0) {
+            return LambdaWebErrorPages.RUNTIME_EXIT;
+        }
+        if (exitCode == INIT_CODE_ERROR_STATUS) {
+            return LambdaWebErrorPages.INIT_CODE_ERROR;
+        }
+        return exitCode == IMPORT_CODE_ERROR_STATUS
+                ? LambdaWebErrorPages.IMPORT_CODE_ERROR : LambdaWebErrorPages.RUNTIME_EXIT_ERROR;
     }
 
     /**

@@ -92,5 +92,22 @@ if (LEVELS.INFO < minimum) {
   process.stderr.write = drop;
 }
 
+// AWS writes one ERROR event in place of Node's stack when the app fails to load. The exit status
+// tells Floci the error type, as LambdaWebEnvironmentManager reads it.
+const INIT_CODE_ERROR_STATUS = 70;
+const IMPORT_CODE_ERROR_STATUS = 71;
 const entry = process.env.AWS_LAMBDA_NODEJS_ENTRYPOINT || 'index.js';
-await import(pathToFileURL(path.resolve('/var/task', entry)).href);
+try {
+  await import(pathToFileURL(path.resolve('/var/task', entry)).href);
+} catch (error) {
+  const missing = error?.code === 'MODULE_NOT_FOUND' || error?.code === 'ERR_MODULE_NOT_FOUND';
+  const reason = error instanceof Error ? error.message : String(error);
+  if (LEVELS.ERROR >= minimum) {
+    writeErr(line('ERROR', missing
+      ? `Runtime.ImportCodeError: could not load customer code: ${reason}. The entrypoint must be 'index.js' at the`
+        + ' root of the deployment package, or the AWS_LAMBDA_NODEJS_ENTRYPOINT environment variable must point to'
+        + ' your entry file'
+      : `Application.InitCodeError: could not load customer code: ${reason}`));
+  }
+  process.exit(missing ? IMPORT_CODE_ERROR_STATUS : INIT_CODE_ERROR_STATUS);
+}
