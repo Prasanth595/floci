@@ -50,6 +50,14 @@ Disabling verification (`--no-verify-ssl`, `verify=False`, `NODE_TLS_REJECT_UNAU
 | `FLOCI_TLS_KEY_PATH` | *(unset)* | Path to PEM private key file |
 | `FLOCI_TLS_SELF_SIGNED` | `true` | Auto-generate a server certificate signed by Floci's local CA when no cert/key paths provided |
 
+The HTTPS listener accepts TLS 1.3 and TLS 1.2 by default, matching
+[AWS's TLS 1.2 minimum](https://aws.amazon.com/blogs/security/tls-1-2-required-for-aws-endpoints/).
+TLS 1.0 and TLS 1.1 are not enabled by default. To require TLS 1.3 only, set
+`QUARKUS_TLS_PROTOCOLS=TLSv1.3`. An explicit [Quarkus TLS registry protocol setting](https://quarkus.io/guides/tls-registry-reference#tls-protocol-versions)
+(`quarkus.tls.protocols`) takes precedence; otherwise the listener inherits the legacy
+`quarkus.http.ssl.protocols` setting, including `QUARKUS_HTTP_SSL_PROTOCOLS`. The selected
+protocols are retained when the server certificate is reloaded.
+
 With TLS enabled, the proxy that accepts HTTP and HTTPS on Floci's ports listens on `QUARKUS_HTTP_HOST` (`127.0.0.1` by default). As without TLS, any address outside loopback also needs `FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE=true`; see [Network Exposure](./environment-variables.md#network-exposure).
 
 ## Local CA and Server Certificate
