@@ -36,6 +36,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -43,7 +44,6 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBooleanOrF
 import static io.github.hectorvent.floci.services.ses.SesV2Json.expectedNullError;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseOptionString;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.parseSuppressedReasons;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
@@ -400,6 +400,21 @@ public class SesConfigurationSetController {
         EventDestination dest = objectMapper.treeToValue(withoutEnabled, EventDestination.class);
         dest.setEnabled(enabled);
         return dest;
+    }
+
+    /**
+     * Reads a {@code SuppressedReasons} member whose type {@link SesV2RequestShapes} has already
+     * checked; reason values are validated by the service layer. A {@code null} element is kept, so
+     * that validation rejects it as AWS does (verified against real AWS SES V2 on 2026-06-13).
+     * Missing / null yields an empty list for the PUT path, which AWS treats as an explicit empty
+     * override.
+     */
+    private static List<String> parseSuppressedReasons(JsonNode reasonsNode) {
+        List<String> reasons = new ArrayList<>();
+        for (JsonNode r : reasonsNode) {
+            reasons.add(r.textValue());
+        }
+        return reasons;
     }
 
     private static TrackingOptions parseTrackingOptions(JsonNode node) {

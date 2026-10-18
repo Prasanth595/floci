@@ -147,7 +147,7 @@ final class SesV2Json {
      * A structure member as the AWS deserializer reads it: absent or null is returned as is, an
      * array is "Start of list found where not expected" and any other non-object "Expected null".
      */
-    static JsonNode structureMemberOrAbsent(JsonNode parent, String field) {
+    private static JsonNode structureMemberOrAbsent(JsonNode parent, String field) {
         JsonNode node = parent.path(field);
         if (node.isMissingNode() || node.isNull() || node.isObject()) {
             return node;
@@ -159,7 +159,7 @@ final class SesV2Json {
     }
 
     /** A string member with the AWS deserializer's message for each wrong JSON type. */
-    static String typedStringMemberOrAbsent(JsonNode parent, String field) {
+    private static String typedStringMemberOrAbsent(JsonNode parent, String field) {
         JsonNode node = parent.path(field);
         if (node.isMissingNode() || node.isNull()) {
             return null;
@@ -306,21 +306,6 @@ final class SesV2Json {
             throw new AwsException("BadRequestException", fieldName + " is required.", 400);
         }
         return node.asText();
-    }
-
-    /**
-     * Reads a {@code SuppressedReasons} member whose type {@link SesV2RequestShapes} has already
-     * checked; reason values are validated by the service layer. A {@code null} element is kept, so
-     * that validation rejects it as AWS does (verified against real AWS SES V2 on 2026-06-13).
-     * Missing / null yields an empty list for the PUT path, which AWS treats as an explicit empty
-     * override.
-     */
-    static List<String> parseSuppressedReasons(JsonNode reasonsNode) {
-        List<String> reasons = new ArrayList<>();
-        for (JsonNode r : reasonsNode) {
-            reasons.add(r.textValue());
-        }
-        return reasons;
     }
 
     /**
