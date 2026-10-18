@@ -255,4 +255,11 @@ class FlowLogServiceTest {
             return new String(in.readAllBytes(), StandardCharsets.UTF_8).trim();
         }
     }
+
+    @Test
+    void bucketComesFromTheS3ArnEvenWhenThePrefixHasAColon() {
+        assertEquals("bkt", FlowLogService.bucketFromArn("arn:aws:s3:::bkt/logs:2024/"));
+        assertEquals("bkt", FlowLogService.bucketFromArn("arn:aws-cn:s3:::bkt"));
+        assertEquals("bkt", FlowLogService.bucketFromArn("bkt/prefix"));
+    }
 }

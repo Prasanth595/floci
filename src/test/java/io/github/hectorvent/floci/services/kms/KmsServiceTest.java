@@ -4035,4 +4035,13 @@ class KmsServiceTest {
             assertEquals(List.of("alias/aws/s3"), aliases.stream().map(KmsAlias::getAliasName).toList());
         }
     }
+
+    @Test
+    void aliasArnResolvesAnAliasNameContainingAColon() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/team:payments", key.getKeyId(), REGION);
+
+        String aliasArn = "arn:aws:kms:" + REGION + ":000000000000:alias/team:payments";
+        assertEquals(key.getKeyId(), kmsService.describeKey(aliasArn, REGION).getKeyId());
+    }
 }

@@ -469,4 +469,12 @@ class KinesisEventSourcePollerTest {
         verify(kinesisService, never()).getShardIterator(anyString(), anyString(), anyString(), any(), anyString());
         verify(kinesisService, never()).getRecords(anyString(), anyInt(), anyString());
     }
+
+    @Test
+    void streamNameComesFromAStreamOrAConsumerArn() {
+        assertEquals("orders", KinesisEventSourcePoller.streamNameFromArn(
+                "arn:aws:kinesis:us-east-1:000000000000:stream/orders"));
+        assertEquals("orders", KinesisEventSourcePoller.streamNameFromArn(
+                "arn:aws:kinesis:us-east-1:000000000000:stream/orders/consumer/reader:1700000000"));
+    }
 }

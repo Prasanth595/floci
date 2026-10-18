@@ -325,7 +325,18 @@ public class KinesisEventSourcePoller implements Resettable {
         esmStore.saveForAccount(esm.getAccountId(), esm);
     }
 
-    private static String streamNameFromArn(String arn) {
-        return arn.substring(arn.lastIndexOf("/") + 1);
+    /**
+     * The stream name from a stream ARN ({@code .../stream/S}) or a stream-consumer ARN
+     * ({@code .../stream/S/consumer/C:123}): the segment right after {@code stream/}, as
+     * {@code KinesisJsonHandler} reads it.
+     */
+    static String streamNameFromArn(String arn) {
+        int streamIdx = arn.indexOf(":stream/");
+        if (streamIdx < 0) {
+            return arn.substring(arn.lastIndexOf("/") + 1);
+        }
+        String after = arn.substring(streamIdx + ":stream/".length());
+        int slash = after.indexOf('/');
+        return slash >= 0 ? after.substring(0, slash) : after;
     }
 }

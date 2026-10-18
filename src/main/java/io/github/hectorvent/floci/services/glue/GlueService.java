@@ -2964,7 +2964,8 @@ public class GlueService {
     }
 
     private void validateResourceExists(String arn) {
-        String[] parts = arn.split(":");
+        // At most six parts: a job, table or other name may itself contain ':'.
+        String[] parts = arn.split(":", 6);
         if (parts.length >= 6) {
             String resource = parts[5];
             if (resource.startsWith("job/")) {
