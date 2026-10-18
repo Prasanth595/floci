@@ -292,7 +292,7 @@ class RdsQueryHandlerTest {
     void describeEvents_reconcilesOnlyTheRequestedDbInstance() {
         DbInstance requested = makeInstance("requested");
         when(service.listDbInstances("requested", null)).thenReturn(List.of(requested));
-        when(service.describeEvents("requested", "db-instance", null, null, null))
+        when(service.describeEvents(null, "requested", "db-instance", null, null, null))
                 .thenReturn(List.of());
         MultivaluedMap<String, String> p = params();
         p.add("SourceIdentifier", "requested");
@@ -308,7 +308,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void describeEvents_doesNotReconcileInstancesForAnotherSourceType() {
-        when(service.describeEvents("cluster", "db-cluster", null, null, null))
+        when(service.describeEvents(null, "cluster", "db-cluster", null, null, null))
                 .thenReturn(List.of());
         MultivaluedMap<String, String> p = params();
         p.add("SourceIdentifier", "cluster");

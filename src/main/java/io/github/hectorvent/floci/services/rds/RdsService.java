@@ -2936,7 +2936,11 @@ public class RdsService implements Resettable, ResourceProvider {
                 List.of("availability"), Instant.now(), instance.getDbInstanceArn()));
     }
 
-    public List<RdsEvent> describeEvents(String sourceIdentifier, String sourceType,
+    /**
+     * The events of {@code region}: an event belongs to the region its source ARN names. An event
+     * recorded without a source ARN stays visible everywhere, as before.
+     */
+    public List<RdsEvent> describeEvents(String region, String sourceIdentifier, String sourceType,
                                          Instant startTime, Instant endTime, Integer durationMinutes) {
         Instant now = Instant.now();
         pruneExpiredEvents(now);
@@ -2944,6 +2948,8 @@ public class RdsService implements Resettable, ResourceProvider {
         Instant effectiveStart = startTime != null ? startTime
                 : effectiveEnd.minusSeconds((durationMinutes != null ? durationMinutes : 60) * 60L);
         return events.scan(_ -> true).stream()
+                .filter(event -> region == null || event.sourceArn() == null
+                        || region.equals(AwsArnUtils.regionOrDefault(event.sourceArn(), region)))
                 .filter(event -> sourceIdentifier == null || sourceIdentifier.equals(event.sourceIdentifier()))
                 .filter(event -> sourceType == null || sourceType.equals(event.sourceType()))
                 .filter(event -> !event.date().isBefore(effectiveStart) && !event.date().isAfter(effectiveEnd))

@@ -651,7 +651,7 @@ public class RdsQueryHandler {
                 service.refreshDbInstanceRuntimeHealth(instance);
             }
         }
-        List<RdsEvent> all = service.describeEvents(sourceIdentifier, sourceType, start, end, duration);
+        List<RdsEvent> all = service.describeEvents(region, sourceIdentifier, sourceType, start, end, duration);
         int offset = parseMarker(params.getFirst("Marker"));
         int limit = maxRecords != null ? maxRecords : 100;
         int from = Math.min(offset, all.size());

@@ -3529,7 +3529,7 @@ class RdsServiceTest {
         listener.onAutoPause(AutoPauseListener.Event.RESUMED, start.plusSeconds(91));
 
         List<RdsEvent> events = rdsService.describeEvents(
-                "paused-1", "db-instance", start.minusSeconds(1), start.plusSeconds(120), null);
+                "us-east-1", "paused-1", "db-instance", start.minusSeconds(1), start.plusSeconds(120), null);
         assertEquals(List.of(
                         "Initiated pause for the DB instance.",
                         "Successfully paused the DB instance.",
@@ -9026,14 +9026,14 @@ class RdsServiceTest {
 
         assertEquals(DbInstanceStatus.FAILED, refreshed.getStatus());
         verify(proxyManager).stopProxy("rds-resource:" + refreshed.getDbInstanceArn());
-        List<RdsEvent> events = rdsService.describeEvents("dead-db", "db-instance", null, null, 60);
+        List<RdsEvent> events = rdsService.describeEvents("us-east-1", "dead-db", "db-instance", null, null, 60);
         assertEquals(1, events.size());
         assertEquals(List.of("availability"), events.getFirst().eventCategories());
         assertEquals(refreshed.getDbInstanceArn(), events.getFirst().sourceArn());
 
         // Repeated health reads do not duplicate the transition event.
         rdsService.refreshDbInstanceRuntimeHealth(refreshed);
-        assertEquals(1, rdsService.describeEvents("dead-db", "db-instance", null, null, 60).size());
+        assertEquals(1, rdsService.describeEvents("us-east-1", "dead-db", "db-instance", null, null, 60).size());
     }
 
     @Test
@@ -9049,7 +9049,7 @@ class RdsServiceTest {
 
         assertEquals(DbInstanceStatus.AVAILABLE, refreshed.getStatus());
         verify(proxyManager, never()).stopProxy("rds-resource:" + refreshed.getDbInstanceArn());
-        assertTrue(rdsService.describeEvents("blip-db", "db-instance", null, null, 60).isEmpty());
+        assertTrue(rdsService.describeEvents("us-east-1", "blip-db", "db-instance", null, null, 60).isEmpty());
     }
 
     @Test
@@ -9071,7 +9071,7 @@ class RdsServiceTest {
         assertEquals(DbInstanceStatus.FAILED, afterDefiniteAnswer.getStatus());
         verify(proxyManager).stopProxy(proxyKey);
         verify(containerManager, times(2)).probeContainer("cont-id");
-        assertEquals(1, rdsService.describeEvents("recover-db", "db-instance", null, null, 60).size());
+        assertEquals(1, rdsService.describeEvents("us-east-1", "recover-db", "db-instance", null, null, 60).size());
     }
 
     @Test
@@ -9089,11 +9089,29 @@ class RdsServiceTest {
         eventStore.put(retained.id(), retained);
 
         List<RdsEvent> result = rdsService.describeEvents(
-                null, null, now.minus(Duration.ofDays(20)), now.plusSeconds(1), null);
+                "us-east-1", null, null, now.minus(Duration.ofDays(20)), now.plusSeconds(1), null);
 
         assertEquals(List.of(retained), result);
         assertTrue(eventStore.get("retained").isPresent());
         assertTrue(eventStore.get("expired").isEmpty());
+    }
+
+    @Test
+    void describeEventsListsOnlyTheRequestRegionsEvents() throws Exception {
+        InMemoryStorage<String, RdsEvent> eventStore = new InMemoryStorage<>();
+        Field eventsField = RdsService.class.getDeclaredField("events");
+        eventsField.setAccessible(true);
+        eventsField.set(rdsService, eventStore);
+        Instant now = Instant.now();
+        RdsEvent east = new RdsEvent("east", "db-east", "db-instance", "created", List.of("creation"),
+                now.minusSeconds(60), "arn:aws:rds:us-east-1:123456789012:db:db-east");
+        RdsEvent west = new RdsEvent("west", "db-west", "db-instance", "created", List.of("creation"),
+                now.minusSeconds(60), "arn:aws:rds:eu-west-1:123456789012:db:db-west");
+        eventStore.put(east.id(), east);
+        eventStore.put(west.id(), west);
+
+        assertEquals(List.of(east), rdsService.describeEvents("us-east-1", null, null, null, null, null));
+        assertEquals(List.of(west), rdsService.describeEvents("eu-west-1", null, null, null, null, null));
     }
 
     @Test
