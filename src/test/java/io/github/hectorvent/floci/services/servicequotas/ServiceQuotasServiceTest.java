@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.servicequotas;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
@@ -16,13 +17,22 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class ServiceQuotasServiceTest {
 
     private static final String ACCOUNT_ID = "000000000000";
 
     private final ServiceQuotasService service =
-            new ServiceQuotasService(new InMemoryStorageFactory(ACCOUNT_ID), new ObjectMapper());
+            new ServiceQuotasService(new InMemoryStorageFactory(ACCOUNT_ID), new ObjectMapper(), defaultConfig());
+
+    private static EmulatorConfig defaultConfig() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().servicequotas().standardOnDemandVcpus()).thenReturn(5);
+        return config;
+    }
 
     @Test
     void syntheticQuotaCodesAreStableAndWellFormed() {

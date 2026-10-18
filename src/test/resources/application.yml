@@ -541,6 +541,7 @@ floci:
       enabled: true
     servicequotas:
       enabled: true
+      standard-on-demand-vcpus: 5
     verifiedpermissions:
       enabled: true
     ram:

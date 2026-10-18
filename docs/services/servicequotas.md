@@ -15,10 +15,13 @@ of 50. VPC's `L-FE5A380F` ("NAT gateways per Availability Zone", 5) and `L-2AEEB
 network ACL", 20) carry their AWS default values, so tooling that compares a desired value against
 the default before requesting an increase takes the same path it would against AWS.
 EC2's `L-1216C47A` ("Running On-Demand Standard (A, C, D, H, I, M, R, T, Z)
-instances") also reports its AWS default of 5. This catalog entry does not enforce
-a vCPU admission limit on EC2.
+instances") reports a configurable applied value through `GetServiceQuota` and
+`ListServiceQuotas`. Set `FLOCI_SERVICES_SERVICEQUOTAS_STANDARD_ON_DEMAND_VCPUS` to
+change that value for all local accounts and regions. It defaults to 5. The AWS
+default read actions always return 5. This setting does not enforce a vCPU
+admission limit on EC2.
 
-Applied quotas and AWS default quotas return the same data, and quota values are static.
+All other applied quotas and AWS default quotas return the same catalog data.
 `RequestServiceQuotaIncrease` is accepted and validated, records the request, and lets you read
 it back with `GetRequestedServiceQuotaChange` or list it with
 `ListRequestedServiceQuotaChangeHistoryByQuota`, but it does not change any quota value. See
@@ -31,8 +34,8 @@ Limitations.
 | --- | --- |
 | `ListServiceQuotas` | Lists the quotas for a service code; generated quotas for unknown codes |
 | `GetServiceQuota` | Returns one quota by service and quota code, else `NoSuchResourceException` |
-| `GetAWSDefaultServiceQuota` | Same as GetServiceQuota; defaults equal applied values |
-| `ListAWSDefaultServiceQuotas` | Same as ListServiceQuotas; defaults equal applied values |
+| `GetAWSDefaultServiceQuota` | Returns the catalog default, independent of the configured applied EC2 value |
+| `ListAWSDefaultServiceQuotas` | Lists catalog defaults, independent of the configured applied EC2 value |
 | `RequestServiceQuotaIncrease` | Validates and stores an increase request as `PENDING`; a second open request for the same quota is refused with `ResourceAlreadyExistsException` |
 | `GetRequestedServiceQuotaChange` | Returns a stored request by id, else `NoSuchResourceException` |
 | `ListRequestedServiceQuotaChangeHistoryByQuota` | Lists the stored requests for a service/quota pair, newest first |
@@ -55,8 +58,8 @@ Limitations.
   `[a-zA-Z][a-zA-Z0-9-]{1,63}` (max 63 characters) and a malformed one is rejected with
   `IllegalArgumentException` instead of returning invented quotas.
 - **A requested increase does not change the quota.** `GetServiceQuota` continues to return
-  the catalog value after a successful increase request. Quota values remain static by design
-  so pipelines never stall on an unenforced limit.
+  configured applied value or catalog value after a successful increase request. Increase
+  requests do not update local configuration or enforce capacity limits.
 - `ListRequestedServiceQuotaChangeHistory` (the account-wide variant without a quota filter) is
   not implemented.
 - `CaseId` is never returned; no support case is opened. `SupportCaseAllowed` in the request is
@@ -69,6 +72,7 @@ Limitations.
 | Environment variable | Default | Description |
 | --- | --- | --- |
 | `FLOCI_SERVICES_SERVICEQUOTAS_ENABLED` | `true` | Enables the service |
+| `FLOCI_SERVICES_SERVICEQUOTAS_STANDARD_ON_DEMAND_VCPUS` | `5` | Applied EC2 Standard On-Demand vCPU quota reported for every local account and region; does not enforce EC2 admission |
 
 ## Example
 

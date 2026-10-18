@@ -1094,6 +1094,9 @@ public interface EmulatorConfig {
     interface ServiceQuotasServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("5")
+        int standardOnDemandVcpus();
     }
 
     interface VerifiedPermissionsServiceConfig {
