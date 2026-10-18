@@ -270,13 +270,9 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
         return addresses;
     }
 
-    /** Checked here rather than only on create, because an in-place update never sends it to WAFv2. */
     private String ipAddressVersion(JsonNode props) {
         String version = required(text(props, "IPAddressVersion"), IP_SET, "IPAddressVersion");
-        if (!"IPV4".equals(version) && !"IPV6".equals(version)) {
-            throw new AwsException("WAFInvalidParameterException",
-                    "Field: IP_ADDRESS_VERSION, Parameter: " + version + ", Reason: must be IPV4 or IPV6.", 400);
-        }
+        WafV2Service.requireIpAddressVersion(version);
         return version;
     }
 

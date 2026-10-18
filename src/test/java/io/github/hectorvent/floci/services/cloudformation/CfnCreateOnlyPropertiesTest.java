@@ -52,6 +52,17 @@ class CfnCreateOnlyPropertiesTest {
     }
 
     @Test
+    void isCreateOnly_ipSetReplacesOnlyForNameAndScope() {
+        String type = "AWS::WAFv2::IPSet";
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "Name"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "Scope"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Addresses"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Description"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "IPAddressVersion"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Tags"));
+    }
+
+    @Test
     void isCreateOnly_treatsEmptySchemaListAsAuthoritative() {
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::ApiGateway::RestApi", "Name"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::Cognito::UserPool", "UserPoolName"));
