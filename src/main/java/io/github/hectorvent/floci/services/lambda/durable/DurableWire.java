@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableErrorObject;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableExecution;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableHistoryEvent;
@@ -333,8 +334,8 @@ public final class DurableWire {
         long seconds = number.longValue();
         if (seconds < min || max < seconds) {
             String bound = seconds < min ? "greater than or equal to " + min : "less than or equal to " + max;
-            throw new AwsException("ValidationException", "1 validation error detected: Value '" + seconds
-                    + "' at '" + field + "' failed to satisfy constraint: Member must have value " + bound, 400);
+            throw SmithyValidationErrors.validationException("Value '" + seconds
+                    + "' at '" + field + "' failed to satisfy constraint: Member must have value " + bound);
         }
         return (int) seconds;
     }

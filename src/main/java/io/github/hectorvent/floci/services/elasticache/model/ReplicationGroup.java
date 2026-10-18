@@ -47,6 +47,7 @@ public class ReplicationGroup {
     private String cacheNodeType;
     private String cacheParameterGroupName;
     private String cacheSubnetGroupName;
+    private List<String> securityGroupIds = new ArrayList<>();
     private boolean automaticFailoverEnabled;
     private boolean multiAzEnabled;
     private List<ClusterNode> clusterNodes = new ArrayList<>();
@@ -181,5 +182,10 @@ public class ReplicationGroup {
     public List<ClusterNode> getClusterNodes() { return clusterNodes; }
     public void setClusterNodes(List<ClusterNode> clusterNodes) {
         this.clusterNodes = clusterNodes != null ? clusterNodes : new ArrayList<>();
+    }
+
+    public List<String> getSecurityGroupIds() { return securityGroupIds; }
+    public void setSecurityGroupIds(List<String> securityGroupIds) {
+        this.securityGroupIds = securityGroupIds == null ? new ArrayList<>() : new ArrayList<>(securityGroupIds);
     }
 }

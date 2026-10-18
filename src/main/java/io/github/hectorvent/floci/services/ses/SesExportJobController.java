@@ -59,6 +59,7 @@ public class SesExportJobController {
     public Response createExportJob(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         JsonNode request = readOptionBody(objectMapper, body);
+        SesV2RequestShapes.check("CreateExportJob", request);
         JsonNode destination = request.path("ExportDestination");
         JsonNode dataSource = request.path("ExportDataSource");
         ExportJob job = exportJobService.createExportJob(region, regionResolver.getAccountId(),

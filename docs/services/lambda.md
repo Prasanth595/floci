@@ -243,7 +243,8 @@ Not emulated yet:
 
 ## Hot-Reloading via Reactive S3 Sync
 
-Floci supports an automatic hot-reloading mechanism when functions are deployed via S3. This follows the standard AWS behavior where S3 and Lambda interact, but is optimized for a seamless local development experience.
+Floci supports automatic hot reload for S3 deployments as a local development convenience.
+AWS normally copies the deployment package: overwriting its S3 object alone does not redeploy the function.
 
 When a Lambda function is created using an S3 bucket and key, Floci maintains a link between the function and its source object. Any subsequent update to that S3 object (e.g., via `s3:PutObject`) automatically triggers a reactive synchronization:
 
@@ -253,6 +254,9 @@ When a Lambda function is created using an S3 bucket and key, Floci maintains a 
 4.  **Reload**: The very next invocation starts a fresh container with the updated code.
 
 This allows you to update your Lambda code by simply re-uploading your ZIP to S3, without having to manually call `UpdateFunctionCode` or restart any containers.
+
+Published versions retain their own code snapshots. Reactive sync updates only `$LATEST`;
+publication and extraction share the per-function lock so a version cannot capture a partial update.
 
 ### Example
 
@@ -273,8 +277,8 @@ aws s3 cp updated-function.zip s3://my-bucket/function.zip
 aws lambda invoke --function-name my-function out.json
 ```
 
-!!! note "Standard Behavior"
-    This mechanism requires no custom configuration or non-standard magic strings. It works with standard AWS SDKs and CLI tools, providing a "live" development feel while staying within the AWS API contract.
+!!! note "Local development behavior"
+    This mechanism requires no custom configuration or special strings. It uses standard AWS SDK and CLI calls; automatic redeployment after an S3 upload is a Floci convenience.
 
 ## Hot-Reload via Bind Mount
 
@@ -491,7 +495,7 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED` | `false` | Enable bind-mount hot-reload via `S3Bucket=hot-reload` |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS` | *(unset)* | Comma-separated allowlist of host paths that may be bind-mounted |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` | *(unset)* | Docker network to attach Lambda containers to (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
-| `FLOCI_SERVICES_LAMBDA_DOCKER_FLAGS` | *(unset)* | Additional Docker flags applied to Lambda containers, including `--env`, `--volume`, `--publish`, `--add-host`, `--dns`, `--label`, `--network`, `--user`, `--privileged`, and `--platform`. Published ports support `host:container` and `127.0.0.1:host:container` forms |
+| `FLOCI_SERVICES_LAMBDA_DOCKER_FLAGS` | *(unset)* | Additional Docker flags applied to Lambda containers, including `--env`, `--volume`, `--publish`, `--add-host`, `--dns`, `--label`, `--network`, `--user`, `--privileged`, and `--platform`. Explicit `--dns` entries replace automatic embedded DNS and public fallback resolvers. Published ports support `host:container` and `127.0.0.1:host:container` forms |
 | `FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS` | *(unset)* | Comma-separated `hostname:ip` entries added to each Lambda container's `/etc/hosts`; `ip` may be `host-gateway`, mirroring `docker run --add-host` |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes; with `FLOCI_DOCKER_RESOURCE_NAMESPACE` set, the namespace follows the prefix and a short hash of it ends the volume name, e.g. `acme-<namespace>-code-<function>-<hash>-<namespace hash>`). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning |
@@ -813,6 +817,12 @@ is a permanent diff rather than a cosmetic omission.
 `LoggingConfig` is replaced wholesale on update, not merged — an update naming only
 `LogFormat` resets `LogGroup` to the default.
 
+A function's execution environments write their logs, `START`, `END` and `REPORT`
+included, to the `LogGroup` its `LoggingConfig` names, creating the group when it does not
+exist, and `AWS_LAMBDA_LOG_GROUP_NAME` names that group. Once a group is named, which several
+functions can share, each stream's name carries the function's name, as on AWS:
+`2026/10/16/my-fn[$LATEST]<id>` rather than the default group's `2026/10/16/[$LATEST]<id>`.
+
 `DurableConfig` requires `ExecutionTimeout` on create. A durable function created without
 a `Timeout` gets `min(ExecutionTimeout, 900)`. It always logs in JSON format, and
 `LogFormat: Text` is rejected. On update the members are merged, and a function created
@@ -820,12 +830,11 @@ without `DurableConfig` cannot gain one. CloudFormation and Terraform (`durable_
 the function to add or remove it. See Durable Functions for the execution itself.
 
 `LogGroup` is validated against AWS's documented constraint: 1-512 characters matching
-`[.\-_/#A-Za-z0-9]+`. `ApplicationLogLevel` and `SystemLogLevel` are accepted with any
-`LogFormat` but are only ever stored — and therefore only ever returned — when the
-resolved format is `JSON`; supplying them with `LogFormat=Text` is not an error, it is
-simply a no-op. That is Floci's own call rather than probed AWS behaviour: it keeps the
-request path consistent with Floci's response shape, which never surfaces the levels for
-Text.
+`[.\-_/#A-Za-z0-9]+`. `ApplicationLogLevel` and `SystemLogLevel` belong to `LogFormat=JSON`:
+a log level under Text, whether `LogFormat` names Text or is left to that default, is refused
+on create and on update with `InvalidParameterValueException` ("LogLevel is not supported when
+LogFormat is set to "Text". Remove LogLevel from your request or change the LogFormat to
+"JSON" and try again."), as Lambda refuses it (measured in eu-west-1, 2026-10-18).
 
 `VpcConfig` is omitted entirely while the function is not attached to a VPC.
 Subnets that EC2 does not know about are still accepted and returned; only `VpcId`
@@ -855,6 +864,10 @@ being mounted as an empty local volume.
     safety net, Floci also appends configurable public resolvers (default
     `8.8.8.8`, `8.8.4.4`) after its own IP on each spawned container's DNS list,
     so name resolution still works if the embedded forwarder cannot answer.
+
+    Explicit `--dns` flags replace those automatic resolvers. In that case,
+    the injected `AWS_ENDPOINT_URL` uses the reachable Docker host address
+    instead of a hostname that requires Floci's resolver.
 
     Tune or disable this for offline / locked-down networks where those resolvers
     are blocked:

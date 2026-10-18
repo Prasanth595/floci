@@ -27,10 +27,13 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -57,8 +60,9 @@ import static org.mockito.Mockito.when;
 /**
  * Covers rollback cleanup when another actor removes a resource after its create succeeded, which
  * resources a stack delete walks after a failed operation left them in a failed status, what a
- * failed update rollback keeps so ContinueUpdateRollback can retry it, and that a stack which
- * finished deleting is no longer updatable.
+ * failed update rollback keeps so ContinueUpdateRollback can retry it, that a stack which
+ * finished deleting is no longer updatable, and that a stack being deleted is neither deleted a
+ * second time nor updated by a change set.
  */
 class CloudFormationServiceRollbackTest {
 
@@ -81,6 +85,7 @@ class CloudFormationServiceRollbackTest {
                 provisioner,
                 mock(S3Service.class),
                 mock(SsmService.class),
+                mock(GetStackOutputRoleAuthorizer.class),
                 mock(CfnDynamicReferences.class),
                 new ObjectMapper(),
                 config,
@@ -111,6 +116,152 @@ class CloudFormationServiceRollbackTest {
         assertEquals("DELETE_COMPLETE", created.getStatus());
         assertNull(created.getStatusReason());
         verify(provisioner).delete(created, REGION);
+    }
+
+    /**
+     * With rollback enabled AWS moves the stack from CREATE_IN_PROGRESS straight to
+     * ROLLBACK_IN_PROGRESS; CREATE_FAILED is the failed resource's status, not the stack's. A
+     * stack status of CREATE_FAILED, even for a moment, is read as final by a DescribeStacks poll.
+     * Each status is published after its reason and event, so a poll that sees it sees them too.
+     */
+    @Test
+    void createRollback_neverReportsTheStackAsCreateFailed() {
+        StatusRecordingStack stack = new StatusRecordingStack();
+        stack.setStackName("rollback-stack-events");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        StackResource failed = resource("FailingResource", null, "AWS::Test::Failure", "CREATE_FAILED");
+        failed.setStatusReason("simulated create failure");
+        stack.getResources().put(failed.getLogicalId(), failed);
+
+        service.rollbackFailedExecution(stack, REGION, true, failed, null, Set.of());
+
+        assertEquals(List.of("ROLLBACK_IN_PROGRESS", "ROLLBACK_COMPLETE"), stack.statuses());
+        assertEquals(List.of("ROLLBACK_IN_PROGRESS", "ROLLBACK_COMPLETE"), stackEventStatuses(stack));
+        stack.assertEachStatusFollowsItsEvent();
+        assertEquals("The following resource(s) failed to create: [FailingResource]. Rollback requested by user.",
+                stack.writes().getFirst().reason());
+    }
+
+    /**
+     * The update counterpart: UPDATE_IN_PROGRESS goes straight to UPDATE_ROLLBACK_IN_PROGRESS, with
+     * no stack-level UPDATE_FAILED in between.
+     */
+    @Test
+    void updateRollback_neverReportsTheStackAsUpdateFailed() {
+        StatusRecordingStack stack = new StatusRecordingStack();
+        stack.setStackName("update-rollback-stack-events");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_IN_PROGRESS");
+        stack.writes().clear();
+        StackResource added = resource("Dup", null, "AWS::Logs::LogGroup", "CREATE_FAILED");
+        added.setStatusReason("already exists");
+        stack.getResources().put(added.getLogicalId(), added);
+        StackUpdateSnapshot previousState = new StackUpdateSnapshot(
+                "previous-template", "previous-original", Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of());
+
+        service.rollbackFailedExecution(stack, REGION, false, added, previousState,
+                new LinkedHashSet<>(List.of("Dup")));
+
+        assertEquals(List.of("UPDATE_ROLLBACK_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE"), stack.statuses());
+        assertEquals(List.of("UPDATE_ROLLBACK_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE"), stackEventStatuses(stack));
+        stack.assertEachStatusFollowsItsEvent();
+        assertEquals("The following resource(s) failed to create: [Dup].", stack.writes().getFirst().reason());
+    }
+
+    /**
+     * The stack's rollback event names the resource that failed, as AWS does; the resource's own
+     * message stays on the resource's event. An update rollback carries no "Rollback requested by
+     * user." suffix.
+     */
+    @Test
+    void updateRollback_reasonSummarizesTheResourceThatFailedToUpdate() {
+        Stack stack = new Stack();
+        stack.setStackName("update-rollback-reason");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_IN_PROGRESS");
+        StackResource failed = resource("MyDB", "db-1", "AWS::RDS::DBInstance", "UPDATE_FAILED");
+        failed.setStatusReason("Size cannot be less than current size; requested: 5; current: 10");
+        stack.getResources().put(failed.getLogicalId(), failed);
+        StackUpdateSnapshot previousState = new StackUpdateSnapshot(
+                "previous-template", "previous-original", Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of());
+
+        service.rollbackFailedExecution(stack, REGION, false, failed, previousState,
+                new LinkedHashSet<>(List.of("MyDB")));
+
+        StackEvent rollbackEvent = stack.getEvents().stream()
+                .filter(event -> "UPDATE_ROLLBACK_IN_PROGRESS".equals(event.getResourceStatus()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("The following resource(s) failed to update: [MyDB].", rollbackEvent.getResourceStatusReason());
+        assertEquals("Size cannot be less than current size; requested: 5; current: 10", failed.getStatusReason());
+    }
+
+    /**
+     * The stack's own reason is the summary; the cause a stack set instance reports is the failed
+     * resource's message, from the operation that rolled back.
+     */
+    @Test
+    void failureCause_afterACreateRollback_isTheFailedResourcesMessage() {
+        Stack stack = new Stack();
+        stack.setStackName("failure-cause");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.getEvents().add(stackEvent(stack, "CREATE_IN_PROGRESS"));
+        stack.getEvents().add(resourceEvent(stack, "FailingResource", "CREATE_FAILED", "simulated create failure"));
+        StackResource failed = resource("FailingResource", null, "AWS::Test::Failure", "CREATE_FAILED");
+        failed.setStatusReason("simulated create failure");
+        stack.getResources().put(failed.getLogicalId(), failed);
+
+        service.rollbackFailedExecution(stack, REGION, true, failed, null, Set.of());
+
+        assertEquals("ROLLBACK_COMPLETE", stack.getStatus());
+        assertEquals("simulated create failure", CloudFormationService.failureCause(stack));
+    }
+
+    /** A resource may share its stack's name; only the stack's ID tells the stack's own events apart. */
+    @Test
+    void failureCause_withAResourceNamedLikeItsStack_isThatResourcesMessage() {
+        Stack stack = new Stack();
+        stack.setStackName("Queue");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.getEvents().add(stackEvent(stack, "CREATE_IN_PROGRESS"));
+        stack.getEvents().add(resourceEvent(stack, "Queue", "CREATE_FAILED", "simulated create failure"));
+        StackResource failed = resource("Queue", null, "AWS::SQS::Queue", "CREATE_FAILED");
+        failed.setStatusReason("simulated create failure");
+        stack.getResources().put(failed.getLogicalId(), failed);
+
+        service.rollbackFailedExecution(stack, REGION, true, failed, null, Set.of());
+
+        assertEquals("The following resource(s) failed to create: [Queue]. Rollback requested by user.",
+                stack.getStatusReason());
+        assertEquals("simulated create failure", CloudFormationService.failureCause(stack));
+    }
+
+    /** A reason that is not the rollback summary, such as a failed rollback's, is the cause as is. */
+    @Test
+    void failureCause_afterAFailedRollback_isTheStacksReason() {
+        Stack stack = new Stack();
+        stack.setStackName("failure-cause-rollback-failed");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        StackResource created = resource("Queue", "queue-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource failed = resource("FailingResource", null, "AWS::Test::Failure", "CREATE_FAILED");
+        failed.setStatusReason("simulated create failure");
+        stack.getResources().put(created.getLogicalId(), created);
+        stack.getResources().put(failed.getLogicalId(), failed);
+        stack.getEvents().add(resourceEvent(stack, "FailingResource", "CREATE_FAILED", "simulated create failure"));
+        doThrow(new IllegalStateException("cannot delete")).when(provisioner).delete(eq(created), eq(REGION));
+
+        service.rollbackFailedExecution(stack, REGION, true, failed, null, Set.of());
+
+        assertEquals("ROLLBACK_FAILED", stack.getStatus());
+        assertEquals("The following resource(s) failed to roll back: [Queue].", CloudFormationService.failureCause(stack));
     }
 
     @Test
@@ -216,6 +367,46 @@ class CloudFormationServiceRollbackTest {
                     : "Stack with id " + nameOrId + " does not exist", error.getMessage());
         }
         assertEquals(Set.of("create"), stack.getChangeSets().keySet());
+    }
+
+    @Test
+    void deleteStack_retriedWhileDeleting_deletesEachResourceOnce() throws Exception {
+        Stack stack = liveStack("retried-delete");
+        StackResource queue = resource("Queue", "queue-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        stack.getResources().put(queue.getLogicalId(), queue);
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        CountDownLatch deleting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            deleting.countDown();
+            release.await(30, TimeUnit.SECONDS);
+            return null;
+        }).when(provisioner).delete(eq(queue), eq(REGION));
+
+        Future<?> first = service.deleteStack("retried-delete", REGION, ACCOUNT);
+        assertTrue(deleting.await(10, TimeUnit.SECONDS));
+        // The retry starts no deletion of its own, so it never waits on the held resource delete.
+        service.deleteStack("retried-delete", REGION, ACCOUNT).get(5, TimeUnit.SECONDS);
+        release.countDown();
+        first.get(10, TimeUnit.SECONDS);
+
+        verify(provisioner, times(1)).delete(queue, REGION);
+        assertEquals("DELETE_COMPLETE", stack.getStatus());
+    }
+
+    @Test
+    void executeChangeSet_onStackBeingDeleted_isRefused() {
+        Stack stack = liveStack("executed-while-deleting");
+        service.createChangeSet("executed-while-deleting", "update", "UPDATE",
+                "{\"Resources\":{\"Topic\":{\"Type\":\"AWS::SNS::Topic\"}}}", null,
+                Map.of(), List.of(), Map.of(), REGION, ACCOUNT);
+        stack.setStatus("DELETE_IN_PROGRESS");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.executeChangeSet("executed-while-deleting", "update", REGION, ACCOUNT));
+
+        assertEquals("InvalidChangeSetStatus", error.getErrorCode());
+        assertEquals("DELETE_IN_PROGRESS", stack.getStatus());
     }
 
     @Test
@@ -419,8 +610,8 @@ class CloudFormationServiceRollbackTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.defaultAccountId()).thenReturn(ACCOUNT);
         CloudFormationService deleteService = new CloudFormationService(cleanupDispatcher, mock(S3Service.class),
-                mock(SsmService.class), mock(CfnDynamicReferences.class), new ObjectMapper(), config,
-                mock(RegionResolver.class), Clock.systemUTC(), new InMemoryStorageFactory());
+                mock(SsmService.class), mock(GetStackOutputRoleAuthorizer.class), mock(CfnDynamicReferences.class), new ObjectMapper(),
+                config, mock(RegionResolver.class), Clock.systemUTC(), new InMemoryStorageFactory());
 
         assertThrows(IllegalStateException.class, () -> deleteService.deleteStackResources(stack, REGION, ACCOUNT));
         assertEquals("DELETE_FAILED", stack.getStatus());
@@ -726,6 +917,74 @@ class CloudFormationServiceRollbackTest {
         assertNull(stack.getUpdateRollbackResourceIds());
     }
 
+    /** A stack whose create finished, created through the service so it is in the live map. */
+    private Stack liveStack(String stackName) {
+        service.createChangeSet(stackName, "create", "CREATE",
+                "{\"Resources\":{\"Queue\":{\"Type\":\"AWS::SQS::Queue\"}}}", null,
+                Map.of(), List.of(), Map.of(), REGION, ACCOUNT);
+        Stack stack = service.describeStacks(stackName, REGION, ACCOUNT).getFirst();
+        stack.getChangeSets().clear();
+        stack.setStatus("CREATE_COMPLETE");
+        return stack;
+    }
+
+    private static List<String> stackEventStatuses(Stack stack) {
+        return stack.getEvents().stream()
+                .filter(event -> "AWS::CloudFormation::Stack".equals(event.getResourceType()))
+                .map(StackEvent::getResourceStatus)
+                .toList();
+    }
+
+    /** One status write, with the reason and the latest stack-level event it was published with. */
+    private record StatusWrite(String status, String reason, String latestStackEvent) {
+    }
+
+    /**
+     * Records every status write, so a test sees a status DescribeStacks could have served for a
+     * moment, not only the one the stack settled in.
+     */
+    private static final class StatusRecordingStack extends Stack {
+        private final List<StatusWrite> writes = new ArrayList<>();
+
+        @Override
+        public void setStatus(String status) {
+            List<String> stackEvents = stackEventStatuses(this);
+            writes.add(new StatusWrite(status, getStatusReason(),
+                    stackEvents.isEmpty() ? null : stackEvents.getLast()));
+            super.setStatus(status);
+        }
+
+        List<StatusWrite> writes() {
+            return writes;
+        }
+
+        List<String> statuses() {
+            return writes.stream().map(StatusWrite::status).toList();
+        }
+
+        void assertEachStatusFollowsItsEvent() {
+            for (StatusWrite write : writes) {
+                assertEquals(write.status(), write.latestStackEvent(), "event published after " + write.status());
+            }
+        }
+    }
+
+    private static StackEvent stackEvent(Stack stack, String status) {
+        StackEvent event = resourceEvent(stack, stack.getStackName(), status, null);
+        event.setPhysicalResourceId(stack.getStackId());
+        event.setResourceType("AWS::CloudFormation::Stack");
+        return event;
+    }
+
+    private static StackEvent resourceEvent(Stack stack, String logicalId, String status, String reason) {
+        StackEvent event = new StackEvent();
+        event.setStackName(stack.getStackName());
+        event.setLogicalResourceId(logicalId);
+        event.setResourceStatus(status);
+        event.setResourceStatusReason(reason);
+        return event;
+    }
+
     private static StackResource resource(String logicalId, String physicalId, String resourceType, String status) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
@@ -742,8 +1001,8 @@ class CloudFormationServiceRollbackTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.defaultAccountId()).thenReturn(ACCOUNT);
         return new CloudFormationService(provisioner, mock(S3Service.class), mock(SsmService.class),
-                mock(CfnDynamicReferences.class), new ObjectMapper(), config, regionResolver, clock,
-                new InMemoryStorageFactory());
+                mock(GetStackOutputRoleAuthorizer.class), mock(CfnDynamicReferences.class), new ObjectMapper(), config,
+                regionResolver, clock, new InMemoryStorageFactory());
     }
 
     /** The stack as {@code PersistentStorage} writes it and reads it back. */

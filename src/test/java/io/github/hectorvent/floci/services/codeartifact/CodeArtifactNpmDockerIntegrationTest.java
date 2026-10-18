@@ -360,6 +360,29 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     /**
+     * The real-world gap this closes: {@code DescribePackageVersion} used to 404 for every
+     * npm-published version the same reason {@code GetPackageVersionAsset} did. Confirms the
+     * bridge checks the real Verdaccio packument's own {@code versions} map (not a mock) for the
+     * published version, and 404s for one that was never published.
+     */
+    @Test
+    @Order(10)
+    void describePackageVersionBridgesToTheRealVerdaccioSidecar() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm"
+                        + "&package=" + PACKAGE_NAME + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("packageVersion.status", equalTo("Published"))
+                .body("packageVersion.packageName", equalTo(PACKAGE_NAME))
+                .body("packageVersion.version", equalTo("1.0.0"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm"
+                        + "&package=" + PACKAGE_NAME + "&version=9.9.9")
+                .then().statusCode(404);
+    }
+
+    /**
      * A throwaway package, not {@link #PACKAGE_NAME}: deleting it exercises the real Verdaccio
      * unpublish-whole-package mechanism (GET the packument's own {@code _rev}, then {@code DELETE}
      * with that revision), confirmed live before this was built, and must not disturb the package
@@ -587,6 +610,138 @@ class CodeArtifactNpmDockerIntegrationTest {
                 .body("readme", equalTo(""))
                 .body("package", equalTo(packageName))
                 .body("version", equalTo("1.0.0"));
+    }
+
+    /**
+     * The real-world gap this closes: {@code CopyPackageVersions} used to only support the
+     * generic and maven formats; npm keeps its published versions straight in Verdaccio's own
+     * packument rather than a {@code packageVersions} record. Confirms the bridge reads the
+     * tarball from the real sidecar (not a mock) and republishes it to the destination
+     * repository's own Verdaccio instance, byte for byte. {@code other-repo} is the empty
+     * repository {@link #repositoriesAreIsolatedFromEachOther} already created.
+     */
+    @Test
+    @Order(17)
+    void copyPackageVersionsBridgesToTheRealVerdaccioSidecar() {
+        String packageName = "copyme-npm-pkg";
+        byte[] tarball = "copy-me-npm-tarball-bytes".getBytes(StandardCharsets.UTF_8);
+        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
+                + "\",\"version\":\"1.0.0\",\"readme\":\"# Copy Me Readme\",\"dist\":{\"tarball\":\"http://ignored/"
+                + packageName + "-1.0.0.tgz\"}}},\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{"
+                + "\"content_type\":\"application/octet-stream\",\"data\":\""
+                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"]}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + REPO
+                        + "&destination-repository=other-repo&format=npm&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0));
+
+        byte[] copied = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/other-repo/" + packageName + "/-/" + packageName
+                        + "-1.0.0.tgz")
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("copy-me-npm-tarball-bytes", new String(copied, StandardCharsets.UTF_8));
+
+        // The real-world gap this proves closed: Verdaccio's own packument never echoes a
+        // per-version readme back (see GetPackageVersionReadme's own javadoc), so this bridge has
+        // no way to read it from the destination sidecar after copying the tarball; it must be
+        // propagated from this service's own captured-at-publish-time record instead.
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/readme?domain=" + DOMAIN + "&repository=other-repo&format=npm&package="
+                        + packageName + "&version=1.0.0")
+                .then().statusCode(200).body("readme", equalTo("# Copy Me Readme"));
+    }
+
+    /**
+     * The real-world bug this would otherwise hit: Verdaccio rejects a plain republish of an
+     * already-published version outright (a real {@code 409}, confirmed live), even after its
+     * packument entry alone is removed, since the tarball file itself is still on disk. Confirms
+     * the bridge's delete-then-republish sequence (packument entry, then the tarball file, both
+     * confirmed live) actually clears the way for the new content.
+     */
+    @Test
+    @Order(18)
+    void copyPackageVersionsOverwritesAnExistingNpmVersionWithDifferentContentAtTheRealSidecar() {
+        String packageName = "copyover-npm-pkg";
+        byte[] oldTarball = "old-overwrite-npm-tarball".getBytes(StandardCharsets.UTF_8);
+        byte[] newTarball = "new-overwrite-npm-tarball".getBytes(StandardCharsets.UTF_8);
+        String oldEnvelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
+                + "\",\"version\":\"1.0.0\",\"dist\":{\"tarball\":\"http://ignored/" + packageName
+                + "-1.0.0.tgz\"}}},\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{\"content_type\":"
+                + "\"application/octet-stream\",\"data\":\"" + Base64.getEncoder().encodeToString(oldTarball)
+                + "\",\"length\":" + oldTarball.length + "}}}";
+        String newEnvelope = oldEnvelope.replace(
+                Base64.getEncoder().encodeToString(oldTarball), Base64.getEncoder().encodeToString(newTarball))
+                .replace(String.valueOf(oldTarball.length), String.valueOf(newTarball.length));
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(oldEnvelope)
+                .put("/codeartifact/npm/" + DOMAIN + "/other-repo/" + packageName)
+                .then().statusCode(anyOf201Or200());
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(newEnvelope)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"],\"allowOverwrite\":true}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + REPO
+                        + "&destination-repository=other-repo&format=npm&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0));
+
+        byte[] copied = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/other-repo/" + packageName + "/-/" + packageName
+                        + "-1.0.0.tgz")
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("new-overwrite-npm-tarball", new String(copied, StandardCharsets.UTF_8));
+    }
+
+    /**
+     * The real-world bug this would otherwise hit: the bridge used to build the copied version's
+     * packument entry from scratch (just {@code name}/{@code version}/{@code dist}), dropping
+     * {@code dependencies} and anything else the source's own version document carried. A real
+     * {@code npm install} against the copied destination would resolve zero dependencies for this
+     * version instead of what the project actually declares.
+     */
+    @Test
+    @Order(19)
+    void copyPackageVersionsPreservesTheSourceVersionsDependenciesAtTheRealSidecar() throws IOException {
+        String packageName = "copydeps-npm-pkg";
+        byte[] tarball = "copy-deps-npm-tarball-bytes".getBytes(StandardCharsets.UTF_8);
+        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
+                + "\",\"version\":\"1.0.0\",\"dependencies\":{\"left-pad\":\"^1.3.0\"},\"dist\":{\"tarball\":"
+                + "\"http://ignored/" + packageName + "-1.0.0.tgz\"}}},\"_attachments\":{\"" + packageName
+                + "-1.0.0.tgz\":{\"content_type\":\"application/octet-stream\",\"data\":\""
+                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"]}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + REPO
+                        + "&destination-repository=other-repo&format=npm&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0));
+
+        String metadataBody = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/other-repo/" + packageName)
+                .then().statusCode(200)
+                .extract().asString();
+        JsonNode copiedVersion = new ObjectMapper().readTree(metadataBody).path("versions").path("1.0.0");
+        assertEquals("^1.3.0", copiedVersion.path("dependencies").path("left-pad").asText());
+        // dist must still point at the copy's own tarball, not the source's.
+        assertTrue(copiedVersion.path("dist").path("tarball").asText().contains("other-repo"),
+                "copied dist.tarball must point back at the destination repository, was: "
+                        + copiedVersion.path("dist").path("tarball").asText());
     }
 
     /**

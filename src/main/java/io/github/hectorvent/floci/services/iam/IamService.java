@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.SshPublicKeyException;
 import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import io.github.hectorvent.floci.core.common.Totp;
@@ -123,6 +124,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private static final String FEDERATED_USER_SESSION_LIMITS =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":[\"iam:*\",\"sts:*\"],\"Resource\":\"*\"}]}";
+    /**
+     * What the account password policy's {@code AllowUsersToChangePassword} authorizes. The guide:
+     * the option "gives users access to the iam:ChangePassword action for only their user and to
+     * the iam:GetAccountPasswordPolicy action", and "does not attach a permissions policy to each
+     * user. Rather, IAM applies the permissions at the account-level for all users". So this is one
+     * document for the whole account, and {@code ${aws:username}} is what binds it to the caller,
+     * exactly as AWS's own {@code IAMUserChangePassword} policy writes the same grant. The second
+     * resource is that policy's second pattern, for a user under a path. A principal with no
+     * {@code aws:username}, a role session or the account root, resolves the variable to nothing
+     * and the statement then matches no user at all, which is the behaviour the guide describes for
+     * a key with no value and the reason this grant needs no principal check of its own.
+     */
+    private static final String PASSWORD_SELF_SERVICE_GRANT =
+            "{\"Version\":\"2012-10-17\",\"Statement\":["
+                    + "{\"Effect\":\"Allow\",\"Action\":\"iam:ChangePassword\","
+                    + "\"Resource\":[\"%s\",\"%s\"]},"
+                    + "{\"Effect\":\"Allow\",\"Action\":\"iam:GetAccountPasswordPolicy\","
+                    + "\"Resource\":\"*\"}]}";
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
@@ -1186,8 +1205,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return;
         }
         String value = roleName == null ? "null" : "'" + roleName + "'";
-        throw new AwsException("ValidationError", "1 validation error detected: Value " + value
-                + " at 'roleName' failed to satisfy constraint: " + constraint, 400);
+        throw SmithyValidationErrors.validationError("Value " + value
+                + " at 'roleName' failed to satisfy constraint: " + constraint);
     }
 
     /**
@@ -1590,10 +1609,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 && !"All".equalsIgnoreCase(scope)
                 && !"AWS".equalsIgnoreCase(scope)
                 && !"Local".equalsIgnoreCase(scope)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + scope + "' at 'scope' failed to "
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + scope + "' at 'scope' failed to "
                             + "satisfy constraint: Member must satisfy enum value set: "
-                            + "[All, AWS, Local]", 400);
+                            + "[All, AWS, Local]");
         }
         String prefix = pathPrefix != null ? pathPrefix : "/";
         boolean blankScope = scope == null || scope.isBlank();
@@ -2734,15 +2753,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private static void validatePassword(String password, String member) {
         if (password == null) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value null at '" + member
-                            + "' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value null at '" + member
+                            + "' failed to satisfy constraint: Member must not be null");
         }
         if (!LOGIN_PROFILE_PASSWORD_PATTERN.matcher(password).matches()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at '" + member
+            throw SmithyValidationErrors.validationError(
+                    "Value at '" + member
                             + "' failed to satisfy constraint: Member must have length less than "
-                            + "or equal to 128 and greater than or equal to 1", 400);
+                            + "or equal to 128 and greater than or equal to 1");
         }
     }
 
@@ -2808,9 +2827,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value null at 'properties' failed to "
-                            + "satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value null at 'properties' failed to "
+                            + "satisfy constraint: Member must not be null");
         }
         String namespace = null;
         for (Map.Entry<String, String> entry : properties.entrySet()) {
@@ -2846,13 +2865,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private String validateAccountPropertyKey(String key) {
         if (key == null || key.isEmpty() || key.length() > MAX_ACCOUNT_PROPERTY_KEY_LENGTH
                 || !ACCOUNT_PROPERTY_KEY_PATTERN.matcher(key).matches()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + key + "' at 'properties' failed "
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + key + "' at 'properties' failed "
                             + "to satisfy constraint: Map keys "
                             + "must satisfy constraint: [Member must have length less than or "
                             + "equal to " + MAX_ACCOUNT_PROPERTY_KEY_LENGTH + ", Member must "
                             + "satisfy regular expression pattern: "
-                            + ACCOUNT_PROPERTY_KEY_PATTERN.pattern() + "]", 400);
+                            + ACCOUNT_PROPERTY_KEY_PATTERN.pattern() + "]");
         }
         int separator = key.indexOf('/');
         if (separator <= 0 || separator != key.lastIndexOf('/') || separator == key.length() - 1) {
@@ -2867,10 +2886,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private void validateAccountPropertyValue(String key, String value) {
         if (value == null || value.isEmpty()
                 || value.length() > MAX_ACCOUNT_PROPERTY_VALUE_LENGTH) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'properties." + key + "' failed to "
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'properties." + key + "' failed to "
                             + "satisfy constraint: Member must have length between 1 and "
-                            + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH, 400);
+                            + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH);
         }
     }
 
@@ -2878,11 +2897,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void setSecurityTokenServicePreferences(String globalEndpointTokenVersion) {
         if (globalEndpointTokenVersion == null
                 || !GLOBAL_ENDPOINT_TOKEN_VERSIONS.contains(globalEndpointTokenVersion)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + globalEndpointTokenVersion
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + globalEndpointTokenVersion
                             + "' at 'globalEndpointTokenVersion' failed to satisfy constraint: "
                             + "Member must satisfy enum value set: ["
-                            + String.join(", ", GLOBAL_ENDPOINT_TOKEN_VERSIONS) + "]", 400);
+                            + String.join(", ", GLOBAL_ENDPOINT_TOKEN_VERSIONS) + "]");
         }
         stsPreferences.put(STS_PREFERENCES_KEY, globalEndpointTokenVersion);
         LOG.infov("Set the global endpoint token version to {0}", globalEndpointTokenVersion);
@@ -3007,9 +3026,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // parsed, which is what makes a whitespace-only chain a malformed certificate rather
             // than silently storing no chain at all.
             if (certificateChain.isEmpty()) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value at 'CertificateChain' failed to satisfy "
-                                + "constraint: Member must have length greater than or equal to 1", 400);
+                throw SmithyValidationErrors.validationError(
+                        "Value at 'CertificateChain' failed to satisfy "
+                                + "constraint: Member must have length greater than or equal to 1");
             }
             parseUploadedChain(certificateChain);
         }
@@ -3067,10 +3086,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     private void checkMaterialLength(String value, String paramName, int limit) {
         if (value != null && value.length() > limit) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at '" + paramName
+            throw SmithyValidationErrors.validationError(
+                    "Value at '" + paramName
                             + "' failed to satisfy constraint: Member must have length less than "
-                            + "or equal to " + limit, 400);
+                            + "or equal to " + limit);
         }
     }
 
@@ -3276,9 +3295,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private void requireStatusFromEnum(String status) {
         if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'status' failed to satisfy "
-                            + "constraint: Member must satisfy enum value set", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'status' failed to satisfy "
+                            + "constraint: Member must satisfy enum value set");
         }
     }
 
@@ -3604,11 +3623,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             }
             if (credentialAgeDays < MIN_CREDENTIAL_AGE_DAYS
                     || credentialAgeDays > MAX_CREDENTIAL_AGE_DAYS) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value '" + credentialAgeDays
+                throw SmithyValidationErrors.validationError(
+                        "Value '" + credentialAgeDays
                                 + "' at 'credentialAgeDays' failed to satisfy constraint: "
                                 + "Member must be between " + MIN_CREDENTIAL_AGE_DAYS + " and "
-                                + MAX_CREDENTIAL_AGE_DAYS, 400);
+                                + MAX_CREDENTIAL_AGE_DAYS);
             }
         }
         synchronized (serviceCredentialLock) {
@@ -3838,18 +3857,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (violations.isEmpty()) {
             return;
         }
-        StringBuilder message = new StringBuilder()
-                .append(violations.size())
-                .append(violations.size() == 1 ? " validation error detected: "
-                                               : " validation errors detected: ");
-        for (int i = 0; i < violations.size(); i++) {
-            if (i > 0) {
-                message.append("; ");
-            }
-            message.append("Value at 'serviceSpecificCredentialId' failed to satisfy constraint: ")
-                    .append(violations.get(i));
-        }
-        throw new AwsException("ValidationError", message.toString(), 400);
+        throw SmithyValidationErrors.validationError(violations.stream()
+                .map(violation -> "Value at 'serviceSpecificCredentialId' failed to satisfy constraint: " + violation)
+                .toList());
     }
 
     /** AWS's wording for an id that matches the pattern and no credential. */
@@ -3933,10 +3943,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public List<VirtualMfaDevice> listVirtualMfaDevices(String assignmentStatus) {
         String status = assignmentStatus == null || assignmentStatus.isBlank() ? "Any" : assignmentStatus;
         if (!status.equals("Any") && !status.equals("Assigned") && !status.equals("Unassigned")) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + assignmentStatus
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + assignmentStatus
                             + "' at 'assignmentStatus' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [Any, Unassigned, Assigned]", 400);
+                            + "Member must satisfy enum value set: [Any, Unassigned, Assigned]");
         }
         return virtualMfaDevices.scan(k -> true).stream()
                 .filter(d -> switch (status) {
@@ -4873,7 +4883,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return CallerContext.of(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY));
         }
         return issuingUser(session)
-                .map(user -> new CallerContext(collectUserPolicies(user.getUserName()), null,
+                .map(user -> new CallerContext(userIdentityPolicies(user.getUserName()), null,
                         resolveUserBoundaryDocument(user.getUserName())))
                 .orElse(CallerContext.of(List.of()));
     }
@@ -4963,7 +4973,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
         if (akOpt.isPresent()) {
             String userName = akOpt.get().getUserName();
-            List<String> identityPolicies = collectUserPolicies(userName);
+            List<String> identityPolicies = userIdentityPolicies(userName);
             String boundaryDoc = resolveUserBoundaryDocument(userName);
             return new CallerContext(identityPolicies, null, boundaryDoc);
         }
@@ -5130,6 +5140,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             this(callerArn, principalArn, null, null, null);
         }
 
+        /**
+         * Floci's account-root principal, for a credential that names no IAM identity. The
+         * guide's principal key values give the root user the account id as its
+         * {@code aws:userid}, {@code Account} as its {@code aws:PrincipalType} and no
+         * {@code aws:username}.
+         */
+        public static CallerArns accountRoot(String rootArn, String accountId) {
+            return new CallerArns(rootArn, rootArn, TYPE_ACCOUNT, accountId, null);
+        }
+
         /** A caller with no permissions boundary attached. */
         public CallerArns(String callerArn, String principalArn, String principalType, String userId,
                           String userName) {
@@ -5176,6 +5196,33 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 user.getUserId(), user.getUserName(), user.getPermissionsBoundaryArn() != null);
     }
 
+
+    /**
+     * The principal keys a policy simulation starts with, for the identity named by a
+     * {@code PolicySourceArn}. The simulator does not ask a caller for these: the guide lists
+     * {@code aws:PrincipalAccount}, {@code aws:PrincipalId}, {@code aws:PrincipalType},
+     * {@code aws:Type}, {@code aws:UserId} and {@code aws:UserName} as "populated for you", and
+     * says the caller provides "the values for all other condition keys".
+     *
+     * <p>What a simulation gets here is the principal half of the request context, the same
+     * {@link CallerArns#putPrincipalKeys} the enforcement filter writes, so a policy simulates the
+     * way it is enforced: {@code aws:PrincipalArn}, {@code aws:PrincipalType},
+     * {@code aws:username} and {@code aws:userid}, with the account added by the caller of this
+     * method. The guide's {@code aws:PrincipalId} and {@code aws:Type} are not in that context on
+     * any request path, so populating them in a simulation alone would answer for keys an
+     * enforced request cannot, and they stay absent here too.
+     *
+     * <p>Only a user source answers here. A role named as a policy source is not a session, so
+     * there is no session name to put in an {@code aws:userid} and no documented value for its
+     * {@code aws:PrincipalType} in a simulation; those keys stay absent, and a policy that matches
+     * on one does not match, which is what an absent key means everywhere else.
+     */
+    public Optional<CallerArns> simulationPrincipalKeys(String principalArn) {
+        if (principalArn == null || !principalArn.contains(":user/")) {
+            return Optional.empty();
+        }
+        return userFromArnOrName(principalArn).map(IamService::callerForUser);
+    }
 
     /**
      * Both of the caller's ARNs from a single lookup, so they always describe the same credential:
@@ -5348,12 +5395,30 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public CallerContext resolvePrincipalContext(String principalArn) {
+        return principalContext(principalArn, true);
+    }
+
+    /**
+     * The same context without the account-level grants that apply to an identity without being
+     * attached to it, for {@code GetContextKeysForPrincipalPolicy}: AWS scopes that answer to "the
+     * identity-based policies attached to the specified entity, and any additional policies that
+     * you provide", so the key {@link #PASSWORD_SELF_SERVICE_GRANT} references is not one the
+     * caller has to supply. A simulation does evaluate with the grant, the way the request path
+     * does, and stays on {@link #resolvePrincipalContext}.
+     */
+    public CallerContext resolveAttachedPrincipalContext(String principalArn) {
+        return principalContext(principalArn, false);
+    }
+
+    private CallerContext principalContext(String principalArn, boolean withAccountGrants) {
         if (principalArn == null || principalArn.isBlank()) {
             throw new AwsException("ValidationError", "PolicySourceArn is required.", 400);
         }
         if (principalArn.contains(":user/")) {
             String userName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
-            List<String> identityPolicies = collectUserPolicies(principalArn);
+            List<String> identityPolicies = withAccountGrants
+                    ? userIdentityPolicies(principalArn)
+                    : collectUserPolicies(principalArn);
             if (identityPolicies == null) {
                 throw new AwsException("NoSuchEntity", "User " + userName + " cannot be found.", 404);
             }
@@ -5518,6 +5583,82 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         String roleName = roleArnOrName.substring(roleArnOrName.lastIndexOf('/') + 1);
         return findRole(AwsArnUtils.accountOrDefault(roleArnOrName, regionResolver.getAccountId()), roleName);
+    }
+
+    /**
+     * The policies an IAM user is evaluated with: its own and its groups', plus the account-level
+     * grant {@link #PASSWORD_SELF_SERVICE_GRANT} carries when the account password policy allows
+     * users to change their own password.
+     *
+     * <p>{@link #collectUserPolicies} stays the user's own set, which is what the guide means by
+     * applying the permissions at the account level rather than attaching a policy: an answer AWS
+     * scopes to the policies attached to a user reads the attached set, so the grant is in no
+     * policy listing and in no context-key answer. It is in this set, the one authorization is
+     * decided from, and in {@link #accountLevelUserGrants}, which a report of what a user can
+     * reach adds on top of the attached set.
+     */
+    private List<String> userIdentityPolicies(String userArnOrName) {
+        List<String> docs = collectUserPolicies(userArnOrName);
+        if (docs == null) {
+            return null;
+        }
+        // The flag that answers is the user's own account's, which is the account the lookup above
+        // resolved them in: a PolicySourceArn may name another account's user, and that user
+        // carries whatever their own account's password policy says, never this one's.
+        Optional<String> grant = passwordSelfServiceGrant(
+                AwsArnUtils.accountOrDefault(userArnOrName, regionResolver.getAccountId()));
+        if (grant.isEmpty()) {
+            return docs;
+        }
+        List<String> withGrant = new ArrayList<>(docs);
+        withGrant.add(grant.get());
+        return withGrant;
+    }
+
+    /**
+     * The account-level grants an IAM user of {@code accountId} is authorized by without holding a
+     * policy of its own, which today is the password self-service grant alone. Separate from
+     * {@link #userIdentityPolicies} because a caller reporting on a user needs these without the
+     * user's own documents, and because "the policies attached to a user" and "what the user can
+     * reach" are different questions that AWS answers from different sets.
+     */
+    public List<String> accountLevelUserGrants(String accountId) {
+        return passwordSelfServiceGrant(accountId).map(List::of).orElseGet(List::of);
+    }
+
+    /**
+     * An account's password self-service grant, present only while that account's password policy
+     * sets {@code AllowUsersToChangePassword}. One document for every user in the account, its
+     * resource ARNs minted for that same account in the request's partition, with
+     * {@code ${aws:username}} left for the evaluator to resolve per caller.
+     */
+    private Optional<String> passwordSelfServiceGrant(String accountId) {
+        boolean allowed = accountPasswordPolicy(accountId)
+                .map(AccountPasswordPolicy::isAllowUsersToChangePassword)
+                .orElse(false);
+        if (!allowed) {
+            return Optional.empty();
+        }
+        return Optional.of(PASSWORD_SELF_SERVICE_GRANT.formatted(
+                regionResolver.buildGlobalArn("iam", accountId, "user/${aws:username}"),
+                regionResolver.buildGlobalArn("iam", accountId, "user/*/${aws:username}")));
+    }
+
+    /**
+     * The password policy of a named account rather than the request's own, for a user that
+     * resolved in another one. Mirrors {@link #findUser(String, String)}: the store is
+     * account-namespaced, and the request's own account goes through
+     * {@link #getAccountPasswordPolicy()}, which also picks up a policy persisted before the
+     * store was namespaced.
+     */
+    private Optional<AccountPasswordPolicy> accountPasswordPolicy(String accountId) {
+        if (accountId.equals(regionResolver.getAccountId())) {
+            return getAccountPasswordPolicy();
+        }
+        if (passwordPolicies instanceof AccountAwareStorageBackend<AccountPasswordPolicy> aware) {
+            return aware.getForAccount(accountId, ACCOUNT_PASSWORD_POLICY_KEY);
+        }
+        return passwordPolicies.get(ACCOUNT_PASSWORD_POLICY_KEY);
     }
 
     private List<String> collectUserPolicies(String userArnOrName) {

@@ -31,6 +31,8 @@ quarkus:
       require-localhost: false
     limits:
       max-body-size: ${floci.protocols.max-request-size}M
+      # Lambda Web Functions accept a request head of up to 128 KiB and answer 431 past it.
+      max-header-size: 128K
   shutdown:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
@@ -51,7 +53,8 @@ quarkus:
       # catalog (ec2/image-catalog.yaml), SageMaker reads its instance type
       # catalog (sagemaker/instance-type-catalog.yaml), KMS reads its AWS managed
       # key catalog (kms/aws-managed-keys.yaml), AppSync's GraphQL
-      # parser reads its message bundles, EC2 security group enforcement builds
+      # parser reads its message bundles, Lambda Web Functions copy their
+      # runtime (lambdaweb/index.mjs) into each environment, EC2 security group enforcement builds
       # its helper image from docker/*.Dockerfile, and API Gateway's Velocity
       # engine reads its default properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
@@ -66,6 +69,7 @@ quarkus:
         - pricing-snapshots/**
         - ui/*.html
         - appsync/*.mjs
+        - lambdaweb/*.mjs
         - ec2/*.yaml
         - docker/*.Dockerfile
         - sagemaker/*.yaml
@@ -76,6 +80,7 @@ quarkus:
         - cloudformation/*.json
         - redshift/*.sql
         - i18n/*.properties
+        - floci/version.properties
         - org/apache/velocity/runtime/defaults/*.properties
         # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
         # driver reads its time zone table at connect time.
@@ -83,14 +88,21 @@ quarkus:
         # OpenAPIParser discovers the Swagger 2.0 converter through ServiceLoader.
         - META-INF/services/io.swagger.v3.parser.core.extensions.SwaggerParserExtension
         - com/mysql/cj/util/TimeZoneMapping.properties
+        # JNA's dispatch library, which docker-java's named-pipe transport (Docker Desktop on
+        # Windows) loads. Only the Windows build includes it, with -Dfloci.native.windows-jni-include=*.
+        - com/sun/jna/win32-x86-64/${floci.native.windows-jni-include:none}
       # snappy-java registers 27 JNI libraries, one per platform. Only the one
-      # for the running platform loads, so 23 are dropped. Linux x86_64 and
-      # aarch64 cover the published images, Mac covers a local native build.
+      # for the running platform loads, so the others are dropped. Linux x86_64 and
+      # aarch64 cover the published images, Mac covers the macOS binaries. The
+      # Windows x86_64 library is kept only by the Windows build, which passes
+      # -Dfloci.native.windows-jni-exclude=none; every other build still excludes it.
       excludes:
         - org/xerial/snappy/native/AIX/**
         - org/xerial/snappy/native/FreeBSD/**
         - org/xerial/snappy/native/SunOS/**
-        - org/xerial/snappy/native/Windows/**
+        - org/xerial/snappy/native/Windows/aarch64/**
+        - org/xerial/snappy/native/Windows/x86/**
+        - org/xerial/snappy/native/Windows/x86_64/${floci.native.windows-jni-exclude:**}
         - org/xerial/snappy/native/Linux/android-aarch64/**
         - org/xerial/snappy/native/Linux/android-arm/**
         - org/xerial/snappy/native/Linux/arm/**
@@ -303,6 +315,12 @@ floci:
     # Env var: FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE=true
     allow-unsafe-network-exposure: false
     allow-private-jwt-targets: false
+
+  init-hooks:
+    dir: /etc/floci/init           # FLOCI_INIT_HOOKS_DIR: root of boot.d, start.d, ready.d, stop.d, shutdown.d (a binary on the host points it elsewhere)
+    shell-executable: /bin/sh      # FLOCI_INIT_HOOKS_SHELL_EXECUTABLE: runs .sh hooks
+    timeout-seconds: 30
+    shutdown-grace-period-seconds: 2
 
   tls:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
@@ -555,6 +573,7 @@ floci:
       enabled: true
     cognito:
       enabled: true
+      google-issuer: https://accounts.google.com
       enforce-token-validity-limits: true
     stepfunctions:
       enabled: true
@@ -975,6 +994,7 @@ floci:
       enabled: true
     servicequotas:
       enabled: true
+      standard-on-demand-vcpus: 5
     verifiedpermissions:
       enabled: true
       # cedar-url: http://floci-cedar:8180  # set to skip sidecar container management
@@ -990,6 +1010,7 @@ floci:
       maven-image: "dzikoysk/reposilite:3.6.3"
       npm-image: "verdaccio/verdaccio:6.10.4"
       pypi-image: "pypiserver/pypiserver:v2.4.2"
+      nuget-image: "bagetter/bagetter:1.6.5"
     marketplace:
       enabled: true
     dms:

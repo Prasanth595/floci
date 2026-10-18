@@ -3,16 +3,24 @@ package io.github.hectorvent.floci.services.ssm;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.time.Duration;
+import java.util.List;
+import java.util.UUID;
+import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
@@ -2189,6 +2197,52 @@ class SsmIntegrationTest {
                 """)
             .statusCode(200)
             .body("RemovedLabels", contains("prod"));
+    }
+
+    static Stream<Arguments> malformedUnlabelScalars() {
+        return Stream.of(
+                Arguments.of("ParameterVersion", "\"1\"", "STRING_VALUE can not be converted to a Long"),
+                Arguments.of("ParameterVersion", "{}", "Start of structure or map found where not expected."),
+                Arguments.of("ParameterVersion", "[]", "Start of list found where not expected"),
+                Arguments.of("ParameterVersion", "true", "TRUE_VALUE can not be converted to a Long"),
+                Arguments.of("ParameterVersion", "false", "FALSE_VALUE can not be converted to a Long"),
+                Arguments.of("Name", "{}", "Start of structure or map found where not expected."),
+                Arguments.of("Name", "[]", "Start of list found where not expected"),
+                Arguments.of("Name", "5", "NUMBER_VALUE can not be converted to a String"),
+                Arguments.of("Labels", "[{}]", "Start of structure or map found where not expected."),
+                Arguments.of("Labels", "[[]]", "Start of list found where not expected"),
+                Arguments.of("Labels", "[5]", "NUMBER_VALUE can not be converted to a String"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("malformedUnlabelScalars")
+    void unlabelScalarErrorsPreserveLabels(String field, String input, String expectedMessage) {
+        String name = "/scalar-errors/" + UUID.randomUUID();
+        given().header("X-Amz-Target", "AmazonSSM.PutParameter").contentType(SSM_CONTENT_TYPE)
+                .body("{\"Name\":\"" + name + "\",\"Type\":\"String\",\"Value\":\"original\"}")
+                .when().post("/").then().statusCode(200);
+        try {
+            String valid = "{\"Name\":\"" + name + "\",\"ParameterVersion\":1,\"Labels\":[\"prod\"]}";
+            labelParameterVersion(valid).statusCode(200);
+            String malformed = "{\"Name\":" + ("Name".equals(field) ? input : "\"" + name + "\"")
+                    + ",\"ParameterVersion\":" + ("ParameterVersion".equals(field) ? input : "1")
+                    + ",\"Labels\":" + ("Labels".equals(field) ? input : "[\"prod\"]") + "}";
+            Response rejected = unlabel(malformed).extract().response();
+            Response history = given().header("X-Amz-Target", "AmazonSSM.GetParameterHistory")
+                    .contentType(SSM_CONTENT_TYPE).body("{\"Name\":\"" + name + "\"}")
+                    .when().post("/");
+            assertAll("deserialization errors preserve parameter labels",
+                    () -> assertEquals(400, rejected.statusCode()),
+                    () -> assertEquals("SerializationException", rejected.jsonPath().getString("__type")),
+                    () -> assertEquals(expectedMessage, rejected.jsonPath().getString("message")),
+                    () -> assertEquals(200, history.statusCode()),
+                    () -> assertEquals(List.of("prod"), history.jsonPath().getList("Parameters[0].Labels")));
+            unlabel(valid).statusCode(200).body("RemovedLabels", contains("prod"));
+        } finally {
+            given().header("X-Amz-Target", "AmazonSSM.DeleteParameter").contentType(SSM_CONTENT_TYPE)
+                    .body("{\"Name\":\"" + name + "\"}")
+                    .when().post("/").then().statusCode(200);
+        }
     }
 
     private io.restassured.response.ValidatableResponse unlabel(String body) {

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.route53.Route53Service;
@@ -350,9 +351,9 @@ public class SesIdentityService implements SesTaggable {
         if (behaviorOnMxFailure != null) {
             if (!"UseDefaultValue".equals(behaviorOnMxFailure)
                     && !"RejectMessage".equals(behaviorOnMxFailure)) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value at 'behaviorOnMXFailure' failed to satisfy "
-                                + "constraint: Member must satisfy enum value set: [RejectMessage, UseDefaultValue]", 400);
+                throw SmithyValidationErrors.validationError(
+                        "Value at 'behaviorOnMXFailure' failed to satisfy "
+                                + "constraint: Member must satisfy enum value set: [RejectMessage, UseDefaultValue]");
             }
             normalizedBehavior = behaviorOnMxFailure;
         }
@@ -468,10 +469,10 @@ public class SesIdentityService implements SesTaggable {
                     "NotificationType is required.", 400);
         }
         if (!NOTIFICATION_TYPES.contains(notificationType)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'notificationType' failed to satisfy "
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'notificationType' failed to satisfy "
                             + "constraint: Member must satisfy enum value set: "
-                            + NOTIFICATION_TYPES, 400);
+                            + NOTIFICATION_TYPES);
         }
         synchronized (identityCreationLock) {
             Identity identity = identityStore.get(identityKey(region, identityValue))

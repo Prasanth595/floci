@@ -34,6 +34,7 @@ import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.rds.container.AutoPauseListener;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
+import io.github.hectorvent.floci.services.rds.export.SnapshotExportSource;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
@@ -2265,6 +2266,69 @@ public class RdsService implements Resettable, ResourceProvider {
         return resource.substring("cluster-snapshot:".length());
     }
 
+    /**
+     * The DB snapshot or DB cluster snapshot {@code sourceArn} names, as an export task reads it.
+     * Floci keeps PostgreSQL data in its snapshots, so a snapshot of any other engine cannot be
+     * exported, and an ARN naming a live cluster rather than a snapshot is refused.
+     */
+    public SnapshotExportSource snapshotExportSource(String sourceArn, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        String accountId = currentAccountId();
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(sourceArn);
+        } catch (IllegalArgumentException malformed) {
+            throw new AwsException("InvalidParameterValue", "Invalid SourceArn: " + sourceArn, 400);
+        }
+        String resource = arn.resource();
+        boolean clusterSnapshot = resource.startsWith("cluster-snapshot:");
+        if (!"rds".equals(arn.service()) || !(clusterSnapshot || resource.startsWith("snapshot:"))) {
+            throw new AwsException("InvalidParameterValue",
+                    "SourceArn must name a DB snapshot or a DB cluster snapshot: " + sourceArn, 400);
+        }
+        boolean ours = AwsRegions.partitionFor(effectiveRegion).equals(arn.partition())
+                && effectiveRegion.equals(arn.region()) && accountId.equals(arn.accountId());
+        String snapshotId = resource.substring(resource.indexOf(':') + 1);
+        if (clusterSnapshot) {
+            if (!ours) {
+                throw new AwsException("DBClusterSnapshotNotFoundFault",
+                        "DBClusterSnapshot " + snapshotId + " not found.", 404);
+            }
+            DbClusterSnapshot snapshot = requireClusterSnapshot(accountId, effectiveRegion, snapshotId);
+            requireExportable(snapshot.getStatus(), snapshot.getEngine(), sourceArn);
+            String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, snapshotId))
+                    .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
+                            "DB cluster snapshot data for " + snapshotId + " not found.", 404));
+            return new SnapshotExportSource(snapshot.getDbClusterSnapshotArn(),
+                    imageForEngine(snapshot.getEngine(), snapshot.getEngineVersion()),
+                    snapshot.getMasterUsername(), snapshot.getMasterPassword(),
+                    snapshot.getSnapshotCreateTime(), sqlDump);
+        }
+        DbSnapshot snapshot = ours ? findSnapshotForScope(accountId, effectiveRegion, snapshotId) : null;
+        if (snapshot == null) {
+            throw new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404);
+        }
+        requireExportable(snapshot.getStatus(), snapshot.getEngine(), sourceArn);
+        String sqlDump = getSnapshotDataForScope(accountId, effectiveRegion, snapshotId)
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
+                        "DBSnapshot data for " + snapshotId + " not found.", 404));
+        return new SnapshotExportSource(snapshot.getDbSnapshotArn(),
+                imageForEngine(snapshot.getEngine(), snapshot.getEngineVersion()),
+                snapshot.getMasterUsername(), snapshot.getMasterPassword(),
+                snapshot.getSnapshotCreateTime(), sqlDump);
+    }
+
+    private static void requireExportable(String status, DatabaseEngine engine, String sourceArn) {
+        if (!"available".equals(status)) {
+            throw new AwsException("InvalidExportSourceState",
+                    "The snapshot " + sourceArn + " is not available for export.", 400);
+        }
+        if (engine != DatabaseEngine.POSTGRES) {
+            throw new AwsException("InvalidExportSourceState",
+                    "Floci exports PostgreSQL snapshots only: " + sourceArn, 400);
+        }
+    }
+
     /** Cluster snapshot dumps share the snapshot data store with instance snapshots under their own prefix. */
     private String clusterSnapshotDataKey(String region, String snapshotId) {
         return dbResourceKey(region, "cluster-snapshot:" + snapshotId);
@@ -3010,6 +3074,7 @@ public class RdsService implements Resettable, ResourceProvider {
         // current size and engine version: a refusal here must leave the whole request unapplied.
         DbInstanceScalingChanges resolvedScaling = scaling.resolveFor(instance);
         DbInstanceSettings effective = withEffectiveWindows(settings, instance);
+        validateAutoscalingMinimum(instance, effective.maxAllocatedStorage());
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         if (optionGroupName != null && !optionGroupName.isBlank()) {
             validateInstanceOptionGroup(optionGroupName,
@@ -3080,6 +3145,22 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private static void validateInstanceSettings(DbInstanceSettings settings) {
         settings.validate();
+    }
+
+    private static void validateAutoscalingMinimum(DbInstance instance, Integer maximum) {
+        String clusterId = instance.getDbClusterIdentifier();
+        String engine = engineName(instance);
+        int allocated = instance.getAllocatedStorage();
+        if (maximum == null || allocated <= 0 || maximum == allocated
+                || clusterId != null && !clusterId.isBlank()
+                || isAuroraEngine(engine)
+                || engine != null && engine.toLowerCase(Locale.ROOT).startsWith("custom-")) {
+            return;
+        }
+        if ((long) maximum * 10 < (long) allocated * 11) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Invalid max storage size for " + (engine == null ? null : engine.toLowerCase(Locale.ROOT)), 400);
+        }
     }
 
     /**
@@ -9550,9 +9631,12 @@ public class RdsService implements Resettable, ResourceProvider {
             } catch (NumberFormatException e) {
                 throw new AwsException("InvalidParameterValue", "Invalid marker: " + marker, 400);
             }
+            if (from < 0) {
+                throw new AwsException("InvalidParameterValue", "Invalid marker: " + marker, 400);
+            }
         }
         int limit = maxRecords == null ? DEFAULT_MAX_RECORDS : maxRecords;
-        int start = Math.min(Math.max(from, 0), matching.size());
+        int start = Math.min(from, matching.size());
         int to = Math.min(matching.size(), start + limit);
         return new OffsetPage<>(matching.subList(start, to), to < matching.size() ? Integer.toString(to) : null);
     }
@@ -9824,6 +9908,79 @@ public class RdsService implements Resettable, ResourceProvider {
             throw notFound.get();
         }
         return cluster;
+    }
+
+    // ── Log files ─────────────────────────────────────────────────────────────
+
+    /** One page of an instance's log files, plus the marker to continue from. */
+    public record LogFilePage(List<RdsLogFiles.LogFile> files, String marker) {}
+
+    /**
+     * The instance's log files, read from its database container's log and named as RDS names them.
+     * An instance without a container (mock RDS) has none.
+     */
+    public LogFilePage describeDbLogFiles(String region, String instanceId, String filenameContains,
+                                          Long fileLastWritten, Long fileSize, Integer maxRecords, String marker) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireValidMaxRecords(maxRecords);
+        if (fileLastWritten != null && fileLastWritten < 0) {
+            throw new AwsException("InvalidParameterValue", "FileLastWritten must not be negative.", 400);
+        }
+        if (fileSize != null && fileSize < 0) {
+            throw new AwsException("InvalidParameterValue", "FileSize must not be negative.", 400);
+        }
+        List<RdsLogFiles.LogFile> files = RdsLogFiles.matching(logFiles(region, instanceId),
+                filenameContains, fileLastWritten, fileSize);
+        OffsetPage<RdsLogFiles.LogFile> page = offsetPage(files, maxRecords, marker);
+        return new LogFilePage(page.items(), page.marker());
+    }
+
+    /** One block of a log file; see {@link RdsLogFiles#portion}. */
+    public RdsLogFiles.Portion downloadDbLogFilePortion(String region, String instanceId, String logFileName,
+                                                        String marker, Integer numberOfLines) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireParameter(logFileName, "LogFileName");
+        RdsLogFiles.LogFile file = logFiles(region, instanceId).stream()
+                .filter(f -> f.name().equals(logFileName))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("DBLogFileNotFoundFault",
+                        "DBLogFile " + logFileName + " not found for DB instance " + instanceId + ".", 404));
+        return RdsLogFiles.portion(file, marker, numberOfLines);
+    }
+
+    private List<RdsLogFiles.LogFile> logFiles(String region, String instanceId) {
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
+        if (instance.getStatus() != null && instance.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("DBInstanceNotReady",
+                    "DB instance " + instanceId + " is not in available state.", 400);
+        }
+        if (config.services().rds().mock()) {
+            return List.of();
+        }
+        // Container ids are not persisted, and a container can be removed outside Floci: when there is
+        // no id, or Docker no longer knows it, the backend is found or started once before giving up.
+        String containerId = instance.getContainerId();
+        List<String> raw = containerId != null ? readContainerLog(containerId) : null;
+        if (raw == null) {
+            containerId = ensureInstanceBackend(instanceId, effectiveRegion).getContainerId();
+            raw = containerId != null ? readContainerLog(containerId) : null;
+        }
+        if (raw == null) {
+            throw new AwsException("DBInstanceNotReady",
+                    "DB instance " + instanceId + " has no running database container.", 400);
+        }
+        String engine = !isBlank(instance.getEngineIdentifier()) ? instance.getEngineIdentifier()
+                : instance.getEngine() != null ? instance.getEngine().name() : null;
+        return RdsLogFiles.files(engine, RdsLogFiles.parseDockerLines(raw));
+    }
+
+    private List<String> readContainerLog(String containerId) {
+        try {
+            return containerManager.readLog(containerId);
+        } catch (IllegalStateException e) {
+            throw new AwsException("InternalFailure", e.getMessage(), 500);
+        }
     }
 
     // ── IAM role associations ─────────────────────────────────────────────────

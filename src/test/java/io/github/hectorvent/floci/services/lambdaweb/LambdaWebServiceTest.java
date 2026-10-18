@@ -475,6 +475,21 @@ class LambdaWebServiceTest {
                 + " input and try again.", message(() -> service.putResourcePolicy(REGION, missing,
                 policy("{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"*\"},"
                         + "\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + resource + "\"}]}"))));
+        // An ARN may carry a path, any other AWS principal may not.
+        assertEquals("The provided input'arn:aws:iam::000000000000:role/has space'was invalid. Member must satisfy"
+                + " expression: [\\w+=/:,.@-]* Please check your input and try again.",
+                message(() -> service.putResourcePolicy(REGION, missing,
+                        policy(members.formatted("{\"AWS\":\"arn:aws:iam::000000000000:role/has space\"}", invoke,
+                                "\"" + resource + "\"")))));
+        assertEquals("The provided input'foo/bar'was invalid. Member must satisfy expression: [\\w+=,.@\\:-]*"
+                + " Please check your input and try again.", message(() -> service.putResourcePolicy(REGION, missing,
+                policy(members.formatted("{\"AWS\":\"foo/bar\"}", invoke, "\"" + resource + "\"")))));
+        assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
+                policy(members.formatted("{\"AWS\":\"arn:aws:iam::000000000000:user/path/alice\"}", invoke,
+                        "\"" + resource + "\"")))).getErrorCode());
+        assertEquals("ValidationException", error(() -> service.putResourcePolicy(REGION, missing,
+                policy(members.formatted("{\"CanonicalUser\":\"arn:aws:iam::000000000000:foo/bar\"}", invoke,
+                        "\"" + resource + "\"")))).getErrorCode(), "only an AWS principal may carry a path");
         assertEquals("Lambda blocked the creation of this policy because it would grant public access to your function.",
                 message(() -> service.putResourcePolicy(REGION, missing, policy("{\"Statement\":[{\"Effect\":\"Allow\","
                         + "\"Principal\":{\"AWS\":[\"arn:aws:iam::000000000000:root\",\"*\"]},"
@@ -529,9 +544,18 @@ class LambdaWebServiceTest {
         ObjectNode update = mapper.createObjectNode().put("description", "updated");
         first.updateEndpoint(REGION, "durable", "dev", update);
 
+        String domain = first.getEndpoint(REGION, "durable", "dev").domainName;
+        assertEquals("dev", first.locate(domain).orElseThrow().endpoint().endpointName);
+
         LambdaWebService second = service(new FileStorageFactory(storageDir));
         WebFunction restored = second.getFunction(REGION, "durable");
         assertEquals(created.functionArn, restored.functionArn);
+        LambdaWebService.WebFunctionTarget target = second.locate(domain).orElseThrow();
+        assertEquals(ACCOUNT_ID, target.accountId());
+        assertEquals(REGION, target.region());
+        assertEquals("durable", target.function().functionName);
+        assertEquals("dev", target.endpoint().endpointName);
+        assertTrue(second.locate("nope.001.lambda-web.us-east-1.localhost:4566").isEmpty());
         assertEquals(2, restored.revisions.size());
         WebFunctionEndpoint endpoint = second.getEndpoint(REGION, "durable", "dev");
         assertEquals("updated", endpoint.description);
@@ -541,6 +565,8 @@ class LambdaWebServiceTest {
         assertEquals(endpoint.revisionWeights.get(0).revisionId,
                 second.listRevisions(REGION, "durable", mapper.createObjectNode()).items().get(0).revisionId,
                 "the LatestRevision endpoint moved to the newer revision and that move was written back");
+        second.deleteEndpoint(REGION, "durable", "dev");
+        assertTrue(second.locate(domain).isEmpty(), "a deleted endpoint's domain is gone");
     }
 
     private static final class MemoryStorageFactory extends StorageFactory {

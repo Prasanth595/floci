@@ -142,6 +142,7 @@ import software.amazon.awssdk.services.scheduler.SchedulerClient;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.securityhub.SecurityHubClient;
 import software.amazon.awssdk.services.servicediscovery.ServiceDiscoveryClient;
+import software.amazon.awssdk.services.servicequotas.ServiceQuotasClient;
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
@@ -414,7 +415,8 @@ public final class TestFixtures {
         }
     }
 
-    private static byte[] probeZip() {
+    /** A Node.js deployment package whose handler answers 200, for a function the test only has to create. */
+    static byte[] probeZip() {
         String code = "exports.handler = async () => ({ statusCode: 200 });";
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -547,6 +549,14 @@ public final class TestFixtures {
 
     public static ControlCatalogClient controlCatalogClient() {
         return ControlCatalogClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static ServiceQuotasClient serviceQuotasClient() {
+        return ServiceQuotasClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
@@ -918,6 +928,24 @@ public final class TestFixtures {
             }
             long sleepMillis = Math.min(500, Math.max(1, Duration.ofNanos(remainingNanos).toMillis()));
             Thread.sleep(sleepMillis);
+        }
+    }
+
+    /** The stack's status once it is no longer {@code *_IN_PROGRESS}, or its last status at the timeout. */
+    public static String awaitStackTerminal(CloudFormationClient cfn, String stackName, Duration timeout)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            String status = cfn.describeStacks(request -> request.stackName(stackName))
+                    .stacks().get(0).stackStatusAsString();
+            if (!status.endsWith("_IN_PROGRESS")) {
+                return status;
+            }
+            long remainingNanos = deadline - System.nanoTime();
+            if (remainingNanos <= 0) {
+                return status;
+            }
+            Thread.sleep(Math.min(500, Math.max(1, Duration.ofNanos(remainingNanos).toMillis())));
         }
     }
 

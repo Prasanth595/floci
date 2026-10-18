@@ -167,8 +167,10 @@ public class Ec2QueryHandler {
                 case "ReplaceTransitGatewayRoute" -> handleReplaceTransitGatewayRoute(params, region);
                 case "SearchTransitGatewayRoutes" -> handleSearchTransitGatewayRoutes(params, region);
                 case "ExportTransitGatewayRoutes" -> handleExportTransitGatewayRoutes(params, region);
+                case "CreateEgressOnlyInternetGateway" -> handleCreateEgressOnlyInternetGateway(params, region);
                 case "DescribeEgressOnlyInternetGateways" ->
-                        handleDescribeEgressOnlyInternetGateways(params);
+                        handleDescribeEgressOnlyInternetGateways(params, region);
+                case "DeleteEgressOnlyInternetGateway" -> handleDeleteEgressOnlyInternetGateway(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -781,13 +783,14 @@ public class Ec2QueryHandler {
             userData = Ec2UserDataDecoder.decode(userDataEncoded);
         }
 
-        String iamInstanceProfileArn = resolveIamInstanceProfileArn(p);
-
         // Parse TagSpecifications. AWS applies each specification to exactly the resource
         // type it names, so the interfaces RunInstances creates are tagged only by a
         // ResourceType=network-interface specification - never by the instance's own tags.
         List<Tag> instanceTags = parseTagsForResource(p, "instance");
         List<Tag> networkInterfaceTags = parseTagsForResource(p, "network-interface");
+        // Resolved after tag parsing so reserved tags are refused before any service call.
+        String iamInstanceProfileArn = service.resolveLaunchIamInstanceProfileArn(
+                p.getFirst("IamInstanceProfile.Name"), p.getFirst("IamInstanceProfile.Arn"));
 
         // Absent fields stay null so the launch default, or the launch template's value, applies.
         LaunchTemplateData.MetadataOptions metadataOptions = parseMetadataOptions(p, "MetadataOptions.");
@@ -1208,7 +1211,7 @@ public class Ec2QueryHandler {
                         .elem("instanceId", inst.getInstanceId())
                         .start("iamInstanceProfile")
                         .elem("arn", inst.getIamInstanceProfileArn())
-                        .elem("id", Ec2Service.iamInstanceProfileId(inst.getInstanceId()))
+                        .elem("id", inst.getIamInstanceProfileId())
                         .end("iamInstanceProfile")
                         .elem("state", "associated");
                 if (inst.getIamInstanceProfileAssociationTime() != null) {
@@ -2947,25 +2950,50 @@ public class Ec2QueryHandler {
         }
     }
 
-    private Response handleDescribeEgressOnlyInternetGateways(MultivaluedMap<String, String> p) {
-        validateEmptyDiscoveryPagination(p, 255);
-        service.describeEgressOnlyInternetGatewayIds(getFilters(p));
-        return emptyDescribeResponse(
-                "DescribeEgressOnlyInternetGateways", "egressOnlyInternetGatewaySet");
+    private Response handleCreateEgressOnlyInternetGateway(MultivaluedMap<String, String> p, String region) {
+        // Tags are validated before anything is created, so a rejected tag leaves no gateway behind.
+        List<Tag> resourceTags = parseTagsForResource(p, "egress-only-internet-gateway");
+        EgressOnlyInternetGateway eigw = service.createEgressOnlyInternetGateway(
+                region, p.getFirst("VpcId"), p.getFirst("ClientToken"), resourceTags);
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateEgressOnlyInternetGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        if (p.getFirst("ClientToken") != null) {
+            xml.elem("clientToken", p.getFirst("ClientToken"));
+        }
+        xml.start("egressOnlyInternetGateway").raw(eigwXml(eigw)).end("egressOnlyInternetGateway")
+                .end("CreateEgressOnlyInternetGatewayResponse");
+        return xmlResponse(xml.build());
     }
 
-    private void validateEmptyDiscoveryPagination(MultivaluedMap<String, String> p, int maximum) {
-        String rawMaxResults = p.getFirst("MaxResults");
-        if (rawMaxResults != null) {
-            int maxResults = parseIntParam(p, "MaxResults", 0);
-            if (maxResults < 5 || maxResults > maximum) {
-                throw new AwsException("InvalidMaxResults",
-                        "The specified value for MaxResults is not valid.", 400);
-            }
+    private Response handleDescribeEgressOnlyInternetGateways(MultivaluedMap<String, String> p, String region) {
+        EgressOnlyInternetGatewayListResult result = service.describeEgressOnlyInternetGateways(
+                region, getList(p, "EgressOnlyInternetGatewayId"), getFilters(p),
+                p.getFirst("MaxResults") == null ? null : parseIntParam(p, "MaxResults", 0),
+                p.getFirst("NextToken"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeEgressOnlyInternetGatewaysResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("egressOnlyInternetGatewaySet");
+        for (EgressOnlyInternetGateway eigw : result.egressOnlyInternetGateways()) {
+            xml.start("item").raw(eigwXml(eigw)).end("item");
         }
-        if (p.getFirst("NextToken") != null) {
-            throw new AwsException("InvalidParameterValue", "Invalid NextToken", 400);
+        xml.end("egressOnlyInternetGatewaySet");
+        if (result.nextToken() != null) {
+            xml.elem("nextToken", result.nextToken());
         }
+        xml.end("DescribeEgressOnlyInternetGatewaysResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteEgressOnlyInternetGateway(MultivaluedMap<String, String> p, String region) {
+        service.deleteEgressOnlyInternetGateway(region, requiredParam(p, "EgressOnlyInternetGatewayId"));
+        return xmlResponse(new XmlBuilder()
+                .start("DeleteEgressOnlyInternetGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("returnCode", "true")
+                .end("DeleteEgressOnlyInternetGatewayResponse")
+                .build());
     }
 
     private Response emptyDescribeResponse(String action, String resultSet) {
@@ -3806,9 +3834,8 @@ public class Ec2QueryHandler {
         String destPrefixList = p.getFirst("DestinationPrefixListId");
         String gwId = p.getFirst("GatewayId");
         String natGwId = p.getFirst("NatGatewayId");
-        // The gateway itself is not modelled (CreateEgressOnlyInternetGateway is still
-        // unimplemented), but the id the caller sent is stored and reported back so an IPv6
-        // egress route is not silently rewritten into a targetless one.
+        // The gateway id is stored as sent, not checked against the egress-only gateways that
+        // exist, so an IPv6 egress route is not silently rewritten into a targetless one.
         String eigwId = p.getFirst("EgressOnlyInternetGatewayId");
         String pcxId = p.getFirst("VpcPeeringConnectionId");
         String instanceId = p.getFirst("InstanceId");
@@ -4301,7 +4328,7 @@ public class Ec2QueryHandler {
 
     private Response handleAllocateAddress(MultivaluedMap<String, String> p, String region) {
         List<Tag> resourceTags = parseTagsForResource(p, "elastic-ip");
-        Address addr = service.allocateAddress(region);
+        Address addr = service.allocateAddress(region, p.getFirst("PublicIpv4Pool"), p.getFirst("NetworkBorderGroup"));
         applyResourceTags(resourceTags, region, addr.getAllocationId());
         XmlBuilder xml = new XmlBuilder()
                 .start("AllocateAddressResponse", AwsNamespaces.EC2)
@@ -4309,6 +4336,8 @@ public class Ec2QueryHandler {
                 .elem("publicIp", addr.getPublicIp())
                 .elem("domain", addr.getDomain())
                 .elem("allocationId", addr.getAllocationId())
+                .elem("publicIpv4Pool", addr.getPublicIpv4Pool())
+                .elem("networkBorderGroup", addr.getNetworkBorderGroup())
                 .end("AllocateAddressResponse");
         return xmlResponse(xml.build());
     }
@@ -4896,7 +4925,7 @@ public class Ec2QueryHandler {
         if (inst.getIamInstanceProfileArn() != null) {
             xml.start("iamInstanceProfile")
                     .elem("arn", inst.getIamInstanceProfileArn())
-                    .elem("id", Ec2Service.iamInstanceProfileId(inst.getInstanceId()))
+                    .elem("id", inst.getIamInstanceProfileId())
                     .end("iamInstanceProfile");
         }
         xml.raw(tagSetXml(inst.getTags()));
@@ -4908,15 +4937,7 @@ public class Ec2QueryHandler {
     }
 
     private String resolveIamInstanceProfileArn(MultivaluedMap<String, String> p, String prefix) {
-        String arn = p.getFirst(prefix + ".Arn");
-        if (arn != null && !arn.isBlank()) {
-            return arn;
-        }
-        String name = p.getFirst(prefix + ".Name");
-        if (name == null || name.isBlank()) {
-            return null;
-        }
-        return service.resolveIamInstanceProfileName(name);
+        return service.resolveIamInstanceProfileArn(p.getFirst(prefix + ".Name"), p.getFirst(prefix + ".Arn"));
     }
 
     private String vpcXml(Vpc vpc) {
@@ -5036,6 +5057,21 @@ public class Ec2QueryHandler {
         }
         xml.end("attachmentSet")
                 .raw(tagSetXml(igw.getTags()));
+        return xml.build();
+    }
+
+    private String eigwXml(EgressOnlyInternetGateway eigw) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("egressOnlyInternetGatewayId", eigw.getEgressOnlyInternetGatewayId())
+                .start("attachmentSet");
+        for (InternetGatewayAttachment att : eigw.getAttachments()) {
+            xml.start("item")
+                    .elem("state", att.getState())
+                    .elem("vpcId", att.getVpcId())
+                    .end("item");
+        }
+        xml.end("attachmentSet")
+                .raw(tagSetXml(eigw.getTags()));
         return xml.build();
     }
 
@@ -5914,6 +5950,8 @@ public class Ec2QueryHandler {
                 .elem("publicIp", addr.getPublicIp())
                 .elem("allocationId", addr.getAllocationId())
                 .elem("domain", addr.getDomain())
+                .elem("publicIpv4Pool", addr.getPublicIpv4Pool())
+                .elem("networkBorderGroup", addr.getNetworkBorderGroup())
                 .elem("instanceId", addr.getInstanceId())
                 .elem("associationId", addr.getAssociationId())
                 .elem("networkInterfaceId", addr.getNetworkInterfaceId())

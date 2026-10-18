@@ -23,7 +23,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Lambda Web Functions](lambda-web-functions.md) | `/2025-03-07/web-functions/...` | REST JSON | 20 |
 | [API Gateway v1](api-gateway.md) | `/restapis/...` | REST JSON | 80 |
 | [API Gateway v2](api-gateway.md#v2) | `/v2/apis/...` | REST JSON | 53 + data-plane |
-| [IAM](iam.md) | `POST /` with `Action=` param | Query | 167 |
+| [IAM](iam.md) | `POST /` with `Action=` param | Query | 174 |
 | [STS](sts.md) | `POST /` with `Action=` param | Query | 7 |
 | [AWS Sign-In](iam.md#aws-sign-in-login-credentials) | `/v1/authorize`, `/v1/token` | REST JSON | 2 |
 | [Organizations](organizations.md) | `POST /` + `X-Amz-Target: AWSOrganizationsV20161128.*` | JSON 1.1 | 56 |
@@ -63,7 +63,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Amazon Data Lifecycle Manager](dlm.md) | `/policies`, `/policies/{policyId}`, `/tags/{resourceArn}` | REST JSON | 8 |
 | [ElastiCache](elasticache.md) | `POST /` with `Action=` param + TCP proxy | Query + RESP | 30 |
 | [MemoryDB](memorydb.md) | `POST /` + `X-Amz-Target: AmazonMemoryDB.*` + TCP proxy | JSON 1.1 + RESP | 13 |
-| [RDS](rds.md) | `POST /` with `Action=` param + TCP proxy | Query + wire | 100 |
+| [RDS](rds.md) | `POST /` with `Action=` param + TCP proxy | Query + wire | 105 |
 | [RDS Data API](rds-data.md) | `/Execute`, `/BeginTransaction`, `/CommitTransaction`, `/RollbackTransaction` | REST JSON | 4 |
 | [Timestream for InfluxDB](timestream-influxdb.md) | `POST /` + `X-Amz-Target: AmazonTimestreamInfluxDB.*` + InfluxDB container | JSON 1.0 + InfluxDB HTTP | 24 |
 | [MSK](msk.md) | `/v1/clusters/...`, `/api/v2/clusters/...` + Redpanda broker | REST JSON + Kafka | 8 |
@@ -77,7 +77,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [DMS](dms.md) | `POST /` + `X-Amz-Target: AmazonDMSv20160101.*` | JSON 1.1 | 20 |
 | [Redshift](redshift.md) | `POST /` with `Action=` param + PostgreSQL container | Query + PostgreSQL wire (+ CFN) | 43 |
 | [Redshift Data API](redshift-data.md) | `POST /` + `X-Amz-Target: RedshiftData.*` | JSON 1.1 | 11 |
-| [Redshift Serverless](redshift-serverless.md) | `POST /` + `X-Amz-Target: RedshiftServerless.*` | JSON 1.1 | 36 |
+| [Redshift Serverless](redshift-serverless.md) | `POST /` + `X-Amz-Target: RedshiftServerless.*` | JSON 1.1 | 55 |
 | [EMR](emr.md) | `POST /` + `X-Amz-Target: ElasticMapReduce.*` | JSON 1.1 | 37 |
 | [EMR Serverless](emr-serverless.md) | `/applications/*`, `/tags/*` | REST JSON | 10 |
 | [Data Firehose](firehose.md) | `POST /` + `X-Amz-Target: Firehose_20150804.*` | JSON 1.1 | 12 |
@@ -122,7 +122,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [AWS Backup](backup.md) | `/backup-vaults/*`, `/backup/plans/*`, `/backup-jobs/*`, `/supported-resource-types` | REST JSON | 20 |
 | [AWS FIS](fis.md) | `/experimentTemplates/*`, `/experiments/*`, `/actions/*`, `/targetResourceTypes/*`, `/safetyLevers/*`, `/tags/*` | REST JSON | 26 |
 | [CodeGuru Reviewer](codegurureviewer.md) | `/associations`, `/associations/{associationArn}`, `/tags/*` | REST JSON | 7 |
-| [CodeArtifact](codeartifact.md) | `/v1/domain*`, `/v1/repository*`, `/v1/package`, `/v1/package/version*`, `/v1/tag*`, `/v1/authorization-token`, `/codeartifact/maven/*`, `/codeartifact/npm/*`, `/codeartifact/pypi/*` | REST JSON | 30 |
+| [CodeArtifact](codeartifact.md) | `/v1/domain*`, `/v1/repository*`, `/v1/package`, `/v1/package/version*`, `/v1/tag*`, `/v1/authorization-token`, `/codeartifact/maven/*`, `/codeartifact/npm/*`, `/codeartifact/pypi/*` | REST JSON | 31 |
 | [CloudFront](cloudfront.md) | `/2020-05-31/distribution/*`, `/2020-05-31/cache-policy/*`, `/2020-05-31/function/*` | REST XML | 50 |
 | [Route53](route53.md) | `/2013-04-01/hostedzone/*`, `/2013-04-01/healthcheck/*`, `/2013-04-01/change/*` | REST XML | 27 |
 | [Route 53 Resolver](route53resolver.md) | `POST /` + `X-Amz-Target: Route53Resolver.*` | JSON 1.1 | 19 |

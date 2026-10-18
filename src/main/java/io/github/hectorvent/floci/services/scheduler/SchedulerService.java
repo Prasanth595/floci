@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -349,13 +350,13 @@ public class SchedulerService {
 
     private void validateScheduleRequest(ScheduleRequest req) {
         if (req.getScheduleExpression() == null || req.getScheduleExpression().isBlank()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'scheduleExpression' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'scheduleExpression' failed to satisfy constraint: Member must not be null");
         }
         if (req.getScheduleExpression().length() > 256) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + req.getScheduleExpression()
-                            + "' at 'scheduleExpression' failed to satisfy constraint: Member must have length less than or equal to 256", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + req.getScheduleExpression()
+                            + "' at 'scheduleExpression' failed to satisfy constraint: Member must have length less than or equal to 256");
         }
         try {
             SchedulerExpressionParser.validate(req.getScheduleExpression(), req.getScheduleExpressionTimezone());
@@ -364,62 +365,62 @@ public class SchedulerService {
                     "Invalid ScheduleExpression: " + e.getMessage(), 400);
         }
         if (req.getFlexibleTimeWindow() == null) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'flexibleTimeWindow' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'flexibleTimeWindow' failed to satisfy constraint: Member must not be null");
         }
         String flexibleTimeWindowMode = req.getFlexibleTimeWindow().getMode();
         if (flexibleTimeWindowMode == null || flexibleTimeWindowMode.isBlank()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'flexibleTimeWindow.mode' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'flexibleTimeWindow.mode' failed to satisfy constraint: Member must not be null");
         }
         flexibleTimeWindowMode = flexibleTimeWindowMode.trim();
         if (!"OFF".equals(flexibleTimeWindowMode) && !"FLEXIBLE".equals(flexibleTimeWindowMode)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + flexibleTimeWindowMode + "' at 'flexibleTimeWindow.mode' failed to satisfy constraint: Member must satisfy enum value set: [OFF, FLEXIBLE]", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + flexibleTimeWindowMode + "' at 'flexibleTimeWindow.mode' failed to satisfy constraint: Member must satisfy enum value set: [OFF, FLEXIBLE]");
         }
         if ("FLEXIBLE".equals(flexibleTimeWindowMode)
                 && req.getFlexibleTimeWindow().getMaximumWindowInMinutes() == null) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'flexibleTimeWindow.maximumWindowInMinutes' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'flexibleTimeWindow.maximumWindowInMinutes' failed to satisfy constraint: Member must not be null");
         }
         if ("OFF".equals(flexibleTimeWindowMode)
                 && req.getFlexibleTimeWindow().getMaximumWindowInMinutes() != null) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'flexibleTimeWindow.maximumWindowInMinutes' failed to satisfy constraint: Member must be null when flexibleTimeWindow.mode is OFF", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value at 'flexibleTimeWindow.maximumWindowInMinutes' failed to satisfy constraint: Member must be null when flexibleTimeWindow.mode is OFF");
         }
         if (req.getTarget() == null) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'target' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'target' failed to satisfy constraint: Member must not be null");
         }
         if (req.getTarget().getArn() == null || req.getTarget().getArn().isBlank()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'target.arn' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'target.arn' failed to satisfy constraint: Member must not be null");
         }
         if (req.getTarget().getRoleArn() == null || req.getTarget().getRoleArn().isBlank()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'target.roleArn' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'target.roleArn' failed to satisfy constraint: Member must not be null");
         }
         if (req.getTarget().getRoleArn().length() > 1600) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + req.getTarget().getRoleArn()
-                            + "' at 'target.roleArn' failed to satisfy constraint: Member must have length less than or equal to 1600", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + req.getTarget().getRoleArn()
+                            + "' at 'target.roleArn' failed to satisfy constraint: Member must have length less than or equal to 1600");
         }
         if (!ROLE_ARN_PATTERN.matcher(req.getTarget().getRoleArn()).matches()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + req.getTarget().getRoleArn()
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + req.getTarget().getRoleArn()
                             + "' at 'target.roleArn' failed to satisfy constraint: Member must satisfy regular expression pattern: "
-                            + ROLE_ARN_MODEL_PATTERN, 400);
+                            + ROLE_ARN_MODEL_PATTERN);
         }
         if (req.getTarget().getDeadLetterConfig() != null
                 && (req.getTarget().getDeadLetterConfig().getArn() == null
                 || req.getTarget().getDeadLetterConfig().getArn().isBlank())) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'target.deadLetterConfig.arn' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'target.deadLetterConfig.arn' failed to satisfy constraint: Member must not be null");
         }
         String input = req.getTarget().getInput();
         if (input != null && requiresJsonInput(req.getTarget().getArn()) && !isWellFormedJson(input)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'target.input' failed to satisfy constraint: Member must be well-formed JSON for Lambda, Step Functions, and EventBridge targets", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value at 'target.input' failed to satisfy constraint: Member must be well-formed JSON for Lambda, Step Functions, and EventBridge targets");
         }
     }
 

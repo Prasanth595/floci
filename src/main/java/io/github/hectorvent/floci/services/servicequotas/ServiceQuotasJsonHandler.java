@@ -28,10 +28,10 @@ public class ServiceQuotasJsonHandler {
     public Response handle(String action, JsonNode request, String region, String accountId) {
         LOG.debugv("ServiceQuotas action: {0}", action);
         return switch (action) {
-            case "ListServiceQuotas" -> handleListServiceQuotas(request, region, accountId);
-            case "GetServiceQuota" -> handleGetServiceQuota(request, region, accountId);
-            case "GetAWSDefaultServiceQuota" -> handleGetServiceQuota(request, region, accountId);
-            case "ListAWSDefaultServiceQuotas" -> handleListServiceQuotas(request, region, accountId);
+            case "ListServiceQuotas" -> handleListServiceQuotas(request, region, accountId, false);
+            case "GetServiceQuota" -> handleGetServiceQuota(request, region, accountId, false);
+            case "GetAWSDefaultServiceQuota" -> handleGetServiceQuota(request, region, accountId, true);
+            case "ListAWSDefaultServiceQuotas" -> handleListServiceQuotas(request, region, accountId, true);
             case "RequestServiceQuotaIncrease" -> handleRequestServiceQuotaIncrease(request, region, accountId);
             case "GetRequestedServiceQuotaChange" ->
                     Response.ok(service.getRequestedServiceQuotaChange(
@@ -48,20 +48,22 @@ public class ServiceQuotasJsonHandler {
         };
     }
 
-    private Response handleListServiceQuotas(JsonNode request, String region, String accountId) {
-        return Response.ok(service.listServiceQuotas(
-                stringOrNull(request, "ServiceCode"),
-                stringOrNull(request, "QuotaCode"),
-                stringOrNull(request, "NextToken"),
-                integerOrNull(request, "MaxResults"),
-                region, accountId)).build();
+    private Response handleListServiceQuotas(JsonNode request, String region, String accountId, boolean awsDefault) {
+        String serviceCode = stringOrNull(request, "ServiceCode");
+        String quotaCode = stringOrNull(request, "QuotaCode");
+        String nextToken = stringOrNull(request, "NextToken");
+        Integer maxResults = integerOrNull(request, "MaxResults");
+        return Response.ok(awsDefault
+                ? service.listAwsDefaultServiceQuotas(serviceCode, quotaCode, nextToken, maxResults, region, accountId)
+                : service.listServiceQuotas(serviceCode, quotaCode, nextToken, maxResults, region, accountId)).build();
     }
 
-    private Response handleGetServiceQuota(JsonNode request, String region, String accountId) {
-        return Response.ok(service.getServiceQuota(
-                stringOrNull(request, "ServiceCode"),
-                stringOrNull(request, "QuotaCode"),
-                region, accountId)).build();
+    private Response handleGetServiceQuota(JsonNode request, String region, String accountId, boolean awsDefault) {
+        String serviceCode = stringOrNull(request, "ServiceCode");
+        String quotaCode = stringOrNull(request, "QuotaCode");
+        return Response.ok(awsDefault
+                ? service.getAwsDefaultServiceQuota(serviceCode, quotaCode, region, accountId)
+                : service.getServiceQuota(serviceCode, quotaCode, region, accountId)).build();
     }
 
     private static String stringOrNull(JsonNode node, String field) {

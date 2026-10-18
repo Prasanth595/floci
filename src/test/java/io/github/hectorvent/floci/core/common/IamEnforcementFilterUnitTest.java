@@ -74,6 +74,44 @@ class IamEnforcementFilterUnitTest {
     }
 
     @Test
+    void versionActions_emitAsTheOperationTheyCheck() {
+        assertEquals("GetObject",
+                IamEnforcementFilter.mapS3ActionToEventName("s3:GetObjectVersion", "GET"));
+        assertEquals("HeadObject",
+                IamEnforcementFilter.mapS3ActionToEventName("s3:GetObjectVersion", "HEAD"));
+        assertEquals("DeleteObject",
+                IamEnforcementFilter.mapS3ActionToEventName("s3:DeleteObjectVersion", "DELETE"));
+        assertEquals("GetObjectAcl",
+                IamEnforcementFilter.mapS3ActionToEventName("s3:GetObjectVersionAcl", "GET"));
+        assertEquals("PutObjectAcl",
+                IamEnforcementFilter.mapS3ActionToEventName("s3:PutObjectVersionAcl", "PUT"));
+        assertEquals("GetObjectTagging",
+                IamEnforcementFilter.mapS3ActionToEventName("s3:GetObjectVersionTagging", "GET"));
+        assertEquals("PutObjectTagging",
+                IamEnforcementFilter.mapS3ActionToEventName("s3:PutObjectVersionTagging", "PUT"));
+        assertEquals("DeleteObjectTagging",
+                IamEnforcementFilter.mapS3ActionToEventName("s3:DeleteObjectVersionTagging", "DELETE"));
+    }
+
+    @Test
+    void extraActionChecks_emitAsTheOperationTheyRefuse() {
+        assertEquals("PutObjectRetention",
+                IamEnforcementFilter.mapS3ActionToEventName("s3:PutObjectRetention", "PUT"));
+        assertEquals("GetObjectAttributes",
+                IamEnforcementFilter.mapS3ActionToEventName("s3:GetObjectAttributes", "GET"));
+        assertEquals("GetObjectAttributes",
+                IamEnforcementFilter.mapS3ActionToEventName("s3:GetObjectVersionAttributes", "GET"));
+    }
+
+    @Test
+    void postOperations_returnNullRatherThanTheWrongName() {
+        // CreateMultipartUpload and CompleteMultipartUpload are checked as s3:PutObject, and
+        // SelectObjectContent as s3:GetObject; neither name is the operation that ran.
+        assertNull(IamEnforcementFilter.mapS3ActionToEventName("s3:PutObject", "POST"));
+        assertNull(IamEnforcementFilter.mapS3ActionToEventName("s3:GetObject", "POST"));
+    }
+
+    @Test
     void unknownAction_returnsNull() {
         assertNull(IamEnforcementFilter.mapS3ActionToEventName("s3:GetBucketAcl", "GET"));
         assertNull(IamEnforcementFilter.mapS3ActionToEventName("dynamodb:Query", "POST"));

@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.DeadlineCharSequence;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -207,9 +208,9 @@ public class SsmService implements ResourceProvider {
         // Validation reads only the request, so it runs before the lock: an AllowedPattern match can take up
         // to ALLOWED_PATTERN_TIMEOUT_NANOS and must not stall other SSM writers.
         if (tier != null && !PARAMETER_TIERS.contains(tier)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + tier + "' at 'tier' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [Standard, Advanced, Intelligent-Tiering]", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + tier + "' at 'tier' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [Standard, Advanced, Intelligent-Tiering]");
         }
         validateTagKeys(tags);
         rejectReservedName(name);
@@ -228,9 +229,9 @@ public class SsmService implements ResourceProvider {
         }
         if (allowedPattern != null) {
             if (allowedPattern.length() > MAX_ALLOWED_PATTERN_LENGTH) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value at 'allowedPattern' failed to satisfy constraint: "
-                                + "Member must have length less than or equal to " + MAX_ALLOWED_PATTERN_LENGTH, 400);
+                throw SmithyValidationErrors.validationException(
+                        "Value at 'allowedPattern' failed to satisfy constraint: "
+                                + "Member must have length less than or equal to " + MAX_ALLOWED_PATTERN_LENGTH);
             }
             Pattern pattern;
             try {
@@ -871,10 +872,7 @@ public class SsmService implements ResourceProvider {
     }
 
     static AwsException validationErrors(List<String> violations) {
-        String count = violations.size() == 1
-                ? "1 validation error detected: "
-                : violations.size() + " validation errors detected: ";
-        return new AwsException("ValidationException", count + String.join("; ", violations), 400);
+        return SmithyValidationErrors.validationException(violations);
     }
 
     private static boolean isValidLabel(String label) {
@@ -935,8 +933,8 @@ public class SsmService implements ResourceProvider {
             } else {
                 continue;
             }
-            throw new AwsException("ValidationException", "1 validation error detected: Value at 'tags."
-                    + position + ".member.key' failed to satisfy constraint: " + constraint, 400);
+            throw SmithyValidationErrors.validationException("Value at 'tags."
+                    + position + ".member.key' failed to satisfy constraint: " + constraint);
         }
     }
 

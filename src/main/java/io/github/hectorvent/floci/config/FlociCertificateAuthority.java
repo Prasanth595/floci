@@ -19,6 +19,9 @@ import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequest;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+
 import java.io.IOException;
 import java.io.StringReader;
 import java.nio.file.Files;
@@ -26,9 +29,13 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.GeneralSecurityException;
 import java.security.KeyPair;
+import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.PublicKey;
+import java.security.SecureRandom;
+import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.util.HexFormat;
@@ -208,6 +215,23 @@ public final class FlociCertificateAuthority {
                                                                             KeyAlgorithm keyAlgorithm, KeyPair keyPair) {
         return generator.generateIssuedCertificate(commonName, sans, keyAlgorithm, keyPair, issuer(),
                 CertificateGenerator.LeafUsage.SERVER);
+    }
+
+    /**
+     * A TLS server context presenting {@code certificate}, issued by this CA, with its
+     * {@code key}, the chain ending at this CA, so a client that trusts Floci's CA verifies it.
+     */
+    public SSLContext serverSslContext(X509Certificate certificate, PrivateKey key)
+            throws GeneralSecurityException, IOException {
+        char[] password = new char[0];
+        KeyStore keyStore = KeyStore.getInstance("PKCS12");
+        keyStore.load(null, password);
+        keyStore.setKeyEntry("floci-server", key, password, new Certificate[]{certificate, certificate()});
+        KeyManagerFactory keyManagers = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        keyManagers.init(keyStore, password);
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(keyManagers.getKeyManagers(), null, new SecureRandom());
+        return context;
     }
 
     /**

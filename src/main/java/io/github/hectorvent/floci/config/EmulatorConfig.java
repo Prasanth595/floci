@@ -887,6 +887,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("pypiserver/pypiserver:v2.4.2")
         String pypiImage();
+
+        /**
+         * Image used for the per-repository BaGetter container backing the {@code nuget} format.
+         * Same reasoning as {@link #npmImage()}: BaGetter has no native concept of multiple named
+         * feeds inside one instance either, so this gets one container per CodeArtifact
+         * repository too, and there is no single external instance a URL override could name.
+         */
+        @WithDefault("bagetter/bagetter:1.6.5")
+        String nugetImage();
     }
 
     interface ConnectServiceConfig {
@@ -1085,6 +1094,9 @@ public interface EmulatorConfig {
     interface ServiceQuotasServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("5")
+        int standardOnDemandVcpus();
     }
 
     interface VerifiedPermissionsServiceConfig {
@@ -1954,6 +1966,10 @@ public interface EmulatorConfig {
     interface CognitoServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** Google federation issuer; override to use a local OIDC provider for testing. */
+        @WithDefault("https://accounts.google.com")
+        String googleIssuer();
 
         /**
          * Rejects an app client whose token validity is outside AWS's limits: access and ID tokens
@@ -3509,6 +3525,15 @@ public interface EmulatorConfig {
     }
 
     interface InitHooksConfig {
+        /**
+         * Root of the Floci-native hook directories ({@code boot.d}, {@code start.d}, {@code ready.d},
+         * {@code stop.d}, {@code shutdown.d}). The image mounts them under the default; a binary on
+         * the host points this at a directory of its own. The LocalStack-compat tree under
+         * {@code /etc/localstack/init} is always read as well.
+         */
+        @WithDefault("/etc/floci/init")
+        String dir();
+
         @WithDefault("/bin/sh")
         String shellExecutable();
 

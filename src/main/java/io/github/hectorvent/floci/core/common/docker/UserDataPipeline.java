@@ -3,8 +3,6 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
@@ -203,20 +201,6 @@ public final class UserDataPipeline {
         return false;
     }
 
-    public static byte[] buildSingleFileTar(String filename, byte[] content, int mode) throws IOException {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
-            tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
-            TarArchiveEntry entry = new TarArchiveEntry(filename);
-            entry.setSize(content.length);
-            entry.setMode(mode);
-            tar.putArchiveEntry(entry);
-            tar.write(content);
-            tar.closeArchiveEntry();
-        }
-        return bos.toByteArray();
-    }
-
     public static String summarizeUserDataOutput(BoundedOutput output) {
         if (output == null) {
             return "(no output)";
@@ -240,6 +224,20 @@ public final class UserDataPipeline {
             Consumer<String> outputLineConsumer,
             Set<ResultCallback<Frame>> activeCallbacks
     ) {
+        return executeUserData(dockerClient, containerId, contextDescription, userData, timeout,
+                outputLineConsumer, activeCallbacks, RetryingTarCopier.DEFAULT_BACKOFF_MS);
+    }
+
+    static ExecutionResult executeUserData(
+            DockerClient dockerClient,
+            String containerId,
+            String contextDescription,
+            String userData,
+            Duration timeout,
+            Consumer<String> outputLineConsumer,
+            Set<ResultCallback<Frame>> activeCallbacks,
+            long archiveRetryBackoffMillis
+    ) {
         if (dockerClient == null || containerId == null || containerId.isBlank()) {
             return ExecutionResult.skipped("No container available");
         }
@@ -255,7 +253,7 @@ public final class UserDataPipeline {
             String scriptContent = shellScripts.get(i);
             ExecutionResult partResult = executeSingleScript(
                     dockerClient, containerId, contextDescription, scriptContent, partNumber, partCount,
-                    effectiveTimeout, outputLineConsumer, activeCallbacks);
+                    effectiveTimeout, outputLineConsumer, activeCallbacks, archiveRetryBackoffMillis);
             if (!partResult.isSuccess()) {
                 return partResult;
             }
@@ -272,15 +270,13 @@ public final class UserDataPipeline {
             int partCount,
             Duration timeout,
             Consumer<String> outputLineConsumer,
-            Set<ResultCallback<Frame>> activeCallbacks
+            Set<ResultCallback<Frame>> activeCallbacks,
+            long archiveRetryBackoffMillis
     ) {
         byte[] script = scriptContent.getBytes(StandardCharsets.UTF_8);
         try {
-            byte[] tar = buildSingleFileTar("user-data.sh", script, 0755);
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withRemotePath("/var/lib")
-                    .withTarInputStream(new ByteArrayInputStream(tar))
-                    .exec();
+            RetryingTarCopier.copyBytes(dockerClient, containerId, "/var/lib", "user-data.sh", script, 0755,
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
 
             String execId = dockerClient.execCreateCmd(containerId)
                     .withCmd(USER_DATA_SCRIPT_PATH)

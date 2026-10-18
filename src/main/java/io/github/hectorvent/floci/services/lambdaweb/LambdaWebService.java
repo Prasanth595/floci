@@ -10,7 +10,9 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
@@ -41,6 +43,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.regex.Matcher;
@@ -119,6 +122,7 @@ public class LambdaWebService implements Resettable {
     private static final Pattern FILTER_NAME = Pattern.compile("[a-zA-Z0-9]+");
     private static final Pattern FILTER_VALUE = Pattern.compile("[a-zA-Z0-9_-]+");
     private static final Pattern PRINCIPAL_AWS = Pattern.compile("[\\w+=,.@\\:-]*");
+    private static final Pattern PRINCIPAL_AWS_ARN = Pattern.compile("[\\w+=/:,.@-]*");
     private static final Pattern PRINCIPAL_SERVICE = Pattern.compile("[\\w+=,.@-]*");
 
     /** AWS assigns one shard label per cell. */
@@ -137,6 +141,8 @@ public class LambdaWebService implements Resettable {
     /** Keyed {@code region/functionName}. The backend adds the caller's account to every key. */
     private StorageBackend<String, WebFunction> functions;
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
+    /** Every endpoint domain, filled from storage at start and kept by the create and delete paths. */
+    private final ConcurrentHashMap<String, EndpointLocator> domains = new ConcurrentHashMap<>();
 
     @Inject
     public LambdaWebService(RegionResolver regionResolver, StorageFactory storageFactory, EmulatorConfig config,
@@ -157,11 +163,74 @@ public class LambdaWebService implements Resettable {
     void initializeStorage() {
         this.functions = storageFactory.create("lambda", "lambda-web-functions.json",
                 new TypeReference<Map<String, WebFunction>>() {});
+        domains.clear();
+        List<WebFunction> all = functions instanceof AccountAwareStorageBackend<WebFunction> aware
+                ? aware.scanAllAccounts()
+                : functions.scan(key -> true);
+        for (WebFunction fn : all) {
+            fn.endpoints.values().forEach(endpoint -> indexDomains(fn, endpoint));
+        }
     }
 
     @Override
     public void clear() {
         functions.clear();
+        domains.clear();
+    }
+
+    /** Where a request to an endpoint domain goes. Domains are unique across accounts and regions. */
+    public record WebFunctionTarget(String accountId, String region, WebFunction function, WebFunctionEndpoint endpoint) {
+    }
+
+    private record EndpointLocator(String accountId, String region, String functionName, String endpointName) {
+    }
+
+    public Optional<WebFunctionTarget> locate(String host) {
+        EndpointLocator locator = domains.get(host);
+        if (locator == null) {
+            return Optional.empty();
+        }
+        return RequestScopes.callAs(locator.accountId(), locator.region(), () -> {
+            synchronized (lockFor(locator.region(), locator.functionName())) {
+                Optional<WebFunction> stored = functions.get(key(locator.region(), locator.functionName()));
+                if (stored.isEmpty() || !stored.get().endpoints.containsKey(locator.endpointName())) {
+                    domains.remove(host, locator);
+                    return Optional.empty();
+                }
+                WebFunction fn = copy(stored.get(), WebFunction.class);
+                return Optional.of(new WebFunctionTarget(locator.accountId(), locator.region(), fn,
+                        fn.endpoints.get(locator.endpointName())));
+            }
+        });
+    }
+
+    private void indexDomains(WebFunction fn, WebFunctionEndpoint endpoint) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.functionArn);
+        EndpointLocator locator = new EndpointLocator(arn.accountId(), arn.region(), fn.functionName, endpoint.endpointName);
+        domains.put(endpoint.domainName, locator);
+        endpoint.regionalDomainNames.values().forEach(domain -> domains.put(domain, locator));
+    }
+
+    private void unindexDomains(WebFunctionEndpoint endpoint) {
+        domains.remove(endpoint.domainName);
+        endpoint.regionalDomainNames.values().forEach(domains::remove);
+    }
+
+    /** The revision a request goes to, drawn by the endpoint's weights. */
+    public static WebFunctionRevision pickRevision(WebFunctionTarget target) {
+        List<WebFunctionEndpoint.RevisionWeight> weights = target.endpoint().revisionWeights;
+        if (weights.isEmpty()) {
+            return null;
+        }
+        int draw = ThreadLocalRandom.current().nextInt(100);
+        int cumulative = 0;
+        for (WebFunctionEndpoint.RevisionWeight weight : weights) {
+            cumulative += weight.weight;
+            if (draw < cumulative) {
+                return target.function().revisions.get(weight.revisionId);
+            }
+        }
+        return target.function().revisions.get(weights.get(weights.size() - 1).revisionId);
     }
 
     /** An endpoint before and after an update. The update response shows both. */
@@ -206,6 +275,7 @@ public class LambdaWebService implements Resettable {
             attachEndpoint(region, fn, endpoint, revision);
             fn.revisions.put(revision.revisionId, revision);
             fn.endpoints.put(endpoint.endpointName, endpoint);
+            indexDomains(fn, endpoint);
             LOG.infov("Created web function {0} with revision {1} and endpoint {2}",
                     functionName, revision.revisionId, endpoint.endpointName);
         });
@@ -276,7 +346,8 @@ public class LambdaWebService implements Resettable {
     public void deleteFunction(String region, String functionNameOrArn) {
         String functionName = resolveFunctionName(region, functionNameOrArn, "DeleteWebFunction");
         synchronized (lockFor(region, functionName)) {
-            function(region, functionName);
+            WebFunction fn = function(region, functionName);
+            fn.endpoints.values().forEach(this::unindexDomains);
             functions.delete(key(region, functionName));
         }
         LOG.infov("Deleted web function {0}", functionName);
@@ -569,6 +640,7 @@ public class LambdaWebService implements Resettable {
             WebFunction fn = function(region, functionName);
             attachEndpoint(region, fn, endpoint, null);
             fn.endpoints.put(endpoint.endpointName, endpoint);
+            indexDomains(fn, endpoint);
             fn.updatedAt = now();
             persist(region, fn);
         }
@@ -665,6 +737,7 @@ public class LambdaWebService implements Resettable {
             WebFunction fn = function(region, functionName);
             WebFunctionEndpoint endpoint = endpoint(fn, endpointName);
             fn.endpoints.remove(endpoint.endpointName);
+            unindexDomains(endpoint);
             fn.updatedAt = now();
             persist(region, fn);
         }
@@ -1126,11 +1199,12 @@ public class LambdaWebService implements Resettable {
             if (!PRINCIPAL_KEYS.contains(field.getKey())) {
                 throw policySyntax();
             }
-            Pattern allowed = "Service".equals(field.getKey()) ? PRINCIPAL_SERVICE : PRINCIPAL_AWS;
             if (field.getValue().isArray() && field.getValue().isEmpty()) {
                 throw new AwsException("ValidationException", INVALID_PRINCIPAL, 400);
             }
             for (String value : policyValues(field.getValue())) {
+                Pattern allowed = "Service".equals(field.getKey()) ? PRINCIPAL_SERVICE
+                        : "AWS".equals(field.getKey()) && AwsArnUtils.isArn(value) ? PRINCIPAL_AWS_ARN : PRINCIPAL_AWS;
                 if (!"*".equals(value) && !allowed.matcher(value).matches()) {
                     throw new AwsException("ValidationException", "The provided input'" + value
                             + "'was invalid. Member must satisfy expression: " + allowed.pattern()

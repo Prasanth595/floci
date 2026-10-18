@@ -15,6 +15,12 @@ OIDC providers. The option permits private HTTPS targets and HTTP URLs that use 
 or loopback address. It does not permit public HTTP targets. Keep it disabled when Floci can
 receive untrusted API configuration.
 
+With TLS enabled, an issuer Floci serves itself, such as a Floci Cognito user pool, presents a
+certificate of Floci's local CA. The discovery document and JWKS are fetched trusting the same CA
+bundle Floci gives the containers it launches (see [TLS](../configuration/tls.md)), so a JWT
+authorizer on a Floci user pool verifies its tokens, as one on a Cognito user pool does on AWS. Its
+address is still a private one, so it also needs `FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`.
+
 ## Custom API IDs
 
 API IDs are generated randomly, which means endpoint URLs change every time you recreate an API. To pin
@@ -226,10 +232,12 @@ placements AWS accepts are honoured: an `Authorization` header and a presigned q
 (`X-Amz-Algorithm=AWS4-HMAC-SHA256`). The credential must be scoped to the `execute-api` service.
 
 Temporary credentials must also present the session token they were issued with, as
-`X-Amz-Security-Token` (a header, or a query parameter on a presigned request). The token is
+`X-Amz-Security-Token` (a header, or a query parameter on a presigned request). As on AWS, the
+token is read only from where the signature is, and an empty one counts as sent. The token is
 compared against the value recorded when STS minted the credential, so a missing or fabricated one
-is rejected: the secret alone is not the whole credential. Whether the token is covered by
-`SignedHeaders` is not required either way, since SigV4 leaves that service-specific.
+is rejected: the secret alone is not the whole credential. A long-term key must come with no
+token, as on AWS. Whether the token is covered by `SignedHeaders` is not required either way, since
+SigV4 leaves that service-specific.
 
 Rejections are `403`, and never reach the integration:
 
@@ -238,7 +246,8 @@ Rejections are `403`, and never reach the integration:
 | No SigV4 credentials at all | `Missing Authentication Token` / `MissingAuthenticationTokenException` | `Forbidden` |
 | Credentials present but incomplete, or scoped to another service | `Incomplete Signature` / `IncompleteSignatureException` | `Forbidden` |
 | Access key the emulator never issued | `The security token included in the request is invalid.` / `UnrecognizedClientException` | `Forbidden` |
-| Temporary credential presenting no `X-Amz-Security-Token`, or one that is not the token it was issued | `The security token included in the request is invalid.` / `UnrecognizedClientException` | `Forbidden` |
+| Temporary credential presenting no `X-Amz-Security-Token`, or an empty one with any key | `The security token included in the request is invalid.` / `UnrecognizedClientException` | `Forbidden` |
+| `X-Amz-Security-Token` that is not the token the key was issued with, or any token with a long-term key | `The security token included in the request is invalid` / `UnrecognizedClientException` | `Forbidden` |
 | `X-Amz-Date` outside the 5-minute window, or a presigned URL past `X-Amz-Expires` | `Signature expired` / `InvalidSignatureException` | `Forbidden` |
 | Signature mismatch | `The request signature we calculated does not match…` / `InvalidSignatureException` | `Forbidden` |
 
@@ -646,6 +655,25 @@ curl http://{apiId}.execute-api.{region}.localhost.floci.io:4566/{stageName}/{pa
 
 APIs created or updated with `disableExecuteApiEndpoint` reject requests to
 this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
+
+An API with a `corsConfiguration` applies it as AWS does (measured). It ignores the CORS headers an
+integration returns, and sets its own on whatever answers a route: the integration, or API Gateway
+itself refusing the request (a JWT or Lambda authorizer's `401` or `403`, an unsigned call to an
+`AWS_IAM` route's `403`) or failing it (a function that is gone, or that API Gateway may not invoke,
+answers `500` `Internal Server Error`; one Lambda throttles, `503` `Service Unavailable`). An
+`OPTIONS` request no route matches is answered `204`, preflight or not. A request whose `Origin` is
+allowed gets `Access-Control-Allow-Origin`, and `Access-Control-Allow-Credentials` and
+`Access-Control-Expose-Headers` when configured, whatever its method. A preflight (an `OPTIONS`
+request with `Origin` and `Access-Control-Request-Method`) gets the origin, credentials,
+`Access-Control-Allow-Methods`, `Access-Control-Allow-Headers` and `Access-Control-Max-Age` instead,
+and only when the method and every header it asks for are allowed; otherwise no CORS header at all.
+A preflight a route matches (an `OPTIONS` or `ANY` route, or `$default`) goes through that route, so
+its authorizer and its integration answer it; one no route matches is answered `204` by API Gateway.
+A preflight that gets them always carries `Access-Control-Allow-Headers`, empty when none are
+configured, and `Vary: origin` unless `allowOrigins` is a single exact origin or `*`; no other
+response gets a `Vary`. Lists are joined with a bare comma. A path no route matches, or a route
+without a target, answers `404` with none of them. An API without a configuration leaves CORS to its
+integrations.
 
 Routes carrying `authorizationType: AWS_IAM`: including those an OpenAPI import resolves from an
 `awsSigv4` security scheme: require a signed caller; see

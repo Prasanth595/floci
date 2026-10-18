@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -61,6 +62,8 @@ public class Ec2MetadataServer {
     private final Map<String, SessionToken> tokens = new ConcurrentHashMap<>();
     /** IMDSv1 fallback: container bridge IP → Instance */
     private final Map<String, Instance> containerIpToInstance = new ConcurrentHashMap<>();
+    /** Cluster nodes whose instance-profile identity their registrar synthesizes rather than IAM holding it. */
+    private final Set<Instance> synthesizedProfiles = ConcurrentHashMap.newKeySet();
 
     private volatile HttpServer httpServer;
 
@@ -101,8 +104,19 @@ public class Ec2MetadataServer {
                 entry.getValue() == instance && !addresses.contains(entry.getKey()));
     }
 
+    /**
+     * Registers a cluster node that another service synthesizes instead of EC2 launching it. Its
+     * instance-profile ARN and ID are the registrar's own, so {@code iam/info} reports them while IAM
+     * holds no such profile.
+     */
+    public void reconcileClusterNodeAddresses(Set<String> addresses, Instance instance) {
+        synthesizedProfiles.add(instance);
+        reconcileContainerAddresses(addresses, instance);
+    }
+
     public void unregisterInstance(Instance instance) {
         if (instance != null) {
+            synthesizedProfiles.remove(instance);
             credentials.unregister(instance);
             tokens.values().removeIf(token -> token.instance() == instance);
             containerIpToInstance.entrySet().removeIf(entry -> entry.getValue() == instance);
@@ -179,6 +193,7 @@ public class Ec2MetadataServer {
         credentials.clear();
         tokens.clear();
         containerIpToInstance.clear();
+        synthesizedProfiles.clear();
         if (httpServer != null) {
             httpServer.close();
             httpServer = null;
@@ -290,18 +305,25 @@ public class Ec2MetadataServer {
         if (inst == null) {
             return;
         }
-        String profileArn = inst.getIamInstanceProfileArn();
-        if (profileArn == null) {
+        Optional<InstanceProfile> resolved = credentials.profile(inst);
+        String profileArn;
+        String profileId;
+        if (resolved.isPresent()) {
+            profileArn = resolved.get().getArn();
+            profileId = resolved.get().getInstanceProfileId();
+        } else if (synthesizedProfiles.contains(inst) && inst.getIamInstanceProfileArn() != null
+                && !credentials.holdsProfile(inst)) {
+            profileArn = inst.getIamInstanceProfileArn();
+            profileId = inst.getIamInstanceProfileId();
+        } else {
             ctx.response().setStatusCode(404).end("{}");
             return;
         }
-        String profileId = "AIPA" + inst.getInstanceId().toUpperCase().substring(2, 16);
-        String body = "{\"Code\":\"Success\",\"LastUpdated\":\"" + now() + "\","
-                + "\"InstanceProfileArn\":\"" + profileArn + "\","
-                + "\"InstanceProfileId\":\"" + profileId + "\"}";
         ctx.response().setStatusCode(200)
                 .putHeader("content-type", "application/json")
-                .end(body);
+                .end(new JsonObject().put("Code", "Success").put("LastUpdated", now())
+                        .put("InstanceProfileArn", profileArn)
+                        .put("InstanceProfileId", profileId).encode());
     }
 
     private void handleCredentialsList(RoutingContext ctx) {

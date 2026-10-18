@@ -76,11 +76,18 @@ class S3AuthEnforcementIntegrationTest {
     private static final S3RequestSigner BAD_KEY_SIGNER = S3RequestSigner.signedAs("bad-key", "bad-secret");
     private static final S3RequestSigner ACCOUNT_SHAPED_SIGNER = S3RequestSigner.signedAs("123456789012", "test");
 
+    private static void enableLegacyAcls(String bucket) {
+        given().filter(LOCAL_SIGNER)
+                .body("<OwnershipControls><Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>")
+                .when().put("/" + bucket + "?ownershipControls").then().statusCode(200);
+    }
+
     @Test
     @Order(1)
     void createBucketsAndObjects() {
         given().filter(LOCAL_SIGNER).when().put("/" + PUBLIC_BUCKET).then().statusCode(200);
         given().filter(LOCAL_SIGNER).when().put("/" + PRIVATE_BUCKET).then().statusCode(200);
+        enableLegacyAcls(PUBLIC_BUCKET);
 
         given()
             .filter(LOCAL_SIGNER)
@@ -356,6 +363,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(14)
     void bucketAclPublicReadAllowsUnsignedList() {
         given().filter(LOCAL_SIGNER).when().put("/" + BUCKET_ACL_BUCKET).then().statusCode(200);
+        enableLegacyAcls(BUCKET_ACL_BUCKET);
 
         given()
             .filter(LOCAL_SIGNER)
@@ -386,6 +394,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(15)
     void explicitBucketPolicyDenyOverridesPublicObjectAcl() {
         given().filter(LOCAL_SIGNER).when().put("/" + DENY_BUCKET).then().statusCode(200);
+        enableLegacyAcls(DENY_BUCKET);
 
         given()
             .filter(LOCAL_SIGNER)
@@ -1137,6 +1146,7 @@ class S3AuthEnforcementIntegrationTest {
         // non-owners the ability to overwrite or delete existing objects" -- it only lets them
         // create new ones.
         given().filter(LOCAL_SIGNER).when().put("/" + PUBLIC_WRITE_ACL_BUCKET).then().statusCode(200);
+        enableLegacyAcls(PUBLIC_WRITE_ACL_BUCKET);
 
         given()
             .filter(LOCAL_SIGNER)
@@ -1181,6 +1191,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(39)
     void explicitPolicyDenyOverridesPublicWriteAcl() {
         given().filter(LOCAL_SIGNER).when().put("/" + DENY_WRITE_ACL_BUCKET).then().statusCode(200);
+        enableLegacyAcls(DENY_WRITE_ACL_BUCKET);
 
         given()
             .filter(LOCAL_SIGNER)
@@ -1300,21 +1311,25 @@ class S3AuthEnforcementIntegrationTest {
 
     @Test
     @Order(42)
-    void deleteObjectDoesNotBypassGovernanceRetentionWithoutDistinctPermission() {
-        given().filter(LOCAL_SIGNER).when().put("/" + BYPASS_BUCKET).then().statusCode(200);
-
-        given()
-            .filter(LOCAL_SIGNER)
+    void deleteObjectNeedsTheBypassPermissionOnlyToRemoveAGovernanceLockedVersion() {
+        // The permissions table requires s3:BypassGovernanceRetention "if you want to delete an object
+        // that's protected by governance mode", so the header alone asks for nothing more.
+        given().filter(LOCAL_SIGNER).header("x-amz-bucket-object-lock-enabled", "true")
+            .when().put("/" + BYPASS_BUCKET).then().statusCode(200);
+        String free = given().filter(LOCAL_SIGNER).body("unlocked")
+            .when().put("/" + BYPASS_BUCKET + "/free.txt")
+            .then().statusCode(200).extract().header("x-amz-version-id");
+        String locked = given().filter(LOCAL_SIGNER)
+            .header("x-amz-object-lock-mode", "GOVERNANCE")
+            .header("x-amz-object-lock-retain-until-date", "2031-01-01T00:00:00Z")
             .body("locked candidate")
-        .when()
-            .put("/" + BYPASS_BUCKET + "/" + BYPASS_KEY)
-        .then()
-            .statusCode(200);
+            .when().put("/" + BYPASS_BUCKET + "/" + BYPASS_KEY)
+            .then().statusCode(200).extract().header("x-amz-version-id");
 
         given()
             .filter(LOCAL_SIGNER)
             .contentType("application/json")
-            .body(publicObjectActionPolicy(BYPASS_BUCKET, "s3:DeleteObject"))
+            .body(publicObjectActionPolicy(BYPASS_BUCKET, "s3:DeleteObjectVersion"))
         .when()
             .put("/" + BYPASS_BUCKET + "?policy")
         .then()
@@ -1322,6 +1337,14 @@ class S3AuthEnforcementIntegrationTest {
 
         given()
             .header("x-amz-bypass-governance-retention", "true")
+            .queryParam("versionId", free)
+        .when()
+            .delete("/" + BYPASS_BUCKET + "/free.txt")
+        .then()
+            .statusCode(204);
+        given()
+            .header("x-amz-bypass-governance-retention", "true")
+            .queryParam("versionId", locked)
         .when()
             .delete("/" + BYPASS_BUCKET + "/" + BYPASS_KEY)
         .then()
@@ -1339,6 +1362,7 @@ class S3AuthEnforcementIntegrationTest {
 
         given()
             .header("x-amz-bypass-governance-retention", "true")
+            .queryParam("versionId", locked)
         .when()
             .delete("/" + BYPASS_BUCKET + "/" + BYPASS_KEY)
         .then()
@@ -1352,7 +1376,7 @@ class S3AuthEnforcementIntegrationTest {
                   "Statement": {
                     "Effect": "Allow",
                     "Principal": "*",
-                    "Action": ["s3:DeleteObject", "s3:BypassGovernanceRetention"],
+                    "Action": ["s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"],
                     "Resource": "arn:aws:s3:::%s/*"
                   }
                 }
@@ -1366,6 +1390,7 @@ class S3AuthEnforcementIntegrationTest {
         // is treated as applying (fail closed) -- consistent with S3PublicAccessEvaluatorTest's
         // conditionalDenyFailsClosedAndOverridesAllow, this must also override the ACL fallback.
         given().filter(LOCAL_SIGNER).when().put("/" + CONDITIONAL_DENY_ACL_BUCKET).then().statusCode(200);
+        enableLegacyAcls(CONDITIONAL_DENY_ACL_BUCKET);
 
         given()
             .filter(LOCAL_SIGNER)
@@ -2413,6 +2438,7 @@ class S3AuthEnforcementIntegrationTest {
                 </OwnershipControls>
                 """;
         given().filter(LOCAL_SIGNER).when().put("/" + bucket).then().statusCode(200);
+        enableLegacyAcls(bucket);
         given().filter(LOCAL_SIGNER).header("x-amz-acl", "public-read").body("public data")
             .when().put("/" + bucket + "/data.txt")
             .then().statusCode(200);
@@ -2426,7 +2452,7 @@ class S3AuthEnforcementIntegrationTest {
             .when().put("/" + bucket + "?ownershipControls")
             .then().statusCode(400).body(containsString("InvalidBucketAclWithObjectOwnership"));
         given().filter(LOCAL_SIGNER).when().get("/" + bucket + "?ownershipControls")
-            .then().statusCode(404);
+            .then().statusCode(200).body(containsString("<ObjectOwnership>ObjectWriter</ObjectOwnership>"));
         given().filter(LOCAL_SIGNER).header("x-amz-acl", "private")
             .when().put("/" + bucket + "?acl")
             .then().statusCode(200);
@@ -2449,6 +2475,33 @@ class S3AuthEnforcementIntegrationTest {
             .when().put("/" + bucket + "?acl")
             .then().statusCode(200);
         given().when().get("/" + bucket + "?list-type=2").then().statusCode(200);
+    }
+
+    @Test
+    @Order(59)
+    void anAnonymousReadNamingTheNullVersionIsCheckedAgainstThatVersionsAcl() {
+        String bucket = "auth-null-version-acl-bucket";
+        given().filter(LOCAL_SIGNER).when().put("/" + bucket).then().statusCode(200);
+        enableLegacyAcls(bucket);
+        given().filter(LOCAL_SIGNER).body("old").when().put("/" + bucket + "/old").then().statusCode(200);
+        given().filter(LOCAL_SIGNER)
+            .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+            .when().put("/" + bucket + "?versioning")
+            .then().statusCode(200);
+        given().filter(LOCAL_SIGNER).header("x-amz-acl", "public-read").body("new")
+            .when().put("/" + bucket + "/new")
+            .then().statusCode(200);
+
+        // "old", written before versioning, is the null version, and its own ACL makes it public.
+        given().filter(LOCAL_SIGNER).queryParam("versionId", "null").header("x-amz-acl", "public-read")
+            .when().put("/" + bucket + "/old?acl")
+            .then().statusCode(200);
+        given().queryParam("versionId", "null").when().get("/" + bucket + "/old")
+            .then().statusCode(200).body(equalTo("old"));
+
+        // "new" has no null version: its public current version does not make one readable.
+        given().when().get("/" + bucket + "/new").then().statusCode(200).body(equalTo("new"));
+        given().queryParam("versionId", "null").when().get("/" + bucket + "/new").then().statusCode(403);
     }
 
     private static String publicObjectActionPolicy(String bucket, String action) {

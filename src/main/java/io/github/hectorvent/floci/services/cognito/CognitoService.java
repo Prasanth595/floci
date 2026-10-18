@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -37,6 +38,7 @@ import io.github.hectorvent.floci.services.cognito.model.ManagedLoginBranding;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
 import io.github.hectorvent.floci.services.cognito.model.RevokedTokenInfo;
+import io.github.hectorvent.floci.services.cognito.model.SmsMfaSettings;
 import io.github.hectorvent.floci.services.cognito.model.SoftwareTokenMfaSettings;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
@@ -179,10 +181,8 @@ public class CognitoService implements ResourceProvider {
     private final TlsCertificateManager certificateManager;
     private final boolean enforceTokenValidityLimits;
     private final Object[] userLocks = newUserLockStripes();
-    // The userKey of each username an AdminCreateUser is creating, from before its existence check
-    // until it stores the user or fails, so an overlapping request for the same username is refused
-    // instead of invoking the PreSignUp trigger again. Only the request that adds a key removes it.
-    private final Set<String> adminCreatesInFlight = ConcurrentHashMap.newKeySet();
+    // Reserve names per account through registration callbacks, without blocking their admin requests.
+    private final Set<String> userCreatesInFlight = ConcurrentHashMap.newKeySet();
 
     // Keyed by session token; contains SRP ephemeral state (bPrivate, B, A, secretBlock)
     private final CognitoAuthFlowHandler authFlowHandler;
@@ -577,26 +577,17 @@ public class CognitoService implements ResourceProvider {
     private void validatePasswordPolicy(Map<String, Object> passwordPolicy) {
         Object minLengthVal = passwordPolicy.get("MinimumLength");
         if (minLengthVal == null) {
-            throw new AwsException(
-                    "InvalidParameterException",
-                    "1 validation error detected: Value '0' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value greater than or equal to 6",
-                    400
-            );
+            throw validationError(
+                    "Value '0' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value greater than or equal to 6");
         }
         BigInteger minLength = policyInteger(passwordPolicy, "MinimumLength", "minimumLength");
         if (minLength.compareTo(BigInteger.valueOf(6)) < 0) {
-            throw new AwsException(
-                    "InvalidParameterException",
-                    "1 validation error detected: Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value greater than or equal to 6",
-                    400
-            );
+            throw validationError(
+                    "Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value greater than or equal to 6");
         }
         if (minLength.compareTo(BigInteger.valueOf(99)) > 0) {
-            throw new AwsException(
-                    "InvalidParameterException",
-                    "1 validation error detected: Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value less than or equal to 99",
-                    400
-            );
+            throw validationError(
+                    "Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value less than or equal to 99");
         }
 
         if (passwordPolicy.containsKey("TemporaryPasswordValidityDays")) {
@@ -605,18 +596,12 @@ public class CognitoService implements ResourceProvider {
                 BigInteger tempDays = policyInteger(passwordPolicy, "TemporaryPasswordValidityDays",
                         "temporaryPasswordValidityDays");
                 if (tempDays.compareTo(BigInteger.ZERO) < 0) {
-                    throw new AwsException(
-                            "InvalidParameterException",
-                            "1 validation error detected: Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value greater than or equal to 0",
-                            400
-                    );
+                    throw validationError(
+                            "Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value greater than or equal to 0");
                 }
                 if (tempDays.compareTo(BigInteger.valueOf(365)) > 0) {
-                    throw new AwsException(
-                            "InvalidParameterException",
-                            "1 validation error detected: Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value less than or equal to 365",
-                            400
-                    );
+                    throw validationError(
+                            "Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value less than or equal to 365");
                 }
             }
         }
@@ -626,18 +611,12 @@ public class CognitoService implements ResourceProvider {
             if (historySizeVal != null) {
                 BigInteger historySize = policyInteger(passwordPolicy, "PasswordHistorySize", "passwordHistorySize");
                 if (historySize.compareTo(BigInteger.ZERO) < 0) {
-                    throw new AwsException(
-                            "InvalidParameterException",
-                            "1 validation error detected: Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value greater than or equal to 0",
-                            400
-                    );
+                    throw validationError(
+                            "Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value greater than or equal to 0");
                 }
                 if (historySize.compareTo(BigInteger.valueOf(24)) > 0) {
-                    throw new AwsException(
-                            "InvalidParameterException",
-                            "1 validation error detected: Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value less than or equal to 24",
-                            400
-                    );
+                    throw validationError(
+                            "Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value less than or equal to 24");
                 }
             }
         }
@@ -759,25 +738,40 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
-     * SetUserPoolMfaConfig. Stores the MFA mode, the software-token setting and the passkey
-     * ({@code WebAuthnConfiguration}) settings, which is what GetUserPoolMfaConfig reports back
-     * and what the Terraform provider reads to detect drift on mfa_configuration /
-     * software_token_mfa_configuration / web_authn_configuration.
-     *
-     * <p>SMS and email MFA are accepted and not stored: Floci has no path to deliver an SMS or
-     * email factor, so retaining the config would claim a capability that does not exist.
-     *
-     * @param otherFactorConfigured whether EmailMfaConfiguration or SmsMfaConfiguration was
-     *     present in the request. Both count towards the factor rules below even though
-     *     Floci does not deliver either challenge; WebAuthnConfiguration does not, measured
-     *     against the live service, which accepts it alongside OFF and does not accept it
-     *     as the sole factor for ON or OPTIONAL.
+     * @param otherFactorConfigured whether to configure SMS MFA with an empty SmsMfaConfiguration
      * @param webAuthnConfiguration the request's WebAuthnConfiguration, or null to keep the stored one
      */
     public UserPool setUserPoolMfaConfig(String id, String mfaConfiguration,
                                          Boolean softwareTokenMfaEnabled,
                                          boolean otherFactorConfigured,
                                          WebAuthnConfiguration webAuthnConfiguration) {
+        return setUserPoolMfaConfig(id, mfaConfiguration, softwareTokenMfaEnabled,
+                otherFactorConfigured ? Map.of() : null, null, webAuthnConfiguration);
+    }
+
+    /**
+     * SetUserPoolMfaConfig. Stores the MFA mode, the software-token setting, the SMS and email MFA
+     * configurations and the passkey ({@code WebAuthnConfiguration}) settings, which is what
+     * GetUserPoolMfaConfig reports back and what the Terraform provider reads to detect drift on
+     * mfa_configuration / software_token_mfa_configuration / web_authn_configuration.
+     *
+     * <p>SMS and email MFA configurations turn those factors on for the pool: Floci delivers their
+     * codes through SNS and SES.
+     *
+     * @param smsMfaConfiguration the request's SmsMfaConfiguration, or null when absent; its
+     *     SmsAuthenticationMessage and SmsConfiguration also become the pool's, as on AWS
+     * @param emailMfaConfiguration the request's EmailMfaConfiguration, or null when absent
+     * @param webAuthnConfiguration the request's WebAuthnConfiguration, or null to keep the stored one.
+     *     Unlike the SMS and email configurations it does not count towards the factor rules below,
+     *     measured against the live service, which accepts it alongside OFF and does not accept it
+     *     as the sole factor for ON or OPTIONAL.
+     */
+    public UserPool setUserPoolMfaConfig(String id, String mfaConfiguration,
+                                         Boolean softwareTokenMfaEnabled,
+                                         Map<String, Object> smsMfaConfiguration,
+                                         Map<String, Object> emailMfaConfiguration,
+                                         WebAuthnConfiguration webAuthnConfiguration) {
+        boolean otherFactorConfigured = smsMfaConfiguration != null || emailMfaConfiguration != null;
         UserPool pool = describeUserPool(id);
         if (webAuthnConfiguration != null) {
             validateWebAuthnConfiguration(webAuthnConfiguration);
@@ -787,10 +781,10 @@ public class CognitoService implements ResourceProvider {
         // to OFF when the member is omitted.
         String mode = mfaConfiguration != null ? mfaConfiguration : "OFF";
         if (!List.of("OPTIONAL", "OFF", "ON").contains(mode)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + mode
+            throw validationError(
+                    "Value '" + mode
                             + "' at 'mfaConfiguration' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [OPTIONAL, OFF, ON]", 400);
+                            + "Member must satisfy enum value set: [OPTIONAL, OFF, ON]");
         }
         // Presence, not value: the live service rejects OFF alongside
         // SoftwareTokenMfaConfiguration{Enabled:false} just as it does Enabled:true, and
@@ -812,8 +806,26 @@ public class CognitoService implements ResourceProvider {
             // Turning MFA off drops the factor configuration with it: the live service
             // answers OFF alone afterwards, with no SoftwareTokenMfaConfiguration member.
             pool.setSoftwareTokenMfaEnabled(null);
-        } else if (softwareTokenMfaEnabled != null) {
-            pool.setSoftwareTokenMfaEnabled(softwareTokenMfaEnabled);
+            pool.setSmsMfaConfiguration(null);
+            pool.setEmailMfaConfiguration(null);
+        } else {
+            if (softwareTokenMfaEnabled != null) {
+                pool.setSoftwareTokenMfaEnabled(softwareTokenMfaEnabled);
+            }
+            if (smsMfaConfiguration != null) {
+                pool.setSmsMfaConfiguration(new LinkedHashMap<>(smsMfaConfiguration));
+                if (smsMfaConfiguration.get("SmsAuthenticationMessage") instanceof String message) {
+                    pool.setSmsAuthenticationMessage(message);
+                }
+                if (smsMfaConfiguration.get("SmsConfiguration") instanceof Map<?, ?> smsConfiguration) {
+                    Map<String, Object> copy = new LinkedHashMap<>();
+                    smsConfiguration.forEach((key, value) -> copy.put(String.valueOf(key), value));
+                    pool.setSmsConfiguration(copy);
+                }
+            }
+            if (emailMfaConfiguration != null) {
+                pool.setEmailMfaConfiguration(new LinkedHashMap<>(emailMfaConfiguration));
+            }
         }
         if (webAuthnConfiguration != null) {
             pool.setWebAuthnConfiguration(webAuthnConfiguration);
@@ -825,25 +837,24 @@ public class CognitoService implements ResourceProvider {
     private static void validateWebAuthnConfiguration(WebAuthnConfiguration configuration) {
         String relyingPartyId = configuration.getRelyingPartyId();
         if (relyingPartyId != null && (relyingPartyId.isEmpty() || relyingPartyId.length() > 127)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value at 'webAuthnConfiguration.relyingPartyId' failed to "
-                            + "satisfy constraint: Member must have length between 1 and 127", 400);
+            throw validationError(
+                    "Value at 'webAuthnConfiguration.relyingPartyId' failed to "
+                            + "satisfy constraint: Member must have length between 1 and 127");
         }
         String userVerification = configuration.getUserVerification();
         if (userVerification != null && !List.of("required", "preferred").contains(userVerification)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + userVerification + "' at "
+            throw validationError(
+                    "Value '" + userVerification + "' at "
                             + "'webAuthnConfiguration.userVerification' failed to satisfy constraint: Member must "
-                            + "satisfy enum value set: [required, preferred]", 400);
+                            + "satisfy enum value set: [required, preferred]");
         }
         String factorConfiguration = configuration.getFactorConfiguration();
         if (factorConfiguration != null
                 && !List.of("SINGLE_FACTOR", "MULTI_FACTOR_WITH_USER_VERIFICATION").contains(factorConfiguration)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + factorConfiguration + "' at "
+            throw validationError(
+                    "Value '" + factorConfiguration + "' at "
                             + "'webAuthnConfiguration.factorConfiguration' failed to satisfy constraint: Member "
-                            + "must satisfy enum value set: [SINGLE_FACTOR, MULTI_FACTOR_WITH_USER_VERIFICATION]",
-                    400);
+                            + "must satisfy enum value set: [SINGLE_FACTOR, MULTI_FACTOR_WITH_USER_VERIFICATION]");
         }
     }
 
@@ -1399,9 +1410,9 @@ public class CognitoService implements ResourceProvider {
             String constraint = authSessionValidity < 3
                     ? "Member must have value greater than or equal to 3"
                     : "Member must have value less than or equal to 15";
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + authSessionValidity
-                            + "' at 'authSessionValidity' failed to satisfy constraint: " + constraint, 400);
+            throw validationError(
+                    "Value '" + authSessionValidity
+                            + "' at 'authSessionValidity' failed to satisfy constraint: " + constraint);
         }
     }
 
@@ -1634,10 +1645,10 @@ public class CognitoService implements ResourceProvider {
 
     private void validateProviderType(String providerType) {
         if (providerType == null || !PROVIDER_TYPES.contains(providerType)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + providerType + "' at 'providerType' failed to "
+            throw validationError(
+                    "Value '" + providerType + "' at 'providerType' failed to "
                             + "satisfy constraint: Member must satisfy enum value set: "
-                            + "[Facebook, SAML, SignInWithApple, LoginWithAmazon, OIDC, Google]", 400);
+                            + "[Facebook, SAML, SignInWithApple, LoginWithAmazon, OIDC, Google]");
         }
     }
 
@@ -2037,11 +2048,12 @@ public class CognitoService implements ResourceProvider {
         }
     }
 
-    private AwsException validationErrors(List<String> errors) {
-        String header = errors.size() == 1
-                ? "1 validation error detected: "
-                : errors.size() + " validation errors detected: ";
-        return new AwsException("InvalidParameterException", header + String.join("; ", errors), 400);
+    private static AwsException validationErrors(List<String> errors) {
+        return SmithyValidationErrors.exception("InvalidParameterException", errors);
+    }
+
+    private static AwsException validationError(String violation) {
+        return SmithyValidationErrors.exception("InvalidParameterException", violation);
     }
 
     /** Mirrors the request model's {@code toString}, which AWS embeds in the length-constraint message. */
@@ -2153,8 +2165,8 @@ public class CognitoService implements ResourceProvider {
         // Claimed before the username is checked, so an overlapping request for it is refused here
         // rather than passing the check while this one is in its trigger and invoking the trigger
         // again. That includes a function calling back for the username it was given.
-        String inFlightKey = userKey(userPoolId, username);
-        if (!adminCreatesInFlight.add(inFlightKey)) {
+        String inFlightKey = regionResolver.getAccountId() + "::" + userKey(userPoolId, username);
+        if (!userCreatesInFlight.add(inFlightKey)) {
             throw new AwsException("UsernameExistsException", "User already exists", 400);
         }
         try {
@@ -2173,15 +2185,15 @@ public class CognitoService implements ResourceProvider {
                         invitation);
             }
         } finally {
-            adminCreatesInFlight.remove(inFlightKey);
+            userCreatesInFlight.remove(inFlightKey);
         }
     }
 
     private static void validateMessageAction(String messageAction) {
         if (messageAction != null && !MESSAGE_ACTIONS.contains(messageAction)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + messageAction + "' at 'messageAction' failed to "
-                            + "satisfy constraint: Member must satisfy enum value set: [RESEND, SUPPRESS]", 400);
+            throw validationError(
+                    "Value '" + messageAction + "' at 'messageAction' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: [RESEND, SUPPRESS]");
         }
     }
 
@@ -2191,10 +2203,10 @@ public class CognitoService implements ResourceProvider {
             return List.of("SMS");
         }
         if (!DELIVERY_MEDIUMS.containsAll(requested)) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + requested + "' at 'desiredDeliveryMediums' failed to "
+            throw validationError(
+                    "Value '" + requested + "' at 'desiredDeliveryMediums' failed to "
                             + "satisfy constraint: Member must satisfy constraint: "
-                            + "[Member must satisfy enum value set: [SMS, EMAIL]]", 400);
+                            + "[Member must satisfy enum value set: [SMS, EMAIL]]");
         }
         return requested;
     }
@@ -2513,8 +2525,8 @@ public class CognitoService implements ResourceProvider {
      */
     public void globalSignOut(String accessToken) {
         if (accessToken == null || accessToken.isEmpty()) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value at 'accessToken' failed to satisfy constraint: Member must not be null", 400);
+            throw validationError(
+                    "Value at 'accessToken' failed to satisfy constraint: Member must not be null");
         }
 
         VerifiedAccessToken token = verifyAccessToken(accessToken);
@@ -2544,8 +2556,8 @@ public class CognitoService implements ResourceProvider {
      */
     public void deleteUser(String accessToken) {
         if (accessToken == null || accessToken.isEmpty()) {
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value at 'accessToken' failed to satisfy constraint: Member must not be null", 400);
+            throw validationError(
+                    "Value at 'accessToken' failed to satisfy constraint: Member must not be null");
         }
 
         VerifiedAccessToken token = verifyAccessToken(accessToken);
@@ -2594,6 +2606,10 @@ public class CognitoService implements ResourceProvider {
 
     private void adminDeleteUserUnderUserLock(String userPoolId, String username) {
         CognitoUser user = adminGetUser(userPoolId, username);
+        deleteUserRecordAndGroups(userPoolId, user);
+    }
+
+    private void deleteUserRecordAndGroups(String userPoolId, CognitoUser user) {
         for (String groupName : new ArrayList<>(user.getGroupNames())) {
             groupStore.get(groupKey(userPoolId, groupName)).ifPresent(group -> {
                 group.removeUserName(user.getUsername());
@@ -2844,42 +2860,71 @@ public class CognitoService implements ResourceProvider {
         describeUserPool(userPoolId);
         String prefix = userPoolId + "::";
         return userStore.scan(key -> key.startsWith(prefix)).stream()
-                .filter(user -> providerName.equals(user.getFederatedProviderName())
-                        && subject.equals(user.getFederatedSubject()))
+                .filter(user -> (providerName.equals(user.getFederatedProviderName())
+                                && subject.equals(user.getFederatedSubject()))
+                        || hasLinkedIdentity(user, providerName, subject))
                 .findFirst();
     }
 
     public CognitoUser provisionFederatedUser(String userPoolId, IdentityProvider provider, String subject,
                                                String issuer, Map<String, String> mappedAttributes) {
         describeUserPool(userPoolId);
-        synchronized (identityLinkLock) {
-            CognitoUser user = findFederatedUser(userPoolId, provider.getProviderName(), subject).orElse(null);
-            if (user == null) {
-                user = new CognitoUser();
-                user.setUsername(provider.getProviderName() + "_" + UUID.randomUUID());
-                user.setUserPoolId(userPoolId);
-                user.getAttributes().put("sub", UUID.randomUUID().toString());
+        while (true) {
+            String targetUsername = findFederatedUser(userPoolId, provider.getProviderName(), subject)
+                    .map(CognitoUser::getUsername)
+                    .orElseGet(() -> provider.getProviderName() + "_"
+                            + ("Google".equals(provider.getProviderType()) ? subject : UUID.randomUUID().toString()));
+            Object lock = userLock(userPoolId, targetUsername);
+            synchronized (lock) {
+                synchronized (identityLinkLock) {
+                    Optional<CognitoUser> existing = findFederatedUser(userPoolId, provider.getProviderName(), subject);
+                    if (existing.isPresent() && !existing.get().getUsername().equals(targetUsername)) {
+                        // Another thread linked this identity to a different destination user concurrently.
+                        // Release locks and retry with the new destination user's lock stripe.
+                        continue;
+                    }
+                    CognitoUser user;
+                    if (existing.isPresent()) {
+                        user = existing.get();
+                        if (!user.isEnabled()) {
+                            throw new AwsException("NotAuthorizedException", "User is disabled.", 400);
+                        }
+                    } else {
+                        if (userStore.get(userKey(userPoolId, targetUsername)).isPresent()) {
+                            throw new AwsException("UsernameExistsException", "User already exists", 400);
+                        }
+                        user = new CognitoUser();
+                        user.setUsername(targetUsername);
+                        user.setUserPoolId(userPoolId);
+                        user.getAttributes().put("sub", UUID.randomUUID().toString());
+                    }
+                    user.getAttributes().putAll(mappedAttributes);
+                    user.setFederatedProviderName(provider.getProviderName());
+                    user.setFederatedSubject(subject);
+                    updateFederatedIdentity(user, provider, subject, issuer);
+                    user.setEnabled(true);
+                    user.setUserStatus("CONFIRMED");
+                    user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+                    userStore.put(userKey(userPoolId, user.getUsername()), user);
+                    LOG.infov("Reconciled federated user {0} from provider {1} in pool {2}",
+                            user.getUsername(), provider.getProviderName(), userPoolId);
+                    return user;
+                }
             }
-            user.getAttributes().putAll(mappedAttributes);
-            user.setFederatedProviderName(provider.getProviderName());
-            user.setFederatedSubject(subject);
-            updateFederatedIdentity(user, provider, subject, issuer);
-            user.setEnabled(true);
-            user.setUserStatus("CONFIRMED");
-            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-            userStore.put(userKey(userPoolId, user.getUsername()), user);
-            LOG.infov("Reconciled federated user {0} from provider {1} in pool {2}",
-                    user.getUsername(), provider.getProviderName(), userPoolId);
-            return user;
         }
     }
 
     private void updateFederatedIdentity(CognitoUser user, IdentityProvider provider, String subject, String issuer) {
         ArrayNode identities = readIdentities(user);
         ArrayNode reconciled = MAPPER.createArrayNode();
+        long dateCreated = System.currentTimeMillis();
         for (JsonNode identity : identities) {
-            if (!provider.getProviderName().equals(identity.path("providerName").asText())
-                    || !subject.equals(identity.path("userId").asText())) {
+            if (provider.getProviderName().equals(identity.path("providerName").asText())
+                    && subject.equals(identity.path("userId").asText())) {
+                if (identity.has("dateCreated") && identity.path("dateCreated").isIntegralNumber()) {
+                    dateCreated = identity.path("dateCreated").asLong();
+                }
+            } else {
                 reconciled.add(identity);
             }
         }
@@ -2889,7 +2934,7 @@ public class CognitoService implements ResourceProvider {
                 .put("providerType", provider.getProviderType())
                 .put("issuer", issuer)
                 .put("primary", false)
-                .put("dateCreated", System.currentTimeMillis());
+                .put("dateCreated", dateCreated);
         user.getAttributes().put(IDENTITIES_ATTRIBUTE, reconciled.toString());
     }
 
@@ -3067,10 +3112,7 @@ public class CognitoService implements ResourceProvider {
         if (errors.isEmpty()) {
             return;
         }
-        String header = errors.size() == 1
-                ? "1 validation error detected: "
-                : errors.size() + " validation errors detected: ";
-        throw new AwsException("InvalidParameterException", header + String.join("; ", errors), 400);
+        throw validationErrors(errors);
     }
 
     /** Mirrors the request model's {@code toString}, which AWS embeds in the length-constraint message. */
@@ -3246,21 +3288,29 @@ public class CognitoService implements ResourceProvider {
 
     // ──────────────────────────── Self-Service Registration ────────────────────────────
 
-    public CognitoUser signUp(String clientId, String username, String password, Map<String, String> attributes) {
+    public CognitoUser signUp(String clientId, String username, String password, Map<String, String> attributes,
+            Map<String, String> validationData, Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
                         400));
         String userPoolId = client.getUserPoolId();
-        // Locked on the requested username/alias, same reasoning as adminCreateUser: an alias
-        // pool has no canonical id to lock on until creation succeeds.
-        synchronized (userLock(userPoolId, username)) {
-            return signUpUnderUserLock(client, userPoolId, username, password, attributes);
+        String inFlightKey = regionResolver.getAccountId() + "::" + userKey(userPoolId, username);
+        if (!userCreatesInFlight.add(inFlightKey)) {
+            throw new AwsException("UsernameExistsException", "User already exists", 400);
+        }
+        try {
+            return signUpWithReservedUsername(client, userPoolId, username, password, attributes,
+                    validationData, clientMetadata);
+        } finally {
+            userCreatesInFlight.remove(inFlightKey);
         }
     }
 
-    private CognitoUser signUpUnderUserLock(UserPoolClient client, String userPoolId,
-            String username, String password, Map<String, String> attributes) {
+    private CognitoUser signUpWithReservedUsername(UserPoolClient client, String userPoolId,
+            String username, String password, Map<String, String> attributes,
+            Map<String, String> validationData, Map<String, String> clientMetadata) {
         UserPool pool = describeUserPool(userPoolId);
+        requireAvailableSignUpUsername(pool, username);
 
         boolean aliasPool = usesAliasUsernames(pool);
         Map<String, String> resolvedAttributes = attributes == null
@@ -3268,14 +3318,9 @@ public class CognitoService implements ResourceProvider {
         String canonicalUsername = username;
         if (aliasPool) {
             String aliasAttribute = aliasAttributeForValue(pool, username);
-            if (findUserByAlias(userPoolId, aliasAttribute, username) != null) {
-                throw new AwsException("UsernameExistsException", "User already exists", 400);
-            }
             resolvedAttributes.put(aliasAttribute, username);
             canonicalUsername = UUID.randomUUID().toString();
             resolvedAttributes.put("sub", canonicalUsername);
-        } else if (userStore.get(userKey(userPoolId, username)).isPresent()) {
-            throw new AwsException("UsernameExistsException", "User already exists", 400);
         }
 
         validateEmailAttribute(resolvedAttributes, false);
@@ -3294,10 +3339,10 @@ public class CognitoService implements ResourceProvider {
             user.getAttributes().put("sub", UUID.randomUUID().toString());
         }
 
-        // Fire PreSignUp BEFORE persisting — allows the trigger to block signup
+        // Fire PreSignUp BEFORE persisting: allows the trigger to block signup
         // (via lambda error) or auto-confirm/auto-verify the user (via response).
         CognitoAuthFlowHandler.PreSignUpResponse preSignUp = authFlowHandler.firePreSignUp(
-                pool, client, user, Map.of(), Map.of(), "PreSignUp_SignUp");
+                pool, client, user, validationData, clientMetadata, "PreSignUp_SignUp");
         if (preSignUp.autoConfirmUser()) {
             user.setUserStatus("CONFIRMED");
         }
@@ -3320,7 +3365,16 @@ public class CognitoService implements ResourceProvider {
             }
         }
 
-        userStore.put(key, user);
+        // Capture trigger data before publishing the live, mutable user to admin requests.
+        CognitoUser triggerUser = MAPPER.convertValue(user, CognitoUser.class);
+        synchronized (userLock(userPoolId, username)) {
+            UserPool currentPool = describeUserPool(userPoolId);
+            if (clientStore.get(client.getClientId()).isEmpty()) {
+                throw new AwsException("ResourceNotFoundException", "Client not found", 400);
+            }
+            requireAvailableSignUpUsername(currentPool, username);
+            userStore.put(key, user);
+        }
         LOG.infov("Signed up user {0} in pool {1} (status={2})",
                 username, userPoolId, user.getUserStatus());
 
@@ -3329,14 +3383,14 @@ public class CognitoService implements ResourceProvider {
                 String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                         VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
                 Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
-                        pool, client, user, "CustomMessage_SignUp");
-                messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+                        pool, client, triggerUser, "CustomMessage_SignUp", clientMetadata);
+                messageDispatcher.dispatch(pool, triggerUser, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
                         code, List.of(deliveryTarget.deliveryMedium()), customMessage);
             } catch (VerificationCodeException e) {
-                rollbackSignUpConfirmationArtifacts(pool.getId(), user.getUsername(), key);
+                rollbackSignUpConfirmationArtifacts(user);
                 throw mapVerificationCodeException(e);
             } catch (RuntimeException e) {
-                rollbackSignUpConfirmationArtifacts(pool.getId(), user.getUsername(), key);
+                rollbackSignUpConfirmationArtifacts(user);
                 throw new AwsException("CodeDeliveryFailureException",
                         "Failed to deliver the message.", 400);
             }
@@ -3345,9 +3399,21 @@ public class CognitoService implements ResourceProvider {
         // When PreSignUp auto-confirms, AWS Cognito also fires PostConfirmation.
         // See: docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-sign-up.html
         if (preSignUp.autoConfirmUser()) {
-            authFlowHandler.firePostConfirmation(pool, client, user, Map.of(), "PostConfirmation_ConfirmSignUp");
+            authFlowHandler.firePostConfirmation(pool, client, triggerUser, clientMetadata, "PostConfirmation_ConfirmSignUp");
         }
-        return user;
+        synchronized (userLock(userPoolId, user.getUsername())) {
+            triggerUser.setUserStatus(user.getUserStatus());
+        }
+        return triggerUser;
+    }
+
+    private void requireAvailableSignUpUsername(UserPool pool, String username) {
+        boolean exists = usesAliasUsernames(pool)
+                ? findUserByAlias(pool.getId(), aliasAttributeForValue(pool, username), username) != null
+                : userStore.get(userKey(pool.getId(), username)).isPresent();
+        if (exists) {
+            throw new AwsException("UsernameExistsException", "User already exists", 400);
+        }
     }
 
     public void confirmSignUp(String clientId, String username) {
@@ -3364,15 +3430,19 @@ public class CognitoService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
                         400));
         String userPoolId = client.getUserPoolId();
-        synchronized (userLock(userPoolId, username)) {
-            confirmSignUpUnderUserLock(client, userPoolId, username, confirmationCode, clientMetadata);
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        UserPool pool;
+        CognitoUser triggerUser;
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            pool = poolStore.get(userPoolId).orElseThrow(() -> userPoolNotFound(userPoolId));
+            triggerUser = confirmSignUpUnderUserLock(client, pool, resolvedUser.getUsername(), confirmationCode);
         }
+        authFlowHandler.firePostConfirmation(pool, client, triggerUser,
+                clientMetadata, "PostConfirmation_ConfirmSignUp");
     }
 
-    private void confirmSignUpUnderUserLock(UserPoolClient client, String userPoolId, String username,
-            String confirmationCode, Map<String, String> clientMetadata) {
-        UserPool pool = poolStore.get(userPoolId)
-                .orElseThrow(() -> userPoolNotFound(userPoolId));
+    private CognitoUser confirmSignUpUnderUserLock(UserPoolClient client, UserPool pool, String username,
+            String confirmationCode) {
         CognitoUser user = adminGetUser(client.getUserPoolId(), username);
         if (verificationCodeService != null && isSignUpConfirmationEnabled(pool)) {
             try {
@@ -3396,7 +3466,7 @@ public class CognitoService implements ResourceProvider {
         user.setUserStatus("CONFIRMED");
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(client.getUserPoolId(), user.getUsername()), user);
-        authFlowHandler.firePostConfirmation(pool, client, user, clientMetadata, "PostConfirmation_ConfirmSignUp");
+        return MAPPER.convertValue(user, CognitoUser.class);
     }
 
     Map<String, String> signUpCodeDeliveryDetails(CognitoUser user) {
@@ -3440,7 +3510,7 @@ public class CognitoService implements ResourceProvider {
             String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                     VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
             Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
-                    pool, client, user, "CustomMessage_ResendCode");
+                    pool, client, user, "CustomMessage_ResendCode", Map.of());
             messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
                     code, List.of(deliveryTarget.deliveryMedium()), customMessage);
         } catch (VerificationCodeException e) {
@@ -3660,9 +3730,9 @@ public class CognitoService implements ResourceProvider {
             String constraint = maxResults < 0
                     ? "greater than or equal to 0"
                     : "less than or equal to " + CognitoWebAuthn.MAX_CREDENTIALS_PER_USER;
-            throw new AwsException("InvalidParameterException",
-                    "1 validation error detected: Value '" + maxResults + "' at 'maxResults' failed to satisfy "
-                            + "constraint: Member must have value " + constraint, 400);
+            throw validationError(
+                    "Value '" + maxResults + "' at 'maxResults' failed to satisfy "
+                            + "constraint: Member must have value " + constraint);
         }
         int pageSize = maxResults == null || maxResults == 0 ? CognitoWebAuthn.MAX_CREDENTIALS_PER_USER : maxResults;
         List<WebAuthnCredential> credentials = adminGetUser(token.poolId(), token.username()).getWebAuthnCredentials();
@@ -3841,7 +3911,7 @@ public class CognitoService implements ResourceProvider {
             String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
                     VerificationCode.Purpose.PASSWORD_RESET, Duration.ofHours(1));
             Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
-                    pool, client, user, "CustomMessage_ForgotPassword");
+                    pool, client, user, "CustomMessage_ForgotPassword", Map.of());
             messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.PASSWORD_RESET, code,
                     List.of(deliveryTarget.deliveryMedium()), customMessage);
         } catch (VerificationCodeException e) {
@@ -5266,11 +5336,9 @@ public class CognitoService implements ResourceProvider {
     }
 
     private static AwsException notAnInteger(Object value, String member) {
-        return new AwsException(
-                "InvalidParameterException",
-                "1 validation error detected: Value '" + value + "' at 'policies.passwordPolicy." + member
-                        + "' failed to satisfy constraint: Member must be an integer",
-                400);
+        return validationError(
+                "Value '" + value + "' at 'policies.passwordPolicy." + member
+                        + "' failed to satisfy constraint: Member must be an integer");
     }
 
     private boolean policyBoolean(Map<String, Object> policy, String key) {
@@ -5924,12 +5992,22 @@ public class CognitoService implements ResourceProvider {
         return null;
     }
 
-    private void rollbackSignUpConfirmationArtifacts(String userPoolId, String username,
-            String userKey) {
-        userStore.delete(userKey);
-        if (verificationCodeService != null) {
-            verificationCodeService.invalidatePrevious(userPoolId, username,
-                    VerificationCode.Purpose.SIGNUP_CONFIRMATION);
+    private void rollbackSignUpConfirmationArtifacts(CognitoUser expectedUser) {
+        String poolId = expectedUser.getUserPoolId();
+        String username = expectedUser.getUsername();
+        synchronized (userLock(poolId, username)) {
+            CognitoUser current = userStore.get(userKey(poolId, username)).orElse(null);
+            // Admin callbacks can edit sub, so only the stored instance identifies this signup.
+            if (current != null && current != expectedUser) {
+                return;
+            }
+            if (current != null) {
+                deleteUserRecordAndGroups(poolId, current);
+            }
+            if (verificationCodeService != null) {
+                verificationCodeService.invalidatePrevious(poolId, username,
+                        VerificationCode.Purpose.SIGNUP_CONFIRMATION);
+            }
         }
     }
 
@@ -6135,8 +6213,8 @@ public class CognitoService implements ResourceProvider {
         return value;
     }
     /**
-     * One factor's settings from an MFA preference request ({@code EmailMfaSettings},
-     * {@code SoftwareTokenMfaSettings}). A null member leaves the stored value alone.
+     * One factor's settings from an MFA preference request ({@code SMSMfaSettings},
+     * {@code EmailMfaSettings}, {@code SoftwareTokenMfaSettings}). A null member leaves the stored value alone.
      */
     public record MfaSettingsUpdate(Boolean enabled, Boolean preferredMfa) {
         public static final MfaSettingsUpdate NONE = new MfaSettingsUpdate(null, null);
@@ -6154,9 +6232,17 @@ public class CognitoService implements ResourceProvider {
     /** @param webAuthnMfaEnabled {@code WebAuthnMfaSettings.Enabled}, or null to leave passkey MFA as it is */
     public void adminSetUserMFAPreference(String userPoolId, String username, MfaSettingsUpdate email,
                                           MfaSettingsUpdate softwareToken, Boolean webAuthnMfaEnabled) {
+        adminSetUserMFAPreference(userPoolId, username, MfaSettingsUpdate.NONE, email, softwareToken,
+                webAuthnMfaEnabled);
+    }
+
+    /** @param webAuthnMfaEnabled {@code WebAuthnMfaSettings.Enabled}, or null to leave passkey MFA as it is */
+    public void adminSetUserMFAPreference(String userPoolId, String username, MfaSettingsUpdate sms,
+                                          MfaSettingsUpdate email, MfaSettingsUpdate softwareToken,
+                                          Boolean webAuthnMfaEnabled) {
         CognitoUser resolvedUser = adminGetUser(userPoolId, username);
         synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
-            updateMfaPreferenceUnderUserLock(userPoolId, resolvedUser.getUsername(), email, softwareToken,
+            updateMfaPreferenceUnderUserLock(userPoolId, resolvedUser.getUsername(), sms, email, softwareToken,
                     webAuthnMfaEnabled);
         }
     }
@@ -6168,38 +6254,70 @@ public class CognitoService implements ResourceProvider {
     /** @param webAuthnMfaEnabled {@code WebAuthnMfaSettings.Enabled}, or null to leave passkey MFA as it is */
     public void setUserMFAPreference(String accessToken, MfaSettingsUpdate email, MfaSettingsUpdate softwareToken,
                                      Boolean webAuthnMfaEnabled) {
+        setUserMFAPreference(accessToken, MfaSettingsUpdate.NONE, email, softwareToken, webAuthnMfaEnabled);
+    }
+
+    /** @param webAuthnMfaEnabled {@code WebAuthnMfaSettings.Enabled}, or null to leave passkey MFA as it is */
+    public void setUserMFAPreference(String accessToken, MfaSettingsUpdate sms, MfaSettingsUpdate email,
+                                     MfaSettingsUpdate softwareToken, Boolean webAuthnMfaEnabled) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
         requireScope(accessToken, USER_ADMIN_SCOPE);
         synchronized (userLock(token.poolId(), token.username())) {
-            updateMfaPreferenceUnderUserLock(token.poolId(), token.username(), email, softwareToken,
+            updateMfaPreferenceUnderUserLock(token.poolId(), token.username(), sms, email, softwareToken,
                     webAuthnMfaEnabled);
         }
     }
 
-    private void updateMfaPreferenceUnderUserLock(String poolId, String username, MfaSettingsUpdate email,
-                                                  MfaSettingsUpdate softwareToken, Boolean webAuthnMfaEnabled) {
+    private void updateMfaPreferenceUnderUserLock(String poolId, String username, MfaSettingsUpdate sms,
+                                                  MfaSettingsUpdate email, MfaSettingsUpdate softwareToken,
+                                                  Boolean webAuthnMfaEnabled) {
         CognitoUser user = adminGetUser(poolId, username);
         requirePasskeyMfaAvailable(describeUserPool(poolId), webAuthnMfaEnabled);
-        if (Boolean.TRUE.equals(email.preferredMfa()) && Boolean.TRUE.equals(softwareToken.preferredMfa())) {
+        long preferredCount = List.of(sms, email, softwareToken).stream()
+                .filter(update -> Boolean.TRUE.equals(update.preferredMfa())).count();
+        if (preferredCount > 1) {
             throw new AwsException("InvalidParameterException",
                     "Only one MFA method can be set as preferred.", 400);
         }
+        SmsMfaSettings smsSettings = user.getSmsMfaSettings();
         EmailMfaSettings emailSettings = user.getEmailMfaSettings();
         SoftwareTokenMfaSettings tokenSettings = user.getSoftwareTokenMfaSettings();
+        FactorState smsState = resolveMfaSettings(sms, smsSettings == null
+                ? FactorState.OFF : new FactorState(smsSettings.isEnabled(), smsSettings.isPreferredMfa()));
         FactorState emailState = resolveMfaSettings(email, emailSettings == null
                 ? FactorState.OFF : new FactorState(emailSettings.isEnabled(), emailSettings.isPreferredMfa()));
         FactorState tokenState = resolveMfaSettings(softwareToken, tokenSettings == null
                 ? FactorState.OFF : new FactorState(tokenSettings.isEnabled(), tokenSettings.isPreferredMfa()));
-        // AWS refuses to turn on TOTP MFA for a user who has not verified an authenticator.
+        // AWS refuses to turn on a factor it has nowhere to deliver: an SMS code without a phone number,
+        // an email code without an email address, TOTP without a verified authenticator.
+        if (Boolean.TRUE.equals(sms.enabled()) && user.getAttributes().get("phone_number") == null) {
+            throw new AwsException("InvalidParameterException",
+                    "User does not have delivery config set to turn on SMS_MFA", 400);
+        }
+        if (Boolean.TRUE.equals(email.enabled()) && user.getAttributes().get("email") == null) {
+            throw new AwsException("InvalidParameterException",
+                    "User does not have delivery config set to turn on EMAIL_OTP", 400);
+        }
         if (Boolean.TRUE.equals(softwareToken.enabled()) && user.getSoftwareTokenMfaSecret() == null) {
             throw new AwsException("InvalidParameterException",
                     "User does not have delivery config set to turn on SOFTWARE_TOKEN_MFA", 400);
         }
         // Only one factor is preferred, so preferring one drops the preference of the others.
-        if (Boolean.TRUE.equals(email.preferredMfa())) {
+        if (Boolean.TRUE.equals(sms.preferredMfa())) {
+            emailState = new FactorState(emailState.enabled(), false);
+            tokenState = new FactorState(tokenState.enabled(), false);
+        } else if (Boolean.TRUE.equals(email.preferredMfa())) {
+            smsState = new FactorState(smsState.enabled(), false);
             tokenState = new FactorState(tokenState.enabled(), false);
         } else if (Boolean.TRUE.equals(softwareToken.preferredMfa())) {
+            smsState = new FactorState(smsState.enabled(), false);
             emailState = new FactorState(emailState.enabled(), false);
+        }
+        if (!sms.isEmpty() || smsSettings != null) {
+            SmsMfaSettings settings = smsSettings != null ? smsSettings : new SmsMfaSettings();
+            settings.setEnabled(smsState.enabled());
+            settings.setPreferredMfa(smsState.preferred());
+            user.setSmsMfaSettings(settings);
         }
         if (!email.isEmpty() || emailSettings != null) {
             EmailMfaSettings settings = emailSettings != null ? emailSettings : new EmailMfaSettings();
@@ -6261,6 +6379,41 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
+     * The message factor's code for a challenge after a password: a new code, or while one sent
+     * moments ago is still live, that one, since each sign-in asks for a code and the code store
+     * paces new ones. Returns the CODE_DELIVERY challenge parameters.
+     */
+    Map<String, String> issueMfaCode(UserPool pool, CognitoUser user, VerificationCode.Purpose purpose,
+                                     String attributeName, String deliveryMedium,
+                                     Map<String, Object> customMessageResponse) {
+        try {
+            return issueSignInOtp(pool, user, purpose, attributeName, deliveryMedium, customMessageResponse);
+        } catch (AwsException e) {
+            if (!"LimitExceededException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            String destination = user.getAttributes().get(attributeName);
+            Map<String, String> details = new LinkedHashMap<>();
+            details.put("CODE_DELIVERY_DELIVERY_MEDIUM", deliveryMedium);
+            details.put("CODE_DELIVERY_DESTINATION",
+                    "email".equals(attributeName) ? maskEmail(destination) : maskPhoneNumber(destination));
+            return details;
+        }
+    }
+
+    /** After an SMS or email MFA code, AWS marks the attribute it went to as verified. */
+    void markAttributeVerified(String poolId, String username, String attributeName) {
+        synchronized (userLock(poolId, username)) {
+            CognitoUser user = adminGetUser(poolId, username);
+            if (!"true".equals(user.getAttributes().get(attributeName + "_verified"))) {
+                user.getAttributes().put(attributeName + "_verified", "true");
+                user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+                userStore.put(userKey(poolId, user.getUsername()), user);
+            }
+        }
+    }
+
+    /**
      * Marks the user's newly registered authenticator as their MFA factor, which completing the
      * {@code MFA_SETUP} challenge does on AWS. It becomes the preferred factor when no other is.
      */
@@ -6286,6 +6439,9 @@ public class CognitoService implements ResourceProvider {
      */
     static List<String> userMfaSettingList(UserPool pool, CognitoUser user) {
         List<String> factors = new ArrayList<>();
+        if (user.getSmsMfaSettings() != null && user.getSmsMfaSettings().isEnabled()) {
+            factors.add("SMS_MFA");
+        }
         if (user.getEmailMfaSettings() != null && user.getEmailMfaSettings().isEnabled()) {
             factors.add("EMAIL_OTP");
         }
@@ -6297,6 +6453,10 @@ public class CognitoService implements ResourceProvider {
 
     /** {@code PreferredMfaSetting}: the user's preferred MFA factor, or null when none is. */
     static @Nullable String preferredMfaSetting(UserPool pool, CognitoUser user) {
+        SmsMfaSettings sms = user.getSmsMfaSettings();
+        if (sms != null && sms.isEnabled() && sms.isPreferredMfa()) {
+            return "SMS_MFA";
+        }
         EmailMfaSettings email = user.getEmailMfaSettings();
         if (email != null && email.isEnabled() && email.isPreferredMfa()) {
             return "EMAIL_OTP";
@@ -6319,7 +6479,7 @@ public class CognitoService implements ResourceProvider {
      * software-token MFA asks for a registered authenticator at every sign-in, whether or not it was
      * turned on, and AWS lets users there choose only which factor is preferred.
      */
-    private static boolean softwareTokenMfaActive(UserPool pool, CognitoUser user) {
+    static boolean softwareTokenMfaActive(UserPool pool, CognitoUser user) {
         return softwareTokenMfaEnabled(user)
                 || (user.getSoftwareTokenMfaSecret() != null && "ON".equals(pool.getMfaConfiguration())
                         && Boolean.TRUE.equals(pool.getSoftwareTokenMfaEnabled()));

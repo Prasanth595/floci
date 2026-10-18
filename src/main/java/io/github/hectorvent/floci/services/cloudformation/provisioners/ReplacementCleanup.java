@@ -69,6 +69,19 @@ public final class ReplacementCleanup {
      */
     static void record(StackResource r, ProvisionContext ctx, Map<String, String> attributesBeforeProvision,
                        boolean replaced) {
+        record(r, ctx, attributesBeforeProvision, replaced, true);
+    }
+
+    /**
+     * Records a replacement the provisioner decided on, spelling out whether this update created the
+     * entity under the new physical id. {@code replacementCreated} is false when that entity already
+     * existed and the provision only took it over, the way us-east-1's idempotent {@code CreateBucket}
+     * answers for a bucket the account already owns. The prior entity is still displaced, so a
+     * committed update deletes it, but {@link #rollback} points the resource back without deleting an
+     * entity this update never created.
+     */
+    static void record(StackResource r, ProvisionContext ctx, Map<String, String> attributesBeforeProvision,
+                       boolean replaced, boolean replacementCreated) {
         ObjectNode cleanup = readOrEmpty(r);
         cleanup.remove("priorPhysicalId");
         cleanup.remove("undeletedReplacement");
@@ -88,6 +101,11 @@ public final class ReplacementCleanup {
                 addDisplaced(cleanup, prior, r.getResourceType(), ctx.region(), true);
             }
         }
+        if (replaced && !replacementCreated) {
+            cleanup.put("replacementPreexisting", true);
+        } else {
+            cleanup.remove("replacementPreexisting");
+        }
         write(r, cleanup);
     }
 
@@ -104,6 +122,10 @@ public final class ReplacementCleanup {
      * propagates so the stack reports it. A retry (CloudFormation {@code ContinueUpdateRollback})
      * re-attempts that failed delete. Returns false when this update replaced nothing, which
      * leaves the engine's handling of in-place updates unchanged.
+     *
+     * <p>A replacement this update did not create is left standing: the resource points back to the
+     * prior entity, and the entity under the new id, whether another resource created it or it was
+     * already owned, is never touched by a rollback this update did not make.
      */
     static boolean rollback(StackResource r, Deleter deleter) {
         ObjectNode cleanup = read(r);
@@ -137,10 +159,15 @@ public final class ReplacementCleanup {
         }
         cleanup.path("priorAttributes").fields()
                 .forEachRemaining(e -> r.getAttributes().put(e.getKey(), e.getValue().asText()));
+        boolean replacementPreexisting = cleanup.path("replacementPreexisting").asBoolean(false);
         cleanup.remove("priorPhysicalId");
         cleanup.remove("priorAttributes");
+        cleanup.remove("replacementPreexisting");
         removeDisplaced(cleanup, prior);
         write(r, cleanup);
+        if (replacementPreexisting) {
+            return true;
+        }
         if (prior.equals(replacement) && !CfnResourceDispatcher.isStub(prior, r.getAttributes())) {
             return true;
         }

@@ -870,7 +870,7 @@ class CloudFormationIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(template))
         .when()
             .post("/")
         .then()
@@ -1556,7 +1556,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("ROLLBACK_COMPLETE"))
-            .body(containsString("FileSystemConfigs must be a list"));
+            .body(containsString("Property [FileSystemConfigs] expected type: JSONArray, found: JSONObject"));
     }
 
     private static String lambdaFileSystemTemplate(String functionName, String accessPointArn,
@@ -2765,8 +2765,10 @@ class CloudFormationIntegrationTest {
         return xml.substring(xml.lastIndexOf("<member>", idAt), xml.indexOf("</member>", idAt));
     }
 
+    // Measured against CloudFormation (eu-west-1, 2026-10-04): a change set the stack does not
+    // have, on a stack in REVIEW_IN_PROGRESS as on one in CREATE_COMPLETE, is deleted with success.
     @Test
-    void deleteChangeSet_nonExistentChangeSet_returnsError() {
+    void deleteChangeSet_nonExistentChangeSet_succeeds() {
         String template = """
             {
               "Resources": {
@@ -2793,7 +2795,6 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Attempt to delete a changeset that does not exist
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DeleteChangeSet")
@@ -2802,8 +2803,18 @@ class CloudFormationIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(400)
-            .body(containsString("ChangeSetNotFoundException"));
+            .statusCode(200)
+            .body(containsString("<DeleteChangeSetResult/>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", "cs-error-stack")
+            .formParam("ChangeSetName", "existing-changeset")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test
@@ -2930,7 +2941,7 @@ class CloudFormationIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(template))
         .when()
             .post("/")
         .then()
@@ -7270,8 +7281,8 @@ class CloudFormationIntegrationTest {
      * resource's {@code Outputs.*} attributes right after the child's (synchronous, same-thread)
      * {@code executeTemplate} call returns. When the child's own resource loop fails, {@code
      * executeTemplate} never reaches its Outputs block at all: {@code rollbackFailedExecution}
-     * rewrites the child's status straight from {@code CREATE_FAILED} into {@code
-     * ROLLBACK_COMPLETE} before returning. {@code executeNestedStack} used to detect a failed
+     * settles the child in {@code ROLLBACK_COMPLETE} before returning, and the child's status is
+     * never {@code CREATE_FAILED}. {@code executeNestedStack} used to detect a failed
      * child only by checking for the literal strings {@code CREATE_FAILED}/{@code UPDATE_FAILED},
      * which a rolled-back create can never match, so the parent kept going and reported
      * {@code CREATE_COMPLETE} with its {@code Fn::GetAtt} on the child's outputs left unresolved:
@@ -8397,13 +8408,14 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body("Items.findAll { it.ApiId == '" + apiId + "' }.Name", hasItem("cfn-apigwv2-api-v2"));
 
-        // Idempotent re-deploy with no changes is a no-op (criterion #3): counts/ids unchanged
+        // Re-deploying the same resources is a no-op for them (criterion #3): counts/ids unchanged.
+        // An identical template is refused outright, so a new output forces the update.
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody",
-                    template.formatted("cfn-apigwv2-api-v2", "https://example.com/v2", "GET /things", "true"))
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(
+                    template.formatted("cfn-apigwv2-api-v2", "https://example.com/v2", "GET /things", "true")))
         .when()
             .post("/")
         .then()
@@ -10766,7 +10778,7 @@ class CloudFormationIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(template))
         .when()
             .post("/")
         .then()

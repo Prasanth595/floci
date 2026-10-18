@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 
 import java.time.Instant;
@@ -140,18 +141,14 @@ final class SesV2Json {
         if (node.isNull()) {
             throw new AwsException("SerializationException", null, 400);
         }
-        if (node.isNumber()) {
-            throw new AwsException("SerializationException",
-                    "NUMBER_VALUE can not be converted to a Boolean", 400);
-        }
-        throw unexpectedStartError(node);
+        throw scalarTypeError(node, "Boolean");
     }
 
     /**
      * A structure member as the AWS deserializer reads it: absent or null is returned as is, an
      * array is "Start of list found where not expected" and any other non-object "Expected null".
      */
-    static JsonNode structureMemberOrAbsent(JsonNode parent, String field) {
+    private static JsonNode structureMemberOrAbsent(JsonNode parent, String field) {
         JsonNode node = parent.path(field);
         if (node.isMissingNode() || node.isNull() || node.isObject()) {
             return node;
@@ -159,11 +156,11 @@ final class SesV2Json {
         if (node.isArray()) {
             throw unexpectedStartError(node);
         }
-        throw new AwsException("SerializationException", "Expected null", 400);
+        throw expectedNullError();
     }
 
     /** A string member with the AWS deserializer's message for each wrong JSON type. */
-    static String typedStringMemberOrAbsent(JsonNode parent, String field) {
+    private static String typedStringMemberOrAbsent(JsonNode parent, String field) {
         JsonNode node = parent.path(field);
         if (node.isMissingNode() || node.isNull()) {
             return null;
@@ -171,16 +168,7 @@ final class SesV2Json {
         if (node.isTextual()) {
             return node.textValue();
         }
-        if (node.isNumber()) {
-            throw new AwsException("SerializationException",
-                    "NUMBER_VALUE can not be converted to a String", 400);
-        }
-        if (node.isBoolean()) {
-            throw new AwsException("SerializationException",
-                    (node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE")
-                            + " can not be converted to a String", 400);
-        }
-        throw unexpectedStartError(node);
+        throw scalarTypeError(node, "String");
     }
 
     /**
@@ -211,14 +199,14 @@ final class SesV2Json {
             return Map.of();
         }
         if (!keys.containsAll(filter.keySet())) {
-            throw new AwsException("BadRequestException", "1 validation error detected: Value at 'filter' "
+            throw SmithyValidationErrors.badRequest( "Value at 'filter' "
                     + "failed to satisfy constraint: Map keys must satisfy constraint: "
-                    + "[Member must satisfy enum value set: [" + String.join(", ", keys) + "]]", 400);
+                    + "[Member must satisfy enum value set: [" + String.join(", ", keys) + "]]");
         }
         if (filter.containsValue("")) {
-            throw new AwsException("BadRequestException", "1 validation error detected: Value at 'filter' "
+            throw SmithyValidationErrors.badRequest( "Value at 'filter' "
                     + "failed to satisfy constraint: Map value must satisfy constraint: "
-                    + "[Member must have length greater than or equal to 1]", 400);
+                    + "[Member must have length greater than or equal to 1]");
         }
         Map<String, String> values = new LinkedHashMap<>();
         filter.forEach((key, value) -> {
@@ -227,6 +215,33 @@ final class SesV2Json {
             }
         });
         return values;
+    }
+
+    /**
+     * The deserializer's message for a scalar member of type {@code target} (such as
+     * {@code "String"}, {@code "Blob"} or {@code "Boolean"}) given a value of another JSON type.
+     */
+    static AwsException scalarTypeError(JsonNode node, String target) {
+        if (node.isNumber()) {
+            return new AwsException("SerializationException",
+                    "NUMBER_VALUE can not be converted to a " + target, 400);
+        }
+        if (node.isBoolean()) {
+            return new AwsException("SerializationException",
+                    (node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE") + " can not be converted to a " + target,
+                    400);
+        }
+        return unexpectedStartError(node);
+    }
+
+    /** The deserializer's message for a structure or map member given a scalar. */
+    static AwsException expectedNullError() {
+        return new AwsException("SerializationException", "Expected null", 400);
+    }
+
+    /** The deserializer's message for a list member given a scalar. */
+    static AwsException expectedListError() {
+        return new AwsException("SerializationException", "Expected list or null", 400);
     }
 
     static AwsException unexpectedStartError(JsonNode node) {
@@ -292,41 +307,6 @@ final class SesV2Json {
             throw new AwsException("BadRequestException", fieldName + " is required.", 400);
         }
         return node.asText();
-    }
-
-    /**
-     * Parses a {@code SuppressedReasons} JSON array into a list, validating
-     * structure only; reason values are validated by the service layer.
-     * Structural violations reproduce the AWS deserialization-layer errors
-     * (verified against real AWS SES V2 on 2026-06-13): a non-array node and
-     * non-string scalar / container elements fail with
-     * {@code SerializationException}, while {@code null} elements pass
-     * deserialization and are rejected by the service-layer value validation,
-     * exactly as AWS does. Missing / null yields an empty list for the PUT
-     * path, which AWS treats as an explicit empty override.
-     */
-    static List<String> parseSuppressedReasons(JsonNode reasonsNode) {
-        List<String> reasons = new ArrayList<>();
-        if (!reasonsNode.isMissingNode() && !reasonsNode.isNull()) {
-            if (!reasonsNode.isArray()) {
-                throw new AwsException("SerializationException", "Expected list or null", 400);
-            }
-            for (JsonNode r : reasonsNode) {
-                if (r.isTextual() || r.isNull()) {
-                    reasons.add(r.asText(null));
-                } else if (r.isNumber()) {
-                    throw new AwsException("SerializationException",
-                            "NUMBER_VALUE can not be converted to a String", 400);
-                } else if (r.isBoolean()) {
-                    throw new AwsException("SerializationException",
-                            (r.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE")
-                                    + " can not be converted to a String", 400);
-                } else {
-                    throw unexpectedStartError(r);
-                }
-            }
-        }
-        return reasons;
     }
 
     /**

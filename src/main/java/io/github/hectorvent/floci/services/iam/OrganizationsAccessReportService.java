@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.OrganizationsAccessReportJob;
@@ -276,9 +277,9 @@ public class OrganizationsAccessReportService {
 
     /** AWS's shape-violation message: an unquoted null, a quoted value, and what it failed. */
     private static AwsException validationError(String value, String at, String constraint) {
-        return new AwsException("ValidationError", "1 validation error detected: Value "
+        return SmithyValidationErrors.validationError("Value "
                 + (value == null ? "null" : "'" + value + "'") + " at '" + at
-                + "' failed to satisfy constraint: " + constraint, 400);
+                + "' failed to satisfy constraint: " + constraint);
     }
 
     private OrganizationsAccessReportJob completed(String callerAccountId, String entityPath,

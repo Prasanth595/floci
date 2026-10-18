@@ -118,6 +118,11 @@ CloudFormation `AWS::EC2::VPCEndpoint` resolves `IpAddressType` on create and up
 
 Floci runs an IMDS-compatible HTTP server on port `9169` of the host. Each launched container receives the environment variable `AWS_EC2_METADATA_SERVICE_ENDPOINT` pointing to this server.
 
+`iam/info` returns the ARN and ID that IAM holds for the attached profile, and 404 when that
+profile is missing, has no role or does not match the attached ARN. An EKS cluster node, whose
+profile Floci synthesizes, reports the synthesized ARN and a stable ID instead while IAM holds no
+such profile.
+
 Both IMDSv1 (no token) and IMDSv2 (token-based) flows are supported:
 
 ```bash
@@ -222,7 +227,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 |--------|-------------|
 | CreateVpc | Creates a VPC with the requested CIDR block. `InstanceTenancy` accepts `default` or `dedicated`; `host` is rejected with `InvalidParameterValue`, as on AWS. |
 | DescribeVpcs | Lists or returns stored VPCs. |
-| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway, a transit gateway attachment, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
+| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway or egress-only internet gateway, a transit gateway attachment, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Lists common AWS interface endpoint services and S3 (gateway and interface) in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
@@ -231,15 +236,12 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, sets or resets the endpoint policy, and updates stored `IpAddressType` metadata. Omitting the type preserves its current value; malformed types are rejected before changes are applied. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` is accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
 | DescribeVpnGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
-| DescribeEgressOnlyInternetGateways | Validates filters and pagination parameters and returns an empty set, including for explicit IDs, as AWS does. |
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
 | DisassociateVpcCidrBlock | Removes a secondary CIDR block association from a VPC. |
 
-The two describe-only network actions above provide discovery compatibility when no
-resources exist. Egress-only gateway discovery validates its pagination parameters before
-returning an empty page. Neither models virtual private gateway or egress-only internet
-gateway lifecycles.
+`DescribeVpnGateways` provides discovery compatibility when no resources exist; virtual
+private gateway lifecycles are not modelled.
 
 ### Subnets
 
@@ -317,6 +319,9 @@ Nested launch-template tags follow AWS's case-sensitive check: `aws:` is rejecte
 | DeleteInternetGateway | Deletes an internet gateway. |
 | AttachInternetGateway | Attaches an internet gateway to a VPC. |
 | DetachInternetGateway | Detaches an internet gateway from a VPC. |
+| CreateEgressOnlyInternetGateway | Creates an egress-only internet gateway attached to an existing VPC (`InvalidVpcID.NotFound` otherwise). Tags are validated before the gateway is created, so a rejected tag leaves nothing behind. A retry with the same `ClientToken` returns the gateway the first call created, unchanged; the same token with a different `VpcId` or different `TagSpecification` tags fails with `IdempotentParameterMismatch`. |
+| DescribeEgressOnlyInternetGateways | Lists stored egress-only internet gateways, filtered by ID and by the `egress-only-internet-gateway-id`, `attachment.vpc-id`, `attachment.state` and tag filters. An unknown ID returns an empty set, as AWS does. `MaxResults` (5 to 255) pages the results, ordered by ID, with `NextToken`. |
+| DeleteEgressOnlyInternetGateway | Deletes an egress-only internet gateway; an unknown ID fails with `InvalidGatewayID.NotFound`. Routes that targeted it stay in their route tables with state `blackhole`. |
 
 ### Route Tables
 
@@ -608,6 +613,14 @@ fixed socket/core/vCPU shape rather than one derived from the instance family.
 | DisassociateAddress | Removes an Elastic IP address association. |
 | ReleaseAddress | Releases an Elastic IP address record. |
 
+`AllocateAddress` and `DescribeAddresses` return `PublicIpv4Pool` and `NetworkBorderGroup`.
+Omitted values default to `amazon` and the request Region, including for older persisted
+allocations without these fields. Explicit values survive association, disassociation and
+restart. `DescribeAddresses` also supports the `network-border-group` filter. These values
+are stored as metadata; Floci does not allocate real BYOIP addresses or route by border group.
+See [AllocateAddress](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_AllocateAddress.html)
+and [Elastic IP allocation](https://docs.aws.amazon.com/vpc/latest/userguide/WorkWithEIPs.html).
+
 `ReleaseAddress` automatically disassociates an instance's Elastic IP only in the default VPC.
 In a nondefault VPC it returns `InvalidIPAddress.InUse` without changing the association;
 call `DisassociateAddress` first, as specified by the
@@ -754,6 +767,20 @@ prefix lists, `EnaSrdSpecification`, `PrimaryIpv6` and `EnaQueueCount` are likew
 | AssociateIamInstanceProfile | Attaches a profile, named by `IamInstanceProfile.Arn` or `IamInstanceProfile.Name`, to an instance that has none; a second association answers `IncorrectState`. |
 | ReplaceIamInstanceProfileAssociation | Swaps the profile behind an existing association id; an unknown id answers `InvalidAssociationID.NotFound`. |
 | DisassociateIamInstanceProfile | Detaches the profile behind an association id. |
+
+Launches and association changes resolve both names and ARNs against IAM in the
+caller's account. Unknown profiles and foreign-account ARNs fail with
+`InvalidParameterValue` before allocation or association changes. A RunInstances launch
+that names both a profile name and an ARN, directly or through its launch template, and a
+CreateFleet launch through such a template, fail with `InvalidParameterCombination`;
+association replacement uses the ARN when both are provided. Launch templates reject
+malformed profile ARNs at creation with `InvalidIamInstanceProfileArn.Malformed` but, as
+on AWS, store a name and ARN pair as given; the pair fails when something uses the
+template, and Auto Scaling refuses a group over it.
+EC2 stores and returns IAM's profile ID, including for launch-template, EC2 Fleet and
+Auto Scaling instances. Persisted instances from older versions omit the unknown ID until the
+profile is reassociated; looking up the ARN could misidentify a deleted and recreated
+profile.
 
 ### Network Interfaces
 
@@ -934,6 +961,11 @@ network attachment. This keeps management calls responsive even when the Docker 
 For overlapping VPC CIDRs, the first VPC whose addresses are needed keeps the declared range;
 later VPCs use the fallback pool. Within one emulator run, allocated addresses remain on the
 same effective range.
+
+When Floci runs in Docker, deleting a VPC disconnects Floci's own container before removing
+the VPC network. Other endpoints are not forcibly disconnected: removal retries while they
+drain, up to five attempts two seconds apart. After successful removal, a new VPC can reuse
+the CIDR without colliding with a network left behind by that deletion.
 
 When EC2 is enabled, Floci initializes its service, restores persisted state, and seeds the
 configured region's default resources during startup. Other account and region scopes seed on

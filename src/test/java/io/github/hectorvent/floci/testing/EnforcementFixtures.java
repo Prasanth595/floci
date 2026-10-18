@@ -1,23 +1,29 @@
 package io.github.hectorvent.floci.testing;
 
+import io.restassured.filter.Filter;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 import static io.restassured.RestAssured.given;
 
 /**
  * Takes an IAM user or an S3 bucket that a test created back out of the shared application, and
- * makes the users an enforcement test signs as ({@link #createUser}, {@link #auth}) and the SNS
- * topics it publishes to ({@link #createTopic}), registering each one's removal as it goes. A {@code @QuarkusTest} shares one application with every other
- * test class, so a fixture left behind outlives the class that made it and is visible to the next
- * class that lists users or buckets unscoped. Registered with {@link PartitionCleanup} as each
- * fixture is made.
+ * makes the users, roles and role sessions an enforcement test signs as ({@link #createUser},
+ * {@link #createRole}, {@link #assumeRole}, {@link #auth}) and the SNS topics it publishes to
+ * ({@link #createTopic}), registering each one's removal as it goes. A {@code @QuarkusTest} shares
+ * one application with every other test class, so a fixture left behind outlives the class that
+ * made it and is visible to the next class that lists users or buckets unscoped. Registered with
+ * {@link PartitionCleanup} as each fixture is made.
  *
  * <p>Both read back what is attached rather than taking it as an argument, and both return
  * quietly when the thing is not there. That is what makes them safe to register before the create
@@ -30,6 +36,9 @@ import static io.restassured.RestAssured.given;
  * URI as the only place to read it from.
  */
 public final class EnforcementFixtures {
+
+    private static final DateTimeFormatter AMZ_DATE =
+            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
 
     private EnforcementFixtures() {
         // Utility class, prevent instantiation
@@ -104,13 +113,87 @@ public final class EnforcementFixtures {
     }
 
     /**
+     * Creates a role under {@code path} that the root of its own {@code account} may assume, with
+     * {@code policy} inline, registering its {@link #removeRole} with {@code cleanup} before the
+     * create runs, and returns the role's ARN.
+     */
+    public static String createRole(PartitionCleanup cleanup, int port, String account, String path,
+                                    String roleName, String policy) {
+        return createRole(cleanup, port, account, path, roleName, """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"sts:AssumeRole"}]}"""
+                .formatted(account), policy);
+    }
+
+    /**
+     * Creates a role as {@link #createRole(PartitionCleanup, int, String, String, String, String)}
+     * does, trusting whatever {@code trustPolicy} allows instead of its own account's root.
+     */
+    public static String createRole(PartitionCleanup cleanup, int port, String account, String path,
+                                    String roleName, String trustPolicy, String policy) {
+        String authorization = auth(account, "iam");
+        cleanup.register(() -> removeRole(port, authorization, roleName));
+        iam(port, authorization, "CreateRole", "RoleName", roleName, "Path", path,
+                "AssumeRolePolicyDocument", trustPolicy).statusCode(200);
+        iam(port, authorization, "PutRolePolicy", "RoleName", roleName, "PolicyName", "p",
+                "PolicyDocument", policy).statusCode(200);
+        return "arn:aws:iam::" + account + ":role" + path + roleName;
+    }
+
+    /** The temporary credentials of a role session, which a request signs with and sends as its token. */
+    public record Session(String accessKeyId, String sessionToken) {
+    }
+
+    /**
+     * Assumes {@code roleArn} as {@code callerAccessKeyId}, in a session named {@code s}, and returns
+     * the session's credentials. The role's trust policy has to admit the caller.
+     */
+    public static Session assumeRole(int port, String callerAccessKeyId, String roleArn) {
+        XmlPath credentials = query(port, auth(callerAccessKeyId, "sts"), "AssumeRole",
+                "RoleArn", roleArn, "RoleSessionName", "s")
+                .statusCode(200).extract().xmlPath();
+        return new Session(
+                credentials.getString("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId"),
+                credentials.getString("AssumeRoleResponse.AssumeRoleResult.Credentials.SessionToken"));
+    }
+
+    /**
      * A SigV4 {@code Authorization} header naming {@code accessKeyId}, scoped to {@code service} in
      * {@code us-east-1}. The signature is a placeholder, so under a profile that verifies signatures
      * the request has to be signed for real instead.
      */
     public static String auth(String accessKeyId, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260629/us-east-1/" + service
+        return auth(accessKeyId, "us-east-1", service);
+    }
+
+    /** A placeholder signature scoped to the caller's selected region and service. */
+    public static String auth(String accessKeyId, String region, String service) {
+        return auth(accessKeyId, "20260629", region, service);
+    }
+
+    /** A placeholder signature retaining the date selected by an existing request fixture. */
+    public static String auth(String accessKeyId, String date, String region, String service) {
+        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/" + date + "/" + region + "/" + service
                 + "/aws4_request, SignedHeaders=host, Signature=abc";
+    }
+
+    /**
+     * The {@code X-Amz-*} query parameters of a SigV4 presigned request naming {@code accessKeyId},
+     * scoped to {@code service} in {@code us-east-1}, to append to a path after {@code ?} or
+     * {@code &}. They are dated now, so the URL has not expired, and the signature is a placeholder,
+     * as {@link #auth}'s is.
+     */
+    public static String presignedQuery(String accessKeyId, String service) {
+        String amzDate = AMZ_DATE.format(Instant.now());
+        String credential = URLEncoder.encode(
+                accessKeyId + "/" + amzDate.substring(0, 8) + "/us-east-1/" + service + "/aws4_request",
+                StandardCharsets.UTF_8);
+        return "X-Amz-Algorithm=AWS4-HMAC-SHA256"
+                + "&X-Amz-Credential=" + credential
+                + "&X-Amz-Date=" + amzDate
+                + "&X-Amz-Expires=3600"
+                + "&X-Amz-SignedHeaders=host"
+                + "&X-Amz-Signature=fakesig";
     }
 
     /**
@@ -221,13 +304,29 @@ public final class EnforcementFixtures {
      *                      delete object versions, and delete the bucket
      */
     public static void removeBucket(int port, String authorization, String bucket) {
-        if (s3(port, authorization).when().head("/" + bucket)
+        removeBucket(() -> s3(port, authorization), bucket);
+    }
+
+    /**
+     * {@link #removeBucket(int, String, String)} under a profile that turns on
+     * {@code floci.services.s3.enforce-auth}, where S3 verifies every header signature and a
+     * fixed {@code Authorization} header is refused. Each request is signed by {@code signer}.
+     *
+     * @param signer a request signer, such as {@code S3RequestSigner}, for an identity allowed to
+     *               list bucket versions, delete object versions, and delete the bucket
+     */
+    public static void removeBucket(int port, Filter signer, String bucket) {
+        removeBucket(() -> given().port(port).filter(signer), bucket);
+    }
+
+    private static void removeBucket(Supplier<RequestSpecification> s3, String bucket) {
+        if (s3.get().when().head("/" + bucket)
                 .then().extract().statusCode() == 404) {
             return;
         }
         List<ObjectVersion> previousPage = List.of();
         while (true) {
-            XmlPath listing = s3(port, authorization).queryParam("versions", "")
+            XmlPath listing = s3.get().queryParam("versions", "")
                     .queryParam("max-keys", 10)
                     .when().get("/" + bucket)
                     .then().statusCode(200).extract().xmlPath();
@@ -243,14 +342,14 @@ public final class EnforcementFixtures {
             for (ObjectVersion version : page) {
                 String encodedKey = URLEncoder.encode(version.key(), StandardCharsets.UTF_8)
                         .replace("+", "%20").replace("%2F", "/");
-                s3(port, authorization).urlEncodingEnabled(false)
+                s3.get().urlEncodingEnabled(false)
                         .queryParam("versionId", version.versionId())
                         .when().delete("/" + bucket + "/" + encodedKey)
                         .then().statusCode(204);
             }
             previousPage = page;
         }
-        s3(port, authorization).when().delete("/" + bucket).then().statusCode(204);
+        s3.get().when().delete("/" + bucket).then().statusCode(204);
     }
 
     /**

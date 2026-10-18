@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iot.model.IotAuthorizer;
@@ -27,7 +28,6 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 /**
  * AWS IoT Core custom authorizers: the records CreateAuthorizer and its peers manage, and the
@@ -392,10 +392,9 @@ public class IotAuthorizerService {
     }
 
     private static AwsException constraints(String field, List<String> constraints) {
-        return invalid(constraints.size() + " validation error" + (constraints.size() == 1 ? "" : "s") + " detected: "
-                + constraints.stream()
-                        .map(constraint -> "Value at '" + field + "' failed to satisfy constraint: " + constraint)
-                        .collect(Collectors.joining("; ")));
+        return invalid(SmithyValidationErrors.message(constraints.stream()
+                .map(constraint -> "Value at '" + field + "' failed to satisfy constraint: " + constraint)
+                .toList()));
     }
 
     static AwsException invalid(String message) {

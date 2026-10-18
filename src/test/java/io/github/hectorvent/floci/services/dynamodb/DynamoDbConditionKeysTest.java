@@ -206,6 +206,19 @@ class DynamoDbConditionKeysTest {
     }
 
     @Test
+    void getItemLeavesAProjectionWithAListIndexRootUnresolved() {
+        DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract(
+                "dynamodb:GetItem",
+                json("""
+                    {"TableName":"FgacTable",
+                     "Key":{"PK":{"S":"USER_alice"},"SK":{"S":"profile"}},
+                     "ProjectionExpression":"email, [0]"}"""),
+                table);
+
+        assertEquals(List.of("PK", "SK"), result.attributes());
+    }
+
+    @Test
     void putItemCollectsLiteralAttributeNamesFromAConditionExpression() {
         DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract(
                 "dynamodb:PutItem",

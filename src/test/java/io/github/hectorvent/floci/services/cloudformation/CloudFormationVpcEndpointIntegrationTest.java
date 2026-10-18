@@ -96,7 +96,8 @@ class CloudFormationVpcEndpointIntegrationTest {
                 if (type.isEmpty()) {
                     CfnStackWaits.StackState failed = CfnStackWaits.awaitTerminal(stack, CFN_AUTH);
                     assertEquals("ROLLBACK_COMPLETE", failed.status(), failed.reason());
-                    assertTrue(failed.reason().contains("IpAddressType"), failed.reason());
+                    String failure = CfnStackWaits.failedResourceReason(stack, CFN_AUTH);
+                    assertTrue(failure.contains("IpAddressType"), failure);
                     break;
                 }
                 assertEquals("CreateStack".equals(action) ? "CREATE_COMPLETE" : "UPDATE_COMPLETE",

@@ -1,14 +1,12 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
-import io.github.hectorvent.floci.services.elasticache.ServerlessTestProfile;
-import io.github.hectorvent.floci.testing.DockerAvailability;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
@@ -33,9 +31,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Provisions AWS::ElastiCache::ServerlessCache through CloudFormation. Output values are asserted,
  * not only the stack status: an unmapped type is stubbed as CREATE_COMPLETE, and its Fn::GetAtt
  * resolves to the literal "LogicalId.Attr".
+ *
+ * <p>The cache containers are namespaced by {@link SidecarContainersProfile}, which this class
+ * shares with the other classes whose managers start real containers. The profile it used before
+ * also mocked RDS and DocumentDB; the stack creates neither, and ElastiCache does not reach them,
+ * so the shared profile leaves both at the test default.
  */
 @QuarkusTest
-@TestProfile(ServerlessTestProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class ElastiCacheServerlessCfnIntegrationTest {
 
     private static final String CFN_AUTH =
@@ -85,7 +88,7 @@ class ElastiCacheServerlessCfnIntegrationTest {
 
     @Test
     void serverlessCacheExposesEndpointsAndIsRemovedWithTheStack() throws Exception {
-        Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker is required for the cache data plane");
+        SidecarContainersProfile.requireDocker();
         cloudFormation(STACK, "CreateStack", TEMPLATE);
         String stacks = describeStacks(STACK, "CREATE_COMPLETE");
 
