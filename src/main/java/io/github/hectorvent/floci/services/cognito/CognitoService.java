@@ -2906,6 +2906,9 @@ public class CognitoService implements ResourceProvider {
                     CognitoUser user;
                     if (existing.isPresent()) {
                         user = existing.get();
+                        if (!user.isEnabled()) {
+                            throw new AwsException("NotAuthorizedException", "User is disabled.", 400);
+                        }
                     } else {
                         if (userStore.get(userKey(userPoolId, targetUsername)).isPresent()) {
                             throw new AwsException("UsernameExistsException", "User already exists", 400);

@@ -21,6 +21,7 @@ import java.util.Map;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.customDomain;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.requestCertificate;
+import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -129,6 +130,28 @@ class CognitoFederatedSignInIntegrationTest {
             assertEquals("Google", identity.path("providerType").asText());
             assertEquals("provider-subject", identity.path("userId").asText());
         }
+
+        cognitoAction("AdminDisableUser", """
+                {"UserPoolId":"%s","Username":"%s"}
+                """.formatted(poolId, firstUsername)).then().statusCode(200);
+
+        String disabledAuthorize = given().redirects().follow(false).header("Host", domain)
+                .queryParam("client_id", clientId).queryParam("redirect_uri", "https://client.example/callback")
+                .queryParam("response_type", "code").queryParam("scope", "openid")
+                .queryParam("identity_provider", "Google").queryParam("state", "client-state")
+                .when().get("/oauth2/authorize").then().statusCode(302).extract().header("Location");
+
+        given().redirects().follow(false).header("Host", domain)
+                .queryParam("state", queryParameter(disabledAuthorize, "state")).queryParam("code", "provider-code")
+                .when().get("/oauth2/idpresponse").then().statusCode(400)
+                .body("error", equalTo("invalid_request"))
+                .body("error_description", equalTo("User is disabled."));
+
+        JsonNode disabledUser = cognitoJson("AdminGetUser", """
+                {"UserPoolId":"%s","Username":"%s"}
+                """.formatted(poolId, firstUsername));
+        assertFalse(disabledUser.path("Enabled").asBoolean());
+
         assertEquals("google-secret", formValue(googleProvider.tokenRequestBody(), "client_secret"));
         assertEquals("Bearer provider-access-token", googleProvider.userInfoAuthorization());
         JsonNode details = cognitoJson("DescribeIdentityProvider", """

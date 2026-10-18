@@ -136,6 +136,10 @@ Floci uses Google's authorization endpoint at `https://accounts.google.com/o/oau
 token endpoint at `https://oauth2.googleapis.com/token`, and OIDC userinfo endpoint at
 `https://openidconnect.googleapis.com/v1/userinfo`.
 
+The redirect URI to register with Google is `<base-url>/cognito-idp/oauth2/idpresponse`
+(or `https://<domain>/oauth2/idpresponse` on a custom user pool domain). Google accepts
+plain HTTP redirect URIs only for `localhost`.
+
 Google users receive usernames of the form `Google_<sub>`. Repeated sign-ins reconcile the same
 user. `AttributeMapping` maps userinfo claims such as `email`, `email_verified`, `name`,
 `given_name`, `family_name`, `picture`, and `sub` to user pool attributes. The `identities`

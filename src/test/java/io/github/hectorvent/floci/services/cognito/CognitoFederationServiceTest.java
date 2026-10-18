@@ -559,6 +559,69 @@ class CognitoFederationServiceTest {
     }
 
     @Test
+    void disabledLinkedUserCannotAuthenticateViaFederation() throws Exception {
+        IdentityProvider provider = createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
+        cognitoService.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.test"), "Password123!");
+        cognitoService.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-subject");
+        cognitoService.adminDisableUser(pool.getId(), "alice");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                cognitoService.provisionFederatedUser(pool.getId(), provider, "google-subject", null,
+                        Map.of("email", "updated@example.test")));
+
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("User is disabled.", ex.getMessage());
+        assertFalse(cognitoService.adminGetUser(pool.getId(), "alice").isEnabled());
+    }
+
+    @Test
+    void disabledFederatedUserCannotReauthenticate() throws Exception {
+        IdentityProvider provider = createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
+        CognitoUser provisioned = cognitoService.provisionFederatedUser(pool.getId(), provider, "google-subject", null,
+                Map.of("email", "alice@example.test"));
+        assertEquals("Google_google-subject", provisioned.getUsername());
+        assertTrue(provisioned.isEnabled());
+
+        cognitoService.adminDisableUser(pool.getId(), provisioned.getUsername());
+        assertFalse(cognitoService.adminGetUser(pool.getId(), provisioned.getUsername()).isEnabled());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                cognitoService.provisionFederatedUser(pool.getId(), provider, "google-subject", null,
+                        Map.of("email", "updated@example.test")));
+
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("User is disabled.", ex.getMessage());
+        assertFalse(cognitoService.adminGetUser(pool.getId(), provisioned.getUsername()).isEnabled());
+    }
+
+    @Test
+    void completeAuthorizationFailsWhenLinkedUserIsDisabled() throws Exception {
+        createProvider("Google", "Google", Map.of("client_id", "google-client", "client_secret", "google-secret"),
+                Map.of("email", "email"));
+        cognitoService.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.test"), "Password123!");
+        cognitoService.adminLinkProviderForUser(pool.getId(), "alice", "Google", "provider-subject");
+        cognitoService.adminDisableUser(pool.getId(), "alice");
+
+        CognitoFederationService service = googleFederation(discovery(), 200);
+        String state = service.beginAuthorization(pool.getId(), "cognito-client",
+                "https://client.example/callback", List.of("openid", "email"), List.of("openid", "email"),
+                "nonce-123", "Google", "rp-state", null);
+
+        tokenResponse = """
+                {"access_token":"provider-access-token","token_type":"Bearer"}
+                """;
+        claimsResponse = """
+                {"sub":"provider-subject","email":"alice@example.test"}
+                """;
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.completeAuthorization(queryValue(state, "state"), "provider-code"));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("User is disabled.", ex.getMessage());
+        assertFalse(cognitoService.adminGetUser(pool.getId(), "alice").isEnabled());
+    }
+
+    @Test
     void googleProvisioningRacesSafelyWithAdminCreateUser() throws Exception {
         IdentityProvider provider = createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
         String targetUsername = "Google_concurrent-subject";
