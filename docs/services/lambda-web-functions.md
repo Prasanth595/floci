@@ -91,8 +91,6 @@ The platform answers these cases itself, with the AWS HTML pages and `lambda-web
 | 504 | `Runtime.RequestTimeout` | No response within the revision's `timeoutSeconds` |
 | 505 | `Platform.UnsupportedHttpVersion` | HTTP/1.0 |
 
-Floci's runtime tells a failed import by its exit status, 70 for `Application.InitCodeError` and 71 for `Runtime.ImportCodeError`, so an app that exits at start with one of them gets that page and not `Runtime.ExitError`.
-
 A request head over 128 KiB is refused with `431`, without the AWS page. A request without a `Host` header cannot be told apart from one for another Floci service, so it does not get `Platform.MissingHostHeader`.
 
 ## Logs

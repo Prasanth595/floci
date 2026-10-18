@@ -32,6 +32,7 @@ import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
@@ -101,9 +102,9 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private static final String[] READ_USAGE = {"/bin/cat", "/sys/fs/cgroup/cpu.stat", "/sys/fs/cgroup/memory.peak"};
     private static final long SIGKILL_STATUS = 137;
     private static final long SIGTERM_STATUS = 143;
-    /** The statuses index.mjs exits with when the app fails to load. */
-    private static final long INIT_CODE_ERROR_STATUS = 70;
-    private static final long IMPORT_CODE_ERROR_STATUS = 71;
+    /** Where index.mjs writes the error type of an app that fails to load. */
+    private static final String INIT_ERROR_FILE = RUNTIME_DIR + "/init-error";
+    private static final int INIT_ERROR_MAX_BYTES = 64;
     /** Longer than the data plane waits to see an exit, so a request the exit failed is counted. */
     private static final Duration EXCHANGES_WAIT = Duration.ofSeconds(2);
 
@@ -724,7 +725,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             if (exitCode.isPresent()) {
                 LOG.infov("The Lambda Web environment {0} exited with status {1} before it listened: {2}",
                         containerId, exitCode.get(), lastLogLines(containerId));
-                throw new StartFailure(initExitPage(exitCode.get()));
+                throw new StartFailure(exitCode.get() == 0
+                        ? LambdaWebErrorPages.RUNTIME_EXIT : initErrorPage(containerId));
             }
             if (isListening(containerId)) {
                 return;
@@ -745,15 +747,25 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         }
     }
 
-    private static LambdaWebErrorPages.Page initExitPage(long exitCode) {
-        if (exitCode == 0) {
-            return LambdaWebErrorPages.RUNTIME_EXIT;
+    /** The page for an app that ended with an error before it listened. The container has stopped but still exists. */
+    private LambdaWebErrorPages.Page initErrorPage(String containerId) {
+        String errorType = "";
+        try (InputStream archive = lifecycleManager.getDockerClient()
+                .copyArchiveFromContainerCmd(containerId, INIT_ERROR_FILE).exec();
+             TarArchiveInputStream tar = new TarArchiveInputStream(archive)) {
+            if (tar.getNextEntry() != null) {
+                errorType = new String(tar.readNBytes(INIT_ERROR_MAX_BYTES), StandardCharsets.UTF_8);
+            }
+        } catch (NotFoundException expected) {
+            // The app exited on its own, so index.mjs wrote no error type.
+        } catch (IOException | RuntimeException e) {
+            LOG.debugv(e, "Could not read the init error of the Lambda Web environment {0}", containerId);
         }
-        if (exitCode == INIT_CODE_ERROR_STATUS) {
-            return LambdaWebErrorPages.INIT_CODE_ERROR;
-        }
-        return exitCode == IMPORT_CODE_ERROR_STATUS
-                ? LambdaWebErrorPages.IMPORT_CODE_ERROR : LambdaWebErrorPages.RUNTIME_EXIT_ERROR;
+        return switch (errorType) {
+            case "Application.InitCodeError" -> LambdaWebErrorPages.INIT_CODE_ERROR;
+            case "Runtime.ImportCodeError" -> LambdaWebErrorPages.IMPORT_CODE_ERROR;
+            default -> LambdaWebErrorPages.RUNTIME_EXIT_ERROR;
+        };
     }
 
     /**

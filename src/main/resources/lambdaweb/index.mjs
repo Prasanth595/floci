@@ -2,6 +2,7 @@
 // console output into the JSON log events AWS writes, with the request each one belongs to,
 // filters the output by applicationLogLevel, then imports the app.
 import { AsyncLocalStorage } from 'node:async_hooks';
+import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -92,22 +93,22 @@ if (LEVELS.INFO < minimum) {
   process.stderr.write = drop;
 }
 
-// AWS writes one ERROR event in place of Node's stack when the app fails to load. The exit status
-// tells Floci the error type, as LambdaWebEnvironmentManager reads it.
-const INIT_CODE_ERROR_STATUS = 70;
-const IMPORT_CODE_ERROR_STATUS = 71;
+// AWS writes one ERROR event in place of Node's stack when the app fails to load. Floci reads the
+// error type from INIT_ERROR_FILE once the process is gone, so any exit status of the app keeps its meaning.
+const INIT_ERROR_FILE = '/var/runtime/init-error';
 const entry = process.env.AWS_LAMBDA_NODEJS_ENTRYPOINT || 'index.js';
 try {
   await import(pathToFileURL(path.resolve('/var/task', entry)).href);
 } catch (error) {
   const missing = error?.code === 'MODULE_NOT_FOUND' || error?.code === 'ERR_MODULE_NOT_FOUND';
+  const errorType = missing ? 'Runtime.ImportCodeError' : 'Application.InitCodeError';
   const reason = error instanceof Error ? error.message : String(error);
   if (LEVELS.ERROR >= minimum) {
-    writeErr(line('ERROR', missing
-      ? `Runtime.ImportCodeError: could not load customer code: ${reason}. The entrypoint must be 'index.js' at the`
-        + ' root of the deployment package, or the AWS_LAMBDA_NODEJS_ENTRYPOINT environment variable must point to'
-        + ' your entry file'
-      : `Application.InitCodeError: could not load customer code: ${reason}`));
+    writeErr(line('ERROR', `${errorType}: could not load customer code: ${reason}` + (missing
+      ? ". The entrypoint must be 'index.js' at the root of the deployment package, or the"
+        + ' AWS_LAMBDA_NODEJS_ENTRYPOINT environment variable must point to your entry file'
+      : '')));
   }
-  process.exit(missing ? IMPORT_CODE_ERROR_STATUS : INIT_CODE_ERROR_STATUS);
+  fs.writeFileSync(INIT_ERROR_FILE, errorType);
+  process.exit(1);
 }
