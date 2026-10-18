@@ -9,7 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @RegisterForReflection
 public class VectorIndex {
-    private Instant creationTime = Instant.now();
+    private Instant creationTime;
     private Map<String, String> tags = new ConcurrentHashMap<>();
     private String indexName;
     private String indexArn;

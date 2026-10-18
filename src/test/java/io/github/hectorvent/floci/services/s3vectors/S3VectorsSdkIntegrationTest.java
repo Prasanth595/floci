@@ -16,6 +16,8 @@ import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3vectors.S3VectorsClient;
 import software.amazon.awssdk.services.s3vectors.model.Index;
+import software.amazon.awssdk.services.s3vectors.model.PutInputVector;
+import software.amazon.awssdk.services.s3vectors.model.QueryVectorsResponse;
 import software.amazon.awssdk.services.s3vectors.model.ValidationException;
 import software.amazon.awssdk.services.s3vectors.model.VectorBucket;
 import software.amazon.awssdk.services.s3vectors.model.VectorData;
@@ -92,6 +94,43 @@ class S3VectorsSdkIntegrationTest {
                 Arguments.of("float32", "cosine", List.of("a".repeat(64)), "NonFilterableMetadataKeys"),
                 Arguments.of("float32", "cosine", List.of("text", "text"), "NonFilterableMetadataKeys"),
                 Arguments.of("float32", "cosine", Collections.nCopies(11, "key"), "NonFilterableMetadataKeys"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"$and", "$or"})
+    void logicalOperatorsAreNotTreatedAsNonFilterableFields(String operator) {
+        String name = "logical-vectors-" + UUID.randomUUID().toString().substring(0, 8);
+        try (S3VectorsClient vectors = vectors("us-east-1")) {
+            vectors.createVectorBucket(request -> request.vectorBucketName(name));
+            try {
+                vectors.createIndex(request -> request.vectorBucketName(name).indexName("index")
+                        .dataType("float32").dimension(1).distanceMetric("cosine")
+                        .metadataConfiguration(metadata -> metadata.nonFilterableMetadataKeys("$and", "$or", "text")));
+                vectors.putVectors(request -> request.vectorBucketName(name).indexName("index")
+                        .vectors(PutInputVector.builder().key("match")
+                                .data(VectorData.builder().float32(1.0f).build())
+                                .metadata(Document.fromMap(Map.of("category", Document.fromString("x")))).build()));
+                Document filter = Document.fromMap(Map.of(operator, Document.fromList(List.of(
+                        Document.fromMap(Map.of("category", Document.fromString("x")))))));
+                QueryVectorsResponse result = vectors.queryVectors(request -> request.vectorBucketName(name)
+                        .indexName("index").queryVector(VectorData.builder().float32(1.0f).build()).topK(1).filter(filter));
+                assertEquals(List.of("match"), result.vectors().stream().map(item -> item.key()).toList());
+
+                Document forbidden = Document.fromMap(Map.of(operator, Document.fromList(List.of(
+                        Document.fromMap(Map.of("$and", Document.fromList(List.of(
+                                Document.fromMap(Map.of("text", Document.fromString("hidden")))))))))));
+                ValidationException error = assertThrows(ValidationException.class, () -> vectors.queryVectors(request -> request
+                        .vectorBucketName(name).indexName("index").queryVector(VectorData.builder().float32(1.0f).build())
+                        .topK(1).filter(forbidden)));
+                assertEquals(400, error.statusCode());
+                assertTrue(error.getMessage().contains("text"));
+            } finally {
+                for (VectorIndex index : service.listIndexes(name, "us-east-1")) {
+                    vectors.deleteIndex(request -> request.vectorBucketName(name).indexName(index.getIndexName()));
+                }
+                vectors.deleteVectorBucket(request -> request.vectorBucketName(name));
+            }
+        }
     }
 
     @ParameterizedTest

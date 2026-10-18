@@ -60,6 +60,11 @@ returns encryption settings and includes metadata configuration only when
 non-filterable keys are configured. Indexes inherit their bucket's encryption
 settings unless overridden. These fields use the existing S3 Vectors storage backend.
 
+On first read, older stored resources with missing encryption settings receive the
+bucket default, or `AES256` when the bucket has no setting. Missing creation times
+are set to the migration time and saved through the configured storage backend;
+the original creation time is unavailable. Later reads and restarts retain that value.
+
 Index dimensions must be between 1 and 4096. Metadata configuration accepts up to
 10 unique non-filterable keys, each a non-blank string of 1 to 63 characters.
 Queries reject filters on these keys, including filters nested in logical expressions.

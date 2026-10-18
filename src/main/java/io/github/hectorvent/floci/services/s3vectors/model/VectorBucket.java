@@ -8,7 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @RegisterForReflection
 public class VectorBucket {
-    private Instant creationTime = Instant.now();
+    private Instant creationTime;
     private Map<String, String> tags = new ConcurrentHashMap<>();
     private String vectorBucketName;
     private String vectorBucketArn;

@@ -99,6 +99,26 @@ class S3VectorsWriteLockTest {
         service.putVectors("bucket", "index", List.of(new VectorData(key, List.of(1.0f), Map.of())), REGION);
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void legacyMetadataMigrationDoesNotOverwriteConcurrentWrites(boolean copyOnAccess) throws Exception {
+        setUp(copyOnAccess);
+        VectorBucket legacy = new VectorBucket("bucket", "bucket-arn", null);
+        storage.put("000000000000/" + REGION + "::bucket", legacy);
+        overlap(() -> service.listVectorBuckets(REGION), this::createIndex);
+        assertNotNull(service.getVectorBucket("bucket", REGION).getCreationTime());
+        assertEquals(Map.of("sseType", "AES256"), service.getIndex("bucket", "index", REGION).getEncryptionConfiguration());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void legacyMetadataMigrationDoesNotReviveADeletedBucket(boolean copyOnAccess) throws Exception {
+        setUp(copyOnAccess);
+        storage.put("000000000000/" + REGION + "::bucket", new VectorBucket("bucket", "bucket-arn", null));
+        overlap(() -> service.getVectorBucket("bucket", REGION), () -> service.deleteVectorBucket("bucket", REGION));
+        assertTrue(service.listVectorBuckets(REGION).isEmpty());
+    }
+
     private void overlap(Runnable first, Runnable second) throws Exception {
         Gate gate = new Gate();
         storage.nextWrite.set(gate);

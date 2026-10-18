@@ -14,12 +14,14 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -29,14 +31,17 @@ public class S3VectorsService {
 
     private final AccountAwareStorageBackend<VectorBucket> store;
     private final RegionResolver regionResolver;
-    // Keep each monitor across deletion and recreation so an in-flight writer cannot revive a bucket.
-    private final Map<String, Object> bucketLocks = new ConcurrentHashMap<>();
+    // Bounded, stable monitors also serialize deletion and recreation of the same bucket.
+    private final Object[] bucketLocks = new Object[256];
 
     @Inject
     public S3VectorsService(StorageFactory factory, RegionResolver regionResolver) {
         this.store = factory.create("s3vectors", "s3vectors.json",
                 new TypeReference<Map<String, VectorBucket>>() {});
         this.regionResolver = regionResolver;
+        for (int i = 0; i < bucketLocks.length; i++) {
+            bucketLocks[i] = new Object();
+        }
     }
 
     private String buildStorageKey(String region, String bucketName) {
@@ -45,7 +50,7 @@ public class S3VectorsService {
 
     private Object lockFor(String bucketName, String region) {
         String key = store.accountId() + "/" + buildStorageKey(region, bucketName);
-        return bucketLocks.computeIfAbsent(key, ignored -> new Object());
+        return bucketLocks[Math.floorMod(key.hashCode(), bucketLocks.length)];
     }
 
     private String buildBucketArn(String region, String bucketName) {
@@ -70,6 +75,7 @@ public class S3VectorsService {
             String arn = buildBucketArn(region, bucketName);
             VectorBucket bucket = new VectorBucket(bucketName, arn,
                     encryptionConfiguration != null ? encryptionConfiguration : Map.of("sseType", "AES256"));
+            bucket.setCreationTime(Instant.now());
             bucket.setTags(new ConcurrentHashMap<>(tags));
             store.put(key, bucket);
             LOG.infov("Created Vector Bucket: {0} in region {1}", bucketName, region);
@@ -78,15 +84,52 @@ public class S3VectorsService {
     }
 
     public VectorBucket getVectorBucket(String bucketName, String region) {
-        String key = buildStorageKey(region, bucketName);
-        return store.get(key).orElseThrow(() ->
+        return findVectorBucket(bucketName, region).orElseThrow(() ->
                 new AwsException("NotFoundException", "The vector bucket " + bucketName + " does not exist.", 404));
     }
 
     public List<VectorBucket> listVectorBuckets(String region) {
-        return store.scan(k -> k.startsWith(region + "::")).stream()
+        String prefix = region + "::";
+        return store.keys().stream().filter(key -> key.startsWith(prefix))
+                .flatMap(key -> findVectorBucket(key.substring(prefix.length()), region).stream())
                 .sorted(Comparator.comparing(VectorBucket::getVectorBucketName))
                 .collect(Collectors.toList());
+    }
+
+    private Optional<VectorBucket> findVectorBucket(String bucketName, String region) {
+        synchronized (lockFor(bucketName, region)) {
+            String key = buildStorageKey(region, bucketName);
+            return store.get(key).map(bucket -> {
+                if (backfillLegacyMetadata(bucket)) {
+                    store.put(key, bucket);
+                }
+                return bucket;
+            });
+        }
+    }
+
+    private static boolean backfillLegacyMetadata(VectorBucket bucket) {
+        boolean changed = false;
+        Instant migrationTime = Instant.now();
+        if (bucket.getCreationTime() == null) {
+            bucket.setCreationTime(migrationTime);
+            changed = true;
+        }
+        if (bucket.getEncryptionConfiguration() == null) {
+            bucket.setEncryptionConfiguration(Map.of("sseType", "AES256"));
+            changed = true;
+        }
+        for (VectorIndex index : bucket.getIndexes().values()) {
+            if (index.getCreationTime() == null) {
+                index.setCreationTime(migrationTime);
+                changed = true;
+            }
+            if (index.getEncryptionConfiguration() == null) {
+                index.setEncryptionConfiguration(bucket.getEncryptionConfiguration());
+                changed = true;
+            }
+        }
+        return changed;
     }
 
     public void deleteVectorBucket(String bucketName, String region) {
@@ -136,6 +179,7 @@ public class S3VectorsService {
 
             String arn = buildIndexArn(region, bucketName, indexName);
             VectorIndex index = new VectorIndex(indexName, arn, bucketName, dimension, dataType, distanceMetric);
+            index.setCreationTime(Instant.now());
             index.setNonFilterableMetadataKeys(List.copyOf(nonFilterableMetadataKeys));
             index.setEncryptionConfiguration(encryptionConfiguration != null
                     ? encryptionConfiguration : bucket.getEncryptionConfiguration());
@@ -358,14 +402,14 @@ public class S3VectorsService {
             return;
         }
         for (Map.Entry<?, ?> clause : clauses.entrySet()) {
-            if (nonFilterableKeys.contains(clause.getKey())) {
-                throw new AwsException("ValidationException", "Cannot filter on non-filterable metadata key: " + clause.getKey(), 400);
-            }
-            if (("$and".equals(clause.getKey()) || "$or".equals(clause.getKey()))
-                    && clause.getValue() instanceof List<?> children) {
-                for (Object child : children) {
-                    validateFilterKeys(child, nonFilterableKeys);
+            if ("$and".equals(clause.getKey()) || "$or".equals(clause.getKey())) {
+                if (clause.getValue() instanceof List<?> children) {
+                    for (Object child : children) {
+                        validateFilterKeys(child, nonFilterableKeys);
+                    }
                 }
+            } else if (nonFilterableKeys.contains(clause.getKey())) {
+                throw new AwsException("ValidationException", "Cannot filter on non-filterable metadata key: " + clause.getKey(), 400);
             }
         }
     }
