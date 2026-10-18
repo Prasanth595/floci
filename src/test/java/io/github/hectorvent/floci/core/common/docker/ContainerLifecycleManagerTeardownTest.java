@@ -31,7 +31,7 @@ class ContainerLifecycleManagerTeardownTest {
     @Test
     void interruptedWaitersStillCleanUpWithoutReleasingAnotherOwnersSlot() throws Exception {
         DockerClient docker = mock(DockerClient.class);
-        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null, null);
+        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null);
         StopContainerCmd stop = mock(StopContainerCmd.class);
         when(docker.stopContainerCmd(anyString())).thenReturn(stop);
         when(stop.withTimeout(anyInt())).thenReturn(stop);
@@ -120,7 +120,7 @@ class ContainerLifecycleManagerTeardownTest {
     @Test
     void removalFailuresReleaseAdmissionForLaterOwners() throws Exception {
         DockerClient docker = mock(DockerClient.class);
-        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null, null);
+        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null);
         StopContainerCmd stop = mock(StopContainerCmd.class);
         when(docker.stopContainerCmd(anyString())).thenReturn(stop);
         when(stop.withTimeout(anyInt())).thenReturn(stop);

@@ -53,7 +53,6 @@ class ContainerLifecycleManagerCaBundleTest {
     @Mock DockerClient dockerClient;
     @Mock ImageCacheService imageCacheService;
     @Mock ContainerDetector containerDetector;
-    @Mock PortAllocator portAllocator;
     @Mock EmulatorConfig config;
     @Mock EmulatorConfig.DockerConfig dockerConfig;
     @Mock EmulatorConfig.TlsConfig tlsConfig;
@@ -205,7 +204,6 @@ class ContainerLifecycleManagerCaBundleTest {
         assertEquals(6, env.getAllValues().get(0).size(), "the first attempt carried the trust variables");
         assertEquals(List.of("FOO=bar"), env.getAllValues().get(1), "the retry carries only the spec's own");
         verify(dockerClient, times(1)).copyArchiveToContainerCmd(anyString());
-        verify(portAllocator, never()).allocateAny();
     }
 
     private Path writeBundle() throws Exception {
@@ -214,7 +212,7 @@ class ContainerLifecycleManagerCaBundleTest {
     }
 
     private ContainerLifecycleManager manager() {
-        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, portAllocator, config);
+        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, config);
     }
 
     private static ContainerSpec specWithEnv(List<String> env) {

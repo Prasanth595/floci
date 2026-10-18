@@ -18,9 +18,10 @@ import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.function.IntFunction;
 
 /**
- * Utility for allocating free TCP ports for Docker container port bindings.
- * Consolidates the free port discovery logic previously duplicated across
- * container managers (RDS, ElastiCache, MSK, ECR).
+ * Allocates host ports from a configured range for callers that must know the port before
+ * the container starts, or that hand it out themselves (ECR, EC2, MSK and other range-based
+ * managers). A binding that only needs some free port uses a dynamic port instead
+ * ({@code ContainerBuilder.Builder#withDynamicPort}), which leaves the choice to the daemon.
  */
 @ApplicationScoped
 public class PortAllocator {
@@ -140,24 +141,6 @@ public class PortAllocator {
             }
         }
         return false;
-    }
-
-    /**
-     * Finds any free TCP port using ephemeral port allocation.
-     * This is the fastest method when any port will do.
-     *
-     * @return a free port
-     * @throws RuntimeException if no free port can be allocated
-     */
-    public int allocateAny() {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            socket.setReuseAddress(true);
-            int port = socket.getLocalPort();
-            LOG.debugv("Allocated ephemeral port {0}", String.valueOf(port));
-            return port;
-        } catch (IOException e) {
-            throw new RuntimeException("Could not find a free port", e);
-        }
     }
 
     /**

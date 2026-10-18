@@ -12,6 +12,7 @@ import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.NetworkSettings;
 import com.github.dockerjava.api.model.Ports;
@@ -62,9 +63,6 @@ class ContainerLifecycleManagerNetworkTest {
 
     @Mock
     ContainerDetector containerDetector;
-
-    @Mock
-    PortAllocator portAllocator;
 
     @Mock
     EmulatorConfig config;
@@ -208,10 +206,24 @@ class ContainerLifecycleManagerNetworkTest {
     }
 
     @Test
-    void createDoesNotAllocateDynamicPortsOnHostNetwork() {
+    void createPublishesNoDynamicPortOnHostNetwork() {
         manager().create(spec("host", Map.of(9200, 0), List.of()));
 
-        verify(portAllocator, never()).allocateAny();
+        assertNull(createdHostConfig().getPortBindings());
+    }
+
+    @Test
+    void createAndStartReadsTheDaemonsDynamicPortBackFromInspect() {
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
+        Ports published = new Ports();
+        published.bind(ExposedPort.tcp(5432), Ports.Binding.bindPort(55037));
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(networks.getPorts()).thenReturn(published);
+        when(inspectOf("container-id").getNetworkSettings()).thenReturn(networks);
+
+        ContainerInfo info = manager().createAndStart(spec(null, Map.of(5432, 0), List.of(5432)));
+
+        assertEquals(new EndpointInfo("localhost", 55037), info.getEndpoint(5432));
     }
 
     @Test
@@ -366,8 +378,7 @@ class ContainerLifecycleManagerNetworkTest {
     }
 
     private ContainerLifecycleManager manager() {
-        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector,
-                portAllocator, config);
+        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, config);
     }
 
     private static ContainerSpec spec(String networkMode, Map<Integer, Integer> portBindings,
