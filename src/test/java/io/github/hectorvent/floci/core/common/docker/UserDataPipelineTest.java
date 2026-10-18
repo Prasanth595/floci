@@ -78,7 +78,7 @@ class UserDataPipelineTest {
         List<String> output = new ArrayList<>();
 
         UserDataPipeline.ExecutionResult result = UserDataPipeline.executeUserData(docker, "container-id",
-                "test instance", script, Duration.ofSeconds(1), output::add, null);
+                "test instance", script, Duration.ofSeconds(1), output::add, null, 0L);
 
         assertTrue(result.isSuccess(), result.getFailureMessage());
         assertEquals(2, attempts.get());

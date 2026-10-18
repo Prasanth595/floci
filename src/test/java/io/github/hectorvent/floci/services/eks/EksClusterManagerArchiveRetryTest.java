@@ -125,7 +125,8 @@ class EksClusterManagerArchiveRetryTest {
 
         manager = new EksClusterManager(containerBuilder, lifecycleManager,
                 mock(ContainerDetector.class), mock(PortAllocator.class), dockerHostResolver,
-                mock(EcrRegistryManager.class), config, regionResolver, null, oidcService, certificateAuthority);
+                mock(EcrRegistryManager.class), config, regionResolver, null, oidcService, certificateAuthority,
+                null, null, 0L);
     }
 
     @Test

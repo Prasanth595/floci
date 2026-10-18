@@ -85,6 +85,7 @@ public class ContainerLifecycleManager {
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
     private final EmulatorConfig config;
+    private final long archiveRetryBackoffMillis;
 
     /** Volumes whose shared-ownership root has already been initialised this process (run-once guard). */
     private final ConcurrentHashMap<String, Boolean> initializedSharedVolumes = new ConcurrentHashMap<>();
@@ -98,11 +99,22 @@ public class ContainerLifecycleManager {
                                      ContainerDetector containerDetector,
                                      PortAllocator portAllocator,
                                      EmulatorConfig config) {
+        this(dockerClient, imageCacheService, containerDetector, portAllocator, config,
+                RetryingTarCopier.DEFAULT_BACKOFF_MS);
+    }
+
+    ContainerLifecycleManager(DockerClient dockerClient,
+                              ImageCacheService imageCacheService,
+                              ContainerDetector containerDetector,
+                              PortAllocator portAllocator,
+                              EmulatorConfig config,
+                              long archiveRetryBackoffMillis) {
         this.dockerClient = dockerClient;
         this.imageCacheService = imageCacheService;
         this.containerDetector = containerDetector;
         this.portAllocator = portAllocator;
         this.config = config;
+        this.archiveRetryBackoffMillis = archiveRetryBackoffMillis;
     }
 
     /**
@@ -328,7 +340,8 @@ public class ContainerLifecycleManager {
         try {
             byte[] content = Files.readAllBytes(bundle);
             RetryingTarCopier.copyBytes(dockerClient, containerId, ContainerCaBundle.CONTAINER_DIR,
-                    ContainerCaBundle.FILE_NAME, content, 0644);
+                    ContainerCaBundle.FILE_NAME, content, 0644,
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
             LOG.debugv("Copied the CA bundle into container {0} at {1}", containerId, ContainerCaBundle.CONTAINER_PATH);
             return true;
         } catch (Exception e) {

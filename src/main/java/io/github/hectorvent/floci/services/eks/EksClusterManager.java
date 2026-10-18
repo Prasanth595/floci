@@ -157,6 +157,7 @@ public class EksClusterManager
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
+    private final long archiveRetryBackoffMillis;
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
     private final DockerHostResolver dockerHostResolver;
@@ -423,6 +424,26 @@ public class EksClusterManager
                              FlociCertificateAuthority certificateAuthority,
                              ContainerLogStreamer logStreamer,
                              StorageBackend<String, Nodegroup> nodeGroupStorage) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer,
+                oidcService, certificateAuthority, logStreamer, nodeGroupStorage,
+                RetryingTarCopier.DEFAULT_BACKOFF_MS);
+    }
+
+    EksClusterManager(ContainerBuilder containerBuilder,
+                      ContainerLifecycleManager lifecycleManager,
+                      ContainerDetector containerDetector,
+                      PortAllocator portAllocator,
+                      DockerHostResolver dockerHostResolver,
+                      EcrRegistryManager ecrRegistryManager,
+                      EmulatorConfig config,
+                      RegionResolver regionResolver,
+                      Ec2MetadataServer metadataServer,
+                      EksOidcService oidcService,
+                      FlociCertificateAuthority certificateAuthority,
+                      ContainerLogStreamer logStreamer,
+                      StorageBackend<String, Nodegroup> nodeGroupStorage,
+                      long archiveRetryBackoffMillis) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
@@ -436,6 +457,7 @@ public class EksClusterManager
         this.certificateAuthority = certificateAuthority;
         this.logStreamer = logStreamer;
         this.nodeGroupStorage = nodeGroupStorage;
+        this.archiveRetryBackoffMillis = archiveRetryBackoffMillis;
     }
 
     @Inject
@@ -1553,7 +1575,8 @@ public class EksClusterManager
     private void copyWebhookIntoContainer(String containerId, String localFile, String clusterName) {
         try {
             RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
-                    WEBHOOK_CONFIG_DIR, localFile);
+                    WEBHOOK_CONFIG_DIR, localFile,
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
         } catch (Exception e) {
             LOG.warnv("EKS token-webhook may not authenticate for cluster {0}: could not copy kubeconfig "
                     + "into the k3s container: {1}", clusterName, e.getMessage());
@@ -1591,7 +1614,8 @@ public class EksClusterManager
         try {
             DockerClient dockerClient = lifecycleManager.getDockerClient();
             if (dockerClient != null) {
-                RetryingTarCopier.copyHostResource(dockerClient, containerId, AUDIT_POLICY_DIR, localFile);
+                RetryingTarCopier.copyHostResource(dockerClient, containerId, AUDIT_POLICY_DIR, localFile,
+                        RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
                 LOG.debugv("Injected audit policy file into k3s container {0} for cluster {1}",
                         containerId, clusterName);
             }
@@ -1916,9 +1940,11 @@ public class EksClusterManager
     void copySigningKeysIntoContainer(String containerId, SigningKeyFiles keyFiles, String clusterName) {
         try {
             RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
-                    WEBHOOK_CONFIG_DIR, keyFiles.signingKeyPath().toString());
+                    WEBHOOK_CONFIG_DIR, keyFiles.signingKeyPath().toString(),
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
             RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
-                    WEBHOOK_CONFIG_DIR, keyFiles.publicKeyPath().toString());
+                    WEBHOOK_CONFIG_DIR, keyFiles.publicKeyPath().toString(),
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
             LOG.debugv("Injected IRSA OIDC signing keypair into k3s container {0} for cluster {1}",
                     containerId, clusterName);
         } catch (Exception e) {
@@ -1973,7 +1999,8 @@ public class EksClusterManager
                 "registries.yaml"), content, clusterName);
         try {
             RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/etc",
-                    REGISTRIES_TAR_ENTRY, content.getBytes(StandardCharsets.UTF_8), 0644);
+                    REGISTRIES_TAR_ENTRY, content.getBytes(StandardCharsets.UTF_8), 0644,
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
             LOG.infov("Injected ECR registry mirror ({0}) into k3s cluster {1}", endpoint, clusterName);
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0} gets no ECR registry mirror: could not copy registries.yaml "
@@ -1993,7 +2020,8 @@ public class EksClusterManager
         try {
             byte[] tar = buildContainerdCertsLinkTar();
             RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId, "/",
-                    "containerd-certs-link", out -> out.write(tar));
+                    "containerd-certs-link", out -> out.write(tar),
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0}: could not link containerd certs.d directory: {1}",
                     clusterName, e.getMessage());
@@ -2061,7 +2089,8 @@ public class EksClusterManager
         try {
             byte[] tar = tarSingleFile(POD_IDENTITY_MANIFEST_TAR_ENTRY, manifest);
             RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId, K3S_DATA_DIR,
-                    POD_IDENTITY_MANIFEST_FILE, out -> out.write(tar));
+                    POD_IDENTITY_MANIFEST_FILE, out -> out.write(tar),
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
             LOG.infov("Registered the EKS Pod Identity mutating webhook ({0}) for cluster {1}", url, clusterName);
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0} gets no pod identity injection: could not copy {1} into the k3s "

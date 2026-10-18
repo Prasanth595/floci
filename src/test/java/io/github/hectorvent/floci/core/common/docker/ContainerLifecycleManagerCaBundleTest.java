@@ -277,7 +277,7 @@ class ContainerLifecycleManagerCaBundleTest {
     }
 
     private ContainerLifecycleManager manager() {
-        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, portAllocator, config);
+        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, portAllocator, config, 0L);
     }
 
     private static ContainerSpec specWithEnv(List<String> env) {

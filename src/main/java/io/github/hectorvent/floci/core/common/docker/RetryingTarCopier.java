@@ -31,8 +31,8 @@ public final class RetryingTarCopier {
 
     private static final Logger LOG = Logger.getLogger(RetryingTarCopier.class);
 
-    static final int DEFAULT_MAX_ATTEMPTS = 6;
-    static final long DEFAULT_BACKOFF_MS = 500L;
+    public static final int DEFAULT_MAX_ATTEMPTS = 6;
+    public static final long DEFAULT_BACKOFF_MS = 500L;
 
     /**
      * Buffer for the tar-streaming pipe. The default {@link PipedInputStream} buffer is only 1KB,
