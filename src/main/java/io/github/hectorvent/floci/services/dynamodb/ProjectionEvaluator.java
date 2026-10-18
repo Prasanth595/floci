@@ -69,9 +69,14 @@ final class ProjectionEvaluator {
         Set<String> attributes = new LinkedHashSet<>();
         for (String rawPath : splitProjectionPaths(projectionExpression)) {
             List<PathSegment> segments = resolvePath(rawPath.trim(), exprAttrNames);
-            if (!segments.isEmpty()) {
-                attributes.add(segments.getFirst().name());
+            if (segments.isEmpty()) {
+                continue;
             }
+            PathSegment root = segments.getFirst();
+            if (root.isIndex()) {
+                throw new IllegalArgumentException("Projection path starts with a list index: " + rawPath.trim());
+            }
+            attributes.add(root.name());
         }
         return Collections.unmodifiableSet(attributes);
     }
