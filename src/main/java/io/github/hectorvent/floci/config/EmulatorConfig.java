@@ -2219,8 +2219,9 @@ public interface EmulatorConfig {
 
         /**
          * Approved parent directories for task definition host volume bind mounts
-         * (volumes[].host.sourcePath). A sourcePath must resolve under one of these roots.
-         * Empty (the default) rejects every host volume sourcePath unless
+         * (volumes[].host.sourcePath) and container devices (linuxParameters.devices[].hostPath).
+         * A host path must resolve under one of these roots. Empty (the default) rejects every
+         * host volume sourcePath and device hostPath unless
          * {@link #allowUnsafeHostVolumes()} is set, subject to the always-on traversal,
          * bare-root, and Docker socket blocks below.
          */

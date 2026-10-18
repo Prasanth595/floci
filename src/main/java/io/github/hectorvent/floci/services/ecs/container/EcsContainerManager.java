@@ -435,6 +435,9 @@ public class EcsContainerManager {
                 if (Boolean.TRUE.equals(def.getReadonlyRootFilesystem())) {
                     specBuilder.withReadonlyRootfs();
                 }
+                // Checked at registration too; again here, as for a host volume, for a definition
+                // persisted before the policy covered devices.
+                checkDeviceHostPaths(def);
                 EcsLinuxParameters.apply(specBuilder, def,
                         def.getMemory() != null ? def.getMemory() : parseTaskMemoryMb(task.getMemory()));
 
@@ -2437,6 +2440,18 @@ public class EcsContainerManager {
             collapsed = collapsed.substring(0, collapsed.length() - 1);
         }
         return collapsed.startsWith("/") ? collapsed : "/" + collapsed;
+    }
+
+    /**
+     * Refuses a device whose host path {@link HostVolumePolicy} does not allow, as it refuses a host
+     * volume: by default, unless {@code floci.services.ecs.host-volume-roots} holds it or
+     * {@code floci.services.ecs.allow-unsafe-host-volumes} is set. A device hands the container the
+     * host's hardware directly, so it is no less exposed than a bind mount.
+     */
+    public void checkDeviceHostPaths(ContainerDefinition def) {
+        for (String hostPath : EcsLinuxParameters.deviceHostPaths(def)) {
+            hostVolumePolicy.validate(hostPath, HostVolumePolicy.DEVICE_HOST_PATH);
+        }
     }
 
     // Inner enum to avoid import cycle — mirrors model.TaskStatus for readability

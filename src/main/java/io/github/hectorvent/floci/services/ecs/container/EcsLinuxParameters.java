@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -23,8 +25,8 @@ import java.util.Set;
  * container with only a soft limit gets none), and {@code swappiness} is {@code --memory-swappiness},
  * which registration requires with {@code maxSwap} and drops without it, as ECS does.
  *
- * <p>RegisterTaskDefinition keeps the members verbatim among the definition's unparsed members,
- * which is where they are read from, whether the definition came from the API or a template.
+ * <p>RegisterTaskDefinition keeps the members among the definition's unparsed members, which is
+ * where they are read from, whether the definition came from the API or a template.
  */
 public final class EcsLinuxParameters {
 
@@ -52,21 +54,28 @@ public final class EcsLinuxParameters {
 
     private static final Set<String> DEVICE_PERMISSIONS = Set.of("read", "write", "mknod");
 
+    private static final Set<String> INTEGER_MEMBERS = Set.of("sharedMemorySize", "maxSwap", "swappiness");
+
     private EcsLinuxParameters() {
     }
 
     /**
      * The {@code linuxParameters} rules RegisterTaskDefinition applies whatever the launch type,
      * before Fargate's own, with the messages and in the order measured on AWS (eu-west-1,
-     * 2026-10-03 and 2026-10-16): every capability one the KernelCapabilities reference lists, in
-     * any case and without the {@code CAP_} prefix; every device with a host path and only read,
-     * write and mknod as permissions, as written; every tmpfs mount with a container path, a size
-     * above zero and options the reference lists; a shared memory size above zero; and swap with a
-     * swappiness, a swap size of zero or more and a swappiness from 0 to 100.
+     * 2026-10-03, 2026-10-16 and 2026-10-18). First, for every container, the JSON type of every
+     * member (see {@link #checkTypes}); then every capability one the KernelCapabilities reference
+     * lists, in any case and without the {@code CAP_} prefix; every device with a host path and only
+     * read, write and mknod as permissions, as written; every tmpfs mount with a container path, a
+     * size above zero and options the reference lists; a shared memory size above zero; and swap
+     * with a swappiness, a swap size of zero or more and a swappiness from 0 to 100. A number is
+     * read as the integer AWS stores, its fraction dropped and its range capped.
      */
     public static void validate(List<ContainerDefinition> containerDefs) {
         if (containerDefs == null) {
             return;
+        }
+        for (ContainerDefinition def : containerDefs) {
+            checkTypes(def.getUnparsed() == null ? null : def.getUnparsed().get("linuxParameters"));
         }
         for (ContainerDefinition def : containerDefs) {
             Map<?, ?> parameters = of(def);
@@ -101,7 +110,7 @@ public final class EcsLinuxParameters {
                     throw new AwsException("ClientException",
                             "All tmpfs mounts must have a specified containerPath value.", 400);
                 }
-                Long size = number(mount.get("size"));
+                Integer size = integer(mount.get("size"));
                 if (size == null || size <= 0) {
                     throw new AwsException("ClientException", "The container has an invalid tmpfs size value"
                             + " specified. It must be a non-zero, non-negative integer.", 400);
@@ -114,7 +123,7 @@ public final class EcsLinuxParameters {
                     }
                 }
             }
-            Long sharedMemorySize = number(parameters.get("sharedMemorySize"));
+            Integer sharedMemorySize = integer(parameters.get("sharedMemorySize"));
             if (sharedMemorySize != null && sharedMemorySize <= 0) {
                 throw new AwsException("ClientException", "The container has an invalid shared memory volume"
                         + " size. It must be a non-zero, non-negative integer.", 400);
@@ -123,13 +132,13 @@ public final class EcsLinuxParameters {
                 throw new AwsException("ClientException",
                         "When a container has a swap memory, it must also specify a swappiness value.", 400);
             }
-            Long maxSwap = number(parameters.get("maxSwap"));
+            Integer maxSwap = integer(parameters.get("maxSwap"));
             if (maxSwap != null) {
                 if (maxSwap < 0) {
                     throw new AwsException("ClientException",
                             "The container has an invalid swap memory size. It must be non-negative integer.", 400);
                 }
-                Long swappiness = number(parameters.get("swappiness"));
+                Integer swappiness = integer(parameters.get("swappiness"));
                 if (swappiness != null && (swappiness < 0 || swappiness > 100)) {
                     throw new AwsException("ClientException",
                             "The container has an invalid swappiness value. It must be between 0 and 100.", 400);
@@ -162,9 +171,10 @@ public final class EcsLinuxParameters {
     }
 
     /**
-     * The {@code linuxParameters} as RegisterTaskDefinition stores them (measured): a swappiness
-     * without a swap size is dropped, whatever its value, and capabilities always carry both an
-     * {@code add} and a {@code drop} list.
+     * The {@code linuxParameters} as RegisterTaskDefinition stores them (measured): a member that
+     * is null is left out, numbers are the integers {@link #integer} reads and booleans the ones
+     * {@link #bool} reads, a swappiness without a swap size is dropped, whatever its value, and
+     * capabilities always carry both an {@code add} and a {@code drop} list, without null entries.
      */
     public static void normalize(List<ContainerDefinition> containerDefs) {
         if (containerDefs == null) {
@@ -175,20 +185,56 @@ public final class EcsLinuxParameters {
             if (parameters == null) {
                 continue;
             }
-            Map<Object, Object> stored = new LinkedHashMap<>(parameters);
+            Map<Object, Object> stored = new LinkedHashMap<>();
+            parameters.forEach((member, value) -> {
+                if (value != null) {
+                    stored.put(member, value);
+                }
+            });
+            for (String member : INTEGER_MEMBERS) {
+                if (stored.containsKey(member)) {
+                    stored.put(member, integer(stored.get(member)));
+                }
+            }
+            if (stored.containsKey("initProcessEnabled")) {
+                stored.put("initProcessEnabled", bool(stored.get("initProcessEnabled")));
+            }
             if (stored.get("maxSwap") == null) {
                 stored.remove("swappiness");
             }
             if (stored.get("capabilities") instanceof Map<?, ?> capabilities) {
                 Map<Object, Object> lists = new LinkedHashMap<>();
-                lists.put("add", capabilities.get("add") instanceof Collection<?> add ? add : List.of());
-                lists.put("drop", capabilities.get("drop") instanceof Collection<?> drop ? drop : List.of());
+                lists.put("add", strings(capabilities.get("add")));
+                lists.put("drop", strings(capabilities.get("drop")));
                 stored.put("capabilities", lists);
+            }
+            if (stored.get("tmpfs") instanceof Collection<?> mounts) {
+                List<Map<Object, Object>> storedMounts = new ArrayList<>();
+                for (Map<?, ?> mount : entries(mounts)) {
+                    Map<Object, Object> storedMount = new LinkedHashMap<>(mount);
+                    storedMount.put("size", integer(mount.get("size")));
+                    storedMounts.add(storedMount);
+                }
+                stored.put("tmpfs", storedMounts);
             }
             Map<String, Object> unparsed = new LinkedHashMap<>(def.getUnparsed());
             unparsed.put("linuxParameters", stored);
             def.setUnparsed(unparsed);
         }
+    }
+
+    /** The host path of each device the definition asks for, which {@link HostVolumePolicy} checks. */
+    public static List<String> deviceHostPaths(ContainerDefinition def) {
+        Map<?, ?> parameters = of(def);
+        List<String> hostPaths = new ArrayList<>();
+        if (parameters != null) {
+            for (Map<?, ?> device : entries(parameters.get("devices"))) {
+                if (device.get("hostPath") instanceof String hostPath) {
+                    hostPaths.add(hostPath);
+                }
+            }
+        }
+        return hostPaths;
     }
 
     /**
@@ -200,7 +246,7 @@ public final class EcsLinuxParameters {
         if (parameters == null) {
             return;
         }
-        if (Boolean.TRUE.equals(parameters.get("initProcessEnabled"))) {
+        if (Boolean.TRUE.equals(bool(parameters.get("initProcessEnabled")))) {
             spec.withInit();
         }
         capabilities(parameters, "add").forEach(spec::withCapAdd);
@@ -212,29 +258,158 @@ public final class EcsLinuxParameters {
                 spec.withDevice(hostPath, containerPath, cgroupPermissions(strings(device.get("permissions"))));
             }
         }
-        Long sharedMemorySize = number(parameters.get("sharedMemorySize"));
+        Integer sharedMemorySize = integer(parameters.get("sharedMemorySize"));
         if (sharedMemorySize != null) {
             spec.withShmSizeBytes(sharedMemorySize * MIB);
         }
         for (Map<?, ?> mount : entries(parameters.get("tmpfs"))) {
-            Long size = number(mount.get("size"));
+            Integer size = integer(mount.get("size"));
             if (mount.get("containerPath") instanceof String containerPath && size != null) {
                 List<String> options = new ArrayList<>(strings(mount.get("mountOptions")));
                 options.add("size=" + size + "m");
                 spec.withTmpfs(containerPath, String.join(",", options));
             }
         }
-        Long maxSwap = number(parameters.get("maxSwap"));
+        Integer maxSwap = integer(parameters.get("maxSwap"));
         if (maxSwap != null) {
             if (memoryLimitMb != null) {
-                spec.withMemorySwapBytes((memoryLimitMb + maxSwap) * MIB);
+                spec.withMemorySwapBytes((memoryLimitMb + (long) maxSwap) * MIB);
             }
             // Docker takes a swappiness without a swap limit; registration keeps one only with maxSwap.
-            Long swappiness = number(parameters.get("swappiness"));
+            Integer swappiness = integer(parameters.get("swappiness"));
             if (swappiness != null) {
-                spec.withMemorySwappiness(swappiness);
+                spec.withMemorySwappiness(swappiness.longValue());
             }
         }
+    }
+
+    /**
+     * Refuses a member of the wrong JSON type with the InvalidParameterException
+     * RegisterTaskDefinition's deserializer gives, before any rule on the values (measured with raw
+     * requests, eu-west-1, 2026-10-18). A null member is absent. Where an object is expected, a
+     * scalar is "Unexpected field type", or "Unexpected value type in payload" for a device or a
+     * tmpfs mount in its list, and a null list member is an empty object; where a list is expected,
+     * a scalar is "Unexpected field type"; where a string, an integer or a boolean is expected, an
+     * object is "Start of structure or map found where not expected", a number in a string is
+     * "NUMBER_VALUE cannot be converted to String", a string or a boolean in an integer
+     * "STRING_VALUE cannot be converted to Integer" or "TRUE_VALUE ...", a number in a boolean
+     * "NUMBER_VALUE cannot be converted to Boolean", and a string in a boolean is read case-blind as
+     * true or false or else "Unexpected token received from parser". A list where none is expected
+     * is refused with no message at all.
+     */
+    private static void checkTypes(Object linuxParameters) {
+        if (linuxParameters == null) {
+            return;
+        }
+        for (Map.Entry<?, ?> member : object(linuxParameters, "Unexpected field type").entrySet()) {
+            Object value = member.getValue();
+            if (value == null) {
+                continue;
+            }
+            switch (String.valueOf(member.getKey())) {
+                case "capabilities" -> {
+                    for (Object names : object(value, "Unexpected field type").values()) {
+                        stringList(names);
+                    }
+                }
+                case "devices" -> {
+                    for (Object item : list(value)) {
+                        if (item != null) {
+                            Map<?, ?> device = object(item, "Unexpected value type in payload");
+                            string(device.get("hostPath"));
+                            string(device.get("containerPath"));
+                            stringList(device.get("permissions"));
+                        }
+                    }
+                }
+                case "tmpfs" -> {
+                    for (Object item : list(value)) {
+                        if (item != null) {
+                            Map<?, ?> mount = object(item, "Unexpected value type in payload");
+                            string(mount.get("containerPath"));
+                            integerValue(mount.get("size"));
+                            stringList(mount.get("mountOptions"));
+                        }
+                    }
+                }
+                case "initProcessEnabled" -> booleanValue(value);
+                case "sharedMemorySize", "maxSwap", "swappiness" -> integerValue(value);
+                default -> {
+                }
+            }
+        }
+    }
+
+    private static Map<?, ?> object(Object value, String scalarMessage) {
+        if (value instanceof Map<?, ?> object) {
+            return object;
+        }
+        throw value instanceof List<?> ? listNotExpected() : invalidParameter(scalarMessage);
+    }
+
+    private static List<?> list(Object value) {
+        if (value instanceof List<?> items) {
+            return items;
+        }
+        throw value instanceof Map<?, ?> ? objectNotExpected() : invalidParameter("Unexpected field type");
+    }
+
+    private static void stringList(Object value) {
+        if (value != null) {
+            list(value).forEach(EcsLinuxParameters::string);
+        }
+    }
+
+    private static void string(Object value) {
+        if (value == null || value instanceof String) {
+            return;
+        }
+        throw notConvertible(value, "String");
+    }
+
+    private static void integerValue(Object value) {
+        if (value == null || value instanceof Number) {
+            return;
+        }
+        throw notConvertible(value, "Integer");
+    }
+
+    private static void booleanValue(Object value) {
+        if (value == null || value instanceof Boolean) {
+            return;
+        }
+        if (value instanceof String text) {
+            if (bool(text) == null) {
+                throw invalidParameter("Unexpected token received from parser");
+            }
+            return;
+        }
+        throw notConvertible(value, "Boolean");
+    }
+
+    private static AwsException notConvertible(Object value, String type) {
+        if (value instanceof Map<?, ?>) {
+            return objectNotExpected();
+        }
+        if (value instanceof List<?>) {
+            return listNotExpected();
+        }
+        String token = value instanceof Boolean flag ? (flag ? "TRUE_VALUE" : "FALSE_VALUE")
+                : value instanceof Number ? "NUMBER_VALUE" : "STRING_VALUE";
+        return invalidParameter(token + " cannot be converted to " + type);
+    }
+
+    private static AwsException objectNotExpected() {
+        return invalidParameter("Start of structure or map found where not expected");
+    }
+
+    /** AWS answers a list where none is expected with the exception type alone. */
+    private static AwsException listNotExpected() {
+        return invalidParameter(null);
+    }
+
+    private static AwsException invalidParameter(String message) {
+        return new AwsException("InvalidParameterException", message, 400);
     }
 
     private static void rejectOnFargate(boolean present, String parameter) {
@@ -272,22 +447,27 @@ public final class EcsLinuxParameters {
                 ? strings(capabilities.get(list)) : List.of();
     }
 
-    /** The members of a list as written, each as text; empty when it is not a list. */
+    /** The members of a list as written, null ones left out; empty when it is not a list. */
     private static List<String> strings(Object list) {
         List<String> result = new ArrayList<>();
         if (list instanceof Collection<?> items) {
             for (Object item : items) {
-                result.add(String.valueOf(item));
+                if (item != null) {
+                    result.add(String.valueOf(item));
+                }
             }
         }
         return result;
     }
 
+    /** The objects of a list, a null one read as empty, as RegisterTaskDefinition reads it. */
     private static List<Map<?, ?>> entries(Object list) {
         List<Map<?, ?>> entries = new ArrayList<>();
         if (list instanceof Collection<?> items) {
             for (Object item : items) {
-                if (item instanceof Map<?, ?> entry) {
+                if (item == null) {
+                    entries.add(Map.of());
+                } else if (item instanceof Map<?, ?> entry) {
                     entries.add(entry);
                 }
             }
@@ -295,7 +475,38 @@ public final class EcsLinuxParameters {
         return entries;
     }
 
-    private static Long number(Object value) {
-        return value instanceof Number number ? number.longValue() : null;
+    /**
+     * The integer RegisterTaskDefinition reads from a number (measured): its fraction dropped
+     * toward zero (1.9 is 1, -0.5 is 0) and its value capped to the 32-bit range (3000000000 is
+     * 2147483647); null when it is not a number.
+     */
+    private static Integer integer(Object value) {
+        if (!(value instanceof Number number)) {
+            return null;
+        }
+        BigDecimal whole = new BigDecimal(number.toString()).setScale(0, RoundingMode.DOWN);
+        if (whole.compareTo(BigDecimal.valueOf(Integer.MAX_VALUE)) > 0) {
+            return Integer.MAX_VALUE;
+        }
+        if (whole.compareTo(BigDecimal.valueOf(Integer.MIN_VALUE)) < 0) {
+            return Integer.MIN_VALUE;
+        }
+        return whole.intValue();
+    }
+
+    /** A boolean, or a string that reads as one in any case (measured); null otherwise. */
+    private static Boolean bool(Object value) {
+        if (value instanceof Boolean flag) {
+            return flag;
+        }
+        if (value instanceof String text) {
+            if ("true".equalsIgnoreCase(text)) {
+                return true;
+            }
+            if ("false".equalsIgnoreCase(text)) {
+                return false;
+            }
+        }
+        return null;
     }
 }

@@ -877,6 +877,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (fargate) {
             validateFargateUnsupportedParameters(request);
         }
+        if (containerDefs != null) {
+            containerDefs.forEach(containerManager::checkDeviceHostPaths);
+        }
         EcsLinuxParameters.normalize(containerDefs);
         String family = request.getFamily();
         int revision = latestRevisions.compute(familyKey(region, family),

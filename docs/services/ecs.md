@@ -140,6 +140,15 @@ still its `swappiness`. A daemon on cgroup v2 discards
 `NET_RAW` stay dropped whatever `capabilities` adds, because the group is enforced in the network
 namespace the task's containers share.
 
+A device hands the container the host's hardware, so Floci refuses one as it refuses a host volume:
+by default, unless its `hostPath` is under `floci.services.ecs.host-volume-roots`
+(`FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS`) or `floci.services.ecs.allow-unsafe-host-volumes` is set,
+at `RegisterTaskDefinition` after AWS's own checks and again at launch. `RegisterTaskDefinition`
+reads the members as AWS does: a member of the wrong JSON type is refused with the deserializer's
+message (`STRING_VALUE cannot be converted to Integer`, `Unexpected value type in payload`, ...) before
+any other check, a number is stored as an integer with its fraction dropped and its range capped to
+32 bits, a boolean may come as text in any case, and a null member is left out.
+
 `firelensConfiguration` is stored and returned the same way. `RegisterTaskDefinition` rejects a
 missing or unsupported `type` (`fluentd` and `fluentbit` only), and a task using `awsfirelens`
 must name exactly one router: a task definition with two FireLens routers, or a router publishing

@@ -268,6 +268,93 @@ class EcsFargateEdgeCaseIntegrationTest {
                 .body("taskDefinition.containerDefinitions[0].linuxParameters.capabilities.drop[0]", equalTo("NET_RAW"));
     }
 
+    /**
+     * Measured with raw requests (eu-west-1, 2026-10-18): a member of the wrong JSON type is
+     * refused by RegisterTaskDefinition's deserializer, with these messages, before any rule on the
+     * values; a list where none is expected carries no message.
+     */
+    @Test
+    void aLinuxParametersMemberOfTheWrongJsonTypeIsRefusedFirst() {
+        String body = "{\"family\":\"edge-linux-types-%s\",\"requiresCompatibilities\":[\"EC2\"],"
+                + "\"networkMode\":\"bridge\",\"memory\":\"512\",\"containerDefinitions\":"
+                + "[{\"name\":\"app\",\"image\":\"nginx:latest\",\"linuxParameters\":%s}]}";
+        String[][] refused = {
+                {"lp", "\"x\"", "Unexpected field type"},
+                {"caps", "{\"capabilities\":\"x\"}", "Unexpected field type"},
+                {"devices", "{\"devices\":\"x\"}", "Unexpected field type"},
+                {"devobj", "{\"devices\":{\"hostPath\":\"/dev/null\"}}", "Start of structure or map found where not expected"},
+                {"devitem", "{\"devices\":[\"not-a-device\"]}", "Unexpected value type in payload"},
+                {"tmpfsitem", "{\"tmpfs\":[\"not-a-mount\"]}", "Unexpected value type in payload"},
+                {"addnum", "{\"capabilities\":{\"add\":[5]}}", "NUMBER_VALUE cannot be converted to String"},
+                {"hosttrue", "{\"devices\":[{\"hostPath\":true}]}", "TRUE_VALUE cannot be converted to String"},
+                {"shmstring", "{\"sharedMemorySize\":\"64\"}", "STRING_VALUE cannot be converted to Integer"},
+                {"shmfalse", "{\"sharedMemorySize\":false}", "FALSE_VALUE cannot be converted to Integer"},
+                {"initnum", "{\"initProcessEnabled\":1}", "NUMBER_VALUE cannot be converted to Boolean"},
+                {"inittext", "{\"initProcessEnabled\":\"abc\"}", "Unexpected token received from parser"},
+                {"order", "{\"capabilities\":{\"add\":[\"CAP_X\"]},\"devices\":[\"x\"]}",
+                        "Unexpected value type in payload"},
+        };
+        for (String[] c : refused) {
+            call("RegisterTaskDefinition", body.formatted(c[0], c[1]), 400).then()
+                    .body("__type", containsString("InvalidParameterException"))
+                    .body("message", equalTo(c[2]));
+        }
+        call("RegisterTaskDefinition", body.formatted("capslist", "{\"capabilities\":[]}"), 400).then()
+                .body("__type", containsString("InvalidParameterException"))
+                .body("message", nullValue());
+
+        // Read as AWS reads them, then checked: a null device is an empty one, half a MiB is none.
+        call("RegisterTaskDefinition", body.formatted("devnull", "{\"devices\":[null]}"), 400).then()
+                .body("message", equalTo("Device cannot have empty hostPath"));
+        call("RegisterTaskDefinition", body.formatted("shmhalf", "{\"sharedMemorySize\":0.5}"), 400).then()
+                .body("message", equalTo(
+                        "The container has an invalid shared memory volume size. It must be a non-zero, non-negative integer."));
+    }
+
+    /**
+     * Measured: numbers are stored as the integers AWS reads (the fraction dropped, the range
+     * capped), a boolean as text is read in any case, and a null member or list entry is absent.
+     */
+    @Test
+    void numbersBooleansAndNullsAreStoredAsAwsReadsThem() {
+        String body = "{\"family\":\"edge-linux-read-%s\",\"requiresCompatibilities\":[\"EC2\"],"
+                + "\"networkMode\":\"bridge\",\"memory\":\"512\",\"containerDefinitions\":"
+                + "[{\"name\":\"app\",\"image\":\"nginx:latest\",\"linuxParameters\":%s}]}";
+        String linux = "taskDefinition.containerDefinitions[0].linuxParameters.";
+
+        call("RegisterTaskDefinition", body.formatted("fractions", "{\"sharedMemorySize\":1.9,\"maxSwap\":1.5,"
+                + "\"swappiness\":10.5,\"tmpfs\":[{\"containerPath\":\"/t\",\"size\":2.5}]}"), 200).then()
+                .body(linux + "sharedMemorySize", equalTo(1))
+                .body(linux + "maxSwap", equalTo(1))
+                .body(linux + "swappiness", equalTo(10))
+                .body(linux + "tmpfs[0].size", equalTo(2));
+        call("RegisterTaskDefinition", body.formatted("capped", "{\"sharedMemorySize\":3000000000,"
+                + "\"initProcessEnabled\":\"False\",\"capabilities\":{\"add\":[null]},\"devices\":null}"), 200).then()
+                .body(linux + "sharedMemorySize", equalTo(Integer.MAX_VALUE))
+                .body(linux + "initProcessEnabled", equalTo(false))
+                .body(linux + "capabilities.add", hasSize(0))
+                .body(linux + "capabilities.drop", hasSize(0))
+                .body(linux + "devices", nullValue());
+    }
+
+    /**
+     * A device hands the container the host's hardware, so Floci refuses one as it refuses a host
+     * volume, by default and after AWS's own checks: floci.services.ecs.host-volume-roots or
+     * allow-unsafe-host-volumes let it through.
+     */
+    @Test
+    void aDeviceIsRefusedByDefaultLikeAHostVolume() {
+        String body = "{\"family\":\"edge-linux-device\",\"requiresCompatibilities\":[\"EC2\"],"
+                + "\"networkMode\":\"bridge\",\"memory\":\"512\",\"containerDefinitions\":"
+                + "[{\"name\":\"app\",\"image\":\"nginx:latest\","
+                + "\"linuxParameters\":{\"devices\":[{\"hostPath\":\"/dev/null\"}]}}]}";
+
+        call("RegisterTaskDefinition", body, 400).then()
+                .body("__type", containsString("InvalidParameterException"))
+                .body("message", containsString(
+                        "containerDefinitions[].linuxParameters.devices[].hostPath is rejected by default: /dev/null"));
+    }
+
     @Test
     void pidModeTaskIsTheOnlyOneFargateAccepts() {
         String body = "{\"family\":\"edge-pidmode-%s\",\"requiresCompatibilities\":[\"FARGATE\"],"

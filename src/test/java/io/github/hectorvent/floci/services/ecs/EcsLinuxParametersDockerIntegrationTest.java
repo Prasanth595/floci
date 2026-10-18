@@ -44,12 +44,16 @@ class EcsLinuxParametersDockerIntegrationTest {
     private static final String ECS_TARGET = "AmazonEC2ContainerServiceV20141113.";
     private static final long MIB = 1024L * 1024L;
 
-    /** Real containers, with security-group enforcement back to its shipped default of off. */
+    /**
+     * Real containers, with security-group enforcement back to its shipped default of off, and
+     * {@code /dev/null} the one host path a device may take, since devices are refused by default.
+     */
     public static final class DockerEcsProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
             return Map.of("floci.services.ecs.mock", "false",
-                    "floci.network.security-group-enforcement.enabled", "false");
+                    "floci.network.security-group-enforcement.enabled", "false",
+                    "floci.services.ecs.host-volume-roots", "/dev/null");
         }
     }
 
