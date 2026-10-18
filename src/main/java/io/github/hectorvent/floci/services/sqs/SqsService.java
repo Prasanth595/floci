@@ -404,7 +404,7 @@ public class SqsService implements Resettable, ResourceProvider {
                Instance<RequestContext> requestContextInstance, IamService iamService) {
         this(queueStore, messageStore, dedupStore, dedupIdentityStore, defaultVisibilityTimeout, maxMessageSize,
                 baseUrl, regionResolver, clearFifoDeduplicationCacheOnPurge, snsService, clock,
-                receiptHandleSecret, requestContextInstance, iamService, EndpointStrategy.PATH);
+                receiptHandleSecret, requestContextInstance, iamService, EndpointStrategy.FLOCI);
     }
 
     SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
@@ -1993,13 +1993,13 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * The QueueUrl handed back to clients. The {@code path} strategy, the default, returns floci's
-     * own endpoint form, {@code <base-url>/<account>/<name>}. The {@code standard} strategy returns
+     * The QueueUrl handed back to clients. The {@code floci} strategy, the default, returns floci's
+     * own endpoint form, {@code <base-url>/<account>/<name>}. The {@code aws} strategy returns
      * the AWS form, {@code https://sqs.<region>.<dnsSuffix>/<account>/<name>}, for tooling that
      * parses queue URLs. Lookups key off the URL path, so either form is accepted on input.
      */
     private String buildQueueUrl(String region, String accountId, String queueName) {
-        if (endpointStrategy != EndpointStrategy.STANDARD) {
+        if (endpointStrategy != EndpointStrategy.AWS) {
             return baseUrl + "/" + accountId + "/" + queueName;
         }
         String effectiveRegion = region != null && !region.isBlank() ? region : regionResolver.getDefaultRegion();

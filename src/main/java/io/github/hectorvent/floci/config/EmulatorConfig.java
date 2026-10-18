@@ -1351,19 +1351,19 @@ public interface EmulatorConfig {
          * Shape of the QueueUrl returned by CreateQueue, GetQueueUrl, ListQueues and
          * ListDeadLetterSourceQueues.
          * <ul>
-         *   <li>{@code path}: floci's own endpoint form, {@code <base-url>/<account>/<name>}.</li>
-         *   <li>{@code standard}: the AWS form, {@code https://sqs.<region>.<dnsSuffix>/<account>/<name>},
+         *   <li>{@code floci}: floci's own endpoint form, {@code <base-url>/<account>/<name>}.</li>
+         *   <li>{@code aws}: the AWS form, {@code https://sqs.<region>.<dnsSuffix>/<account>/<name>},
          *       with the DNS suffix of the region's partition.</li>
          * </ul>
          * Either form is accepted on input under either setting, since queue lookups key off the
          * URL path and ignore the host.
          */
-        @WithDefault("path")
+        @WithDefault("floci")
         EndpointStrategy endpointStrategy();
 
         enum EndpointStrategy {
-            PATH,
-            STANDARD
+            FLOCI,
+            AWS
         }
     }
 

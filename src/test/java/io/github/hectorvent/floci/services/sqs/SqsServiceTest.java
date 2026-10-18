@@ -400,7 +400,7 @@ class SqsServiceTest {
 
     private SqsService standardService() {
         return serviceWithStrategy(new InMemoryStorage<>(), new RegionResolver("us-east-1", "000000000000"),
-                EndpointStrategy.STANDARD);
+                EndpointStrategy.AWS);
     }
 
     @Test
@@ -478,7 +478,7 @@ class SqsServiceTest {
     @Test
     void standardStrategyUsesTheQueueOwnerAccount() {
         SqsService service = serviceWithStrategy(new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "111122223333"), EndpointStrategy.STANDARD);
+                new RegionResolver("us-east-1", "111122223333"), EndpointStrategy.AWS);
 
         assertEquals("https://sqs.ap-southeast-2.amazonaws.com/111122223333/owned",
                 service.createQueue("owned", null, "ap-southeast-2").getQueueUrl());
@@ -505,8 +505,8 @@ class SqsServiceTest {
 
     @ParameterizedTest
     @CsvSource({
-            "PATH, http://localhost:4566/000000000000/legacy-queue",
-            "STANDARD, https://sqs.eu-west-1.amazonaws.com/000000000000/legacy-queue"
+            "FLOCI, http://localhost:4566/000000000000/legacy-queue",
+            "AWS, https://sqs.eu-west-1.amazonaws.com/000000000000/legacy-queue"
     })
     void storedQueuesAreReportedInTheCurrentForm(EndpointStrategy strategy, String expectedUrl) {
         String region = "eu-west-1";

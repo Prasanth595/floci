@@ -376,7 +376,7 @@ floci:
       receipt-handle-secret: local-emulator-secret
       # QueueUrl shape. path is <base-url>/<account>/<name>,
       # standard is https://sqs.<region>.<partition dns suffix>/<account>/<name>
-      endpoint-strategy: path
+      endpoint-strategy: floci
     s3:
       enabled: true
       enforce-auth: false
