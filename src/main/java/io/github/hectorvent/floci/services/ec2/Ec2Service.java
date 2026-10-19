@@ -155,6 +155,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
     private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
+    // An EC2 id is a known resource prefix, a hyphen and hex digits. Longer prefixes come first so
+    // that eni-attach- is not read as eni-.
+    private static final Pattern TAGGABLE_RESOURCE_ID = Pattern.compile("^(?:subnet-cidr-assoc|vpc-cidr-assoc"
+            + "|traf-mir-fil|traf-mir-tar|iip-assoc|eni-attach|tgw-attach|tgw-rtb|vpce-svc|aclassoc|eipassoc"
+            + "|eipalloc|rtbassoc|subnet|fleet|cagw|dopt|eigw|snap|vpce|acl|ami|cgw|eni|igw|key|nat|pcx|rtb|scr"
+            + "|sfr|sgr|sir|tgw|tms|vgw|vol|vpc|vpn|cr|fl|lt|pl|sg|h|i|r)-[0-9a-f]{8}");
+    private static final int MAX_USER_TAGS_PER_RESOURCE = 50;
+    private static final int MAX_TAG_KEY_LENGTH = 128;
+    private static final int MAX_TAG_VALUE_LENGTH = 256;
     private static final long SYNTHETIC_FIRST_OFFSET = 10;
     /** AWS reserves the first four addresses of every subnet, so offset 4 is the first assignable one. */
     private static final long ENDPOINT_FIRST_USABLE_OFFSET = 4;
@@ -8606,8 +8615,128 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // ─── Tags ──────────────────────────────────────────────────────────────────
 
     public void createTags(String region, List<String> resourceIds, List<Tag> tagList) {
+        validateTagTargets(resourceIds);
         validateUserTagKeys(tagList);
+        validateTagLengths(tagList);
+        ensureDefaultResources(region);
+        for (String resourceId : resourceIds) {
+            requireTaggableResource(region, resourceId);
+        }
+        for (String resourceId : resourceIds) {
+            requireWithinTagLimit(region, resourceId, tagList);
+        }
         createSystemTags(region, resourceIds, tagList);
+    }
+
+    /** CreateTags and DeleteTags name at least one resource, each a well-formed EC2 id. */
+    private static void validateTagTargets(List<String> resourceIds) {
+        if (resourceIds == null || resourceIds.isEmpty()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter resourceIdSet", 400);
+        }
+        for (String resourceId : resourceIds) {
+            if (resourceId == null || !TAGGABLE_RESOURCE_ID.matcher(resourceId).lookingAt()) {
+                throw new AwsException("InvalidID", "The ID '" + resourceId + "' is not valid", 400);
+            }
+        }
+    }
+
+    private static void validateTagLengths(List<Tag> tagList) {
+        for (Tag tag : tagList) {
+            if (tag.getKey().codePointCount(0, tag.getKey().length()) > MAX_TAG_KEY_LENGTH) {
+                throw new AwsException("InvalidParameterValue",
+                        "Tag key exceeds the maximum length of " + MAX_TAG_KEY_LENGTH + " characters", 400);
+            }
+            String value = tag.getValue();
+            if (value != null && value.codePointCount(0, value.length()) > MAX_TAG_VALUE_LENGTH) {
+                throw new AwsException("InvalidParameterValue",
+                        "Tag value exceeds the maximum length of " + MAX_TAG_VALUE_LENGTH + " characters", 400);
+            }
+        }
+    }
+
+    /**
+     * CreateTags fails for a resource this region does not hold, with the error that resource's own
+     * Describe call gives. A well-formed id of a type Floci does not model is accepted.
+     */
+    private void requireTaggableResource(String region, String resourceId) {
+        String prefix = resourceId.startsWith("tgw-attach-") ? "tgw-attach"
+                : resourceId.startsWith("tgw-rtb-") ? "tgw-rtb"
+                : resourceId.substring(0, resourceId.indexOf('-'));
+        switch (prefix) {
+            case "i" -> getRequiredInstance(region, resourceId);
+            case "vpc" -> getRequiredVpc(region, resourceId);
+            case "subnet" -> requireSubnet(region, resourceId);
+            case "sg" -> getRequiredSecurityGroup(region, resourceId);
+            case "sgr" -> requireFound(!describeSecurityGroupRules(region, List.of(), List.of(resourceId)).isEmpty(),
+                    "InvalidSecurityGroupRuleId.NotFound", "The security group rule ID '" + resourceId + "' does not exist");
+            case "igw" -> getRequiredInternetGateway(region, resourceId);
+            case "eigw" -> requireFound(egressOnlyInternetGateways.get(key(region, resourceId)).isPresent(),
+                    "InvalidGatewayID.NotFound", "The eigw ID '" + resourceId + "' does not exist");
+            case "rtb" -> getRequiredRouteTable(region, resourceId);
+            case "acl" -> getRequiredNetworkAcl(region, resourceId);
+            case "nat" -> getRequiredNatGateway(region, resourceId);
+            case "eipalloc" -> getRequiredAddress(region, resourceId);
+            case "vpce" -> getRequiredVpcEndpoint(region, resourceId);
+            case "pl" -> getRequiredManagedPrefixList(region, resourceId);
+            case "tgw" -> getRequiredTransitGateway(region, resourceId);
+            case "tgw-rtb" -> getRequiredTransitGatewayRouteTable(region, resourceId);
+            case "tgw-attach" -> {
+                if (transitGatewayVpcAttachments.get(key(region, resourceId)).isEmpty()) {
+                    getRequiredPeeringAttachment(region, resourceId);
+                }
+            }
+            case "cr" -> getRequiredCapacityReservation(region, resourceId);
+            case "h" -> getRequiredHost(region, resourceId);
+            case "vol" -> getRequiredVolume(region, resourceId);
+            case "ami" -> requireFound(!describeImages(region, List.of(resourceId), List.of()).isEmpty(),
+                    "InvalidAMIID.NotFound", "The image id '[" + resourceId + "]' does not exist");
+            case "snap" -> requireFound(!describeSnapshots(region, List.of(resourceId), List.of(), Map.of()).isEmpty(),
+                    "InvalidSnapshot.NotFound", "The snapshot '" + resourceId + "' does not exist.");
+            case "key" -> requireFound(!describeKeyPairs(region, List.of(), List.of(resourceId)).isEmpty(),
+                    "InvalidKeyPair.NotFound", "The key pair '" + resourceId + "' does not exist");
+            case "lt" -> requireFound(!describeLaunchTemplates(region, List.of(resourceId), List.of(), Map.of()).isEmpty(),
+                    "InvalidLaunchTemplateId.NotFound", "The specified launch template, with template ID "
+                            + resourceId + ", does not exist.");
+            case "eni" -> requireFound(!describeNetworkInterfaces(region, List.of(resourceId), Map.of())
+                            .networkInterfaces().isEmpty(),
+                    "InvalidNetworkInterfaceID.NotFound", "The networkInterface ID '" + resourceId + "' does not exist");
+            case "sir" -> requireFound(!describeSpotInstanceRequests(region, List.of(resourceId), Map.of()).isEmpty(),
+                    "InvalidSpotInstanceRequestID.NotFound", "The spot instance request ID '" + resourceId
+                            + "' does not exist");
+            case "pcx" -> {
+                if (describeVpcPeeringConnections(region, List.of(resourceId), Map.of()).isEmpty()) {
+                    throw vpcPeeringConnectionNotFound(resourceId);
+                }
+            }
+            default -> {
+                // A valid EC2 id of a type Floci does not model: tagged as given.
+            }
+        }
+    }
+
+    private static void requireFound(boolean found, String code, String message) {
+        if (!found) {
+            throw new AwsException(code, message, 400);
+        }
+    }
+
+    /** At most 50 user tags on a resource after the change; tags with the aws: prefix do not count. */
+    private void requireWithinTagLimit(String region, String resourceId, List<Tag> tagList) {
+        Set<String> userKeys = new HashSet<>();
+        for (Tag tag : tagsOf(region, resourceId).orElse(List.of())) {
+            if (!isAwsTagKey(tag.getKey())) {
+                userKeys.add(tag.getKey());
+            }
+        }
+        for (Tag tag : tagList) {
+            if (!isAwsTagKey(tag.getKey())) {
+                userKeys.add(tag.getKey());
+            }
+        }
+        if (userKeys.size() > MAX_USER_TAGS_PER_RESOURCE) {
+            throw new AwsException("TagLimitExceeded",
+                    "The maximum number of Tags for a resource has been reached.", 400);
+        }
     }
 
     /** Service-owned tags, separate from the public EC2 CreateTags operation. */
@@ -8649,6 +8778,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void deleteTags(String region, List<String> resourceIds, List<Tag> tagList) {
+        validateTagTargets(resourceIds);
         validateUserTagKeys(tagList);
         ensureDefaultResources(region);
         for (String resourceId : resourceIds) {

@@ -315,6 +315,14 @@ version are moved under their resource's region at startup. Tags on a catalog AM
 default region, and tags on an EKS node instance move to the node's region once the node is
 restored; any other tag whose resource no longer exists is dropped.
 
+`CreateTags` and `DeleteTags` require at least one resource id (`MissingParameter`) and reject an
+id that is not a known EC2 resource prefix followed by hex digits (`InvalidID`). `CreateTags` also
+checks each resource exists in the request's region and answers with that type's own error
+(`InvalidVpcID.NotFound`, `InvalidInstanceID.NotFound`, ...); a well-formed id of a type Floci does
+not model is tagged as given. A resource takes at most 50 user tags (`TagLimitExceeded`; tags with
+the `aws:` prefix do not count), keys up to 128 and values up to 256 Unicode characters
+(`InvalidParameterValue`). A request that fails changes no resource's tags.
+
 Public tag mutations reject keys beginning with `aws:` regardless of ASCII case.
 An empty `DeleteTags` tag list removes user tags and preserves AWS-managed tags.
 CloudFormation tag updates and rollbacks likewise leave AWS-managed tags intact.
