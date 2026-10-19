@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import io.github.hectorvent.floci.testutil.FreePorts;
 import io.netty.handler.codec.mqtt.MqttQoS;
 import io.quarkus.tls.CertificateUpdatedEvent;
@@ -78,6 +79,7 @@ import java.security.Principal;
 import java.security.PrivateKey;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -95,6 +97,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -157,6 +160,8 @@ class IotMqttBrokerServiceTest {
     private final Instance<IotService> iotService = mock(Instance.class);
     private final IotCustomAuthorizer customAuthorizer = mock(IotCustomAuthorizer.class);
     private final IotPublishEventRecorder recorder = new IotPublishEventRecorder();
+    /** The broker's clock, which a keep-alive test moves forward instead of sleeping. */
+    private final AtomicLong nanoTime = new AtomicLong();
     private int plainPort;
     private int tlsPort;
     private IotMqttBrokerService broker;
@@ -188,7 +193,7 @@ class IotMqttBrokerServiceTest {
         when(config.tls().enabled()).thenReturn(true);
         when(registry.getDefault()).thenReturn(Optional.of(tls));
         when(tls.getKeyStoreOptions()).thenReturn(pem(bootLeaf));
-        broker = new IotMqttBrokerService(config, vertx, iotService, customAuthorizer, registry);
+        broker = new IotMqttBrokerService(config, vertx, iotService, customAuthorizer, registry, nanoTime::get);
     }
 
     @AfterEach
@@ -852,7 +857,7 @@ class IotMqttBrokerServiceTest {
                 racing.handleEndpoint(reconnect, false);
                 subscribeHandler.get().handle(subscribe);
             });
-            awaitDoneOrBlocked(reconnected, reconnectingThread);
+            ThreadStates.awaitBlockedOrDone(reconnectingThread, reconnected);
             release.countDown();
 
             assertTrue(delete.get(10, TimeUnit.SECONDS));
@@ -1063,7 +1068,7 @@ class IotMqttBrokerServiceTest {
         MqttEndpoint subscribing = keepAliveEndpoint("subscribing");
         MqttEndpoint unsubscribing = keepAliveEndpoint("unsubscribing");
         MqttEndpoint acknowledging = keepAliveEndpoint("acknowledging");
-        Thread.sleep(2_000);
+        nanoTime.addAndGet(Duration.ofSeconds(2).toNanos());
 
         ArgumentCaptor<Handler<MqttPublishMessage>> publish = handlerCaptor();
         verify(publishing).publishHandler(publish.capture());
@@ -1104,11 +1109,8 @@ class IotMqttBrokerServiceTest {
     @Test
     void anAbruptCloseBeforeTheKeepAliveTimeoutIsDueIsAConnectionLoss() throws Exception {
         startBrokerRecordingPublishes();
-        MqttEndpoint dropped = mock(MqttEndpoint.class);
-        when(dropped.clientIdentifier()).thenReturn("dropped");
-        when(dropped.keepAliveTimeSeconds()).thenReturn(3);
-        broker.handleEndpoint(dropped, false);
-        Thread.sleep(3_100);
+        MqttEndpoint dropped = keepAliveEndpoint("dropped");
+        nanoTime.addAndGet(Duration.ofMillis(1_500).toNanos());
 
         ArgumentCaptor<Handler<Void>> close = handlerCaptor();
         verify(dropped).closeHandler(close.capture());
@@ -1125,7 +1127,7 @@ class IotMqttBrokerServiceTest {
     void aSilentClientTimesOutFromItsConnectNotFromItsCustomAuthorizersDecision() throws Exception {
         startBrokerRecordingPublishes();
         when(customAuthorizer.connectPolicies(eq("slow-auth"), eq("slow"), any(), any(), any())).thenAnswer(invocation -> {
-            Thread.sleep(1_500);
+            nanoTime.addAndGet(Duration.ofMillis(1_500).toNanos());
             return List.of("""
                     {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "iot:Connect", "Resource": "*"}]}""");
         });
@@ -1139,7 +1141,7 @@ class IotMqttBrokerServiceTest {
 
         broker.handleEndpoint(endpoint, false);
         awaitPresence("connected", "slow", 1);
-        Thread.sleep(600);
+        nanoTime.addAndGet(Duration.ofMillis(600).toNanos());
         ArgumentCaptor<Handler<Void>> close = handlerCaptor();
         verify(endpoint, times(2)).closeHandler(close.capture());
         close.getValue().handle(null);
@@ -1572,17 +1574,6 @@ class IotMqttBrokerServiceTest {
     @SuppressWarnings("unchecked")
     private static <T> ArgumentCaptor<Handler<T>> handlerCaptor() {
         return ArgumentCaptor.forClass(Handler.class);
-    }
-
-    /** Waits until the task finished or its thread is blocked on a monitor. */
-    private static void awaitDoneOrBlocked(Future<?> task, AtomicReference<Thread> thread) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + 10_000;
-        while (!task.isDone() && (thread.get() == null || thread.get().getState() != Thread.State.BLOCKED)) {
-            if (System.currentTimeMillis() > deadline) {
-                throw new AssertionError("the task neither finished nor blocked");
-            }
-            Thread.sleep(5);
-        }
     }
 
     private static List<String> eventTypes(List<JsonNode> events) {

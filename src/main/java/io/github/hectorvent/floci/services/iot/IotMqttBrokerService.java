@@ -60,6 +60,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -136,6 +137,7 @@ public class IotMqttBrokerService implements Resettable {
     private final Instance<IotService> iotService;
     private final IotCustomAuthorizer customAuthorizer;
     private final TlsConfigurationRegistry tlsRegistry;
+    private final LongSupplier nanoTime;
     final WorkerExecutor ruleWorker;
     private final Map<String, ClientSession> sessionsByClient = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Subscription>> subscriptionsByClient = new ConcurrentHashMap<>();
@@ -159,11 +161,17 @@ public class IotMqttBrokerService implements Resettable {
     @Inject
     public IotMqttBrokerService(EmulatorConfig config, Vertx vertx, Instance<IotService> iotService,
                                 IotCustomAuthorizer customAuthorizer, TlsConfigurationRegistry tlsRegistry) {
+        this(config, vertx, iotService, customAuthorizer, tlsRegistry, System::nanoTime);
+    }
+
+    IotMqttBrokerService(EmulatorConfig config, Vertx vertx, Instance<IotService> iotService,
+                         IotCustomAuthorizer customAuthorizer, TlsConfigurationRegistry tlsRegistry, LongSupplier nanoTime) {
         this.config = config;
         this.vertx = vertx;
         this.iotService = iotService;
         this.customAuthorizer = customAuthorizer;
         this.tlsRegistry = tlsRegistry;
+        this.nanoTime = nanoTime;
         this.ruleWorker = vertx.createSharedWorkerExecutor("floci-iot-mqtt-rules", 1);
     }
 
@@ -412,7 +420,7 @@ public class IotMqttBrokerService implements Resettable {
      * every client except one that names a custom authorizer, see {@link #authorizeCustom}.
      */
     void handleEndpoint(MqttEndpoint endpoint, boolean verifyDevice) {
-        long connectNanos = System.nanoTime();
+        long connectNanos = nanoTime.getAsLong();
         String clientId = endpoint.clientIdentifier();
         SocketAddress remoteAddress = endpoint.remoteAddress();
         String sourceIp = remoteAddress == null ? null : remoteAddress.host();
@@ -528,10 +536,10 @@ public class IotMqttBrokerService implements Resettable {
             endpoint.subscribeHandler(message -> handleSubscribe(session, message));
             endpoint.unsubscribeHandler(message -> handleUnsubscribe(session, message));
             endpoint.publishHandler(message -> handlePublish(session, message));
-            endpoint.pingHandler(ignored -> session.received());
-            endpoint.publishAcknowledgeHandler(ignored -> session.received());
+            endpoint.pingHandler(ignored -> received(session));
+            endpoint.publishAcknowledgeHandler(ignored -> received(session));
             endpoint.disconnectHandler(ignored -> endSession(session, CLIENT_INITIATED_DISCONNECT));
-            endpoint.closeHandler(ignored -> endSession(session, session.keepAliveExpired() ? MQTT_KEEP_ALIVE_TIMEOUT : CONNECTION_LOST));
+            endpoint.closeHandler(ignored -> endSession(session, keepAliveExpired(session) ? MQTT_KEEP_ALIVE_TIMEOUT : CONNECTION_LOST));
             endpoint.accept();
         } catch (IllegalStateException e) {
             // Only another thread closes the endpoint here: a takeover, DeleteConnection or stop,
@@ -611,7 +619,7 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     private void handleSubscribe(ClientSession session, MqttSubscribeMessage message) {
-        session.received();
+        received(session);
         List<MqttQoS> grantedQos = new ArrayList<>();
         List<Subscription> accepted = new ArrayList<>();
 
@@ -644,7 +652,7 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     private void handleUnsubscribe(ClientSession session, MqttUnsubscribeMessage message) {
-        session.received();
+        received(session);
         synchronized (sessionLock) {
             if (session.ended().get()) {
                 return;
@@ -663,7 +671,7 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     private void handlePublish(ClientSession session, MqttPublishMessage message) {
-        session.received();
+        received(session);
         if (message.payload().length() > MAX_PAYLOAD_SIZE) {
             LOG.debugv("IoT MQTT client {0} disconnected: {1} byte payload on {2} exceeds the AWS limit",
                     session.clientId(), Integer.toString(message.payload().length()), message.topicName());
@@ -876,6 +884,18 @@ public class IotMqttBrokerService implements Resettable {
         return filterLevels.length == topicLevels.length;
     }
 
+    private void received(ClientSession session) {
+        session.lastPacketNanos().set(nanoTime.getAsLong());
+    }
+
+    private boolean keepAliveExpired(ClientSession session) {
+        int keepAlive = session.endpoint().keepAliveTimeSeconds();
+        // Vert.x closes a client silent for ceil(1.5 * keep-alive) seconds since Netty's last read.
+        // Every packet is stamped here before Netty stamps it, the CONNECT microseconds after.
+        long timeout = TimeUnit.SECONDS.toNanos((long) Math.ceil(keepAlive * 1.5)) - KEEP_ALIVE_SLACK_NANOS;
+        return keepAlive > 0 && nanoTime.getAsLong() - session.lastPacketNanos().get() >= timeout;
+    }
+
     private record ClientSession(
             String clientId,
             MqttEndpoint endpoint,
@@ -887,18 +907,6 @@ public class IotMqttBrokerService implements Resettable {
             long versionNumber,
             AtomicBoolean ended,
             AtomicLong lastPacketNanos) {
-
-        void received() {
-            lastPacketNanos.set(System.nanoTime());
-        }
-
-        boolean keepAliveExpired() {
-            int keepAlive = endpoint.keepAliveTimeSeconds();
-            // Vert.x closes a client silent for ceil(1.5 * keep-alive) seconds since Netty's last read.
-            // Every packet is stamped here before Netty stamps it, the CONNECT microseconds after.
-            long timeout = TimeUnit.SECONDS.toNanos((long) Math.ceil(keepAlive * 1.5)) - KEEP_ALIVE_SLACK_NANOS;
-            return keepAlive > 0 && System.nanoTime() - lastPacketNanos.get() >= timeout;
-        }
     }
 
     private record Subscription(String topicFilter, int qos) {
