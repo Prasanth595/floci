@@ -1210,6 +1210,14 @@ a Query `Action` field on it does not change the action it is checked as, and it
 still percent-encoded, as the router matches it, so an encoded `/` inside a parameter cannot make
 the route's rule miss.
 
+An S3 `CreateBucket` is checked as `s3:CreateBucket`, and also needs one action for each header
+that configures the new bucket, as the CreateBucket API reference lists them:
+`s3:PutBucketAcl` for a canned ACL other than `private` or a grant header,
+`s3:PutBucketObjectLockConfiguration` and `s3:PutBucketVersioning` for
+`x-amz-bucket-object-lock-enabled: true`, and `s3:PutBucketOwnershipControls` for
+`x-amz-object-ownership`. They are checked before the bucket is created, so a denied request
+creates nothing.
+
 An S3 object operation is checked as the action the S3 documentation gives it:
 - **Multipart uploads:**
   - `CreateMultipartUpload`, `UploadPart` and `CompleteMultipartUpload` are checked as
