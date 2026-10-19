@@ -75,6 +75,13 @@ public class S3VectorsController {
     ) {}
 
     @RegisterForReflection
+    public record VectorBucketSummary(
+            String vectorBucketName,
+            String vectorBucketArn,
+            double creationTime
+    ) {}
+
+    @RegisterForReflection
     public record ListVectorBucketsRequest(
             Integer maxResults,
             String nextToken,
@@ -84,7 +91,7 @@ public class S3VectorsController {
     @RegisterForReflection
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record ListVectorBucketsResponse(
-            List<VectorBucketRepresentation> vectorBuckets,
+            List<VectorBucketSummary> vectorBuckets,
             String nextToken
     ) {}
 
@@ -142,6 +149,14 @@ public class S3VectorsController {
     ) {}
 
     @RegisterForReflection
+    public record IndexSummary(
+            double creationTime,
+            String vectorBucketName,
+            String indexName,
+            String indexArn
+    ) {}
+
+    @RegisterForReflection
     public record ListIndexesRequest(
             String vectorBucketName,
             String vectorBucketArn,
@@ -153,7 +168,7 @@ public class S3VectorsController {
     @RegisterForReflection
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record ListIndexesResponse(
-            List<IndexRepresentation> indexes,
+            List<IndexSummary> indexes,
             String nextToken
     ) {}
 
@@ -285,9 +300,9 @@ public class S3VectorsController {
     public Response listVectorBuckets(@Context HttpHeaders headers, ListVectorBucketsRequest request) {
         String region = regionResolver.resolveRegion(headers);
         List<VectorBucket> buckets = service.listVectorBuckets(region);
-        List<VectorBucketRepresentation> reps = buckets.stream()
-                .map(b -> new VectorBucketRepresentation(b.getVectorBucketName(), b.getVectorBucketArn(),
-                        b.getCreationTime().toEpochMilli() / 1000.0, b.getEncryptionConfiguration()))
+        List<VectorBucketSummary> reps = buckets.stream()
+                .map(b -> new VectorBucketSummary(b.getVectorBucketName(), b.getVectorBucketArn(),
+                        b.getCreationTime().toEpochMilli() / 1000.0))
                 .toList();
         return Response.ok(new ListVectorBucketsResponse(reps, null)).build();
     }
@@ -344,17 +359,12 @@ public class S3VectorsController {
     public Response listIndexes(@Context HttpHeaders headers, ListIndexesRequest request) {
         String region = regionResolver.resolveRegion(headers);
         List<VectorIndex> indexes = service.listIndexes(request.vectorBucketName(), region);
-        List<IndexRepresentation> reps = indexes.stream()
-                .map(i -> new IndexRepresentation(
+        List<IndexSummary> reps = indexes.stream()
+                .map(i -> new IndexSummary(
                         i.getCreationTime().toEpochMilli() / 1000.0,
                         i.getVectorBucketName(),
                         i.getIndexName(),
-                        i.getIndexArn(),
-                        i.getDataType(),
-                        i.getDimension(),
-                        i.getDistanceMetric(),
-                        null,
-                        null
+                        i.getIndexArn()
                 ))
                 .toList();
         return Response.ok(new ListIndexesResponse(reps, null)).build();

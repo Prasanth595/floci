@@ -26,6 +26,7 @@ import java.net.URI;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -165,8 +166,19 @@ class S3VectorsSdkIntegrationTest {
                         .body(Map.of("vectorBucketName", name))
                         .post("/ListIndexes").then().statusCode(200).extract().path("indexes[0]");
                 assertEquals(index.indexArn(), summary.get("indexArn"));
-                assertFalse(summary.containsKey("metadataConfiguration"));
-                assertFalse(summary.containsKey("encryptionConfiguration"));
+                assertEquals(Set.of("creationTime", "vectorBucketName", "indexName", "indexArn"), summary.keySet());
+                assertEquals(3, detail.get("dimension"));
+                assertEquals("float32", detail.get("dataType"));
+                assertEquals("cosine", detail.get("distanceMetric"));
+
+                List<Map<String, Object>> buckets = given().baseUri(endpoint.toString()).contentType("application/json")
+                        .body(Map.of()).post("/ListVectorBuckets").then().statusCode(200).extract().path("vectorBuckets");
+                Map<String, Object> bucketSummary = buckets.stream()
+                        .filter(bucket -> name.equals(bucket.get("vectorBucketName"))).findFirst().orElseThrow();
+                assertEquals(Set.of("creationTime", "vectorBucketName", "vectorBucketArn"), bucketSummary.keySet());
+                VectorBucket bucket = vectors.getVectorBucket(request -> request.vectorBucketName(name)).vectorBucket();
+                assertEquals(bucket.vectorBucketArn(), bucketSummary.get("vectorBucketArn"));
+                assertEquals("AES256", bucket.encryptionConfiguration().sseTypeAsString());
             } finally {
                 for (VectorIndex index : service.listIndexes(name, "us-east-1")) {
                     vectors.deleteIndex(request -> request.vectorBucketName(name).indexName(index.getIndexName()));
