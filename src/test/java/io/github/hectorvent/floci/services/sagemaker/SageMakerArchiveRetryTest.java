@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.sagemaker.model.SageMakerEntities.EndpointResource;
 import io.github.hectorvent.floci.services.sagemaker.model.SageMakerEntities.ModelResource;
 import io.github.hectorvent.floci.services.sagemaker.model.SageMakerEntities.TrainingJobResource;
+import io.github.hectorvent.floci.testing.DockerArchiveUploadFixture;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
@@ -29,17 +30,14 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
 import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -49,7 +47,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
-import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -61,16 +58,11 @@ class SageMakerArchiveRetryTest {
     private final ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
     private final S3Service s3 = mock(S3Service.class);
     private final ObjectMapper mapper = new ObjectMapper();
-    private final List<InputStream> streams = new ArrayList<>();
-    private final List<CopyArchiveToContainerCmd> commands = new ArrayList<>();
-    private final List<byte[]> completed = new ArrayList<>();
+    private final DockerArchiveUploadFixture uploads = new DockerArchiveUploadFixture(docker, "container");
     private final byte[] payload = "model-data".repeat(2000).getBytes(StandardCharsets.UTF_8);
     private SageMakerEndpointManager manager;
     private SageMakerTrainingRunner runner;
     private TrainingJobResource job;
-    private int failures;
-    private int consumedBytes;
-    private RuntimeException failure;
 
     @BeforeEach
     void setUp() {
@@ -99,26 +91,6 @@ class SageMakerArchiveRetryTest {
         when(s3.getObject("bucket", "input/nested/data.csv")).thenReturn(input);
         when(lifecycle.create(any(ContainerSpec.class))).thenReturn("container");
         when(lifecycle.getDockerClient()).thenReturn(docker);
-        when(docker.copyArchiveToContainerCmd("container")).thenAnswer(ignored -> {
-            CopyArchiveToContainerCmd command = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
-            commands.add(command);
-            AtomicReference<InputStream> inputStream = new AtomicReference<>();
-            when(command.withTarInputStream(any(InputStream.class))).thenAnswer(invocation -> {
-                InputStream stream = invocation.getArgument(0);
-                streams.add(stream);
-                inputStream.set(stream);
-                return command;
-            });
-            doAnswer(invocation -> {
-                if (commands.size() <= failures) {
-                    inputStream.get().readNBytes(consumedBytes);
-                    throw failure;
-                }
-                completed.add(inputStream.get().readAllBytes());
-                return null;
-            }).when(command).exec();
-            return command;
-        });
     }
 
     @AfterEach
@@ -181,23 +153,23 @@ class SageMakerArchiveRetryTest {
     @ValueSource(booleans = {false, true})
     void exhaustedTransportFailureStopsAtSixAttempts(boolean training) {
         failTransport(73);
-        failures = 10;
+        uploads.failures = 10;
 
         RuntimeException thrown = assertThrows(RuntimeException.class, () -> copy(training));
 
-        assertEquals(6, commands.size());
-        assertSame(failure, thrown.getCause());
+        assertEquals(6, uploads.commands.size());
+        assertSame(uploads.failure, thrown.getCause());
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void daemonRejectionDoesNotRetry(boolean training) {
-        failures = 10;
-        failure = new NotFoundException("container missing");
+        uploads.failures = 10;
+        uploads.failure = new NotFoundException("container missing");
 
         RuntimeException thrown = assertThrows(RuntimeException.class, () -> copy(training));
 
-        assertEquals(1, commands.size());
+        assertEquals(1, uploads.commands.size());
         assertTrue(thrown.getMessage().contains("container missing"));
     }
 
@@ -211,14 +183,14 @@ class SageMakerArchiveRetryTest {
         IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class, () -> copy(training));
 
         assertEquals("source unavailable", thrown.getMessage());
-        assertTrue(commands.isEmpty());
+        assertTrue(uploads.commands.isEmpty());
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void failedUploadRemovesTheUnstartedContainer(boolean training) throws InterruptedException {
-        failures = 1;
-        failure = new NotFoundException("container missing");
+        uploads.failures = 1;
+        uploads.failure = new NotFoundException("container missing");
         assertFailedStart(training, 1, "container missing");
     }
 
@@ -226,7 +198,7 @@ class SageMakerArchiveRetryTest {
     @ValueSource(booleans = {false, true})
     void exhaustedUploadRetriesRemoveTheUnstartedContainer(boolean training) throws InterruptedException {
         failTransport(73);
-        failures = 10;
+        uploads.failures = 10;
         assertFailedStart(training, 6, "Connection reset");
     }
 
@@ -257,7 +229,7 @@ class SageMakerArchiveRetryTest {
         assertTrue(reported.await(5, TimeUnit.SECONDS));
         assertEquals("Failed", training ? job.trainingJobStatus : endpoint.endpointStatus);
         assertTrue((training ? job.failureReason : endpoint.failureReason).contains(reason));
-        assertEquals(attempts, commands.size());
+        assertEquals(attempts, uploads.commands.size());
         verify(lifecycle).create(any(ContainerSpec.class));
         verify(lifecycle).stopAndRemove("container", null);
         verify(lifecycle, never()).startCreated(any(), any());
@@ -272,24 +244,24 @@ class SageMakerArchiveRetryTest {
     }
 
     private void failTransport(int consumed) {
-        failures = 1;
-        consumedBytes = consumed;
-        failure = new RuntimeException(new SocketException("Connection reset"));
+        uploads.failures = 1;
+        uploads.consumedBytes = consumed;
+        uploads.failure = new RuntimeException(new SocketException("Connection reset"));
     }
 
     private void assertRetried() {
-        assertEquals(2, commands.size());
-        assertNotSame(commands.get(0), commands.get(1));
-        assertNotSame(streams.get(0), streams.get(1));
-        for (CopyArchiveToContainerCmd command : commands) {
+        assertEquals(2, uploads.commands.size());
+        assertNotSame(uploads.commands.get(0), uploads.commands.get(1));
+        assertNotSame(uploads.streams.get(0), uploads.streams.get(1));
+        for (CopyArchiveToContainerCmd command : uploads.commands) {
             verify(command).withRemotePath("/");
         }
-        assertEquals(1, completed.size());
+        assertEquals(1, uploads.completed.size());
     }
 
     private void assertArchive(Map<String, byte[]> expected) throws Exception {
         Map<String, byte[]> actual = new LinkedHashMap<>();
-        try (TarArchiveInputStream tar = new TarArchiveInputStream(new ByteArrayInputStream(completed.getFirst()))) {
+        try (TarArchiveInputStream tar = new TarArchiveInputStream(new ByteArrayInputStream(uploads.completed.getFirst()))) {
             TarArchiveEntry entry;
             while ((entry = tar.getNextEntry()) != null) {
                 assertEquals(0644, entry.getMode());
