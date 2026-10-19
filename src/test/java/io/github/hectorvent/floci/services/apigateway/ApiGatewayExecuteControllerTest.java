@@ -256,9 +256,11 @@ class ApiGatewayExecuteControllerTest {
     /**
      * Measured on HTTP APIs (eu-west-1, 2026-10-19), for payload formats 1.0 and 2.0: a 1.0 result
      * that is not an object with a statusCode, and a statusCode that is not a whole number from 100
-     * to 599, are answered with 500 and the generic message; a statusCode given as text that spells
-     * one is taken, and headers that are not an object are left out. A function that raises is
-     * covered below.
+     * to 599, are answered with 500 and the generic message, and so are a body that is an object or a
+     * list, an isBase64Encoded that strconv.ParseBool would not read, and a body said to be base64
+     * that does not decode; a statusCode given as text that spells one is taken, headers that are
+     * not an object are left out, and a number or a boolean body is its text. A function that raises
+     * is covered below.
      */
     @ParameterizedTest(name = "{0} payload {1}")
     @MethodSource("httpApiProxyResponses")
@@ -288,6 +290,38 @@ class ApiGatewayExecuteControllerTest {
                 Arguments.of("{\"statusCode\":\"201\",\"body\":\"x\"}", "2.0", 201, "x"),
                 Arguments.of("{\"statusCode\":201,\"headers\":\"x\",\"body\":\"x\"}", "1.0", 201, "x"),
                 Arguments.of("{\"statusCode\":201,\"headers\":\"x\",\"body\":\"x\"}", "2.0", 201, "x"),
+                Arguments.of("{\"statusCode\":200,\"body\":\"not base64!\",\"isBase64Encoded\":true}", "1.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":\"not base64!\",\"isBase64Encoded\":true}", "2.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":{\"a\":1}}", "1.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":{\"a\":1}}", "2.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":[\"a\"]}", "1.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":[\"a\"]}", "2.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":\"yes\"}", "1.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":\"yes\"}", "2.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":\"tRuE\"}", "1.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":\"tRuE\"}", "2.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":2}", "1.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":2}", "2.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":1.5}", "1.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":1.5}", "2.0", 500, error),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":true}", "1.0", 200, "hello"),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":true}", "2.0", 200, "hello"),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":\"True\"}", "1.0", 200, "hello"),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":\"True\"}", "2.0", 200, "hello"),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":\"TRUE\"}", "1.0", 200, "hello"),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":\"TRUE\"}", "2.0", 200, "hello"),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":\"t\"}", "1.0", 200, "hello"),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":\"t\"}", "2.0", 200, "hello"),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":1}", "1.0", 200, "hello"),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":1}", "2.0", 200, "hello"),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":\"F\"}", "1.0", 200, "aGVsbG8="),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":\"F\"}", "2.0", 200, "aGVsbG8="),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":0}", "1.0", 200, "aGVsbG8="),
+                Arguments.of("{\"statusCode\":200,\"body\":\"aGVsbG8=\",\"isBase64Encoded\":0}", "2.0", 200, "aGVsbG8="),
+                Arguments.of("{\"statusCode\":200,\"body\":5}", "1.0", 200, "5"),
+                Arguments.of("{\"statusCode\":200,\"body\":5}", "2.0", 200, "5"),
+                Arguments.of("{\"statusCode\":200,\"body\":true}", "1.0", 200, "true"),
+                Arguments.of("{\"statusCode\":200,\"body\":true}", "2.0", 200, "true"),
                 Arguments.of("null", "2.0", 200, "null"),
                 Arguments.of("5", "2.0", 200, "5"));
     }

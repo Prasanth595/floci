@@ -1605,11 +1605,15 @@ public class ApiGatewayExecuteController {
                         : result.getPayload();
                 return Response.status(200).entity(inferredBody).type(MediaType.APPLICATION_JSON).build();
             }
-            if (httpApi && httpApiStatusCode(node) == null) {
+            Boolean base64 = httpApi ? httpApiBase64(node) : Boolean.valueOf(node.path("isBase64Encoded").asBoolean(false));
+            if (httpApi && (httpApiStatusCode(node) == null || base64 == null
+                    || !httpApiBodyReadable(node.path("body"), base64))) {
                 // Measured (eu-west-1, 2026-10-19): an HTTP API answers a response it cannot read
                 // with 500 and its generic message, in format 1.0 a result that is not an object with
                 // a statusCode, and in either format a statusCode that is not a whole number from 100
-                // to 599, though text spelling one ("201") is taken.
+                // to 599, though text spelling one ("201") is taken, a body that is an object or a
+                // list, an isBase64Encoded it cannot read as a boolean, and a body it says is base64
+                // that does not decode.
                 return httpApiError(500, "Internal Server Error");
             }
             int statusCode = httpApi ? httpApiStatusCode(node) : node.path("statusCode").asInt(200);
@@ -1637,8 +1641,7 @@ public class ApiGatewayExecuteController {
             JsonNode bodyNode = node.get("body");
             if (bodyNode != null && !bodyNode.isNull()) {
                 String bodyStr = bodyNode.asText();
-                boolean isBase64 = node.path("isBase64Encoded").asBoolean(false);
-                byte[] bytes = isBase64 ? Base64.getDecoder().decode(bodyStr) : bodyStr.getBytes();
+                byte[] bytes = base64 ? Base64.getDecoder().decode(bodyStr) : bodyStr.getBytes();
                 String ct = findHeaderIgnoreCase(multiHeaders, "Content-Type")
                         .or(() -> findHeaderIgnoreCase(respHeaders, "Content-Type"))
                         .orElse(MediaType.APPLICATION_JSON);
@@ -1647,6 +1650,10 @@ public class ApiGatewayExecuteController {
             return builder.build();
         } catch (Exception e) {
             LOG.warnv("Failed to parse Lambda response: {0}", e.getMessage());
+            if (httpApi) {
+                // A result an HTTP API cannot parse is answered as one it cannot read.
+                return httpApiError(500, "Internal Server Error");
+            }
             return Response.status(502).entity(result.getPayload()).type(MediaType.APPLICATION_JSON).build();
         }
     }
@@ -1657,6 +1664,44 @@ public class ApiGatewayExecuteController {
     }
 
     private static final Pattern WHOLE_STATUS = Pattern.compile("\\d{1,3}");
+    private static final Set<String> TRUE_TEXT = Set.of("1", "t", "T", "TRUE", "true", "True");
+    private static final Set<String> FALSE_TEXT = Set.of("0", "f", "F", "FALSE", "false", "False");
+
+    /**
+     * Whether an HTTP API reads a Lambda proxy response's body as base64, or null when it cannot read
+     * isBase64Encoded: its text read as Go's strconv.ParseBool does (measured: "True", "TRUE", "t" and
+     * 1 are true, "F" and 0 false, and "tRuE", "yes", 2 and 1.5 unreadable). Left out, it is false.
+     */
+    private static Boolean httpApiBase64(JsonNode response) {
+        JsonNode flag = response.path("isBase64Encoded");
+        if (flag.isMissingNode() || flag.isNull()) {
+            return false;
+        }
+        String text = flag.isContainerNode() ? "" : flag.asText();
+        if (TRUE_TEXT.contains(text)) {
+            return true;
+        }
+        return FALSE_TEXT.contains(text) ? false : null;
+    }
+
+    /**
+     * Whether an HTTP API can read a Lambda proxy response's body: absent, null or a scalar, which it
+     * takes as text, and, when it is said to be base64, one that decodes (measured).
+     */
+    private static boolean httpApiBodyReadable(JsonNode body, boolean base64) {
+        if (body.isContainerNode()) {
+            return false;
+        }
+        if (!base64 || body.isMissingNode() || body.isNull()) {
+            return true;
+        }
+        try {
+            Base64.getDecoder().decode(body.asText());
+            return true;
+        } catch (IllegalArgumentException notBase64) {
+            return false;
+        }
+    }
 
     /**
      * The status an HTTP API takes from a Lambda proxy response, or null when it cannot read one: a

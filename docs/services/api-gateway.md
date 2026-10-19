@@ -659,8 +659,11 @@ this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 A Lambda proxy integration's response is read as AWS reads it (measured): a function that raises, a
 format 1.0 result that is not an object with a `statusCode`, and a `statusCode` that is not a whole
 number from 100 to 599 (text that spells one, such as `"201"`, is taken) are answered `500` with
-`{"message":"Internal Server Error"}`. Format 2.0 takes a result without a `statusCode` as a `200`
-whose body is the result itself.
+`{"message":"Internal Server Error"}`, and so are a `body` that is an object or a list, an
+`isBase64Encoded` that Go's `strconv.ParseBool` would not read (`"True"`, `"t"` and `1` are true,
+`"yes"` and `2` are not read), and a `body` said to be base64 that does not decode. A number or a
+boolean `body` is its text. Format 2.0 takes a result without a `statusCode` as a `200` whose body
+is the result itself.
 
 An API with a `corsConfiguration` applies it as AWS does (measured). It ignores the CORS headers an
 integration returns, and sets its own on whatever answers a route: the integration, or API Gateway
