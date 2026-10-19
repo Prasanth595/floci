@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -13,6 +15,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
+import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -421,6 +424,41 @@ class CodeArtifactNuGetDockerIntegrationTest {
                 .then().statusCode(200)
                 .extract().asByteArray();
         assertArrayEquals(newNupkg, copied);
+    }
+
+    /**
+     * The real-world gap this closes: {@code ListPackageVersionAssets} used to not exist at all.
+     * Confirms the bridge enumerates NuGet's one-asset-per-version flat container against the
+     * real BaGetter sidecar (not a mock) and reports the exact byte size and hash of a freshly
+     * pushed {@code .nupkg}. Self-contained, own package id, rather than reusing {@link
+     * #PACKAGE_ID}: that fixture is re-pushed by {@link
+     * #deletePackageRemovesTheFileFromTheRealBagetterSidecarAndAllowsARepublish} with a freshly
+     * built (not necessarily byte-identical) zip, so asserting against it here would depend on
+     * exactly what that unrelated test last wrote.
+     */
+    @Test
+    @Order(15)
+    void listPackageVersionAssetsBridgesToTheRealBagetterSidecar() {
+        String packageId = "ListAssets.Package";
+        String lowerId = packageId.toLowerCase(Locale.ROOT);
+        byte[] nupkg = buildNupkg(packageId, VERSION, "list assets description", null, null);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(pushBody("boundary123", nupkg))
+                .put("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/api/v2/package")
+                .then().statusCode(201);
+
+        JsonPath body = given().header("Authorization", AUTH)
+                .post("/v1/package/version/assets?domain=" + DOMAIN + "&repository=" + REPO + "&format=nuget"
+                        + "&package=" + packageId + "&version=" + VERSION)
+                .then().statusCode(200)
+                .body("package", equalTo(packageId))
+                .body("assets.size()", equalTo(1))
+                .body("assets[0].name", equalTo(lowerId + "." + VERSION + ".nupkg"))
+                .body("assets[0].size", equalTo(nupkg.length))
+                .extract().jsonPath();
+        Map<String, String> hashes = body.getMap("assets[0].hashes");
+        assertEquals(Digests.sha256Hex(nupkg), hashes.get("SHA-256"));
     }
 
     private static long describeDomainAssetSizeBytes() {

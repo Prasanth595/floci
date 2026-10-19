@@ -61,7 +61,7 @@ public class IamConditionContextResolver {
     private static final Logger LOG = Logger.getLogger(IamConditionContextResolver.class);
 
     /** Set by {@code ResourceArnBuilder.readJsonBody}, which runs earlier in the same filter pass. */
-    private static final String BUFFERED_JSON_BODY = "floci.bufferedJsonBody";
+    static final String BUFFERED_JSON_BODY = "floci.bufferedJsonBody";
     private static final String BUFFERED_FORM_BODY = "floci.bufferedFormBody";
     private static final String REQUEST_TAG_PREFIX = "aws:RequestTag/";
     private static final String RESOURCE_TAG_PREFIX = "aws:ResourceTag/";
@@ -657,7 +657,7 @@ public class IamConditionContextResolver {
      * resource this context describes is the resource the handler acts on.
      */
     @SuppressWarnings("unchecked")
-    private static Map<String, String> formParameters(ContainerRequestContext ctx) {
+    static Map<String, String> formParameters(ContainerRequestContext ctx) {
         Object cached = ctx.getProperty(BUFFERED_FORM_BODY);
         if (cached instanceof Map<?, ?> map) {
             return (Map<String, String>) map;
@@ -688,7 +688,7 @@ public class IamConditionContextResolver {
     }
 
     /** Reads the entity fully and puts an equivalent stream back for downstream readers. */
-    private static byte[] bufferEntity(ContainerRequestContext ctx) {
+    static byte[] bufferEntity(ContainerRequestContext ctx) {
         InputStream in = ctx.getEntityStream();
         if (in == null) {
             return null;

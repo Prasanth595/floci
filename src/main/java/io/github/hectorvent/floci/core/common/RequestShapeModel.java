@@ -12,7 +12,7 @@ import java.util.Map;
  * The input shapes of a service's operations, as a {@code tools/aws/regen_*_shapes.py} generator
  * vendors them from botocore: each operation's input shape, and for every shape reachable from one
  * its type and the shapes of its structure members, list elements or map values. A service's
- * request check walks a body against it with its own protocol's messages.
+ * request check walks a body against it with {@link RequestShapeCheck} and its own messages.
  */
 public record RequestShapeModel(Map<String, String> operations, Map<String, Shape> shapes) {
 

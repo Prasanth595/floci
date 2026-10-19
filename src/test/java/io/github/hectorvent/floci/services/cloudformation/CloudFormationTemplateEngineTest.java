@@ -14,6 +14,7 @@ import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -240,6 +241,36 @@ class CloudFormationTemplateEngineTest {
     void resolveJsonAttributeReturnsNullForMissingOrNullNode() {
         assertNull(engine().resolveJsonAttribute(json("null")));
         assertNull(engine().resolveJsonAttribute(mapper.createArrayNode().path("nope")));
+    }
+
+    /**
+     * Measured on CloudFormation (eu-west-1, 2026-10-18), for a Lambda function's Architectures and
+     * Layers: the first forms are refused as a string where a list is expected, the others are
+     * lists. Fn::GetAtt and Fn::ImportValue are only known when the resource is provisioned.
+     */
+    @Test
+    void yieldsStringTellsTheFormsCloudFormationRefusesWhereAListIsExpected() {
+        Map<String, String> types = Map.of("Str", "String", "Num", "Number", "Csv", "CommaDelimitedList",
+                "Subnets", "List<AWS::EC2::Subnet::Id>", "SsmList", "AWS::SSM::Parameter::Value<List<String>>",
+                "SsmCsv", "AWS::SSM::Parameter::Value<CommaDelimitedList>");
+        Map<String, String> values = Map.of("Str", "x86_64", "Num", "1", "Csv", "x86_64", "Subnets", "subnet-a",
+                "SsmList", "/p", "SsmCsv", "/p");
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000", "us-east-1",
+                "my-stack", "stack/id", values, Map.of(), Map.of(), Map.of("Yes", true), Map.of(), mapper,
+                (Function<String, String>) name -> null, null, null, types);
+
+        for (String string : List.of("\"x86_64\"", "5", "true", "{\"Ref\": \"Str\"}", "{\"Ref\": \"Num\"}",
+                "{\"Ref\": \"AWS::Region\"}", "{\"Fn::Select\": [0, {\"Ref\": \"Csv\"}]}",
+                "{\"Fn::Join\": [\",\", {\"Ref\": \"Csv\"}]}", "{\"Fn::Sub\": \"x86_64\"}", "{\"Fn::Base64\": \"x86_64\"}",
+                "{\"Fn::If\": [\"Yes\", \"x86_64\", {\"Ref\": \"AWS::NoValue\"}]}")) {
+            assertTrue(e.yieldsString(json(string)), string);
+        }
+        for (String list : List.of("[\"x86_64\"]", "{\"Ref\": \"Csv\"}", "{\"Ref\": \"Subnets\"}",
+                "{\"Ref\": \"SsmList\"}", "{\"Ref\": \"SsmCsv\"}", "{\"Ref\": \"AWS::NotificationARNs\"}",
+                "{\"Fn::Split\": [\",\", {\"Ref\": \"Str\"}]}", "{\"Fn::If\": [\"Yes\", {\"Ref\": \"Csv\"}, [\"arm64\"]]}",
+                "{\"Fn::GetAtt\": [\"Queue\", \"Arn\"]}", "{\"Fn::ImportValue\": \"Archs\"}")) {
+            assertFalse(e.yieldsString(json(list)), list);
+        }
     }
 
     private CloudFormationTemplateEngine engineWithCondition(String name, boolean value) {

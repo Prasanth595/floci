@@ -752,6 +752,10 @@
     "StateMachineName",
     "StateMachineType"
   ],
+  "AWS::WAFv2::IPSet": [
+    "Name",
+    "Scope"
+  ],
   "AWS::WAFv2::WebACL": [
     "Name",
     "Scope"

@@ -2,10 +2,10 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
+import io.github.hectorvent.floci.testing.SignedIamEnforcementProfile;
 import io.github.hectorvent.floci.testutil.StsRequests;
 import io.github.hectorvent.floci.testutil.StsRequests.Credentials;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
@@ -22,8 +22,16 @@ import java.util.UUID;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
+/**
+ * Verifies that STS refuses {@code GetFederationToken} to a caller with temporary credentials, only
+ * once the request is authenticated, and that a long-term caller is still decided by its IAM
+ * policies.
+ *
+ * <p>Signature validation and IAM enforcement come from {@link SignedIamEnforcementProfile}, which
+ * this class shares with the other classes that test signed requests under IAM enforcement.
+ */
 @QuarkusTest
-@TestProfile(StsFederationCallerEnforcementIntegrationTest.SignedEnforcement.class)
+@TestProfile(SignedIamEnforcementProfile.class)
 class StsFederationCallerEnforcementIntegrationTest {
     private static final String ACCOUNT = "000000000000";
     private static final String ALLOW_STS = "{\"Version\":\"2012-10-17\",\"Statement\":["
@@ -31,13 +39,6 @@ class StsFederationCallerEnforcementIntegrationTest {
 
     @Inject IamService iam;
     @RegisterExtension final PartitionCleanup cleanup = new PartitionCleanup();
-
-    public static class SignedEnforcement implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.auth.validate-signatures", "true", "floci.services.iam.enforcement-enabled", "true");
-        }
-    }
 
     @ParameterizedTest
     @ValueSource(strings = {"GetFederationToken", "GetSessionToken", "AssumeRole"})

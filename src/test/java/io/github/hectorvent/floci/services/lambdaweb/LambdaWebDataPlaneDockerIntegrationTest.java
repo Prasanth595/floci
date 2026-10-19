@@ -66,6 +66,8 @@ class LambdaWebDataPlaneDockerIntegrationTest {
             const [host, port] = process.env.AWS_LAMBDA_HTTP_ENDPOINT.split(':');
             console.log('starting');
             if (process.env.MODE === 'throw') { throw new Error('init boom'); }
+            if (process.env.MODE === 'exit') { process.exit(1); }
+            if (process.env.MODE === 'missing') { require('no-such-module'); }
             http.createServer((req, res) => {
               if (req.url.startsWith('/log')) {
                 console.info({route: 'log', main: require.main === module, argv: process.argv.slice(1)});
@@ -504,8 +506,40 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         assertEquals("WARN", initReport.getString("level"));
         assertEquals("failure", initReport.getString("record.status"));
         assertEquals("Application.InitCodeError", initReport.getString("record.errorType"));
-        assertTrue(events.stream().anyMatch(event -> event.contains("\"message\":\"starting\"")), events.toString());
-        assertTrue(events.stream().anyMatch(event -> event.contains("init boom")), events.toString());
+        List<JsonPath> output = events.stream().filter(event -> !isPlatformEvent(event)).map(JsonPath::from).toList();
+        assertEquals(List.of("ERROR Application.InitCodeError: could not load customer code: init boom", "INFO starting"),
+                output.stream().map(event -> event.getString("level") + " " + event.getString("message")).sorted()
+                        .toList(), events.toString());
+    }
+
+    @Test
+    @Timeout(180)
+    void anAppThatExitsWithAnErrorAtStartGetsTheExitErrorPage() throws Exception {
+        String domain = createFunction(30, 64, "WARN", "exit");
+        String group = "/aws/lambda/web/" + functionName + ".local";
+        given().header("Host", domain).when().get("/").then().statusCode(502)
+                .header("lambda-web-error-type", "Runtime.ExitError");
+
+        List<String> events = awaitLogEvents(group, awaitLogStream(group),
+                each -> types(each).contains("platform.initReport"));
+        assertEquals("Runtime.ExitError", platformEvent(events, "platform.initReport").getString("record.errorType"));
+    }
+
+    @Test
+    @Timeout(180)
+    void anAppThatCannotFindAModuleGetsTheImportCodeErrorPage() throws Exception {
+        String domain = createFunction(30, 64, "WARN", "missing");
+        String group = "/aws/lambda/web/" + functionName + ".local";
+        given().header("Host", domain).when().get("/").then().statusCode(502)
+                .header("lambda-web-error-type", "Runtime.ImportCodeError");
+
+        List<String> events = awaitLogEvents(group, awaitLogStream(group), each -> types(each).contains(
+                "platform.initReport") && each.stream().anyMatch(event -> event.contains("ImportCodeError:")));
+        assertEquals("Runtime.ImportCodeError",
+                platformEvent(events, "platform.initReport").getString("record.errorType"));
+        assertTrue(events.stream().anyMatch(event -> event.contains("\"message\":\"Runtime.ImportCodeError: could not"
+                + " load customer code: Cannot find module 'no-such-module'\\nRequire stack:\\n- /var/task/index.js."
+                + " The entrypoint must be")), events.toString());
     }
 
     private static boolean isPlatformEvent(String event) {

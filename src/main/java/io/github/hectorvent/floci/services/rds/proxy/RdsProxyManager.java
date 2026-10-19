@@ -44,13 +44,24 @@ public class RdsProxyManager {
                                         String masterUsername, String masterPassword, String dbName,
                                         RdsAuthProxy.MasterPasswordCheck passwordValidator,
                                         RdsProxyBinding binding) {
+        startProxy(instanceId, engine, iamEnabled, proxyPort, backendHost, backendPort,
+                advertisedHost, masterUsername, masterPassword, dbName, passwordValidator,
+                binding, RdsAuthProxy.EndpointKind.DATABASE);
+    }
+
+    public synchronized void startProxy(String instanceId, DatabaseEngine engine, boolean iamEnabled,
+                                        int proxyPort, String backendHost, int backendPort,
+                                        String advertisedHost,
+                                        String masterUsername, String masterPassword, String dbName,
+                                        RdsAuthProxy.MasterPasswordCheck passwordValidator,
+                                        RdsProxyBinding binding, RdsAuthProxy.EndpointKind endpointKind) {
         tlsCertificates.ensureHost(advertisedHost);
         EmulatorConfig.RdsServiceConfig rdsConfig = config.services().rds();
         RdsAuthProxy proxy = new RdsAuthProxy(
                 instanceId, backendHost, backendPort, engine, iamEnabled,
                 masterUsername, masterPassword, dbName, sigV4Validator, tlsCertificates, passwordValidator,
                 rdsConfig.proxyHandshakeTimeoutMillis(), rdsConfig.proxyBackendConnectTimeoutMillis(),
-                rdsConfig.proxyMaxConnections(), binding, backendGate);
+                rdsConfig.proxyMaxConnections(), binding, username -> binding != null, backendGate, endpointKind);
         try {
             proxy.start(proxyPort);
         } catch (IOException e) {

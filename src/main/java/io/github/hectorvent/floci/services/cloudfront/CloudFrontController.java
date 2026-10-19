@@ -42,14 +42,12 @@ public class CloudFrontController {
 
     /**
      * Origin timeout constraints from the CloudFront {@code CustomOriginConfig} and
-     * {@code Origin} API references. {@code OriginReadTimeout} accepts 1-120 seconds, default 30.
-     * {@code OriginKeepaliveTimeout} accepts 1-300 seconds, default 5. {@code ResponseCompletionTimeout}
-     * has no enforced maximum when unset (represented here as 0), but when set must be at least
-     * {@code OriginReadTimeout}.
+     * {@code Origin} API references. {@code OriginKeepaliveTimeout} accepts 1-300 seconds,
+     * default 5. {@code ResponseCompletionTimeout} has no enforced maximum when unset
+     * (represented here as 0), but when set must be at least {@code OriginReadTimeout}.
+     * The read and connection timeouts live in {@link CloudFrontOriginTimeouts}, shared with
+     * the serving layer that applies them.
      */
-    private static final int DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS = 30;
-    private static final int MIN_ORIGIN_READ_TIMEOUT_SECONDS = 1;
-    private static final int MAX_ORIGIN_READ_TIMEOUT_SECONDS = 120;
     private static final int DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS = 5;
     private static final int MIN_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS = 1;
     private static final int MAX_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS = 300;
@@ -1961,8 +1959,8 @@ public class CloudFrontController {
                     .elem("HTTPSPort", coc.getOrDefault("HTTPSPort", "443").toString())
                     .elem("OriginProtocolPolicy",
                             coc.getOrDefault("OriginProtocolPolicy", "https-only").toString())
-                    .elem("OriginReadTimeout",
-                            coc.getOrDefault("OriginReadTimeout", DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS).toString())
+                    .elem("OriginReadTimeout", coc.getOrDefault("OriginReadTimeout",
+                            CloudFrontOriginTimeouts.DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS).toString())
                     .elem("OriginKeepaliveTimeout",
                             coc.getOrDefault("OriginKeepaliveTimeout", DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS)
                                     .toString())
@@ -2840,8 +2838,8 @@ public class CloudFrontController {
                             if (inCustomOriginConfig && customConfig != null) {
                                 originReadTimeoutSeconds = parseBoundedTimeout(
                                         "InvalidOriginReadTimeout", "OriginReadTimeout",
-                                        r.getElementText(), MIN_ORIGIN_READ_TIMEOUT_SECONDS,
-                                        MAX_ORIGIN_READ_TIMEOUT_SECONDS);
+                                        r.getElementText(), CloudFrontOriginTimeouts.MIN_ORIGIN_READ_TIMEOUT_SECONDS,
+                                        CloudFrontOriginTimeouts.MAX_ORIGIN_READ_TIMEOUT_SECONDS);
                                 customConfig.put("OriginReadTimeout", originReadTimeoutSeconds);
                             }
                         }
@@ -2956,7 +2954,7 @@ public class CloudFrontController {
                                 Integer completionTimeout = current.getResponseCompletionTimeout();
                                 int effectiveReadTimeout = originReadTimeoutSeconds != null
                                         ? originReadTimeoutSeconds
-                                        : DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS;
+                                        : CloudFrontOriginTimeouts.DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS;
                                 if (completionTimeout != null && completionTimeout > 0
                                         && completionTimeout < effectiveReadTimeout) {
                                     throw new AwsException(

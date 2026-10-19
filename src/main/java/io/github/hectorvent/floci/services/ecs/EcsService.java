@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
+import io.github.hectorvent.floci.services.ecs.container.EcsLinuxParameters;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskLaunchException;
 import io.github.hectorvent.floci.services.ecs.exec.EcsExecChannelHandler;
@@ -872,9 +873,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         validateEphemeralStorage(request.getEphemeralStorage());
         validateContainerDependencies(containerDefs);
         validateFirelensS3Config(containerDefs, fargate);
+        EcsLinuxParameters.validate(containerDefs);
         if (fargate) {
             validateFargateUnsupportedParameters(request);
         }
+        if (containerDefs != null) {
+            containerDefs.forEach(containerManager::checkDeviceHostPaths);
+        }
+        EcsLinuxParameters.normalize(containerDefs);
         String family = request.getFamily();
         int revision = latestRevisions.compute(familyKey(region, family),
                 (key, latest) -> (latest != null ? latest : latestRevision(region, family)) + 1);
@@ -1138,7 +1144,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             rejectOnFargate(def.getDockerSecurityOptions() != null && !def.getDockerSecurityOptions().isEmpty(),
                     "dockerSecurityOptions");
             rejectOnFargate(notEmpty(def.getUnparsed(), "extraHosts"), "extraHosts");
-            validateFargateLinuxParameters(def);
+            EcsLinuxParameters.validateFargate(def);
             validateFargateResourceRequirements(def);
         }
     }
@@ -1148,17 +1154,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("ClientException",
                     "Fargate compatible task definitions do not support " + parameter + ".", 400);
         }
-    }
-
-    /** {@code maxSwap} and {@code swappiness} have no meaning on Fargate's managed kernel. */
-    @SuppressWarnings("unchecked")
-    private static void validateFargateLinuxParameters(ContainerDefinition def) {
-        Object linuxParameters = def.getUnparsed() == null ? null : def.getUnparsed().get("linuxParameters");
-        if (!(linuxParameters instanceof Map<?, ?> parameters)) {
-            return;
-        }
-        rejectOnFargate(parameters.get("maxSwap") != null, "maxSwap");
-        rejectOnFargate(parameters.get("swappiness") != null, "swappiness");
     }
 
     /** A Fargate task cannot ask for a GPU; only {@code InferenceAccelerator} requirements remain. */

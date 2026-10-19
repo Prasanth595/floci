@@ -2219,15 +2219,16 @@ public interface EmulatorConfig {
 
         /**
          * Approved parent directories for task definition host volume bind mounts
-         * (volumes[].host.sourcePath). A sourcePath must resolve under one of these roots.
-         * Empty (the default) rejects every host volume sourcePath unless
+         * (volumes[].host.sourcePath) and container devices (linuxParameters.devices[].hostPath).
+         * A host path must resolve under one of these roots. Empty (the default) rejects every
+         * host volume sourcePath and device hostPath unless
          * {@link #allowUnsafeHostVolumes()} is set, subject to the always-on traversal,
          * bare-root, and Docker socket blocks below.
          */
         Optional<List<String>> hostVolumeRoots();
 
         /**
-         * When true, bypasses the {@link #hostVolumeRoots()} allowlist check for host volumes,
+         * When true, bypasses the {@link #hostVolumeRoots()} allowlist check for host volumes and devices,
          * allowing any absolute path. Traversal segments, the bare root "/", and the Docker
          * socket (or any ancestor directory that contains it) are still always rejected.
          */
@@ -2375,6 +2376,14 @@ public interface EmulatorConfig {
          */
         @WithDefault("60")
         int requestTimeoutSeconds();
+
+        /**
+         * How long to collect an upstream error response body before returning the
+         * known model error without its details. Bounds a backend that sends an error
+         * status and then stalls, since the request timeout stops at the headers.
+         */
+        @WithDefault("1000")
+        int errorBodyTimeoutMillis();
     }
 
     interface TextractServiceConfig {

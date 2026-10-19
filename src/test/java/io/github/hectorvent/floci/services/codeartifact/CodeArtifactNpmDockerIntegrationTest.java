@@ -3,11 +3,13 @@ package io.github.hectorvent.floci.services.codeartifact;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.path.json.JsonPath;
 import jakarta.inject.Inject;
 import org.hamcrest.Matcher;
 import org.junit.jupiter.api.BeforeAll;
@@ -20,6 +22,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -742,6 +745,28 @@ class CodeArtifactNpmDockerIntegrationTest {
         assertTrue(copiedVersion.path("dist").path("tarball").asText().contains("other-repo"),
                 "copied dist.tarball must point back at the destination repository, was: "
                         + copiedVersion.path("dist").path("tarball").asText());
+    }
+
+    /**
+     * The real-world gap this closes: {@code ListPackageVersionAssets} used to not exist at all.
+     * Confirms the bridge enumerates npm's one-asset-per-version packument entry against the real
+     * Verdaccio sidecar (not a mock) and reports the exact byte size and hash of the tarball
+     * already published in {@link #publishThenFetchRoundTripsTheRealNpmEnvelope}.
+     */
+    @Test
+    @Order(20)
+    void listPackageVersionAssetsBridgesToTheRealVerdaccioSidecar() {
+        JsonPath body = given().header("Authorization", AUTH)
+                .post("/v1/package/version/assets?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm"
+                        + "&package=" + PACKAGE_NAME + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("package", equalTo(PACKAGE_NAME))
+                .body("assets.size()", equalTo(1))
+                .body("assets[0].name", equalTo(PACKAGE_NAME + "-1.0.0.tgz"))
+                .body("assets[0].size", equalTo(expectedTarballBytes.length))
+                .extract().jsonPath();
+        Map<String, String> hashes = body.getMap("assets[0].hashes");
+        assertEquals(Digests.sha256Hex(expectedTarballBytes), hashes.get("SHA-256"));
     }
 
     /**

@@ -2,6 +2,7 @@
 // console output into the JSON log events AWS writes, with the request each one belongs to,
 // filters the output by applicationLogLevel, then imports the app.
 import { AsyncLocalStorage } from 'node:async_hooks';
+import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -92,5 +93,34 @@ if (LEVELS.INFO < minimum) {
   process.stderr.write = drop;
 }
 
+// AWS writes one ERROR event in place of Node's stack when the app fails to load. Floci reads the
+// error type from INIT_ERROR_FILE once the process is gone, so any exit status of the app keeps its meaning.
+// /tmp is writable by any user, also in an image that does not run as root.
+const INIT_ERROR_FILE = '/tmp/floci-init-error';
 const entry = process.env.AWS_LAMBDA_NODEJS_ENTRYPOINT || 'index.js';
-await import(pathToFileURL(path.resolve('/var/task', entry)).href);
+// A runtime image could carry the file from a container that failed before.
+try {
+  fs.rmSync(INIT_ERROR_FILE, { force: true });
+} catch (ignored) {
+  // The app still runs. Only a failed start would get the old error type.
+}
+try {
+  await import(pathToFileURL(path.resolve('/var/task', entry)).href);
+} catch (error) {
+  // AWS goes by the code alone, also for an error the app throws itself.
+  const missing = error?.code === 'MODULE_NOT_FOUND' || error?.code === 'ERR_MODULE_NOT_FOUND';
+  const errorType = missing ? 'Runtime.ImportCodeError' : 'Application.InitCodeError';
+  const reason = error instanceof Error ? error.message : String(error);
+  if (LEVELS.ERROR >= minimum) {
+    writeErr(line('ERROR', `${errorType}: could not load customer code: ${reason}` + (missing
+      ? ". The entrypoint must be 'index.js' at the root of the deployment package, or the"
+        + ' AWS_LAMBDA_NODEJS_ENTRYPOINT environment variable must point to your entry file'
+      : '')));
+  }
+  try {
+    fs.writeFileSync(INIT_ERROR_FILE, errorType);
+  } catch (ignored) {
+    // A full disk leaves Floci with Runtime.ExitError, without a stack trace AWS would not write.
+  }
+  process.exit(1);
+}

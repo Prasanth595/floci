@@ -3102,6 +3102,155 @@ class CodeArtifactServiceTest {
         assertEquals("package-version", wrongRevision.getExtendedData().get("resourceType"));
     }
 
+    // ------------------------------------------------------ ListPackageVersionAssets
+
+    @Test
+    void listPackageVersionAssetsReturnsEveryAssetForAGenericVersion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "generic-asset-bytes".getBytes(StandardCharsets.UTF_8);
+        publishGeneric("repo", "my-pkg", "1.0.0", content);
+
+        CodeArtifactService.PackageVersionAssetsListResult result = service.listPackageVersionAssets(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", "1.0.0", null, null);
+
+        assertEquals(1, result.assets().size());
+        assertEquals("a.txt", result.assets().get(0).name());
+        assertEquals(content.length, result.assets().get(0).size());
+        assertEquals(Digests.sha256Hex(content), result.assets().get(0).hashes().get("SHA-256"));
+        assertTrue(result.versionRevision() != null && !result.versionRevision().isBlank());
+    }
+
+    @Test
+    void listPackageVersionAssetsFailsNotFoundForAGenericVersionThatWasNeverPublished() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionAssets(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", "1.0.0", null, null));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageVersionAssetsPaginatesGenericAssets() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex("a".getBytes(StandardCharsets.UTF_8)), "true",
+                "a".getBytes(StandardCharsets.UTF_8));
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "b.txt",
+                Digests.sha256Hex("b".getBytes(StandardCharsets.UTF_8)), "true",
+                "b".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.PackageVersionAssetsListResult page1 = service.listPackageVersionAssets(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", "1.0.0", 1, null);
+        assertEquals(1, page1.assets().size());
+        assertTrue(page1.nextToken() != null);
+
+        CodeArtifactService.PackageVersionAssetsListResult page2 = service.listPackageVersionAssets(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", "1.0.0", 1, page1.nextToken());
+        assertEquals(1, page2.assets().size());
+        assertTrue(page2.nextToken() == null);
+        assertTrue(!page1.assets().get(0).name().equals(page2.assets().get(0).name()));
+    }
+
+    @Test
+    void listPackageVersionAssetsBridgesToReposiliteForMaven() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        byte[] jarBytes = "jar-bytes".getBytes(StandardCharsets.UTF_8);
+        byte[] pomBytes = "pom-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar", "a-1.0.pom"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(pomBytes));
+
+        CodeArtifactService.PackageVersionAssetsListResult result = service.listPackageVersionAssets(REGION, "dom",
+                null, "repo", "maven", "com.example", "a", "1.0", null, null);
+
+        assertEquals(2, result.assets().size());
+        assertEquals("a-1.0.jar", result.assets().get(0).name());
+        assertEquals(jarBytes.length, result.assets().get(0).size());
+        assertEquals(Digests.sha256Hex(jarBytes), result.assets().get(0).hashes().get("SHA-256"));
+    }
+
+    @Test
+    void listPackageVersionAssetsFailsNotFoundForAMavenVersionThatWasNeverPublished() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionAssets(REGION, "dom",
+                null, "repo", "maven", "com.example", "a", "1.0", null, null));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageVersionAssetsRoutesEveryContainerBackedFormatToTheSidecarBridge() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        for (String format : List.of("npm", "pypi", "nuget")) {
+            AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionAssets(REGION, "dom",
+                    null, "repo", format, null, "my-pkg", "1.0.0", null, null));
+            assertEquals("ResourceNotFoundException", e.getErrorCode());
+        }
+    }
+
+    @Test
+    void listPackageVersionAssetsRejectsAFormatAwsDoesNotSupport() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionAssets(REGION, "dom",
+                null, "repo", "not-a-real-format", null, "my-pkg", "1.0.0", null, null));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageVersionAssetsRequiresANamespaceForMaven() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionAssets(REGION, "dom",
+                null, "repo", "maven", null, "a", "1.0", null, null));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageVersionAssetsRejectsANamespaceForPypiAndNuGet() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        for (String format : List.of("pypi", "nuget")) {
+            AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionAssets(REGION, "dom",
+                    null, "repo", format, "a-namespace", "my-pkg", "1.0.0", null, null));
+            assertEquals("ValidationException", e.getErrorCode());
+        }
+    }
+
+    @Test
+    void listPackageVersionAssetsRequiresDomainRepositoryAndVersion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException missingDomain = assertThrows(AwsException.class, () -> service.listPackageVersionAssets(REGION,
+                null, null, "repo", "generic", "ns", "my-pkg", "1.0.0", null, null));
+        assertEquals("ValidationException", missingDomain.getErrorCode());
+
+        AwsException missingRepository = assertThrows(AwsException.class, () -> service.listPackageVersionAssets(
+                REGION, "dom", null, null, "generic", "ns", "my-pkg", "1.0.0", null, null));
+        assertEquals("ValidationException", missingRepository.getErrorCode());
+
+        AwsException missingVersion = assertThrows(AwsException.class, () -> service.listPackageVersionAssets(REGION,
+                "dom", null, "repo", "generic", "ns", "my-pkg", null, null, null));
+        assertEquals("ValidationException", missingVersion.getErrorCode());
+    }
+
     // ---------------------------------------------------------- GetPackageVersionReadme
 
     @Test

@@ -931,9 +931,14 @@ public final class TestFixtures {
         }
     }
 
-    /** The stack's status once it is no longer {@code *_IN_PROGRESS}, or its last status at the timeout. */
+    /**
+     * The stack's status once it is no longer {@code *_IN_PROGRESS}, or its last status at the timeout.
+     * It checks every 50 ms against Floci, where a stack usually finishes in milliseconds, as the
+     * integration tests' {@code CfnStackWaits} does, and every 500 ms against real AWS.
+     */
     public static String awaitStackTerminal(CloudFormationClient cfn, String stackName, Duration timeout)
             throws InterruptedException {
+        long pollMillis = isRealAws() ? 500 : 50;
         long deadline = System.nanoTime() + timeout.toNanos();
         while (true) {
             String status = cfn.describeStacks(request -> request.stackName(stackName))
@@ -945,7 +950,7 @@ public final class TestFixtures {
             if (remainingNanos <= 0) {
                 return status;
             }
-            Thread.sleep(Math.min(500, Math.max(1, Duration.ofNanos(remainingNanos).toMillis())));
+            Thread.sleep(Math.min(pollMillis, Math.max(1, Duration.ofNanos(remainingNanos).toMillis())));
         }
     }
 

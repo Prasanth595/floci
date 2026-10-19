@@ -64,6 +64,7 @@ public class CloudFormationTemplateEngine {
     private final Function<String, String> importValueResolver;
     private final UnaryOperator<String> dynamicReferenceResolver;
     private final StackOutputResolver stackOutputResolver;
+    private final Map<String, String> parameterTypes;
     private final List<String> unresolvedIntrinsics = new ArrayList<>();
     /**
      * Above zero while {@code Fn::GetStackOutput}'s arguments resolve: CloudFormation hands them on
@@ -134,6 +135,27 @@ public class CloudFormationTemplateEngine {
                                  Function<String, String> importValueResolver,
                                  UnaryOperator<String> dynamicReferenceResolver,
                                  StackOutputResolver stackOutputResolver) {
+        this(accountId, region, stackName, stackId, parameters, physicalIds, resourceAttributes,
+                conditions, mappings, objectMapper, importValueResolver, dynamicReferenceResolver,
+                stackOutputResolver, Map.of());
+    }
+
+    /**
+     * @param parameterTypes each declared parameter's {@code Type}, which tells a {@code Ref} to a
+     *                       list parameter, resolved to the comma-joined text, from one to a string
+     *                       (see {@link #yieldsString})
+     */
+    CloudFormationTemplateEngine(String accountId, String region, String stackName, String stackId,
+                                 Map<String, String> parameters,
+                                 Map<String, String> physicalIds,
+                                 Map<String, Map<String, String>> resourceAttributes,
+                                 Map<String, Boolean> conditions,
+                                 Map<String, JsonNode> mappings,
+                                 ObjectMapper objectMapper,
+                                 Function<String, String> importValueResolver,
+                                 UnaryOperator<String> dynamicReferenceResolver,
+                                 StackOutputResolver stackOutputResolver,
+                                 Map<String, String> parameterTypes) {
         this.accountId = accountId;
         this.region = region;
         this.stackName = stackName;
@@ -147,6 +169,7 @@ public class CloudFormationTemplateEngine {
         this.importValueResolver = importValueResolver;
         this.dynamicReferenceResolver = dynamicReferenceResolver;
         this.stackOutputResolver = stackOutputResolver;
+        this.parameterTypes = parameterTypes;
     }
 
     /** The id of the stack this engine resolves for, as {@code AWS::StackId} returns it. */
@@ -257,7 +280,7 @@ public class CloudFormationTemplateEngine {
             if (node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr")) {
                 return objectMapper.valueToTree(resolveList(node));
             }
-            if (isIntrinsic(node) || node.has(GET_STACK_OUTPUT)) {
+            if (callsIntrinsic(node)) {
                 return TextNode.valueOf(resolve(node));
             }
             // Plain object: resolve each field.
@@ -284,7 +307,14 @@ public class CloudFormationTemplateEngine {
         return resolveNode(omitNoValue(node));
     }
 
-    private JsonNode omitNoValue(JsonNode node) {
+    /**
+     * The template node with every {@code AWS::NoValue} that stands for a member, a list item or an
+     * {@code Fn::If} branch left out, and every {@code Fn::If} outside another function replaced by
+     * the branch its condition chooses; other intrinsic calls stay as they are, unresolved. A
+     * {@link MissingNode} when the node itself is {@code AWS::NoValue}. A caller that needs to see how
+     * a member is written, a literal or a call, reads it from here before resolving it.
+     */
+    public JsonNode omitNoValue(JsonNode node) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return node;
         }
@@ -323,6 +353,14 @@ public class CloudFormationTemplateEngine {
             return resolved;
         }
         return node;
+    }
+
+    /**
+     * Whether {@code node} calls an intrinsic function, which {@link #resolveNode} evaluates, rather
+     * than being a literal object whose fields it resolves one by one.
+     */
+    public static boolean callsIntrinsic(JsonNode node) {
+        return node.isObject() && (isIntrinsic(node) || node.has(GET_STACK_OUTPUT));
     }
 
     private static boolean isIntrinsic(JsonNode node) {
@@ -576,6 +614,45 @@ public class CloudFormationTemplateEngine {
         }
         out.removeIf(value -> value == null || value.isBlank());
         return out;
+    }
+
+    /**
+     * Whether {@code node} yields a string, which CloudFormation's template validation refuses where
+     * a list is expected, "expected type: JSONArray, found: String" (measured, eu-west-1,
+     * 2026-10-18): a literal scalar, a {@code Ref} to a parameter whose type is not a list
+     * ({@code String}, {@code Number}, ...) or to a pseudo-parameter but
+     * {@code AWS::NotificationARNs}, {@code Fn::Select}, {@code Fn::Join}, {@code Fn::Sub},
+     * {@code Fn::Base64}, or an {@code Fn::If} choosing one of these. A {@code Ref} to a {@code CommaDelimitedList},
+     * {@code List<...>} or SSM list parameter is a list, though it resolves to the comma-joined
+     * text. What only provisioning can tell (a resource's {@code Ref}, {@code Fn::GetAtt},
+     * {@code Fn::ImportValue}, {@code Fn::FindInMap}) is not reported here.
+     */
+    public boolean yieldsString(JsonNode node) {
+        if (node == null || node.isNull() || node.isMissingNode() || node.isArray()) {
+            return false;
+        }
+        if (node.isValueNode()) {
+            return true;
+        }
+        if (node.has("Ref")) {
+            String name = node.get("Ref").asText();
+            if (name.startsWith("AWS::")) {
+                return !"AWS::NotificationARNs".equals(name) && !"AWS::NoValue".equals(name);
+            }
+            String type = parameterTypes.get(name);
+            return type != null && !isListParameterType(type);
+        }
+        if (node.has("Fn::If")) {
+            return yieldsString(selectIfBranch(node.get("Fn::If")));
+        }
+        return node.has("Fn::Select") || node.has("Fn::Join") || node.has("Fn::Sub") || node.has("Fn::Base64");
+    }
+
+    /** The parameter types whose value is a list: CommaDelimitedList, List<...> and their SSM forms. */
+    private static boolean isListParameterType(String type) {
+        return "CommaDelimitedList".equals(type) || type.startsWith("List<")
+                || "AWS::SSM::Parameter::Value<CommaDelimitedList>".equals(type)
+                || type.startsWith("AWS::SSM::Parameter::Value<List<");
     }
 
     private boolean isListValuedIntrinsic(JsonNode node) {

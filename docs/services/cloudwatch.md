@@ -203,6 +203,15 @@ scenarios tagged **Verified on Live AWS**, the recorded fixtures and their evide
 
 ### Logs Insights {#logs-insights}
 
+`StartQuery` accepts log group names and canonical log group ARNs in `logGroupIdentifiers`.
+Floci also accepts the `:*` suffix and the bare trailing `:` produced when Grafana removes
+the `*` from `DescribeLogGroups.arn`. Equivalent identifiers scan the group only once.
+The bare-colon tolerance applies only to `logGroupIdentifiers`, requires a complete Logs ARN,
+and does not rewrite values supplied through `logGroupName` or `logGroupNames`.
+The bare-colon spelling is a client-compatibility tolerance: the
+[AWS reference](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_StartQuery.html#CWL-StartQuery-request-logGroupIdentifiers)
+documents the canonical ARN, not that spelling. This tolerance does not change other APIs' ARN handling.
+
 `StartQuery` / `GetQueryResults` / `StopQuery` run a **subset** of the Logs Insights
 query language. Supported commands:
 

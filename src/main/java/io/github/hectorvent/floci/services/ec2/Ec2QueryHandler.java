@@ -6310,10 +6310,11 @@ public class Ec2QueryHandler {
             userDataEncoded = null;
         }
         String userData = Ec2UserDataDecoder.decode(userDataEncoded);
-        String iamInstanceProfileArn = p.getFirst("LaunchSpecification.IamInstanceProfile.Arn");
 
         List<Tag> spotRequestTags = parseTagsForResource(p, "spot-instances-request");
         List<Tag> instanceTags = parseTagsForResource(p, "instance");
+        // The profile is named by ARN or by name, as for RunInstances.
+        String iamInstanceProfileArn = resolveIamInstanceProfileArn(p, "LaunchSpecification.IamInstanceProfile");
 
         List<SpotInstanceRequest> requests = service.requestSpotInstances(region, spotPrice, instanceCount,
                 type, productDescription, imageId, instanceType, keyName, subnetId, securityGroupIds, userData, iamInstanceProfileArn,

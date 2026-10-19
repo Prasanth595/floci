@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -21,11 +23,14 @@ import jakarta.inject.Inject;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * EMR management-plane business logic. Cluster and step lifecycles are simulated
@@ -400,6 +405,97 @@ public class EmrService {
                     "Security configuration does not exist: " + name, 400);
         }
         secConfigStore.delete(name);
+    }
+
+    // ──────────────────────────── Release catalogue ────────────────────────────
+
+    private static final int MAX_RESULTS = 100;
+    private static final int INSTANCE_TYPE_PAGE = 50;
+
+    /**
+     * The catalogue's releases, newest first. Floci's configured default release label is always
+     * among them, with no applications when the catalogue does not describe it, so a non-default
+     * setting never makes Floci's own default unknown.
+     */
+    List<EmrReleaseCatalog.Release> releases() {
+        if (EmrReleaseCatalog.release(defaultReleaseLabel).isPresent()) {
+            return EmrReleaseCatalog.RELEASES;
+        }
+        List<EmrReleaseCatalog.Release> all = new ArrayList<>(EmrReleaseCatalog.RELEASES);
+        all.add(new EmrReleaseCatalog.Release(defaultReleaseLabel, List.of(), List.of()));
+        all.sort((a, b) -> EmrReleaseCatalog.NEWEST_FIRST.compare(a.label(), b.label()));
+        return all;
+    }
+
+    /**
+     * Release labels, newest first, narrowed by {@code prefix} (such as {@code emr-6}) and by
+     * {@code application}, a name or {@code name@version} (such as {@code spark@3.5.2}) matched
+     * without regard to case. A token belongs to the filters it was issued for, so one replayed
+     * with other filters, or altered, is refused.
+     */
+    public PaginatedResult<String> listReleaseLabels(String prefix, String application, String nextToken,
+                                                     Integer maxResults) {
+        if (maxResults != null && (maxResults < 1 || maxResults > MAX_RESULTS)) {
+            throw new AwsException("InvalidRequestException",
+                    "MaxResults must be between 1 and " + MAX_RESULTS + ".", 400);
+        }
+        String appName = null;
+        String appVersion = null;
+        if (application != null && !application.isBlank()) {
+            int at = application.indexOf('@');
+            appName = (at < 0 ? application : application.substring(0, at)).trim();
+            appVersion = at < 0 ? null : application.substring(at + 1).trim();
+        }
+        String name = appName;
+        String version = appVersion;
+        List<String> labels = releases().stream()
+                .filter(r -> prefix == null || prefix.isBlank() || r.label().startsWith(prefix))
+                .filter(r -> name == null || r.applications().stream().anyMatch(a -> a.name().equalsIgnoreCase(name)
+                        && (version == null || version.isEmpty() || a.version().equalsIgnoreCase(version))))
+                .map(EmrReleaseCatalog.Release::label)
+                .toList();
+        String namespace = "ListReleaseLabels|" + Objects.toString(prefix, "") + "|" + Objects.toString(application, "");
+        return Pagination.paginate(labels, positionIn(labels), maxResults != null ? maxResults : MAX_RESULTS,
+                nextToken, namespace, EmrService::invalidToken);
+    }
+
+    /** A release's applications and OS releases; no label means the latest release. */
+    public EmrReleaseCatalog.Release describeReleaseLabel(String label) {
+        return label == null || label.isBlank() ? releases().get(0) : requireRelease(label);
+    }
+
+    public PaginatedResult<EmrReleaseCatalog.InstanceType> listSupportedInstanceTypes(String label, String marker) {
+        if (label == null || label.isBlank()) {
+            throw new AwsException("InvalidRequestException", "ReleaseLabel is required.", 400);
+        }
+        requireRelease(label);
+        List<EmrReleaseCatalog.InstanceType> types = EmrReleaseCatalog.INSTANCE_TYPES;
+        return Pagination.paginate(types, positionIn(types), INSTANCE_TYPE_PAGE, marker,
+                "ListSupportedInstanceTypes|" + label, EmrService::invalidToken);
+    }
+
+    private EmrReleaseCatalog.Release requireRelease(String label) {
+        return releases().stream()
+                .filter(r -> r.label().equals(label))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidRequestException",
+                        "The specified release label " + label + " is not valid.", 400));
+    }
+
+    /**
+     * A cursor that keeps the catalogue's own order: {@link Pagination} sorts by cursor, and the
+     * catalogue is newest first rather than alphabetical.
+     */
+    private static <T> Function<T, String> positionIn(List<T> items) {
+        Map<T, String> positions = new HashMap<>();
+        for (int i = 0; i < items.size(); i++) {
+            positions.put(items.get(i), String.format("%06d", i));
+        }
+        return positions::get;
+    }
+
+    private static AwsException invalidToken(String token) {
+        return new AwsException("InvalidRequestException", "Invalid pagination token: " + token, 400);
     }
 
     public List<SecurityConfiguration> listSecurityConfigurations() {

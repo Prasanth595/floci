@@ -18,6 +18,12 @@ import java.util.List;
  * <p>{@code notes} and {@code rejectionReason} both exist on the shape and each has exactly one
  * writer: {@code UpdateDelegationRequest} carries notes for an administrator, and
  * {@code RejectDelegationRequest} carries the explanation for the refusal.
+ *
+ * <p>{@code exchangeToken} and {@code tokenReleasedAt} are the only two fields the shape does not
+ * publish. AWS hands the exchange token to the partner over SNS and returns it from no API, so it
+ * lives on the record that issued it, and the release instant lives beside it because the
+ * credentials it mints expire at release plus {@code sessionDuration} however late it is redeemed.
+ * Neither is written to the wire.
  */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -45,6 +51,8 @@ public class DelegationRequest {
     private Instant createDate;
     private Instant updatedTime;
     private Instant expirationTime;
+    private String exchangeToken;
+    private Instant tokenReleasedAt;
 
     public DelegationRequest() {}
 
@@ -121,4 +129,10 @@ public class DelegationRequest {
 
     public Instant getExpirationTime() { return expirationTime; }
     public void setExpirationTime(Instant expirationTime) { this.expirationTime = expirationTime; }
+
+    public String getExchangeToken() { return exchangeToken; }
+    public void setExchangeToken(String exchangeToken) { this.exchangeToken = exchangeToken; }
+
+    public Instant getTokenReleasedAt() { return tokenReleasedAt; }
+    public void setTokenReleasedAt(Instant tokenReleasedAt) { this.tokenReleasedAt = tokenReleasedAt; }
 }

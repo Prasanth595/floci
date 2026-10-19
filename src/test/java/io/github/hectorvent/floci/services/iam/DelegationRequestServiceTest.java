@@ -13,6 +13,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -39,6 +40,8 @@ class DelegationRequestServiceTest {
     private static final String PARTNER = "000000000001";
     private static final String CUSTOMER = "000000000002";
     private static final String CUSTOMER_ARN = "arn:aws:iam::000000000002:user/admin";
+    /** A second identity in the customer's account, the privileged approver the reference names. */
+    private static final String APPROVER_ARN = "arn:aws:iam::000000000002:user/security-admin";
     private static final String REGION = "us-east-1";
 
     /** Enough trials and racers to surface an unguarded read-then-write reliably. */
@@ -57,13 +60,19 @@ class DelegationRequestServiceTest {
 
     private DelegationRequestService.Created createdIn(String region, String workflowId,
                                                        String ownerAccountId) {
+        return createdIn(region, workflowId, ownerAccountId, null);
+    }
+
+    private DelegationRequestService.Created createdIn(String region, String workflowId,
+                                                       String ownerAccountId,
+                                                       Boolean onlySendByOwner) {
         return service.create(PARTNER, region, new DelegationRequestService.NewRequest(
                 "Set up the integration", "arn:aws:sns:us-east-1:000000000001:partner-notifications",
                 workflowId, 3600,
                 new DelegationPermission("arn:aws:iam::partner:policy/template/example",
                         List.of(new PolicyParameter("BucketName", PolicyParameter.TYPE_STRING,
                                 List.of("example-bucket")))),
-                ownerAccountId, null, null, null));
+                ownerAccountId, null, null, onlySendByOwner));
     }
 
     private DelegationRequest created(String workflowId, String ownerAccountId) {
@@ -73,6 +82,16 @@ class DelegationRequestServiceTest {
     private DelegationRequest assigned(String workflowId) {
         DelegationRequest request = created(workflowId, null);
         return service.associate(CUSTOMER, CUSTOMER_ARN, request.getDelegationRequestId());
+    }
+
+    private DelegationRequest accepted(String workflowId) {
+        DelegationRequest request = assigned(workflowId);
+        return service.accept(CUSTOMER, CUSTOMER_ARN, request.getDelegationRequestId());
+    }
+
+    private DelegationRequest finalized(String workflowId) {
+        DelegationRequest request = accepted(workflowId);
+        return service.release(CUSTOMER, CUSTOMER_ARN, request.getDelegationRequestId());
     }
 
     /**
@@ -93,6 +112,118 @@ class DelegationRequestServiceTest {
 
         assertEquals("https://" + host + "/iam/home?region=" + region + "#/delegation_requests/"
                 + created.request().getDelegationRequestId(), created.consoleDeepLink());
+    }
+
+    @Test
+    void releasingTheTokenFinalizesTheRequestAndMintsSomethingToExchange() {
+        DelegationRequest request = finalized("workflow-1");
+
+        assertEquals(DelegationRequestState.FINALIZED, request.getState());
+        assertNotNull(request.getExchangeToken());
+        // The week FINALIZED runs for and the token's own window both start at the release, so
+        // the one instant the transition took is the anchor for both.
+        assertNotNull(request.getTokenReleasedAt());
+        assertEquals(request.getTokenReleasedAt().plus(Duration.ofDays(7)),
+                request.getExpirationTime());
+        // No operation on the family answers the token, so nothing but the record holds it.
+        assertEquals(request.getExchangeToken(),
+                service.get(CUSTOMER, request.getDelegationRequestId()).getExchangeToken());
+    }
+
+    @Test
+    void onlyAnAcceptedRequestReleasesItsToken() {
+        String assignedId = assigned("workflow-1").getDelegationRequestId();
+        assertEquals("ConcurrentModification", assertThrows(AwsException.class,
+                () -> service.release(CUSTOMER, CUSTOMER_ARN, assignedId)).getErrorCode());
+
+        String finalizedId = finalized("workflow-2").getDelegationRequestId();
+        assertEquals("ConcurrentModification", assertThrows(AwsException.class,
+                () -> service.release(CUSTOMER, CUSTOMER_ARN, finalizedId)).getErrorCode(),
+                "the reference says finalizing cannot be rolled back, so it cannot be repeated");
+    }
+
+    /**
+     * {@code OnlySendByOwner} "prevents any party other than the owner from calling
+     * SendDelegationToken API for this delegation request", for the case the reference names: the
+     * owner forwarded it to a more privileged user for approval, and that approver must not be the
+     * one who releases the token. It is the one call on this family decided per identity rather
+     * than per account.
+     */
+    @Test
+    void aRequestMarkedOwnerOnlyIsReleasedByItsOwnerAndNobodyElse() {
+        String id = createdIn(REGION, "workflow-1", null, true).request().getDelegationRequestId();
+        service.associate(CUSTOMER, CUSTOMER_ARN, id);
+        service.update(CUSTOMER, id, "please approve");
+        service.accept(CUSTOMER, APPROVER_ARN, id);
+        assertEquals(APPROVER_ARN, service.get(CUSTOMER, id).getApproverId());
+
+        assertEquals("AccessDenied", assertThrows(AwsException.class,
+                () -> service.release(CUSTOMER, APPROVER_ARN, id)).getErrorCode());
+        assertEquals(DelegationRequestState.ACCEPTED, service.get(CUSTOMER, id).getState());
+
+        assertEquals(DelegationRequestState.FINALIZED,
+                service.release(CUSTOMER, CUSTOMER_ARN, id).getState());
+    }
+
+    @Test
+    void withoutThatFlagTheApproverReleasesItJustAsWell() {
+        String id = createdIn(REGION, "workflow-1", null, null).request().getDelegationRequestId();
+        service.associate(CUSTOMER, CUSTOMER_ARN, id);
+        service.accept(CUSTOMER, APPROVER_ARN, id);
+
+        assertEquals(DelegationRequestState.FINALIZED,
+                service.release(CUSTOMER, APPROVER_ARN, id).getState());
+    }
+
+    /**
+     * "The delegation period starts when customer releases the exchange token, not when the
+     * product provider redeems it", and "all credentials obtained from the same exchange token
+     * expire at the same time", so a later exchange buys a shorter session rather than a fresh
+     * hour.
+     */
+    @Test
+    void everyExchangeOfOneTokenExpiresWhenTheFirstWouldHave() {
+        DelegationRequest request = finalized("workflow-1");
+        Instant releasedAt = request.getTokenReleasedAt();
+
+        DelegationRequestService.Redeemed first =
+                service.redeem(PARTNER, request.getExchangeToken());
+        assertEquals(releasedAt.plus(Duration.ofSeconds(3600)), first.credentialExpiry());
+
+        clock.advance(Duration.ofMinutes(50));
+        DelegationRequestService.Redeemed second =
+                service.redeem(PARTNER, request.getExchangeToken());
+        assertEquals(first.credentialExpiry(), second.credentialExpiry());
+    }
+
+    @Test
+    void onlyTheAccountThatFiledTheRequestCanExchangeItsToken() {
+        DelegationRequest request = finalized("workflow-1");
+
+        assertEquals("AccessDenied", assertThrows(AwsException.class,
+                () -> service.redeem(CUSTOMER, request.getExchangeToken())).getErrorCode());
+    }
+
+    @Test
+    void aTokenPastTheReleasedDurationIsNoLongerExchangeable() {
+        DelegationRequest request = finalized("workflow-1");
+
+        clock.advance(Duration.ofSeconds(3599));
+        assertNotNull(service.redeem(PARTNER, request.getExchangeToken()));
+
+        clock.advance(Duration.ofSeconds(1));
+        assertEquals("ExpiredTradeInTokenException", assertThrows(AwsException.class,
+                () -> service.redeem(PARTNER, request.getExchangeToken())).getErrorCode());
+    }
+
+    @Test
+    void aTokenNothingMatchesReadsAsOneThatExpired() {
+        finalized("workflow-1");
+
+        // Only three errors are modeled and none says "no such token": from the caller's side a
+        // token that never existed and one that ran out call for the same retry.
+        assertEquals("ExpiredTradeInTokenException", assertThrows(AwsException.class,
+                () -> service.redeem(PARTNER, "not-a-token")).getErrorCode());
     }
 
     @Test

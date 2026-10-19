@@ -231,7 +231,7 @@ public class ResourceArnBuilder {
      * {@code CreateServiceLinkedRole}, an access key id for {@code GetAccessKeyLastUsed}, a
      * deletion task id for {@code GetServiceLinkedRoleDeletionStatus}, an Organizations
      * entity path for {@code GenerateOrganizationsAccessReport}, whose resource lives in another
-     * service's tree, and a request id for the four delegation actions that name one.
+     * service's tree, and a request id for the five delegation actions that name one.
      *
      * <p>The resolver is the value rather than a branch elsewhere, so this cannot become a list
      * that says an action is handled while the dispatch has nothing for it. The keys are also what
@@ -248,7 +248,8 @@ public class ResourceArnBuilder {
             "AssociateDelegationRequest", ResourceArnBuilder::delegationRequestArn,
             "AcceptDelegationRequest", ResourceArnBuilder::delegationRequestArn,
             "RejectDelegationRequest", ResourceArnBuilder::delegationRequestArn,
-            "GetDelegationRequest", ResourceArnBuilder::delegationRequestArn);
+            "GetDelegationRequest", ResourceArnBuilder::delegationRequestArn,
+            "SendDelegationToken", ResourceArnBuilder::delegationRequestArn);
 
     /** How one of {@link #DERIVED_RESOLVERS} reads its resource out of the request. */
     interface DerivedResolver {
@@ -1065,7 +1066,8 @@ public class ResourceArnBuilder {
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
-    private JsonNode readJsonBody(ContainerRequestContext ctx) {
+    /** The request's JSON or CBOR body, buffered so the handler still reads it, or null when it has none. */
+    public JsonNode readJsonBody(ContainerRequestContext ctx) {
         Object cached = ctx.getProperty("floci.bufferedJsonBody");
         if (cached instanceof JsonNode node) {
             return node;

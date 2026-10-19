@@ -414,6 +414,44 @@ public class CodeArtifactController {
                 .build();
     }
 
+    @POST
+    @Path("/v1/package/version/assets")
+    @Consumes(MediaType.WILDCARD)
+    public Response listPackageVersionAssets(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                              @QueryParam("domain-owner") String domainOwner,
+                                              @QueryParam("repository") String repository,
+                                              @QueryParam("format") String format,
+                                              @QueryParam("namespace") String namespace,
+                                              @QueryParam("package") String packageName,
+                                              @QueryParam("version") String version,
+                                              @QueryParam("max-results") String maxResults,
+                                              @QueryParam("next-token") String nextToken) {
+        String region = regionResolver.resolveRegion(headers);
+        CodeArtifactService.PackageVersionAssetsListResult result = service.listPackageVersionAssets(region, domain,
+                domainOwner, repository, format, namespace, packageName, version,
+                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("format", result.format());
+        if (result.namespace() != null) {
+            response.put("namespace", result.namespace());
+        }
+        response.put("package", result.packageName());
+        response.put("version", result.version());
+        response.put("versionRevision", result.versionRevision());
+        ArrayNode assets = response.putArray("assets");
+        result.assets().forEach(asset -> {
+            ObjectNode node = assets.addObject();
+            node.put("name", asset.name());
+            node.put("size", asset.size());
+            ObjectNode hashes = node.putObject("hashes");
+            asset.hashes().forEach(hashes::put);
+        });
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return ok(response);
+    }
+
     @GET
     @Path("/v1/package/version/readme")
     public Response getPackageVersionReadme(@Context HttpHeaders headers, @QueryParam("domain") String domain,

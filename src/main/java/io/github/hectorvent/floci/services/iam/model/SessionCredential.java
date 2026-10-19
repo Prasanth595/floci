@@ -20,7 +20,9 @@ public class SessionCredential {
     private String sessionPolicyDocument;
     /**
      * Account of the caller that minted this session, captured at mint time. Used to route
-     * temporary credentials that carry no role ARN (e.g. GetSessionToken) back to the caller.
+     * temporary credentials that carry no role ARN (e.g. GetSessionToken) back to the caller. A
+     * delegated session holds the customer's account here instead of the partner's that redeemed
+     * the token, that being the account the credentials act in.
      */
     private String originAccountId;
     /** True when this session belongs to a Floci-launched Lambda container. */
@@ -39,6 +41,15 @@ public class SessionCredential {
     private String issuerArn;
     /** The unique ID of the IAM user named by {@link #issuerArn}, so a same-named replacement is not it. */
     private String issuerUserId;
+    /**
+     * The identity that approved the delegation request these credentials were exchanged for, which
+     * AcceptDelegationRequest records as the one "that gets mapped to the delegated credential" and
+     * GetDelegatedAccessToken reports as its {@code AssumedPrincipal}. Null for every other
+     * session. It is held apart from {@link #roleArn} because it is whatever identity approved the
+     * request, an IAM user or the account root as much as a role, and reading it as a role would
+     * resolve it by name.
+     */
+    private String delegatedApproverArn;
 
     public SessionCredential() {}
 
@@ -136,4 +147,7 @@ public class SessionCredential {
 
     public String getIssuerUserId() { return issuerUserId; }
     public void setIssuerUserId(String issuerUserId) { this.issuerUserId = issuerUserId; }
+
+    public String getDelegatedApproverArn() { return delegatedApproverArn; }
+    public void setDelegatedApproverArn(String arn) { this.delegatedApproverArn = arn; }
 }

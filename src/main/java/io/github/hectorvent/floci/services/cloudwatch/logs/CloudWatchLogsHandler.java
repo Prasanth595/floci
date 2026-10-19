@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.AccountPolicy;
@@ -22,12 +23,15 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class CloudWatchLogsHandler {
 
     private static final Pattern LOG_GROUP_NAME = Pattern.compile("[._/#A-Za-z0-9-]+");
+    private static final Pattern QUERY_LOG_GROUP_ARN_WITH_COLON = Pattern.compile("arn:"
+            + AwsArnUtils.PARTITION_REGEX + ":logs:[a-z0-9-]+:[0-9]{12}:log-group:(" + LOG_GROUP_NAME.pattern() + "):");
 
     private final CloudWatchLogsService logsService;
     private final CloudWatchLogsCrossAccountService crossAccountService;
@@ -397,7 +401,7 @@ public class CloudWatchLogsHandler {
         if (request.has("logGroupName")) {
             logGroupNames.add(extractLogGroupNameFromArn(request.path("logGroupName").asText()));
         }
-        request.path("logGroupIdentifiers").forEach(n -> logGroupNames.add(extractLogGroupNameFromArn(n.asText())));
+        request.path("logGroupIdentifiers").forEach(n -> logGroupNames.add(resolveQueryLogGroupName(n.asText())));
 
         long startTime = request.path("startTime").asLong();
         long endTime = request.path("endTime").asLong();
@@ -408,6 +412,18 @@ public class CloudWatchLogsHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("queryId", queryId);
         return Response.ok(response).build();
+    }
+
+    private static String resolveQueryLogGroupName(String identifier) {
+        // Grafana strips only the '*' from DescribeLogGroups' ARN. Keep this tolerance identifier-only.
+        Matcher arn = QUERY_LOG_GROUP_ARN_WITH_COLON.matcher(identifier == null ? "" : identifier);
+        if (arn.matches()) {
+            String name = arn.group(1);
+            if (name.length() <= 512) {
+                return name;
+            }
+        }
+        return extractLogGroupNameFromArn(identifier);
     }
 
     /**

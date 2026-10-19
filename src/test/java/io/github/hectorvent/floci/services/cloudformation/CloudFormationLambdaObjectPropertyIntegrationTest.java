@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -35,6 +36,15 @@ class CloudFormationLambdaObjectPropertyIntegrationTest {
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
     private static final String LAMBDA = "/2015-03-31/functions/";
+    /** A String, a Number and a CommaDelimitedList parameter, and a condition that holds. */
+    private static final String LIST_SECTIONS = """
+            "Parameters": {
+              "Str": {"Type": "String", "Default": "x86_64"},
+              "Num": {"Type": "Number", "Default": "1"},
+              "Csv": {"Type": "CommaDelimitedList", "Default": "x86_64"}
+            },
+            "Conditions": {"Yes": {"Fn::Equals": ["a", "a"]}},
+            """;
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
@@ -239,6 +249,80 @@ class CloudFormationLambdaObjectPropertyIntegrationTest {
         });
     }
 
+    /**
+     * Measured on CloudFormation (eu-west-1, 2026-10-18): where a list is expected, a Ref to a String
+     * or Number parameter, Ref AWS::Region, Fn::Select, Fn::Join, Fn::Sub, Fn::Base64 and an Fn::If
+     * choosing a literal string fail validation with "found: String", while an Fn::If choosing a Ref to a
+     * CommaDelimitedList is a list. A nested stack's own parameter types decide for its resources.
+     */
+    @Test
+    void aListPropertyThatYieldsAStringFailsTheCreate() {
+        for (String architectures : List.of("{\"Ref\": \"Str\"}", "{\"Ref\": \"Num\"}", "{\"Ref\": \"AWS::Region\"}",
+                "{\"Fn::Select\": [0, {\"Ref\": \"Csv\"}]}", "{\"Fn::Join\": [\",\", {\"Ref\": \"Csv\"}]}",
+                "{\"Fn::Sub\": \"x86_64\"}", "{\"Fn::Base64\": \"x86_64\"}",
+                "{\"Fn::If\": [\"Yes\", \"x86_64\", {\"Ref\": \"AWS::NoValue\"}]}")) {
+            String stack = stackName("yields-string");
+            submit("CreateStack", stack, template(LIST_SECTIONS, ",\"Architectures\": " + architectures));
+            assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status(), architectures);
+            assertEventReason(stack, "Property [Architectures] expected type: JSONArray, found: String");
+        }
+
+        String listChosen = stackName("if-list");
+        submit("CreateStack", listChosen, template(LIST_SECTIONS,
+                ",\"Architectures\": {\"Fn::If\": [\"Yes\", {\"Ref\": \"Csv\"}, [\"arm64\"]]}"));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(listChosen, CFN_AUTH).status());
+        given().when().get(LAMBDA + functionName(listChosen) + "/configuration")
+            .then().statusCode(200)
+            .body("Architectures", contains("x86_64"));
+
+        String bucket = "cfn-lambda-nested-" + Long.toString(System.nanoTime(), 36);
+        given().when().put("/" + bucket).then().statusCode(200);
+        cleanup.register(() -> {
+            given().when().delete("/" + bucket + "/string.json");
+            given().when().delete("/" + bucket + "/list.json");
+            given().when().delete("/" + bucket);
+        });
+        for (String type : List.of("String", "CommaDelimitedList")) {
+            String child = """
+                    {"Parameters": {"Archs": {"Type": "%s"}},
+                     "Resources": {"Fn": {"Type": "AWS::Lambda::Function", "Properties": {
+                       "Runtime": "python3.14", "Handler": "index.handler",
+                       "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                       "Code": {"ZipFile": "def handler(e, c): return 'ok'"},
+                       "Architectures": {"Ref": "Archs"}}}},
+                     "Outputs": {"Name": {"Value": {"Ref": "Fn"}}}}
+                    """.formatted(type);
+            String key = "String".equals(type) ? "string.json" : "list.json";
+            given().contentType("application/json").body(child)
+                .when().put("/" + bucket + "/" + key).then().statusCode(200);
+            String parent = stackName("nested-" + key.replace(".json", ""));
+            submit("CreateStack", parent, """
+                    {"Resources": {"Child": {"Type": "AWS::CloudFormation::Stack", "Properties": {
+                      "TemplateURL": "http://localhost/%s/%s", "Parameters": {"Archs": "x86_64"}}}}}
+                    """.formatted(bucket, key));
+            assertEquals("String".equals(type) ? "ROLLBACK_COMPLETE" : "CREATE_COMPLETE",
+                    CfnStackWaits.awaitTerminal(parent, CFN_AUTH).status(), type);
+            String childStack = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStackResource")
+                .formParam("StackName", parent)
+                .formParam("LogicalResourceId", "Child")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath().getString("**.find { it.name() == 'PhysicalResourceId' }");
+            if ("String".equals(type)) {
+                assertEventReason(childStack, "Property [Architectures] expected type: JSONArray, found: String");
+            } else {
+                given().when().get(LAMBDA + functionName(childStack) + "/configuration")
+                    .then().statusCode(200)
+                    .body("Architectures", contains("x86_64"));
+            }
+        }
+    }
+
     private String publishLayer() throws IOException {
         String layerName = "cfn-lambda-list-" + Long.toString(System.nanoTime(), 36);
         ByteArrayOutputStream zip = new ByteArrayOutputStream();
@@ -269,8 +353,14 @@ class CloudFormationLambdaObjectPropertyIntegrationTest {
     }
 
     private static String template(String property) {
+        return template("", property);
+    }
+
+    /** {@link #template(String)} after the template sections {@code sections}, each followed by a comma. */
+    private static String template(String sections, String property) {
         return """
                 {
+                  %s
                   "Resources": {
                     "Fn": {
                       "Type": "AWS::Lambda::Function",
@@ -285,7 +375,7 @@ class CloudFormationLambdaObjectPropertyIntegrationTest {
                   },
                   "Outputs": {"Name": {"Value": {"Ref": "Fn"}}}
                 }
-                """.formatted(property);
+                """.formatted(sections, property);
     }
 
     private static void submit(String action, String stackName, String template) {

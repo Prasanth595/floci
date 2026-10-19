@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.path.json.JsonPath;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -17,6 +19,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -613,6 +616,39 @@ class CodeArtifactPypiDockerIntegrationTest {
                 .then().statusCode(200)
                 .extract().asByteArray();
         assertEquals("new-multi-pypi-wheel", new String(copiedWheel, StandardCharsets.UTF_8));
+    }
+
+    /**
+     * The real-world gap this closes: {@code ListPackageVersionAssets} used to not exist at all.
+     * Confirms the bridge enumerates pypi's one-asset-per-version simple index entry against the
+     * real pypiserver sidecar (not a mock) and reports the exact byte size and hash of a freshly
+     * uploaded file. A throwaway package, not {@link #PACKAGE_NAME}: {@link
+     * #deletePackageRemovesTheFileFromTheRealPypiserverSidecar} deletes that fixture for good with
+     * no republish afterward, unlike this format's sibling test classes.
+     */
+    @Test
+    @Order(18)
+    void listPackageVersionAssetsBridgesToTheRealPypiserverSidecar() {
+        String packageName = "list-assets-pypi-pkg";
+        String filename = "list_assets_pypi_pkg-1.0.0.tar.gz";
+        byte[] content = "list-assets-sdist-bytes".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename, content))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        JsonPath body = given().header("Authorization", AUTH)
+                .post("/v1/package/version/assets?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + packageName + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("package", equalTo(packageName))
+                .body("assets.size()", equalTo(1))
+                .body("assets[0].name", equalTo(filename))
+                .body("assets[0].size", equalTo(content.length))
+                .extract().jsonPath();
+        Map<String, String> hashes = body.getMap("assets[0].hashes");
+        assertEquals(Digests.sha256Hex(content), hashes.get("SHA-256"));
     }
 
     /**

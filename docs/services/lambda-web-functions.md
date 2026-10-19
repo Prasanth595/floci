@@ -85,7 +85,7 @@ The platform answers these cases itself, with the AWS HTML pages and `lambda-web
 | 404 | `Platform.InvalidEndpoint` | The `Host` is a `lambda-web` domain Floci did not mint |
 | 429 | `Platform.EndpointMaxEnvThrottle` | Every environment is full and the endpoint runs `maxEnvironments` |
 | 429 | `Platform.EndpointRequestThrottle` | The requests exceed the endpoint's `rateLimit` |
-| 502 | `Application.TimeoutListenError`, `Application.InitCodeError`, `Runtime.Exit` | The server did not listen within 9 seconds, threw at import, or exited at start |
+| 502 | `Application.TimeoutListenError`, `Application.InitCodeError`, `Runtime.ImportCodeError`, `Runtime.Exit`, `Runtime.ExitError` | The server did not listen within 9 seconds, threw at import, could not find a module at import, or exited at start with status 0 or another status |
 | 503 | `Platform.EndpointDisabled` | The endpoint's `rateLimit` is 0 |
 | 503 | `Runtime.OriginRequestError` | The process died while handling the request, or tens of milliseconds before it |
 | 504 | `Runtime.RequestTimeout` | No response within the revision's `timeoutSeconds` |
@@ -106,7 +106,7 @@ The platform writes the `platform.*` events of the [system log schema](https://d
 | Event | When |
 | --- | --- |
 | `platform.initStart` | The environment starts |
-| `platform.initReport` | The server listens, or fails to, with the error type of the `502` page. A server that does not listen also gets an `ERROR` event that says so, unless `applicationLogLevel` is `FATAL` |
+| `platform.initReport` | The server listens, or fails to, with the error type of the `502` page. A server that does not listen or an app that fails at import also gets an `ERROR` event that says so, unless `applicationLogLevel` is `FATAL` |
 | `platform.invokeStart` | Right after a successful `initReport` |
 | `platform.requestComplete` | At `DEBUG`, for each request the environment took, with the status, the body bytes and the error type of a `503` or `504` page |
 | `platform.invokeSummary` | Every 60 seconds from `invokeStart`, and once more when the environment ends |

@@ -331,6 +331,7 @@ public class IamQueryHandler {
             case "AcceptDelegationRequest" -> handleAcceptDelegationRequest(params, authorization);
             case "RejectDelegationRequest" -> handleRejectDelegationRequest(params);
             case "UpdateDelegationRequest" -> handleUpdateDelegationRequest(params);
+            case "SendDelegationToken" -> handleSendDelegationToken(params, authorization);
             case "GetDelegationRequest" -> handleGetDelegationRequest(params);
             case "ListDelegationRequests" -> handleListDelegationRequests(params);
 
@@ -2533,6 +2534,25 @@ public class IamQueryHandler {
         delegationRequestService.update(regionResolver.getAccountId(),
                 getParam(params, "DelegationRequestId"), getParam(params, "Notes"));
         return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateDelegationRequest",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * Releases the exchange token on an accepted request, which finalizes it.
+     *
+     * <p>The operation answers no output shape at all, so the envelope carries no result, and the
+     * token itself goes nowhere from here: AWS publishes it on the partner's SNS topic and
+     * returns it from no operation on the family.
+     *
+     * <p>The caller's ARN goes with the account because this is the one delegation call that can
+     * be scoped to an identity: {@code OnlySendByOwner} holds the release to whoever claimed the
+     * request, who need not be the approver that accepted it.
+     */
+    private Response handleSendDelegationToken(MultivaluedMap<String, String> params,
+                                               String authorization) {
+        delegationRequestService.release(regionResolver.getAccountId(),
+                callerPrincipalArn(authorization), getParam(params, "DelegationRequestId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("SendDelegationToken",
                 AwsNamespaces.IAM)).build();
     }
 

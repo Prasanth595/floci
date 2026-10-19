@@ -114,6 +114,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
     private static final String FEDERATED_USER_PREFIX = "federated-user/";
+    private static final String ASSUMED_ROLE_PREFIX = "assumed-role/";
     private static final ObjectMapper POLICY_MAPPER = new ObjectMapper();
     private static final String SCOPED_IDENTITY_SESSION_BASE_POLICY =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}";
@@ -4580,6 +4581,32 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         sessions.put(sessionAccessKeyId, session);
     }
 
+    /**
+     * Stores the session GetDelegatedAccessToken exchanges a released token for. It acts in the
+     * customer's account as the identity that approved the delegation request: accepting one
+     * "records the details and the state of the identity that called this API", and "this is the
+     * identity that gets mapped to the delegated credential".
+     *
+     * <p>The approver is held in its own field rather than in the role ARN slot
+     * {@link #registerIssuedSession} fills for a federated user. That slot is read by name: an
+     * approver named like a role would borrow that role's permissions, and one named like no role
+     * at all would borrow none.
+     *
+     * <p>The account is the owner's either way. A request is visible only from the account that
+     * claimed it, so whatever identity accepted it is an identity in that same account.
+     *
+     * <p>No issuing key is recorded. The permissions come from the customer's side of the
+     * delegation, so the partner key that redeemed the token must not bound the session.
+     */
+    public void registerDelegatedSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
+                                         String delegatedApproverArn, Instant expiration,
+                                         String sessionPolicyDocument, String ownerAccountId) {
+        SessionCredential session = new SessionCredential(sessionAccessKeyId, secretAccessKey, sessionToken,
+                null, expiration, sessionPolicyDocument, ownerAccountId);
+        session.setDelegatedApproverArn(delegatedApproverArn);
+        sessions.put(sessionAccessKeyId, session);
+    }
+
     /** Stores a temporary session in an explicit account namespace. */
     public void registerSessionForAccount(String accountId, String sessionAccessKeyId, String secretAccessKey,
                                           String roleArn, Instant expiration,
@@ -4841,8 +4868,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * issuer was recorded), or its user has since been deleted or recreated under the same name.
      * Such a session is no credential at all, so that neither a resource policy nor a fallback to the
      * account root can act on its behalf.
+     *
+     * <p>A delegated session is not one of these. It records its approver rather than an issuer,
+     * by design, so it would read as orphaned on the issuer being absent and stop routing to the
+     * account it acts in. An approver that has since gone is answered where the session's
+     * permissions are resolved, which grants it nothing.
      */
     private boolean isOrphanedIssuedSession(SessionCredential session) {
+        if (session.getDelegatedApproverArn() != null) {
+            return false;
+        }
         boolean issued = isFederatedUserSession(session)
                 || (session.getRoleArn() == null && session.getPresignedAction() == null);
         return issued && !issuedByRoot(session) && issuingUser(session).isEmpty();
@@ -4923,6 +4958,90 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return new CallerContext(identityPolicies, context.sessionPolicyDocument(), context.boundaryPolicyDocument());
     }
 
+    /**
+     * Delegated credentials carry the permissions of the identity that approved the request,
+     * within the request's permission policy wherever it holds one. AWS renders that policy from
+     * the partner's registered template, which no API registers here, so the approver's own
+     * permissions are the whole of the bound today, which is also how the user guide reads it: "if
+     * you don't have access to the requested services and actions, the product provider does not
+     * receive these permissions when you approve the request". An approver that no longer exists
+     * hands over nothing.
+     */
+    private CallerContext delegatedApproverContext(SessionCredential session) {
+        String approverArn = session.getDelegatedApproverArn();
+        String sessionPolicy = session.getSessionPolicyDocument();
+        if (isAccountRootArn(approverArn)) {
+            return new CallerContext(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY), sessionPolicy, null);
+        }
+        Optional<IamUser> approver = delegatedApproverUser(approverArn);
+        if (approver.isPresent()) {
+            return new CallerContext(userIdentityPolicies(approver.get().getUserName()), sessionPolicy,
+                    resolveUserBoundaryDocument(approver.get().getUserName()));
+        }
+        return delegatedApproverRole(approverArn)
+                .map(role -> new CallerContext(collectRolePolicies(role.getArn()), sessionPolicy,
+                        resolveRoleBoundaryDocument(role.getArn())))
+                .orElse(CallerContext.of(List.of()));
+    }
+
+    /**
+     * The identity delegated credentials report, read off the approver ARN the request recorded:
+     * an IAM user answers as itself, with the {@code aws:username} only a user has, and an account
+     * root as the account. It is the same ARN GetDelegatedAccessToken answered as its
+     * {@code AssumedPrincipal}.
+     */
+    private Optional<CallerArns> delegatedApproverArns(SessionCredential session) {
+        String approverArn = session.getDelegatedApproverArn();
+        if (isAccountRootArn(approverArn)) {
+            return Optional.of(CallerArns.accountRoot(approverArn,
+                    AwsArnUtils.accountOrDefault(approverArn, regionResolver.getAccountId())));
+        }
+        Optional<IamUser> approver = delegatedApproverUser(approverArn);
+        if (approver.isPresent()) {
+            return Optional.of(callerForUser(approver.get()));
+        }
+        return delegatedApproverRole(approverArn)
+                .map(role -> new CallerArns(approverArn, role.getArn(), CallerArns.TYPE_ASSUMED_ROLE,
+                        null, null, role.getPermissionsBoundaryArn() != null));
+    }
+
+    /** The {@code aws:userid} of delegated credentials: the approver's, in the approver's shape. */
+    private Optional<String> delegatedApproverUserId(String approverArn) {
+        if (isAccountRootArn(approverArn)) {
+            return Optional.of(AwsArnUtils.accountOrDefault(approverArn, regionResolver.getAccountId()));
+        }
+        return delegatedApproverUser(approverArn).map(IamUser::getUserId);
+    }
+
+    /** The IAM user an approver ARN names, and only where it names one at all. */
+    private Optional<IamUser> delegatedApproverUser(String approverArn) {
+        return approverArn != null && AwsArnUtils.parse(approverArn).resource().startsWith("user/")
+                ? userFromArnOrName(approverArn) : Optional.empty();
+    }
+
+    /**
+     * The role an approver ARN names, whether it names the role itself or a session assumed from
+     * it. An assumed-role ARN carries the role's name in the middle of its resource, the last
+     * segment being the session's name, so a lookup by last segment would miss the role entirely.
+     */
+    private Optional<IamRole> delegatedApproverRole(String approverArn) {
+        if (approverArn == null) {
+            return Optional.empty();
+        }
+        String resource = AwsArnUtils.parse(approverArn).resource();
+        if (resource.startsWith(ASSUMED_ROLE_PREFIX)) {
+            String[] parts = resource.split("/");
+            return parts.length < 2 ? Optional.empty()
+                    : findRole(AwsArnUtils.accountOrDefault(approverArn, regionResolver.getAccountId()), parts[1]);
+        }
+        return resource.startsWith("role/") ? roleFromArnOrName(approverArn) : Optional.empty();
+    }
+
+    /** Whether an ARN names an account root, the one principal whose resource is a bare word. */
+    private static boolean isAccountRootArn(String arn) {
+        return arn != null && "root".equals(AwsArnUtils.parse(arn).resource());
+    }
+
     /** One policy document holding only the Deny statements of a user's policies and boundary. */
     private String denyStatementsOf(String userName) {
         List<String> documents = new ArrayList<>();
@@ -4988,6 +5107,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 return null; // expired — unknown key → bypass
             }
 
+            if (session.getDelegatedApproverArn() != null) {
+                return delegatedApproverContext(session);
+            }
             if (isFederatedUserSession(session)) {
                 return withFederatedUserLimits(federatedUserContext(session));
             }
@@ -5245,6 +5367,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 deleteSession(accessKeyId, session);
                 return Optional.empty();
             }
+            if (session.getDelegatedApproverArn() != null) {
+                return delegatedApproverArns(session);
+            }
             if (isFederatedUserSession(session)) {
                 // A federated user has no aws:username at all, only the account:name userid.
                 String federatedArn = session.getRoleArn();
@@ -5336,6 +5461,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * reports the same key for the same credential and must not derive it a second way.
      */
     private Optional<String> sessionUserId(SessionCredential session) {
+        if (session.getDelegatedApproverArn() != null) {
+            return delegatedApproverUserId(session.getDelegatedApproverArn());
+        }
         if (isFederatedUserSession(session)) {
             // account:caller-specified-name, the aws:userid of a federated user.
             AwsArnUtils.Arn federatedUser = AwsArnUtils.parse(session.getRoleArn());

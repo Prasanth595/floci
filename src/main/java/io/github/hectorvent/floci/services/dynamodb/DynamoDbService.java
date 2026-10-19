@@ -1259,12 +1259,9 @@ public class DynamoDbService {
             // AWS validates index key values against the item the update produces.
             validateIndexKeyTypes(table, item, true);
 
-            if (sizeRule == UpdateSizeRule.UPDATE_ITEM) {
-                requireUpdateItemWithinSizeLimit(item,
-                        writtenAttributes(touchedPaths, updateExpression, expressionAttrNames),
-                        updateExpression != null
-                                ? DynamoDbItemSize.updateExpressionCost(updateExpression)
-                                : DynamoDbItemSize.attributeUpdatesCost(attributeUpdates));
+            if (sizeRule == UpdateSizeRule.UPDATE_ITEM && updateExpression != null) {
+                requireUpdateItemWithinSizeLimit(item, DynamoDbItemSize.updateStatementSize(updateExpression,
+                        path -> parsePath(path, expressionAttrNames), expressionAttrValues));
             } else {
                 requireUpdatedItemWithinSizeLimit(item);
             }
@@ -1306,18 +1303,6 @@ public class DynamoDbService {
 
     private List<Object> pathTokens(String path, String updateExpression, JsonNode expressionAttrNames) {
         return updateExpression != null ? parsePath(path, expressionAttrNames) : List.<Object>of(path);
-    }
-
-    private Set<String> writtenAttributes(List<String> touchedPaths, String updateExpression,
-                                           JsonNode expressionAttrNames) {
-        Set<String> names = new LinkedHashSet<>();
-        for (String path : touchedPaths) {
-            List<Object> tokens = pathTokens(path, updateExpression, expressionAttrNames);
-            if (!tokens.isEmpty() && tokens.get(0) instanceof String name) {
-                names.add(name);
-            }
-        }
-        return names;
     }
 
     public QueryResult query(String tableName, JsonNode keyConditions,
@@ -2169,9 +2154,8 @@ public class DynamoDbService {
         }
     }
 
-    private static void requireUpdateItemWithinSizeLimit(JsonNode item, Set<String> writtenAttributes,
-                                                          int actionCost) {
-        if (!DynamoDbItemSize.updateItemWithinLimit(item, writtenAttributes, actionCost)) {
+    private static void requireUpdateItemWithinSizeLimit(JsonNode item, int statementSize) {
+        if (!DynamoDbItemSize.updateItemWithinLimit(item, statementSize)) {
             throw new UpdatedItemTooLargeException();
         }
     }
@@ -2929,6 +2913,7 @@ public class DynamoDbService {
             throw new AwsException("ValidationException",
                     "Invalid UpdateExpression: The expression can not be empty;", 400);
         }
+        requireClosedParentheses(expression, "");
         // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs of
         // whitespace (newlines, tabs, multiple spaces) so clause-keyword dispatch and the
         // comma-separated action parsing below work regardless of formatting. Normalize
@@ -3132,7 +3117,7 @@ public class DynamoDbService {
      * unwrapped form. Rejects forms like "(a) - (b)" where the outer parens do
      * not actually enclose the whole expression.
      */
-    private static String stripOuterParens(String expr) {
+    static String stripOuterParens(String expr) {
         String s = expr.trim();
         while (s.length() >= 2 && s.charAt(0) == '(' && s.charAt(s.length() - 1) == ')') {
             int depth = 0;
@@ -3792,6 +3777,41 @@ public class DynamoDbService {
         }
     }
 
+    // DynamoDB reads an unclosed call or group to the end of the expression and reports the
+    // raw text from its last token on, trailing whitespace included. UpdateItem wraps the
+    // error in the validation envelope, TransactWriteItems does not.
+    static void requireClosedParentheses(String expression, String envelope) {
+        int depth = 0;
+        int lastToken = 0;
+        for (int i = 0; i < expression.length(); i++) {
+            char c = expression.charAt(i);
+            if (Character.isWhitespace(c)) {
+                continue;
+            }
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+                if (depth < 0) {
+                    return;
+                }
+            }
+            if (i == 0 || isUpdatePunctuation(c) || isUpdatePunctuation(expression.charAt(i - 1))
+                    || Character.isWhitespace(expression.charAt(i - 1))) {
+                lastToken = i;
+            }
+        }
+        if (depth > 0) {
+            throw new AwsException("ValidationException",
+                    envelope + "Invalid UpdateExpression: Syntax error; token: \"<EOF>\", near: \""
+                            + expression.substring(lastToken) + "\"", 400);
+        }
+    }
+
+    private static boolean isUpdatePunctuation(char c) {
+        return "()[],.=+-".indexOf(c) >= 0;
+    }
+
     static int findNextComma(String s) {
         // Find next comma that is not inside a function call
         int depth = 0;
@@ -3874,7 +3894,7 @@ public class DynamoDbService {
      * Finds the index of an arithmetic operator (+ or -) that is outside
      * function parentheses. Returns -1 if none found.
      */
-    private int findArithmeticOperator(String expr) {
+    static int findArithmeticOperator(String expr) {
         int depth = 0;
         for (int i = 0; i < expr.length(); i++) {
             char c = expr.charAt(i);
@@ -3899,7 +3919,7 @@ public class DynamoDbService {
      * spaced form (e.g. PynamoDB always generates {@code "list_append (x, y)"}), which a plain
      * {@code startsWith(functionName + "(")} rejects.
      */
-    private static boolean startsWithFunctionCall(String value, String functionName) {
+    static boolean startsWithFunctionCall(String value, String functionName) {
         return value.startsWith(functionName)
                 && value.substring(functionName.length()).stripLeading().startsWith("(");
     }

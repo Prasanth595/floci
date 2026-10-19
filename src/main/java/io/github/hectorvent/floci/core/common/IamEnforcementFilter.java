@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
@@ -17,6 +18,7 @@ import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProviders;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
@@ -520,6 +522,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 region, accountId, akid)) {
             return;
         }
+        if (abortIfRolePassDenied(ctx, caller, principal, callerArns.orElse(null), action, credentialScope,
+                region, accountId, akid)) {
+            return;
+        }
 
         // Tagged group creation requires either tagging permission, using the same resolved
         // caller (including session, boundary and SCP ceilings) as the primary operation.
@@ -536,6 +542,16 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}",
                         akid, "logs:TagResource", taggingResource);
                 ctx.abortWith(accessDeniedForRequest("logs:TagResource", credentialScope, ctx, taggingResource));
+                return;
+            }
+        }
+
+        // PutAccountPolicy also needs the action for the type of policy it creates, as its API
+        // reference says. An unknown type needs nothing more: the handler refuses it.
+        if ("logs:PutAccountPolicy".equals(action)) {
+            String typeAction = accountPolicyTypeAction(arnBuilder.readJsonBody(ctx));
+            if (typeAction != null && abortIfDenied(ctx, caller, principal, typeAction, action, credentialScope,
+                    resources, targetContexts, region, accountId, akid)) {
                 return;
             }
         }
@@ -617,6 +633,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     private static final Set<String> GOVERNANCE_BYPASS_ACTIONS =
             Set.of("s3:PutObjectRetention", "s3:DeleteObject", "s3:DeleteObjectVersion");
+
+    private static String accountPolicyTypeAction(JsonNode body) {
+        if (body == null) {
+            return null;
+        }
+        return switch (body.path("policyType").asText()) {
+            case "DATA_PROTECTION_POLICY" -> "logs:PutDataProtectionPolicy";
+            case "SUBSCRIPTION_FILTER_POLICY" -> "logs:PutSubscriptionFilter";
+            case "TRANSFORMER_POLICY" -> "logs:PutTransformer";
+            case "FIELD_INDEX_POLICY" -> "logs:PutIndexPolicy";
+            case "METRIC_EXTRACTION_POLICY" -> "logs:PutMetricExtractionPolicy";
+            default -> null;
+        };
+    }
 
     // PutObject and CopyObject are any PUT S3Controller does not run as UploadPart or UploadPartCopy,
     // which name both an uploadId and a partNumber; CompleteMultipartUpload is a POST naming its
@@ -834,6 +864,44 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private CallerArns accountRootArns(String accountId) {
         String rootArn = AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString();
         return CallerArns.accountRoot(rootArn, accountId);
+    }
+
+    /**
+     * A request that passes a role to a service also needs {@code iam:PassRole} on that role (see
+     * {@link PassedRoles}), checked as the caller with {@code iam:PassedToService} naming the
+     * service and the keys that say who is calling, which {@code callerArns} writes when it is known.
+     * An instance profile is looked up in the request's account, as EC2 resolves it; one that does
+     * not exist passes nothing, and the operation reports it. Returns true when the request was
+     * aborted.
+     */
+    private boolean abortIfRolePassDenied(ContainerRequestContext ctx, CallerContext caller, RequestPrincipal principal,
+                                          CallerArns callerArns, String action, String credentialScope,
+                                          String region, String accountId, String akid) {
+        for (PassedRoles.PassedRole passed : PassedRoles.of(action, ctx,
+                (name, arn) -> instanceProfileRoleArns(accountId, name, arn))) {
+            Map<String, List<String>> context = new HashMap<>();
+            if (callerArns != null) {
+                callerArns.putPrincipalKeys(context);
+            }
+            context.put("iam:PassedToService", List.of(passed.passedToService()));
+            if (abortIfDenied(ctx, caller, principal, "iam:PassRole", action, credentialScope,
+                    List.of(passed.roleArn()), List.of(context), region, accountId, akid)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The ARNs of the roles the instance profile, named by {@code name} or {@code arn}, holds. */
+    private List<String> instanceProfileRoleArns(String accountId, String name, String arn) {
+        String profileName = arn != null ? arn.substring(arn.lastIndexOf('/') + 1) : name;
+        return iamService.findInstanceProfile(accountId, profileName)
+                .filter(profile -> arn == null || arn.equals(profile.getArn()))
+                .map(profile -> profile.getRoleNames().stream()
+                        .flatMap(roleName -> iamService.findRole(accountId, roleName).stream())
+                        .map(IamRole::getArn)
+                        .toList())
+                .orElse(List.of());
     }
 
     /**
@@ -1192,7 +1260,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             if (action == null || !action.startsWith("s3:")) {
                 return;
             }
-            String eventName = mapS3ActionToEventName(action, ctx.getMethod());
+            String eventName = mapS3ActionToEventName(action, ctx.getMethod(),
+                    ctx.getUriInfo().getQueryParameters().keySet());
             if (eventName == null) {
                 return;
             }
@@ -1239,16 +1308,14 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     // Package-private for unit testing.
-    static String mapS3ActionToEventName(String action, String httpMethod) {
+    static String mapS3ActionToEventName(String action, String httpMethod, Set<String> queryParameters) {
         if (action == null) return null;
         // Action set sourced from IamActionRegistry — see that file for any
         // additions. HEAD on an object is bucketed under s3:GetObject by the
-        // registry, so we distinguish via httpMethod. The POST operations checked as
-        // s3:PutObject or s3:GetObject (multipart create and complete, Select) cannot
-        // be told apart from the action, so they get no name rather than a wrong one.
-        // The GetObjectAttributes actions are the operation its own check refuses.
+        // registry, so we distinguish via httpMethod. The GetObjectAttributes actions
+        // are the operation its own check refuses.
         if ("POST".equalsIgnoreCase(httpMethod)) {
-            return null;
+            return postObjectEventName(action, queryParameters);
         }
         return switch (action) {
             case "s3:GetObject", "s3:GetObjectVersion" ->
@@ -1264,6 +1331,28 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             case "s3:GetObjectTagging", "s3:GetObjectVersionTagging" -> "GetObjectTagging";
             case "s3:PutObjectTagging", "s3:PutObjectVersionTagging" -> "PutObjectTagging";
             case "s3:DeleteObjectTagging", "s3:DeleteObjectVersionTagging" -> "DeleteObjectTagging";
+            default -> null;
+        };
+    }
+
+    /**
+     * The operation a denied POST on an object names. Its action alone is not enough: CreateMultipartUpload
+     * and CompleteMultipartUpload are both checked as {@code s3:PutObject}, and SelectObjectContent as
+     * {@code s3:GetObject}. The sub-resource that chose the action in {@code IamActionRegistry} names the
+     * operation, and {@code ?uploads}, which S3Controller runs ahead of an {@code uploadId}, makes a
+     * request naming both a create. A POST naming none gets no name rather than a wrong one.
+     */
+    private static String postObjectEventName(String action, Set<String> queryParameters) {
+        return switch (action) {
+            case "s3:PutObject" -> {
+                if (queryParameters.contains("uploads")) {
+                    yield "CreateMultipartUpload";
+                }
+                yield queryParameters.contains("uploadId") ? "CompleteMultipartUpload" : null;
+            }
+            case "s3:RestoreObject" -> queryParameters.contains("restore") ? "RestoreObject" : null;
+            case "s3:GetObject", "s3:GetObjectVersion" ->
+                    queryParameters.contains("select") ? "SelectObjectContent" : null;
             default -> null;
         };
     }

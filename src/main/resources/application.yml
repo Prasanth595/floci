@@ -10,6 +10,10 @@ quarkus:
       "io.apicurio":
         level: WARN
 
+  tls:
+    # Keep AWS's TLS 1.2 minimum and preserve explicit legacy HTTP protocol restrictions.
+    protocols: ${quarkus.http.ssl.protocols:TLSv1.3,TLSv1.2}
+
   http:
     port: ${floci.port}
     # Loopback by default. Any other address (0.0.0.0, a LAN IP) also needs
@@ -743,6 +747,7 @@ floci:
       backend: stub
       proxy:
         passthrough: false
+        error-body-timeout-millis: 1000
         # url: http://localhost:11434/v1
         # api-key: sk-...
         # default-model: llama3

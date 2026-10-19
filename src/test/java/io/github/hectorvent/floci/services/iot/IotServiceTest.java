@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbItemAccess;
@@ -67,8 +69,9 @@ import static org.mockito.Mockito.when;
  * Rules engine behaviour of {@link IotService} with in-memory stores and mocked action targets:
  * one failing action never fails the publish or the other actions, the error action receives the
  * failure document, and the {@code firehose} and {@code cloudwatchLogs} actions deliver the payload.
- * Also the five-version cap on a policy, including under racing creates, and the device shadow
- * events that reach MQTT subscribers and topic rules on the AWS response topics.
+ * Also the five-version cap on a policy, including under racing creates, the device shadow
+ * events that reach MQTT subscribers and topic rules on the AWS response topics, and one stored
+ * registration when identical RegisterCertificateWithoutCA calls race.
  */
 class IotServiceTest {
 
@@ -585,6 +588,43 @@ class IotServiceTest {
         service.deletePolicyVersion("capped", "2", REGION);
         assertEquals("6", service.createPolicyVersion("capped", "{\"v\":6}", true, REGION).getVersionId());
         assertEquals("6", service.getPolicy("capped", REGION).getDefaultVersionId());
+    }
+
+    @Test
+    void racingIdenticalRegistrationsStoreOneCertificateAndRejectTheRest() throws Exception {
+        String pem = new CertificateGenerator()
+                .generateSelfSignedCertificate("raced-device", List.of(), KeyAlgorithm.RSA_2048)
+                .certificatePem();
+        int writers = 8;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(writers);
+        List<Future<Boolean>> outcomes = new ArrayList<>();
+        try {
+            for (int i = 0; i < writers; i++) {
+                outcomes.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        service.registerCertificateWithoutCa(pem, "ACTIVE", REGION);
+                        return true;
+                    } catch (AwsException e) {
+                        assertEquals("ResourceAlreadyExistsException", e.getErrorCode());
+                        return false;
+                    }
+                }));
+            }
+            start.countDown();
+            int registered = 0;
+            for (Future<Boolean> outcome : outcomes) {
+                if (outcome.get()) {
+                    registered++;
+                }
+            }
+            assertEquals(1, registered);
+            assertEquals(1, service.listCertificates(REGION).size());
+            assertEquals("SNI_ONLY", service.listCertificates(REGION).getFirst().getCertificateMode());
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test
