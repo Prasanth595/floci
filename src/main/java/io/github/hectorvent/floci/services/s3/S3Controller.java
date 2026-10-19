@@ -913,7 +913,7 @@ public class S3Controller {
 
             ObjectLockHeaders lock = objectLockHeaders(httpHeaders);
 
-            String checksumAlgorithm = getChecksumAlgorithm(httpHeaders, uriInfo);
+            String checksumAlgorithm = getChecksumAlgorithm(httpHeaders);
             String persistedEncoding = toPersistedContentEncoding(contentEncoding);
             String contentDisposition = httpHeaders.getHeaderString("Content-Disposition");
             String cacheControl = httpHeaders.getHeaderString("Cache-Control");
@@ -949,7 +949,7 @@ public class S3Controller {
                             .withGrantReadAcp(httpHeaders.getHeaderString("x-amz-grant-read-acp"))
                             .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp"))
                             .withChecksumAlgorithm(checksumAlgorithm)
-                            .withClientChecksum(extractChecksum(httpHeaders, uriInfo))
+                            .withClientChecksum(extractChecksum(httpHeaders))
                             .withIfMatch(ifMatch)
                             .withIfNoneMatch(ifNoneMatch)
                             .withTagging(inlineTags));
@@ -1635,7 +1635,7 @@ public class S3Controller {
                                         "x-amz-server-side-encryption-customer-key"))
                                 .withSseCustomerKeyMd5(httpHeaders.getHeaderString(
                                         "x-amz-server-side-encryption-customer-key-MD5"))
-                                .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders, uriInfo))
+                                .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders))
                                 .withAcl(httpHeaders.getHeaderString("x-amz-acl"))
                                 .withGrantRead(httpHeaders.getHeaderString("x-amz-grant-read"))
                                 .withGrantWrite(httpHeaders.getHeaderString("x-amz-grant-write"))
@@ -1692,7 +1692,7 @@ public class S3Controller {
                     return preconditionResponse;
                 }
                 String checksumType = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-type");
-                S3Checksum expectedChecksum = extractChecksum(httpHeaders, uriInfo);
+                S3Checksum expectedChecksum = extractChecksum(httpHeaders);
                 S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers,
                         completedPartETags(completedParts), completedPartChecksums(completedParts), checksumType,
                         expectedChecksum, multipartObjectSize(httpHeaders, uriInfo));
@@ -2764,7 +2764,7 @@ public class S3Controller {
                     httpHeaders.getHeaderString("x-amz-content-sha256"));
             String annotationName = uriInfo.getQueryParameters().getFirst("annotationName");
             String versionId = uriInfo.getQueryParameters().getFirst("versionId");
-            String algorithmHeader = getChecksumAlgorithm(httpHeaders, uriInfo);
+            String algorithmHeader = getChecksumAlgorithm(httpHeaders);
             ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromWireValue(algorithmHeader);
             validateChecksumHeaders(httpHeaders, uriInfo, payload);
             ObjectAnnotation annotation = s3Service.putObjectAnnotation(bucket, key, annotationName,
@@ -3201,7 +3201,7 @@ public class S3Controller {
                         .withCopySourceSseCustomerAlgorithm(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-algorithm"))
                         .withCopySourceSseCustomerKey(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key"))
                         .withCopySourceSseCustomerKeyMd5(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key-MD5"))
-                        .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders, uriInfo))
+                        .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders))
                         .withAnnotationDirective(annotationDirective)
                         .withAcl(cannedAcl)
                         .withGrantRead(httpHeaders.getHeaderString("x-amz-grant-read"))
@@ -3462,12 +3462,13 @@ public class S3Controller {
         return null;
     }
 
-    private S3Checksum extractChecksum(HttpHeaders httpHeaders, UriInfo uriInfo) {
-        String crc32 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc32");
-        String crc32c = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc32c");
-        String crc64nvme = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc64nvme");
-        String sha1 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-sha1");
-        String sha256 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-sha256");
+    private S3Checksum extractChecksum(HttpHeaders httpHeaders) {
+        // AWS signs hoisted checksum query parameters but does not use them as integrity headers.
+        String crc32 = httpHeaders.getHeaderString("x-amz-checksum-crc32");
+        String crc32c = httpHeaders.getHeaderString("x-amz-checksum-crc32c");
+        String crc64nvme = httpHeaders.getHeaderString("x-amz-checksum-crc64nvme");
+        String sha1 = httpHeaders.getHeaderString("x-amz-checksum-sha1");
+        String sha256 = httpHeaders.getHeaderString("x-amz-checksum-sha256");
         if (crc32 == null && crc32c == null && crc64nvme == null && sha1 == null && sha256 == null) {
             return null;
         }
@@ -3481,10 +3482,10 @@ public class S3Controller {
         return checksum;
     }
 
-    private String getChecksumAlgorithm(HttpHeaders httpHeaders, UriInfo uriInfo) {
-        String algorithm = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-algorithm");
+    private String getChecksumAlgorithm(HttpHeaders httpHeaders) {
+        String algorithm = httpHeaders.getHeaderString("x-amz-checksum-algorithm");
         if (algorithm == null || algorithm.isBlank()) {
-            algorithm = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-sdk-checksum-algorithm");
+            algorithm = httpHeaders.getHeaderString("x-amz-sdk-checksum-algorithm");
         }
         return algorithm;
     }
@@ -3504,7 +3505,7 @@ public class S3Controller {
     private UploadChecksums uploadChecksums(HttpHeaders httpHeaders, UriInfo uriInfo) {
         Map<ChecksumAlgorithm, String> claimed = new EnumMap<>(ChecksumAlgorithm.class);
         for (ChecksumAlgorithm algorithm : ChecksumAlgorithm.values()) {
-            String value = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-" + algorithm.wireValue());
+            String value = httpHeaders.getHeaderString("x-amz-checksum-" + algorithm.wireValue());
             if (value != null) {
                 claimed.put(algorithm, value);
             }
