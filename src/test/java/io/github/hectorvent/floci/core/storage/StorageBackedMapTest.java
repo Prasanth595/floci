@@ -7,6 +7,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -15,6 +16,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -231,6 +234,22 @@ class StorageBackedMapTest
 
         assertEquals(2, keys.size());
         assertFalse(keys.contains(null));
+    }
+
+    @Test
+    void viewStreamsSeeKeyAddedBeforeTerminalOperation()
+    {
+        StorageBackedMap<String> map = mapOf("alpha");
+
+        Stream<String> keys = map.keySet().stream();
+        Stream<String> values = map.values().stream();
+        Stream<Map.Entry<String, String>> entries = map.entrySet().stream();
+        map.put("beta", "beta-value");
+
+        assertEquals(Set.of("alpha", "beta"), keys.collect(Collectors.toSet()));
+        assertEquals(Set.of("alpha-value", "beta-value"), values.collect(Collectors.toSet()));
+        assertEquals(Set.of("alpha", "beta"),
+                entries.map(Map.Entry::getKey).collect(Collectors.toSet()));
     }
 
     @Test

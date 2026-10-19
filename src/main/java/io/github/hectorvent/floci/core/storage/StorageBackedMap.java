@@ -13,7 +13,9 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.Spliterator;
 import java.util.Spliterators;
+import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * A mutable {@link Map} facade over {@link StorageBackend}.
@@ -181,7 +183,7 @@ public class StorageBackedMap<V>
             @Override
             public Spliterator<Entry<String, V>> spliterator()
             {
-                return unsized(iterator());
+                return unsized(this::iterator);
             }
         };
     }
@@ -232,7 +234,7 @@ public class StorageBackedMap<V>
             @Override
             public Spliterator<String> spliterator()
             {
-                return unsized(iterator());
+                return unsized(this::iterator);
             }
         };
     }
@@ -277,7 +279,7 @@ public class StorageBackedMap<V>
             @Override
             public Spliterator<V> spliterator()
             {
-                return unsized(iterator());
+                return unsized(this::iterator);
             }
         };
     }
@@ -285,9 +287,27 @@ public class StorageBackedMap<V>
     // size() is a separate key snapshot from the one an iterator walks, and the
     // iterator skips keys deleted in between, so the views must not report SIZED:
     // a sized stream throws "End size N is less than fixed size M" on a mismatch.
-    private static <T> Spliterator<T> unsized(Iterator<T> iterator)
+    // The iterator is taken on first traversal or split, not here, so the
+    // spliterator stays late-binding like the Collection.spliterator() default.
+    private static <T> Spliterator<T> unsized(Supplier<Iterator<T>> iterators)
     {
-        return Spliterators.spliteratorUnknownSize(iterator, Spliterator.NONNULL);
+        return new Spliterators.AbstractSpliterator<>(Long.MAX_VALUE, Spliterator.NONNULL)
+        {
+            private Iterator<T> iterator;
+
+            @Override
+            public boolean tryAdvance(Consumer<? super T> action)
+            {
+                if (iterator == null) {
+                    iterator = iterators.get();
+                }
+                if (!iterator.hasNext()) {
+                    return false;
+                }
+                action.accept(iterator.next());
+                return true;
+            }
+        };
     }
 
     private List<String> snapshotKeys()
