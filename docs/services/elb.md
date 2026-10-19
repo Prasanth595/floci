@@ -99,6 +99,20 @@ Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB)
 - `DescribeSSLPolicies` returns a pre-seeded list of standard AWS SSL policies (`ELBSecurityPolicy-*`).
 - `DescribeAccountLimits` returns standard default limits (e.g., 50 load balancers per region, 100 target groups, etc.).
 - Responses from HTTP targets preserve repeated header values, including multiple `Set-Cookie` headers. This also applies when a target rejects a WebSocket upgrade.
+- Duration-based ALB target stickiness is applied for instance and IP targets when
+  `stickiness.enabled=true` and `stickiness.type=lb_cookie` (the default type). Requests
+  without a usable cookie select a target normally; subsequent requests carrying the
+  cookie return to that target while it remains eligible. Deregistered or unhealthy
+  targets are replaced using the existing health-aware selection, including fail-open
+  behavior when every target is unhealthy.
+- Sticky responses include opaque, authenticated `AWSALB` and `AWSALBCORS` cookies, without
+  replacing application cookies. `AWSALBCORS` takes precedence and has
+  `SameSite=None; Secure`. Both cookies use `Expires` seven days in the future; the
+  configured `stickiness.lb_cookie.duration_seconds` (default 86400, range 1 to 604800)
+  separately limits the age of a target binding. Each response renews the binding.
+  Restarting Floci invalidates existing bindings. Application-cookie stickiness,
+  weighted target-group affinity, and NLB stickiness are not implemented. Cookie
+  stickiness is not applied with cross-zone balancing disabled or `weighted_random` routing.
 - `routing.http.preserve_host_header.enabled` (default `false`) controls whether the original client Host header is forwarded to targets unchanged, or replaced with the target's `host:port`.
 - `RegisterTargets` rejects link-local and cloud instance-metadata addresses (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`) with `InvalidTarget`, and the load balancer and its health checks refuse to connect to them. Loopback and private addresses stay reachable so a load balancer can front a neighbouring container.
 

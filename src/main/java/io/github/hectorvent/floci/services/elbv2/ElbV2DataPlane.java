@@ -96,6 +96,7 @@ public class ElbV2DataPlane {
     private final Map<String, AtomicReference<List<CompiledRule>>> ruleChains = new ConcurrentHashMap<>();
     private final Map<String, AtomicInteger> rrCounters = new ConcurrentHashMap<>();
     private final Map<String, String> listenerRegions = new ConcurrentHashMap<>();
+    private final ElbV2StickyCookie stickyCookie = new ElbV2StickyCookie();
 
     private HttpClient proxyClient;
 
@@ -464,18 +465,28 @@ public class ElbV2DataPlane {
             req.response().setStatusCode(503).end("No targets available");
             return;
         }
-        AtomicInteger counter = rrCounters.computeIfAbsent(tgArn, k -> new AtomicInteger(0));
-        int idx = Math.abs(counter.getAndIncrement() % candidates.size());
-        TargetDescription target = candidates.get(idx);
+        ListenerBinding binding = listenerBindings.get(listenerArn);
+        LoadBalancer loadBalancer = binding != null
+                ? elbV2Service.getLoadBalancer(region, binding.loadBalancerArn()) : null;
+        long duration = loadBalancer != null && "application".equals(loadBalancer.getType())
+                ? ElbV2StickyCookie.durationSeconds(tg) : 0;
+        String scope = binding != null ? binding.loadBalancerArn() + "\n" + tgArn : "";
+        TargetDescription target = stickyCookie.target(req.headers().getAll("Cookie"), scope, tg, candidates, duration);
+        if (target == null) {
+            AtomicInteger counter = rrCounters.computeIfAbsent(tgArn, k -> new AtomicInteger(0));
+            int idx = Math.abs(counter.getAndIncrement() % candidates.size());
+            target = candidates.get(idx);
+        }
+        List<String> cookies = duration > 0 ? stickyCookie.headers(scope, tg, target) : List.of();
         int targetPort = ElbV2HealthChecker.effectivePort(target, tg);
         String host = ElbV2TargetResolver.resolveHost(ec2Service, tg, target);
         boolean preserveHostHeader = Boolean.parseBoolean(
                 loadBalancerAttribute(listenerArn, region, PRESERVE_HOST_HEADER_ATTRIBUTE));
         if (isWebSocketUpgrade(req)) {
-            proxyUpgrade(req, host, targetPort, preserveHostHeader, idleTimeoutMillis(listenerArn, region));
+            proxyUpgrade(req, host, targetPort, preserveHostHeader, idleTimeoutMillis(listenerArn, region), cookies);
             return;
         }
-        proxyRequest(req, host, targetPort, preserveHostHeader);
+        proxyRequest(req, host, targetPort, preserveHostHeader, cookies);
     }
 
     private String loadBalancerAttribute(String listenerArn, String region, String key) {
@@ -695,18 +706,18 @@ public class ElbV2DataPlane {
     }
 
     private void proxyRequest(io.vertx.core.http.HttpServerRequest req, String host, int port,
-                              boolean preserveHostHeader) {
+                              boolean preserveHostHeader, List<String> cookies) {
         req.pause();
         if (ElbV2TargetResolver.isIpLiteral(host)) {
             try {
-                proxyRequestTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port, preserveHostHeader);
+                proxyRequestTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port, preserveHostHeader, cookies);
             } catch (IOException e) {
                 rejectTarget(req, host, e);
             }
             return;
         }
         vertx.<String>executeBlocking(() -> ElbV2TargetResolver.resolveCheckedAddress(host))
-                .onSuccess(address -> proxyRequestTo(req, address, host, port, preserveHostHeader))
+                .onSuccess(address -> proxyRequestTo(req, address, host, port, preserveHostHeader, cookies))
                 .onFailure(err -> rejectTarget(req, host, err));
     }
 
@@ -717,7 +728,7 @@ public class ElbV2DataPlane {
     }
 
     private void proxyRequestTo(HttpServerRequest req, String address, String host, int port,
-                                boolean preserveHostHeader) {
+                                boolean preserveHostHeader, List<String> cookies) {
         RequestOptions opts = new RequestOptions()
                 .setHost(address)
                 .setPort(port)
@@ -742,6 +753,7 @@ public class ElbV2DataPlane {
                         responseStarted.set(true);
                         req.response().setStatusCode(resp.statusCode());
                         copyTargetResponseHeaders(resp.headers(), req.response());
+                        cookies.forEach(cookie -> req.response().headers().add("Set-Cookie", cookie));
                         if (resp.getHeader("Content-Length") == null) {
                             req.response().setChunked(true);
                         }
@@ -805,12 +817,12 @@ public class ElbV2DataPlane {
     }
 
     private void proxyUpgrade(HttpServerRequest req, String host, int port, boolean preserveHostHeader,
-                              long idleTimeoutMillis) {
+                              long idleTimeoutMillis, List<String> cookies) {
         req.pause();
         if (ElbV2TargetResolver.isIpLiteral(host)) {
             try {
                 proxyUpgradeTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port,
-                        preserveHostHeader, idleTimeoutMillis);
+                        preserveHostHeader, idleTimeoutMillis, cookies);
             } catch (IOException e) {
                 rejectTarget(req, host, e);
             }
@@ -818,7 +830,7 @@ public class ElbV2DataPlane {
         }
         vertx.<String>executeBlocking(() -> ElbV2TargetResolver.resolveCheckedAddress(host))
                 .onSuccess(address -> proxyUpgradeTo(req, address, host, port, preserveHostHeader,
-                        idleTimeoutMillis))
+                        idleTimeoutMillis, cookies))
                 .onFailure(err -> rejectTarget(req, host, err));
     }
 
@@ -828,7 +840,7 @@ public class ElbV2DataPlane {
      * the target refused the upgrade and is relayed as an ordinary response.
      */
     private void proxyUpgradeTo(HttpServerRequest req, String address, String host, int port,
-                                boolean preserveHostHeader, long idleTimeoutMillis) {
+                                boolean preserveHostHeader, long idleTimeoutMillis, List<String> cookies) {
         RequestOptions opts = new RequestOptions()
                 .setHost(address)
                 .setPort(port)
@@ -850,6 +862,7 @@ public class ElbV2DataPlane {
                             .onSuccess(resp -> {
                                 req.response().setStatusCode(resp.statusCode());
                                 copyTargetResponseHeaders(resp.headers(), req.response());
+                                cookies.forEach(cookie -> req.response().headers().add("Set-Cookie", cookie));
                                 if (resp.statusCode() != 101) {
                                     req.resume();
                                     if (resp.getHeader("Content-Length") == null) {
