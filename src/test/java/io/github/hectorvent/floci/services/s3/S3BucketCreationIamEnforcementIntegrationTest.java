@@ -155,11 +155,10 @@ class S3BucketCreationIamEnforcementIntegrationTest {
         return EnforcementFixtures.createUser(cleanup, baseUri.getPort(), auth(ADMIN, "iam"), user).accessKeyId();
     }
 
-    private static void userPolicy(String user, List<String> actions) {
+    private void userPolicy(String user, List<String> actions) {
         String actionList = String.join("\",\"", actions);
         String statement = "{\"Effect\":\"Allow\",\"Action\":[\"" + actionList + "\"],\"Resource\":\"*\"}";
-        given().formParam("Action", "PutUserPolicy").formParam("UserName", user).formParam("PolicyName", "p")
-                .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[" + statement + "]}")
-                .header("Authorization", auth(ADMIN, "iam")).when().post("/").then().statusCode(200);
+        EnforcementFixtures.putUserPolicy(baseUri.getPort(), auth(ADMIN, "iam"), user, "p",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[" + statement + "]}");
     }
 }

@@ -106,6 +106,32 @@ public final class S3ObjectActions {
     }
 
     /**
+     * The actions a CreateBucket needs besides {@code s3:CreateBucket}, one for each thing its headers
+     * set on the new bucket, as the CreateBucket API reference lists them: an ACL other than
+     * {@code private}, or any grant header, needs s3:PutBucketAcl; Object Lock needs
+     * s3:PutBucketObjectLockConfiguration and s3:PutBucketVersioning; an Object Ownership needs
+     * s3:PutBucketOwnershipControls. A blank header counts as absent.
+     *
+     * @param header reads one request header, null when it is absent
+     */
+    public static List<String> bucketCreationActions(Function<String, String> header) {
+        List<String> actions = new ArrayList<>();
+        String cannedAcl = header.apply("x-amz-acl");
+        if ((!isBlank(cannedAcl) && !"private".equals(cannedAcl))
+                || GRANT_HEADERS.stream().anyMatch(name -> !isBlank(header.apply(name)))) {
+            actions.add("s3:PutBucketAcl");
+        }
+        if ("true".equalsIgnoreCase(header.apply("x-amz-bucket-object-lock-enabled"))) {
+            actions.add("s3:PutBucketObjectLockConfiguration");
+            actions.add("s3:PutBucketVersioning");
+        }
+        if (!isBlank(header.apply("x-amz-object-ownership"))) {
+            actions.add("s3:PutBucketOwnershipControls");
+        }
+        return actions;
+    }
+
+    /**
      * The condition keys an object creation offers {@code s3:PutObject} and each of
      * {@link #objectCreationActions}: {@code s3:RequestObjectTag/<key>} and
      * {@code s3:RequestObjectTagKeys} from the tags it applies, which a copy under the default
@@ -261,5 +287,9 @@ public final class S3ObjectActions {
             LOG.debugv(e, "Undecodable tag component in the condition context: {0}", value);
             return null;
         }
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 }

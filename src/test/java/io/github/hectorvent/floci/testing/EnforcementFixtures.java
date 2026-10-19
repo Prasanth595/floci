@@ -113,6 +113,18 @@ public final class EnforcementFixtures {
     }
 
     /**
+     * Puts {@code policyDocument} inline on a user, as {@code policyName}, replacing any policy of that
+     * name. The user's removal deletes it with the user.
+     *
+     * @param authorization an IAM-scoped header for the account the user belongs to
+     */
+    public static void putUserPolicy(int port, String authorization, String userName, String policyName,
+                                     String policyDocument) {
+        iam(port, authorization, "PutUserPolicy", "UserName", userName, "PolicyName", policyName,
+                "PolicyDocument", policyDocument).statusCode(200);
+    }
+
+    /**
      * Creates a role under {@code path} that the root of its own {@code account} may assume, with
      * {@code policy} inline, registering its {@link #removeRole} with {@code cleanup} before the
      * create runs, and returns the role's ARN.

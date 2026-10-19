@@ -112,10 +112,6 @@ public class S3Controller {
     /** The errors S3Service answers a read of an object that is not there with. */
     private static final Set<String> MISSING_OBJECT_ERRORS = Set.of("NoSuchBucket", "NoSuchKey", "NoSuchVersion");
 
-    private static final List<String> BUCKET_GRANT_HEADERS = List.of(
-            "x-amz-grant-read", "x-amz-grant-write", "x-amz-grant-read-acp", "x-amz-grant-write-acp",
-            "x-amz-grant-full-control");
-
     private static final Logger LOG = Logger.getLogger(S3Controller.class);
     private static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter
             .ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
@@ -4502,32 +4498,13 @@ public class S3Controller {
     }
 
     /**
-     * Authorizes the actions a CreateBucket needs besides {@code s3:CreateBucket}, which the CreateBucket
-     * API reference lists for the headers that configure the new bucket: an ACL other than
-     * {@code private}, or any grant header, needs s3:PutBucketAcl; Object Lock needs
-     * s3:PutBucketObjectLockConfiguration and s3:PutBucketVersioning; an Object Ownership needs
-     * s3:PutBucketOwnershipControls. It runs before the bucket is created, so a denied request creates
-     * nothing. A blank header counts as absent.
+     * Authorizes the actions a CreateBucket needs besides {@code s3:CreateBucket}
+     * (see {@link S3ObjectActions#bucketCreationActions}) on the new bucket. It runs before the bucket
+     * is created, so a denied request creates nothing.
      */
     private void authorizeBucketCreationSettings(HttpHeaders httpHeaders, UriInfo uriInfo, String bucket,
                                                  String region) {
-        List<String> actions = new ArrayList<>();
-        String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
-        if ((cannedAcl != null && !cannedAcl.isBlank() && !"private".equals(cannedAcl))
-                || BUCKET_GRANT_HEADERS.stream().anyMatch(name -> {
-                    String grant = httpHeaders.getHeaderString(name);
-                    return grant != null && !grant.isBlank();
-                })) {
-            actions.add("s3:PutBucketAcl");
-        }
-        if ("true".equalsIgnoreCase(httpHeaders.getHeaderString("x-amz-bucket-object-lock-enabled"))) {
-            actions.add("s3:PutBucketObjectLockConfiguration");
-            actions.add("s3:PutBucketVersioning");
-        }
-        String ownership = httpHeaders.getHeaderString("x-amz-object-ownership");
-        if (ownership != null && !ownership.isBlank()) {
-            actions.add("s3:PutBucketOwnershipControls");
-        }
+        List<String> actions = S3ObjectActions.bucketCreationActions(httpHeaders::getHeaderString);
         if (actions.isEmpty()) {
             return;
         }
