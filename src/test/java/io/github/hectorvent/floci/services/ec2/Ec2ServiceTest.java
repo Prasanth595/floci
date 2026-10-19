@@ -1149,6 +1149,66 @@ class Ec2ServiceTest {
         assertEquals(expected, instance.getPublicIpAddress());
     }
 
+    @Test
+    void containerModeDisassociatingASecondaryAddressLeavesThePublicAddressAlone() {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.244.0.0/24");
+        NetworkInterface eni = service.createNetworkInterface(region, subnetId, null, "10.244.0.10",
+                List.of("10.244.0.11"), List.of(), List.of());
+        Instance instance = runningContainerInstance(service, region, subnetId, eni.getNetworkInterfaceId());
+        Address primary = service.allocateAddress(region);
+        service.associateAddress(region, primary.getAllocationId(), instance.getInstanceId());
+        Address secondary = service.allocateAddress(region);
+        service.associateAddress(region, secondary.getAllocationId(), instance.getInstanceId(), "10.244.0.11");
+        // With a container, both addresses point at the one reachable address.
+        assertEquals("127.0.0.1", instance.getPublicIpAddress());
+
+        service.disassociateAddress(region, secondary.getAssociationId());
+
+        assertEquals("127.0.0.1", instance.getPublicIpAddress());
+        assertNotNull(primary.getAssociationId());
+    }
+
+    @Test
+    void containerModeDisassociationReleasesAnAddressARestartMoved() {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        String subnetId = service.createSubnet(region, service.createVpc(region, "10.245.0.0/24", false).getVpcId(),
+                "10.245.0.0/26", region + "a").getSubnetId();
+        Instance instance = runningContainerInstance(service, region, subnetId, null);
+        Address address = service.allocateAddress(region);
+        service.associateAddress(region, address.getAllocationId(), instance.getInstanceId());
+        // A restart gives the container a new address, which the start publishes for the Elastic IP.
+        instance.setPublicIpAddress("172.17.0.9");
+
+        service.disassociateAddress(region, address.getAssociationId());
+
+        assertNull(instance.getPublicIpAddress(), "nothing backs a public address once the Elastic IP is gone");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,", "true,127.0.0.1"})
+    void containerModeStartDecidesAfreshWhateverStoppedTheInstance(boolean elasticIp, String kept) {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.246.0.0/24");
+        Instance instance = runningContainerInstance(service, region, subnetId, null);
+        if (elasticIp) {
+            Address address = service.allocateAddress(region);
+            service.associateAddress(region, address.getAllocationId(), instance.getInstanceId());
+        }
+        // Stopped without StopInstances, as Floci's shutdown or a failed firewall restore does, so
+        // the automatic address was never released.
+        instance.setState(InstanceState.stopped());
+        instance.setPublicIpAddress("172.17.0.9");
+
+        service.startInstances(region, List.of(instance.getInstanceId()));
+
+        // The container manager then re-points what is left, which is only an Elastic IP's.
+        assertEquals(kept, instance.getPublicIpAddress());
+    }
+
     /** Ec2Service in container mode, with a container manager whose containers answer on loopback. */
     private static Ec2Service containerModeService() {
         Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);

@@ -357,7 +357,7 @@ class Ec2ContainerManagerTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"1,,127.0.0.1", "2,,", "2,127.0.0.1,127.0.0.1"})
+    @CsvSource({"1,,127.0.0.1", "2,,", "2,54.1.2.3,127.0.0.1"})
     void startReplacesAReleasedAddressOnlyWhileTheInstanceHasOneInterface(int interfaces, String kept,
                                                                          String expected) throws Exception {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);

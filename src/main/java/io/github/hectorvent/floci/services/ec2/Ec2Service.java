@@ -4186,9 +4186,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 containerManager.terminate(inst, () ->
                         RequestScopes.runAs(owner, () -> reclaimCapturesPinnedBy(region, inst, terminating)));
                 // Termination releases the public address with a container too.
-                synchronized (inst) {
-                    clearPublicAddress(inst);
-                }
+                writePublicAddress(inst, () -> clearPublicAddress(inst));
             }
             // Delete root volume if deleteOnTermination (matches real AWS behavior)
             if (inst.getRootVolumeId() != null) {
@@ -4308,9 +4306,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 // A stop releases the automatic address with a container too; the next start
                 // decides on a replacement, and re-points an Elastic IP kept here.
                 synchronized (privateIpAllocationLock) {
-                    synchronized (inst) {
-                        releaseAutomaticAddress(region, inst);
-                    }
+                    writePublicAddress(inst, () -> releaseAutomaticAddress(region, inst));
                 }
             }
             instances.put(key(region, id), inst);
@@ -4343,6 +4339,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (config.services().ec2().mock()) {
                 completeMockLaunch(region, inst, true);
             } else {
+                if ("stopped".equals(prev.getName())) {
+                    // Whatever stopped it, StopInstances or Floci's own shutdown, an automatic
+                    // address does not outlive the stop: what is left for the container manager to
+                    // re-point is then only an Elastic IP's, and otherwise it assigns one when due.
+                    synchronized (privateIpAllocationLock) {
+                        writePublicAddress(inst, () -> releaseAutomaticAddress(region, inst));
+                    }
+                }
                 restoreInstanceFirewall(inst);
                 String accountId = callerAccountId();
                 containerManager.start(inst, () ->
@@ -10154,7 +10158,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     // interface is attached to now holds it.
                     String instanceId = addr.getInstanceId() != null ? addr.getInstanceId()
                             : instanceAttachedTo(region, addr.getNetworkInterfaceId());
-                    String associatedPublicIp = addr.getPublicIp();
+                    Instance holder = instanceId == null ? null : instances.get(key(region, instanceId)).orElse(null);
+                    // Only the address on the primary private address is the instance's public one.
+                    boolean onPrimary = holder != null
+                            && secondaryPrivateIpOf(region, holder, addr.getPrivateIpAddress()) == null;
                     addr.setInstanceId(null);
                     addr.setAssociationId(null);
                     updateStoredAddressAssociation(addr);
@@ -10166,8 +10173,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         addr.setPublicIp(addr.getAllocatedPublicIp());
                     }
                     addresses.put(key(region, addr.getAllocationId()), addr);
-                    if (instanceId != null) {
-                        releaseElasticAddress(region, instanceId, associatedPublicIp);
+                    if (onPrimary) {
+                        releaseElasticAddress(region, holder);
                     }
                     return;
                 }
@@ -10176,22 +10183,43 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * A running instance whose Elastic IP is disassociated gets a new automatic address when
-     * {@link AutomaticPublicAddress} says it is due, as on AWS; otherwise it is left without one.
+     * An instance whose Elastic IP on its primary private address was just disassociated shows
+     * another Elastic IP left on that address, or else, while running, a new automatic address when
+     * {@link AutomaticPublicAddress} says it is due, as on AWS; otherwise none. A terminated
+     * instance is left as it is.
      */
-    private void releaseElasticAddress(String region, String instanceId, String elasticPublicIp) {
-        instances.get(key(region, instanceId)).ifPresent(inst -> {
-            synchronized (inst) {
-                if (!Objects.equals(elasticPublicIp, inst.getPublicIpAddress())) {
-                    return;
-                }
-                clearPublicAddress(inst);
-                if ("running".equals(inst.getState().getName())) {
-                    assignAutomaticAddress(inst, true);
-                }
+    private void releaseElasticAddress(String region, Instance inst) {
+        writePublicAddress(inst, () -> {
+            String state = inst.getState() == null ? null : inst.getState().getName();
+            if ("terminated".equals(state) || "shutting-down".equals(state)) {
+                return;
             }
-            instances.put(key(region, instanceId), inst);
+            Address remaining = primaryElasticAddress(region, inst);
+            if (remaining != null) {
+                setPublicAddress(inst, remaining.getPublicIp());
+                return;
+            }
+            clearPublicAddress(inst);
+            if ("running".equals(state)) {
+                assignAutomaticAddress(inst, true);
+            }
         });
+        instances.put(key(region, inst.getInstanceId()), inst);
+    }
+
+    /**
+     * Writes an instance's public address under the instance's lock where mock launches complete
+     * under it. With containers, the port-forward manager holds that lock across Docker calls, so the
+     * write goes without it rather than keep the allocation lock waiting on Docker.
+     */
+    private void writePublicAddress(Instance instance, Runnable write) {
+        if (config.services().ec2().mock()) {
+            synchronized (instance) {
+                write.run();
+            }
+        } else {
+            write.run();
+        }
     }
 
     /**
