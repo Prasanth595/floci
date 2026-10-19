@@ -137,6 +137,7 @@ import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -155,12 +156,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
     private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
-    // An EC2 id is a known resource prefix, a hyphen and hex digits. Longer prefixes come first so
-    // that eni-attach- is not read as eni-.
-    private static final Pattern TAGGABLE_RESOURCE_ID = Pattern.compile("^(?:subnet-cidr-assoc|vpc-cidr-assoc"
+    // An EC2 id is a known resource prefix, a hyphen and 8 or 17 hex digits. Longer prefixes come
+    // first so that eni-attach- is read as one type, not as eni-.
+    private static final String TAGGABLE_RESOURCE_TYPES = "(subnet-cidr-assoc|vpc-cidr-assoc"
             + "|traf-mir-fil|traf-mir-tar|iip-assoc|eni-attach|tgw-attach|tgw-rtb|vpce-svc|aclassoc|eipassoc"
             + "|eipalloc|rtbassoc|subnet|fleet|cagw|dopt|eigw|snap|vpce|acl|ami|cgw|eni|igw|key|nat|pcx|rtb|scr"
-            + "|sfr|sgr|sir|tgw|tms|vgw|vol|vpc|vpn|cr|fl|lt|pl|sg|h|i|r)-[0-9a-f]{8}");
+            + "|sfr|sgr|sir|tgw|tms|vgw|vol|vpc|vpn|cr|fl|lt|pl|sg|h|i|r)-";
+    private static final Pattern TAGGABLE_RESOURCE_ID =
+            Pattern.compile(TAGGABLE_RESOURCE_TYPES + "(?:[0-9a-f]{8}|[0-9a-f]{17})");
+    private static final Pattern TAGGABLE_RESOURCE_PREFIX = Pattern.compile(TAGGABLE_RESOURCE_TYPES);
     private static final int MAX_USER_TAGS_PER_RESOURCE = 50;
     private static final int MAX_TAG_KEY_LENGTH = 128;
     private static final int MAX_TAG_VALUE_LENGTH = 256;
@@ -8615,7 +8619,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // ─── Tags ──────────────────────────────────────────────────────────────────
 
     public void createTags(String region, List<String> resourceIds, List<Tag> tagList) {
-        validateTagTargets(resourceIds);
+        validateTagTargets(region, resourceIds);
         validateUserTagKeys(tagList);
         validateTagLengths(tagList);
         ensureDefaultResources(region);
@@ -8628,15 +8632,33 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         createSystemTags(region, resourceIds, tagList);
     }
 
-    /** CreateTags and DeleteTags name at least one resource, each a well-formed EC2 id. */
-    private static void validateTagTargets(List<String> resourceIds) {
+    /**
+     * CreateTags and DeleteTags name at least one resource, each a well-formed EC2 id. An id Floci
+     * seeds without hex digits (the default VPC's, a catalog AMI's) passes only when this region
+     * holds that resource.
+     */
+    private void validateTagTargets(String region, List<String> resourceIds) {
         if (resourceIds == null || resourceIds.isEmpty()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter resourceIdSet", 400);
         }
         for (String resourceId : resourceIds) {
-            if (resourceId == null || !TAGGABLE_RESOURCE_ID.matcher(resourceId).lookingAt()) {
+            if (resourceId == null || !TAGGABLE_RESOURCE_ID.matcher(resourceId).matches()
+                    && !holdsSeededResource(region, resourceId)) {
                 throw new AwsException("InvalidID", "The ID '" + resourceId + "' is not valid", 400);
             }
+        }
+    }
+
+    private boolean holdsSeededResource(String region, String resourceId) {
+        if (!TAGGABLE_RESOURCE_PREFIX.matcher(resourceId).lookingAt()) {
+            return false;
+        }
+        ensureDefaultResources(region);
+        try {
+            return requireTaggableResource(region, resourceId);
+        } catch (AwsException notHeld) {
+            // A non-hex id that names nothing here is malformed rather than missing.
+            return false;
         }
     }
 
@@ -8657,12 +8679,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * CreateTags fails for a resource this region does not hold, with the error that resource's own
      * Describe call gives. A well-formed id of a type Floci does not model is accepted.
+     *
+     * @return whether Floci models the resource's type, and so found it
      */
-    private void requireTaggableResource(String region, String resourceId) {
-        String prefix = resourceId.startsWith("tgw-attach-") ? "tgw-attach"
-                : resourceId.startsWith("tgw-rtb-") ? "tgw-rtb"
-                : resourceId.substring(0, resourceId.indexOf('-'));
-        switch (prefix) {
+    private boolean requireTaggableResource(String region, String resourceId) {
+        Matcher prefix = TAGGABLE_RESOURCE_PREFIX.matcher(resourceId);
+        if (!prefix.lookingAt()) {
+            throw new AwsException("InvalidID", "The ID '" + resourceId + "' is not valid", 400);
+        }
+        switch (prefix.group(1)) {
             case "i" -> getRequiredInstance(region, resourceId);
             case "vpc" -> getRequiredVpc(region, resourceId);
             case "subnet" -> requireSubnet(region, resourceId);
@@ -8688,7 +8713,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             case "cr" -> getRequiredCapacityReservation(region, resourceId);
             case "h" -> getRequiredHost(region, resourceId);
             case "vol" -> getRequiredVolume(region, resourceId);
-            case "ami" -> requireFound(!describeImages(region, List.of(resourceId), List.of()).isEmpty(),
+            // Not describeImages: it answers an unknown ami- id with a launchable fallback image.
+            case "ami" -> requireFound(imageCatalog.findByIdOrAlias(resourceId).isPresent()
+                            || registeredImages.get(key(region, resourceId))
+                                    .filter(image -> !DEREGISTERED_STATE.equals(image.getState())).isPresent(),
                     "InvalidAMIID.NotFound", "The image id '[" + resourceId + "]' does not exist");
             case "snap" -> requireFound(!describeSnapshots(region, List.of(resourceId), List.of(), Map.of()).isEmpty(),
                     "InvalidSnapshot.NotFound", "The snapshot '" + resourceId + "' does not exist.");
@@ -8710,8 +8738,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             default -> {
                 // A valid EC2 id of a type Floci does not model: tagged as given.
+                return false;
             }
         }
+        return true;
     }
 
     private static void requireFound(boolean found, String code, String message) {
@@ -8778,7 +8808,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void deleteTags(String region, List<String> resourceIds, List<Tag> tagList) {
-        validateTagTargets(resourceIds);
+        validateTagTargets(region, resourceIds);
         validateUserTagKeys(tagList);
         ensureDefaultResources(region);
         for (String resourceId : resourceIds) {

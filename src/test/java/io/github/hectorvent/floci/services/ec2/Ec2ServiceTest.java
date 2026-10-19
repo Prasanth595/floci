@@ -904,7 +904,8 @@ class Ec2ServiceTest {
                 () -> service.createTags("us-east-1", List.of(), tag)).getErrorCode());
         assertEquals("MissingParameter", assertThrows(AwsException.class,
                 () -> service.deleteTags("us-east-1", List.of(), tag)).getErrorCode());
-        for (String id : List.of("not-an-id", "vpc-xyz", "i-123", "foo-0123456789abcdef0")) {
+        for (String id : List.of("not-an-id", "vpc-xyz", "i-123", "foo-0123456789abcdef0", "vgw-12345678-not-an-id",
+                "vgw-0123456789abcdef", "vgw-0123456789abcdef01", "vpc-default-nowhere")) {
             assertEquals("InvalidID", assertThrows(AwsException.class,
                     () -> service.createTags("us-east-1", List.of(id), tag)).getErrorCode(), id);
             assertEquals("InvalidID", assertThrows(AwsException.class,
@@ -916,9 +917,54 @@ class Ec2ServiceTest {
     void aWellFormedIdOfAnUnmodelledTypeIsTagged() {
         Ec2Service service = tagTestService(new InMemoryStorageFactory());
 
-        service.createTags("us-east-1", List.of("vgw-0123456789abcdef0"), List.of(new Tag("Team", "x")));
+        List<String> ids = List.of("vgw-0123456789abcdef0", "vgw-01234567", "vpce-svc-0123456789abcdef0",
+                "eni-attach-0123456789abcdef0", "vpc-cidr-assoc-01234567", "subnet-cidr-assoc-0123456789abcdef0");
+        service.createTags("us-east-1", ids, List.of(new Tag("Team", "x")));
 
-        assertEquals("x", service.resourceTags("us-east-1", "vgw-0123456789abcdef0").getFirst().getValue());
+        for (String id : ids) {
+            assertEquals("x", service.resourceTags("us-east-1", id).getFirst().getValue(), id);
+        }
+    }
+
+    @Test
+    void theDefaultVpcsSeededResourcesTakeTags() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        Map<String, List<String>> isDefault = Map.of("is-default", List.of("true"));
+        String vpcId = service.describeVpcs("us-east-1", List.of(), isDefault).getFirst().getVpcId();
+        Map<String, List<String>> inVpc = Map.of("vpc-id", List.of(vpcId));
+        List<String> ids = new ArrayList<>(List.of(vpcId,
+                service.describeSubnets("us-east-1", List.of(), inVpc).getFirst().getSubnetId(),
+                service.describeSecurityGroups("us-east-1", List.of(), List.of(), inVpc).getFirst().getGroupId(),
+                service.describeInternetGateways("us-east-1", List.of(), Map.of()).getFirst().getInternetGatewayId(),
+                service.describeRouteTables("us-east-1", List.of(), inVpc).getFirst().getRouteTableId(),
+                service.describeNetworkAcls("us-east-1", List.of(), inVpc).getFirst().getNetworkAclId()));
+
+        service.createTags("us-east-1", ids, List.of(new Tag("Team", "x")));
+        for (String id : ids) {
+            assertEquals("x", service.resourceTags("us-east-1", id).getFirst().getValue(), id);
+        }
+        service.deleteTags("us-east-1", ids, List.of(new Tag("Team", null)));
+        for (String id : ids) {
+            assertTrue(service.resourceTags("us-east-1", id).isEmpty(), id);
+        }
+    }
+
+    @Test
+    void catalogImagesTakeTagsButAnAbsentImageIsNotFound() {
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), new AmiImageResolver(imageCatalog), imageCatalog,
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Ec2ImageCatalog.CatalogImage catalogImage = imageCatalog.images().stream()
+                .filter(image -> !image.aliases().isEmpty()).findFirst().orElseThrow();
+        List<String> ids = List.of(catalogImage.imageId, catalogImage.aliases().getFirst());
+
+        service.createTags("us-east-1", ids, List.of(new Tag("Team", "x")));
+        AwsException absent = assertThrows(AwsException.class, () -> service.createTags("us-east-1",
+                List.of("ami-0123456789abcdef0"), List.of(new Tag("Team", "x"))));
+
+        assertEquals("InvalidAMIID.NotFound", absent.getErrorCode());
+        assertTrue(service.resourceTags("us-east-1", "ami-0123456789abcdef0").isEmpty());
     }
 
     @Test
