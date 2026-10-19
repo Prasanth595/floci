@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -37,22 +38,25 @@ class CfnResourceDispatcherTest {
             new CfnResourceDispatcher(mapper, registry, dynamicReferences, null);
 
     /**
-     * A type routed to the generic custom-resource handler is a custom resource; an exactly
-     * registered {@code Custom::} type with its own provisioner, and any other type, is not.
+     * A type the registry routes to the generic custom-resource handler is a custom resource: the
+     * handler's own type and an unregistered {@code Custom::} type. An exactly registered
+     * {@code Custom::} type with its own provisioner, any other type, a missing type, and every type
+     * of a registry without the handler, are not.
      */
     @Test
     void onlyTypesRoutedToTheCustomResourceHandlerAreCustomResources() {
-        CfnResourceProvisioner generic = provisioner((resource, ctx) -> { });
-        CfnResourceProvisioner replica = provisioner((resource, ctx) -> { });
-        when(registry.forType("AWS::CloudFormation::CustomResource")).thenReturn(Optional.of(generic));
-        when(registry.forType("Custom::Namer")).thenReturn(Optional.of(generic));
-        when(registry.forType("Custom::DynamoDBReplica")).thenReturn(Optional.of(replica));
-        when(registry.forType(TYPE)).thenReturn(Optional.empty());
+        CfnResourceDispatcher routed = new CfnResourceDispatcher(mapper, new CloudFormationResourceRegistry(
+                List.of(serving("AWS::CloudFormation::CustomResource"), serving("Custom::DynamoDBReplica"),
+                        serving(TYPE))), dynamicReferences, null);
+        CfnResourceDispatcher withoutHandler = new CfnResourceDispatcher(mapper,
+                new CloudFormationResourceRegistry(List.of(serving(TYPE))), dynamicReferences, null);
 
-        assertTrue(dispatcher.isCustomResourceType("AWS::CloudFormation::CustomResource"));
-        assertTrue(dispatcher.isCustomResourceType("Custom::Namer"));
-        assertFalse(dispatcher.isCustomResourceType("Custom::DynamoDBReplica"));
-        assertFalse(dispatcher.isCustomResourceType(TYPE));
+        assertTrue(routed.isCustomResourceType("AWS::CloudFormation::CustomResource"));
+        assertTrue(routed.isCustomResourceType("Custom::Namer"));
+        assertFalse(routed.isCustomResourceType("Custom::DynamoDBReplica"));
+        assertFalse(routed.isCustomResourceType(TYPE));
+        assertFalse(routed.isCustomResourceType(null));
+        assertFalse(withoutHandler.isCustomResourceType("Custom::Namer"));
     }
 
     @Test
@@ -182,6 +186,20 @@ class CfnResourceDispatcherTest {
         verify(owner).delete(any(StackResource.class), anyString());
         verify(owner).delete(org.mockito.ArgumentMatchers.argThat((StackResource r) ->
                 "thing-1".equals(r.getPhysicalId()) && "r".equals(r.getAttributes().get("Role"))), any());
+    }
+
+    /** A provisioner that serves {@code type} and does nothing, for routing through a real registry. */
+    private static CfnResourceProvisioner serving(String type) {
+        return new CfnResourceProvisioner() {
+            @Override
+            public Set<String> resourceTypes() {
+                return Set.of(type);
+            }
+
+            @Override
+            public void provision(StackResource resource, JsonNode properties, ProvisionContext ctx) {
+            }
+        };
     }
 
     private static CfnResourceProvisioner provisioner(Provision body) {

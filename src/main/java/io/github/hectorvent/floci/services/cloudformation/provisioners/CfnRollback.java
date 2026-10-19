@@ -215,9 +215,11 @@ public final class CfnRollback {
 
     /**
      * Prefixes attributes that name, by physical id, a resource this one uses where none of its
-     * public attributes does, such as a NAT gateway's subnet and Elastic IP. {@code
-     * CloudFormationService} reads every attribute value of a resource the template no longer
-     * names to delete it before what it uses; these keep {@code Fn::GetAtt} to what AWS resolves.
+     * public attributes does, such as a NAT gateway's subnet and Elastic IP, or the parameters a
+     * nested stack passed its child. {@code CloudFormationService} reads the attribute values of a
+     * resource the template no longer names to delete it before what it uses; these keep
+     * {@code Fn::GetAtt} to what AWS resolves, and count even for a custom resource or nested stack,
+     * whose other attributes are outputs.
      */
     public static final String USES_ATTR_PREFIX = "__FlociUses";
 

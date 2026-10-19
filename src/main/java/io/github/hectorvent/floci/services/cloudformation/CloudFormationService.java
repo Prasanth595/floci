@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -29,6 +30,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CustomResourceCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -3121,9 +3123,11 @@ public class CloudFormationService implements ResourceProvider {
      * reversing the map would delete it first: a certificate still used by a user pool domain, for
      * one. Resources the template no longer names, left behind by a failed cleanup or skipped by
      * ContinueUpdateRollback, are deleted as late as possible, after anything that might still use
-     * them, but before any held resource whose physical id one of their attributes names, such as a
-     * subnet's {@code VpcId}: with their template entry gone, that is the only record of what they
-     * depend on, so a leftover whose attributes name nothing it uses is still deleted last.
+     * them, but before any held resource they use: one whose physical id their record names, such
+     * as a subnet's {@code VpcId}, one whose id theirs extends, or for a type that takes its
+     * parent's id, the parent (see {@link #leftoverPosition}). With their template entry gone, that
+     * is the only record of what they depend on, so a leftover that uses nothing held is still
+     * deleted last.
      * Conditions are ignored, both on resources and in {@code Fn::If}: a resource depends on what
      * every branch names. The conditions read now need not be the ones a held resource was
      * provisioned under, since a failed rollback restores the parameters but can leave a resource
@@ -3426,26 +3430,69 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * The attribute values of a resource that may name what it uses, for leftover ordering. A custom
-     * resource's attributes are its handler's response Data, which can name a resource that depends
-     * on it as easily as one it uses, so only Floci's own {@code __Floci} keys count, such as its
-     * {@code ServiceToken}. A nested stack's {@code Outputs.*} and a parameter's {@code Value} are
-     * values passed through, not references, and do not count either.
+     * The values in a resource's record that may name what it uses, for leftover ordering: what it
+     * was given, not what it produced. For most resources that is every attribute value. Two kinds
+     * of resource have attributes that are outputs, which can name a resource depending on them as
+     * easily as one they use, so other values count instead. A custom resource's attributes are its
+     * handler's response Data: its resolved properties count, with the name of any Lambda function
+     * they give by ARN, since a function's physical id is its name, and of its attributes only
+     * Floci's own {@code __Floci} keys. A nested stack's {@code Outputs.*} are its child's outputs:
+     * the parameters it passed the child count, recorded under {@link CfnRollback#USES_ATTR_PREFIX}
+     * keys.
      */
     private Collection<String> referenceValues(StackResource resource) {
-        boolean custom = dispatcher.isCustomResourceType(resource.getResourceType());
-        String type = resource.getResourceType();
         List<String> values = new ArrayList<>();
+        if (dispatcher.isCustomResourceType(resource.getResourceType())) {
+            for (Map.Entry<String, String> attribute : resource.getAttributes().entrySet()) {
+                if (attribute.getKey().startsWith("__Floci")) {
+                    values.add(attribute.getValue());
+                }
+            }
+            String properties = resource.getAttributes().get(CustomResourceCfnProvisioner.CR_PROPERTIES_ATTR);
+            if (properties != null) {
+                try {
+                    addTextValues(objectMapper.readTree(properties), values);
+                } catch (JsonProcessingException e) {
+                    LOG.debugv("Custom resource {0} keeps properties that are not JSON: {1}",
+                            resource.getLogicalId(), e.getMessage());
+                }
+            }
+            for (int i = 0, given = values.size(); i < given; i++) {
+                String function = lambdaFunctionName(values.get(i));
+                if (function != null) {
+                    values.add(function);
+                }
+            }
+            return values;
+        }
+        boolean nestedStack = "AWS::CloudFormation::Stack".equals(resource.getResourceType());
         for (Map.Entry<String, String> attribute : resource.getAttributes().entrySet()) {
-            String key = attribute.getKey();
-            boolean passedThrough = custom ? !key.startsWith("__Floci")
-                    : ("AWS::CloudFormation::Stack".equals(type) && key.startsWith("Outputs."))
-                    || ("AWS::SSM::Parameter".equals(type) && "Value".equals(key));
-            if (!passedThrough) {
+            if (!nestedStack || !attribute.getKey().startsWith("Outputs.")) {
                 values.add(attribute.getValue());
             }
         }
         return values;
+    }
+
+    /** Adds every text value in {@code node}, at any depth, to {@code values}. */
+    private static void addTextValues(JsonNode node, List<String> values) {
+        Deque<JsonNode> pending = new ArrayDeque<>(List.of(node));
+        while (!pending.isEmpty()) {
+            JsonNode current = pending.pop();
+            if (current.isTextual()) {
+                values.add(current.asText());
+            } else {
+                current.forEach(pending::push);
+            }
+        }
+    }
+
+    /** The name of the Lambda function {@code value} gives by ARN, qualified or not, or else null. */
+    private static String lambdaFunctionName(String value) {
+        return AwsArnUtils.resourceIfArnFor(value, "lambda")
+                .filter(resource -> resource.startsWith("function:"))
+                .map(resource -> resource.substring("function:".length()).split(":", 2)[0])
+                .orElse(null);
     }
 
     void deleteStackResources(Stack stack, String region, String accountId) {
@@ -4075,6 +4122,7 @@ public class CloudFormationService implements ResourceProvider {
 
         resource.setPhysicalId(childStack.getStackId());
         resource.getAttributes().put("Arn", childStack.getStackId());
+        recordParameterUses(resource, parameters);
         childStack.getOutputs().forEach((k, v) -> resource.getAttributes().put("Outputs." + k, v));
 
         if (NESTED_STACK_SUCCESS_STATUSES.contains(childStack.getStatus())) {
@@ -4098,6 +4146,27 @@ public class CloudFormationService implements ResourceProvider {
         return resource;
     }
 
+    /**
+     * Keeps the parameter values a nested stack passed its child, a list's items one by one, under
+     * {@link CfnRollback#USES_ATTR_PREFIX} keys: what the child was given names what it uses, such as
+     * a VPC it creates subnets in, where its outputs can as well name a resource depending on it.
+     */
+    private static void recordParameterUses(StackResource resource, JsonNode parameters) {
+        if (parameters == null || !parameters.isObject()) {
+            return;
+        }
+        String prefix = CfnRollback.USES_ATTR_PREFIX + "Parameters.";
+        parameters.properties().forEach(parameter -> {
+            JsonNode value = parameter.getValue();
+            if (value.isArray()) {
+                for (int i = 0; i < value.size(); i++) {
+                    resource.getAttributes().put(prefix + parameter.getKey() + "." + i, value.get(i).asText());
+                }
+            } else if (value.isValueNode() && !value.isNull()) {
+                resource.getAttributes().put(prefix + parameter.getKey(), value.asText());
+            }
+        });
+    }
 
     private static String newStackId(String stackName, String region, String accountId) {
         return AwsArnUtils.Arn.of("cloudformation", region, accountId, "stack/" + stackName + "/" + UUID.randomUUID()).toString();

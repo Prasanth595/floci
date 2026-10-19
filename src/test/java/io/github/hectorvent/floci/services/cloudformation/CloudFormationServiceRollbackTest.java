@@ -15,7 +15,10 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.model.StackUpdateSnapshot;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CustomResourceCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
@@ -78,6 +81,12 @@ class CloudFormationServiceRollbackTest {
     @BeforeEach
     void setUp() {
         provisioner = mock(CfnResourceDispatcher.class);
+        // Which types the generic custom-resource handler serves, as the registry routes them: an
+        // unregistered Custom:: type goes to it, and Custom::DynamoDBReplica has its own provisioner.
+        CloudFormationResourceRegistry registry = new CloudFormationResourceRegistry(List.of(
+                serving("AWS::CloudFormation::CustomResource"), serving("Custom::DynamoDBReplica")));
+        when(provisioner.isCustomResourceType(any()))
+                .thenAnswer(invocation -> registry.isCustomResourceType(invocation.getArgument(0)));
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.defaultAccountId()).thenReturn(ACCOUNT);
 
@@ -1041,7 +1050,6 @@ class CloudFormationServiceRollbackTest {
             stack.getResources().put(resource.getLogicalId(), resource);
         }
         when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
-        when(provisioner.isCustomResourceType("Custom::BucketNamer")).thenReturn(true);
 
         service.deleteStackResources(stack, REGION, ACCOUNT);
 
@@ -1051,16 +1059,38 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
+     * A custom resource's resolved properties are what it was given, so a leftover one goes before
+     * the bucket they name, at any depth, which its handler may need to empty first.
+     */
+    @Test
+    void deleteStack_deletesALeftoverCustomResourceBeforeTheBucketItsPropertiesName() {
+        String token = "arn:aws:sns:us-east-1:000000000000:emptier";
+        Stack stack = leftoverStack("delete-leftover-custom-uses", "{\"Bucket\": {\"Type\": \"AWS::S3::Bucket\"}}");
+        StackResource emptier = resource("Emptier", "emptier-1", "Custom::EmptyBucket", "UPDATE_COMPLETE");
+        emptier.getAttributes().put("__FlociServiceToken", token);
+        emptier.getAttributes().put(CustomResourceCfnProvisioner.CR_PROPERTIES_ATTR,
+                "{\"ServiceToken\": \"" + token + "\", \"Target\": {\"Buckets\": [\"bucket-1\"]}}");
+        StackResource bucket = resource("Bucket", "bucket-1", "AWS::S3::Bucket", "CREATE_COMPLETE");
+        hold(stack, emptier, bucket);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(emptier, REGION);
+        deletes.verify(provisioner).delete(bucket, REGION);
+    }
+
+    /**
      * {@code Custom::DynamoDBReplica} has its own provisioner, and its {@code TableName} names the
      * table it replicates, so a leftover replica still goes before that table.
      */
     @Test
     void deleteStack_deletesALeftoverDynamoDbReplicaBeforeItsTable() {
         Stack stack = leftoverStack("delete-leftover-replica", "{\"Table\": {\"Type\": \"AWS::DynamoDB::Table\"}}");
-        StackResource table = resource("Table", "table-1", "AWS::DynamoDB::Table", "CREATE_COMPLETE");
         StackResource replica = resource("Replica", "table-1-replica", "Custom::DynamoDBReplica", "UPDATE_COMPLETE");
         replica.getAttributes().put("TableName", "table-1");
-        hold(stack, table, replica);
+        StackResource table = resource("Table", "table-1", "AWS::DynamoDB::Table", "CREATE_COMPLETE");
+        hold(stack, replica, table);
 
         service.deleteStackResources(stack, REGION, ACCOUNT);
 
@@ -1077,11 +1107,10 @@ class CloudFormationServiceRollbackTest {
     void deleteStack_deletesALeftoverCustomResourceBeforeItsServiceToken() {
         String topicArn = "arn:aws:sns:us-east-1:000000000000:handler";
         Stack stack = leftoverStack("delete-leftover-custom-token", "{\"Topic\": {\"Type\": \"AWS::SNS::Topic\"}}");
-        StackResource topic = resource("Topic", topicArn, "AWS::SNS::Topic", "CREATE_COMPLETE");
         StackResource custom = resource("Notifier", "notifier-1", "Custom::Notifier", "UPDATE_COMPLETE");
         custom.getAttributes().put("__FlociServiceToken", topicArn);
-        hold(stack, topic, custom);
-        when(provisioner.isCustomResourceType("Custom::Notifier")).thenReturn(true);
+        StackResource topic = resource("Topic", topicArn, "AWS::SNS::Topic", "CREATE_COMPLETE");
+        hold(stack, custom, topic);
 
         service.deleteStackResources(stack, REGION, ACCOUNT);
 
@@ -1091,27 +1120,83 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
-     * A parameter's {@code Value} is a value passed through, not what the parameter uses: a bucket
-     * named after it, created after it, still goes first. (A nested stack's {@code Outputs.*} are
-     * left out the same way; its delete does not go through the dispatcher, so it is not observed
-     * here.)
+     * A Lambda {@code ServiceToken} is the function's ARN while the function's physical id is its
+     * name: a leftover custom resource still goes before its handler function.
      */
     @Test
-    void deleteStack_infersNoLeftoverOrderFromAParametersValue() {
-        String type = "AWS::SSM::Parameter";
-        String attribute = "Value";
-        Stack stack = leftoverStack("delete-leftover-passthrough", "{\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}");
-        StackResource queue = resource("Queue", "queue-1", "AWS::SQS::Queue", "CREATE_COMPLETE");
-        StackResource source = resource("Source", "source-1", type, "UPDATE_COMPLETE");
-        source.getAttributes().put(attribute, "bucket-1");
-        StackResource bucket = resource("Bucket", "bucket-1", "AWS::S3::Bucket", "UPDATE_COMPLETE");
-        hold(stack, queue, source, bucket);
+    void deleteStack_deletesALeftoverLambdaBackedCustomResourceBeforeItsHandler() {
+        String handlerArn = "arn:aws:lambda:us-east-1:000000000000:function:handler";
+        Stack stack = leftoverStack("delete-leftover-custom-lambda",
+                "{\"Handler\": {\"Type\": \"AWS::Lambda::Function\"}}");
+        StackResource custom = resource("Seeder", "seeder-1", "Custom::Seeder", "UPDATE_COMPLETE");
+        custom.getAttributes().put("__FlociServiceToken", handlerArn);
+        StackResource handler = resource("Handler", "handler", "AWS::Lambda::Function", "CREATE_COMPLETE");
+        handler.getAttributes().put("Arn", handlerArn);
+        hold(stack, custom, handler);
 
         service.deleteStackResources(stack, REGION, ACCOUNT);
 
         InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(custom, REGION);
+        deletes.verify(provisioner).delete(handler, REGION);
+    }
+
+    /**
+     * An SSM parameter's {@code Value} is what it was given, such as a bucket's name, so a leftover
+     * parameter goes before that bucket, as a stack delete orders {@code Value: !Ref Bucket}.
+     */
+    @Test
+    void deleteStack_deletesALeftoverParameterBeforeTheBucketItsValueNames() {
+        Stack stack = leftoverStack("delete-leftover-parameter", "{\"Bucket\": {\"Type\": \"AWS::S3::Bucket\"}}");
+        StackResource parameter = resource("Parameter", "bucket-name", "AWS::SSM::Parameter", "UPDATE_COMPLETE");
+        parameter.getAttributes().put("Value", "bucket-1");
+        StackResource bucket = resource("Bucket", "bucket-1", "AWS::S3::Bucket", "CREATE_COMPLETE");
+        hold(stack, parameter, bucket);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(parameter, REGION);
         deletes.verify(provisioner).delete(bucket, REGION);
-        deletes.verify(provisioner).delete(source, REGION);
+    }
+
+    /**
+     * A leftover nested stack goes before the VPC it passed its child, where the child created
+     * subnets; the parameters it passed are recorded for this.
+     */
+    @Test
+    void deleteStack_deletesALeftoverNestedStackBeforeTheVpcItPassedItsChild() {
+        String childId = "arn:aws:cloudformation:us-east-1:000000000000:stack/parent-Network/1";
+        Stack stack = leftoverStack("delete-leftover-nested-uses", "{\"Vpc\": {\"Type\": \"AWS::EC2::VPC\"}}");
+        StackResource nested = resource("Network", childId, "AWS::CloudFormation::Stack", "UPDATE_COMPLETE");
+        nested.getAttributes().put("Arn", childId);
+        nested.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "Parameters.VpcId", "vpc-1");
+        StackResource vpc = resource("Vpc", "vpc-1", "AWS::EC2::VPC", "CREATE_COMPLETE");
+        hold(stack, nested, vpc);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        assertEquals(List.of("Network", "Vpc"), deletesInProgress(stack));
+    }
+
+    /**
+     * A nested stack's {@code Outputs.*} are its child's outputs: a leftover bucket named after
+     * one, created after the nested stack, still goes first.
+     */
+    @Test
+    void deleteStack_infersNoLeftoverOrderFromANestedStacksOutputs() {
+        String childId = "arn:aws:cloudformation:us-east-1:000000000000:stack/parent-Names/1";
+        Stack stack = leftoverStack("delete-leftover-nested-outputs", "{\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}");
+        StackResource queue = resource("Queue", "queue-1", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource nested = resource("Names", childId, "AWS::CloudFormation::Stack", "UPDATE_COMPLETE");
+        nested.getAttributes().put("Arn", childId);
+        nested.getAttributes().put("Outputs.BucketName", "bucket-1");
+        StackResource bucket = resource("Bucket", "bucket-1", "AWS::S3::Bucket", "UPDATE_COMPLETE");
+        hold(stack, queue, nested, bucket);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        assertEquals(List.of("Queue", "Bucket", "Names"), deletesInProgress(stack));
     }
 
     /**
@@ -1165,12 +1250,12 @@ class CloudFormationServiceRollbackTest {
         String secretArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf";
         Stack stack = leftoverStack("delete-leftover-attachment-ranked",
                 "{\"Secret\": {\"Type\": \"AWS::SecretsManager::Secret\"}}");
-        StackResource secret = resource("Secret", secretArn, "AWS::SecretsManager::Secret", "CREATE_COMPLETE");
-        secret.getAttributes().put("Arn", secretArn);
         StackResource attachment = resource("Attachment", secretArn,
                 "AWS::SecretsManager::SecretTargetAttachment", "UPDATE_COMPLETE");
         attachment.getAttributes().put("Id", secretArn);
-        hold(stack, secret, attachment);
+        StackResource secret = resource("Secret", secretArn, "AWS::SecretsManager::Secret", "CREATE_COMPLETE");
+        secret.getAttributes().put("Arn", secretArn);
+        hold(stack, attachment, secret);
 
         service.deleteStackResources(stack, REGION, ACCOUNT);
 
@@ -1267,6 +1352,14 @@ class CloudFormationServiceRollbackTest {
             stack.getResources().put(resource.getLogicalId(), resource);
         }
         when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+    }
+
+    /** The resources a stack delete reached, in order, as its DELETE_IN_PROGRESS events name them. */
+    private static List<String> deletesInProgress(Stack stack) {
+        return stack.getEvents().stream()
+                .filter(event -> "DELETE_IN_PROGRESS".equals(event.getResourceStatus()))
+                .map(StackEvent::getLogicalResourceId)
+                .toList();
     }
 
     /**
@@ -1512,6 +1605,13 @@ class CloudFormationServiceRollbackTest {
         resource.setResourceType(resourceType);
         resource.setStatus(status);
         return resource;
+    }
+
+    /** A provisioner that serves {@code type}, for routing through a real registry. */
+    private static CfnResourceProvisioner serving(String type) {
+        CfnResourceProvisioner serving = mock(CfnResourceProvisioner.class);
+        when(serving.resourceTypes()).thenReturn(Set.of(type));
+        return serving;
     }
 
     /** A service over the shared provisioner that reads the time from {@code clock}. */
