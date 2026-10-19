@@ -26,6 +26,7 @@ final class RedshiftDestinationValidator {
     private static final String SECRET_ARN_REGEX =
             "arn:.*:secretsmanager:[a-zA-Z0-9\\-]+:\\d{12}:secret:[a-zA-Z0-9\\-/_+=.@!]+";
     private static final Pattern SECRET_ARN = Pattern.compile(SECRET_ARN_REGEX);
+    private static final Pattern UNREADABLE_KEY_CHARS = Pattern.compile("[\\s'\"]");
     private static final Set<String> BACKUP_MODES = Set.of("Disabled", "Enabled");
     private static final Set<String> UNSUPPORTED_COMPRESSION = Set.of("zip", "snappy");
 
@@ -40,6 +41,10 @@ final class RedshiftDestinationValidator {
         }
         if (config.getS3() == null) {
             violations.add(violation(shapeName, "s3Configuration", "Member must not be null"));
+        }
+        if ("Enabled".equals(config.getS3BackupMode()) && config.getS3Backup() == null) {
+            violations.add(violation(shapeName, "s3BackupConfiguration",
+                    "Member must not be null when S3BackupMode is Enabled"));
         }
         collectMemberViolations(config, shapeName, violations);
         throwIfAny(violations);
@@ -137,6 +142,10 @@ final class RedshiftDestinationValidator {
             }
         }
         S3Destination s3 = dest.getS3();
+        if (s3 != null && s3.getPrefix() != null && UNREADABLE_KEY_CHARS.matcher(s3.getPrefix()).find()) {
+            violations.add(violation(shape, "s3Configuration.prefix",
+                    "Member must not contain whitespace or quotes: the Redshift COPY emulation cannot read such object keys"));
+        }
         if (s3 != null && s3.getCompressionFormat() != null
                 && UNSUPPORTED_COMPRESSION.contains(s3.getCompressionFormat().toLowerCase(Locale.ROOT))) {
             violations.add(violation(shape, "s3Configuration.compressionFormat",

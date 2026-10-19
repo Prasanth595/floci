@@ -54,15 +54,14 @@ class FirehoseRedshiftDeliveryTest {
     }
 
     @Test
-    void runsCopyThroughTheProxyPortInSimpleMode() throws Exception {
+    void runsCopyWithoutAnIamRoleThroughTheProxyPortInSimpleMode() throws Exception {
         delivery.copy("000000000000", "us-east-1", destination(), "stage", "k1");
 
         assertEquals(1, executed.size());
         assertEquals("jdbc:postgresql://127.0.0.1:41234/dev?preferQueryMode=simple", executed.get(0)[0]);
         assertEquals("admin", executed.get(0)[1]);
         assertEquals("Secret123", executed.get(0)[2]);
-        assertEquals("COPY events FROM 's3://stage/k1' "
-                + "IAM_ROLE 'arn:aws:iam::000000000000:role/firehose' json 'auto'", executed.get(0)[3]);
+        assertEquals("COPY events FROM 's3://stage/k1' json 'auto'", executed.get(0)[3]);
     }
 
     @Test
@@ -126,5 +125,16 @@ class FirehoseRedshiftDeliveryTest {
         assertEquals("Secret123", properties.getProperty("password"));
         assertTrue(Integer.parseInt(properties.getProperty("connectTimeout")) > 0);
         assertTrue(Integer.parseInt(properties.getProperty("socketTimeout")) > 0);
+    }
+
+    @Test
+    void destinationWithoutAnyPasswordFailsWithAClearMessage() throws Exception {
+        RedshiftDestination dest = destination();
+        dest.setPassword(null);
+
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> delivery.copy("000000000000", "us-east-1", dest, "stage", "k"));
+
+        assertTrue(e.getMessage().contains("Password"), e.getMessage());
     }
 }

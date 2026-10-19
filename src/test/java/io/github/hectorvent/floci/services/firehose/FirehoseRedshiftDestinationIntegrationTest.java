@@ -201,4 +201,52 @@ class FirehoseRedshiftDestinationIntegrationTest {
                  "RedshiftDestinationUpdate": {"CopyCommand": {"CopyOptions": "CSV"}}}
                 """.formatted(DESTINATION_ID)).statusCode(400);
     }
+
+    @Test
+    void explicitNullRedshiftConfigurationIsTreatedAsAbsent() {
+        post("CreateDeliveryStream", """
+                {"DeliveryStreamName": "rs-null-config", "RedshiftDestinationConfiguration": null}
+                """).statusCode(200);
+    }
+
+    @Test
+    void dataFormatConversionInTheIntermediateS3ConfigurationIsIgnored() {
+        String body = createBody("rs-conversion", "rs-conversion-stage")
+                .replace("\"BucketARN\": \"arn:aws:s3:::rs-conversion-stage\"",
+                        "\"BucketARN\": \"arn:aws:s3:::rs-conversion-stage\","
+                                + " \"DataFormatConversionConfiguration\": {\"Enabled\": true}");
+        post("CreateDeliveryStream", body).statusCode(200);
+
+        post("DescribeDeliveryStream", "{\"DeliveryStreamName\": \"rs-conversion\"}")
+                .body("DeliveryStreamDescription.Destinations[0].RedshiftDestinationDescription"
+                        + ".S3DestinationDescription.DataFormatConversionConfiguration", nullValue());
+    }
+
+    @Test
+    void createRejectsBackupEnabledWithoutABackupConfiguration() {
+        String body = createBody("rs-backup-missing", "rs-backup-missing-stage")
+                .replace("\"Username\": \"admin\"", "\"S3BackupMode\": \"Enabled\", \"Username\": \"admin\"");
+
+        post("CreateDeliveryStream", body).statusCode(400);
+    }
+
+    @Test
+    void updateRejectsBackupEnabledWithoutABackupConfiguration() {
+        post("CreateDeliveryStream", createBody("rs-backup-missing-upd", "rs-backup-missing-upd-stage")).statusCode(200);
+
+        post("UpdateDestination", """
+                {"DeliveryStreamName": "rs-backup-missing-upd", "CurrentDeliveryStreamVersionId": "1",
+                 "DestinationId": "%s",
+                 "RedshiftDestinationUpdate": {"S3BackupMode": "Enabled"}}
+                """.formatted(DESTINATION_ID)).statusCode(400);
+    }
+
+    @Test
+    void createRejectsAnIntermediatePrefixTheCopyEmulationCannotRead() {
+        String body = createBody("rs-bad-prefix", "rs-bad-prefix-stage")
+                .replace("\"BucketARN\": \"arn:aws:s3:::rs-bad-prefix-stage\"",
+                        "\"BucketARN\": \"arn:aws:s3:::rs-bad-prefix-stage\", \"Prefix\": \"my prefix/\"");
+
+        post("CreateDeliveryStream", body).statusCode(400);
+    }
 }

@@ -162,4 +162,22 @@ class RedshiftDestinationValidatorTest {
 
         assertTrue(e.getMessage().contains("copyCommand.dataTableName"), e.getMessage());
     }
+
+    @Test
+    void backupEnabledWithoutABackupConfigurationIsRejected() throws Exception {
+        RedshiftDestination dest = valid();
+        dest.setS3BackupMode("Enabled");
+
+        assertTrue(messageOf(dest).contains("s3BackupConfiguration"));
+    }
+
+    @Test
+    void intermediatePrefixWithWhitespaceOrQuotesIsRejected() throws Exception {
+        for (String prefix : new String[] {"my prefix/", "it's/", "say\"/"}) {
+            RedshiftDestination dest = valid();
+            dest.getS3().setPrefix(prefix);
+
+            assertTrue(messageOf(dest).contains("s3Configuration.prefix"), prefix);
+        }
+    }
 }

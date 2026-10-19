@@ -30,6 +30,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.*;
@@ -51,6 +52,10 @@ public class FirehoseService implements ResourceProvider {
     private static final String DEFAULT_BUCKET = "floci-firehose-results";
     private static final int DEFAULT_BUFFERING_INTERVAL_SECONDS = 300;
     private static final int DEFAULT_REDSHIFT_RETRY_SECONDS = 3600;
+    // AWS retries a failed Redshift load every 5 minutes; the first retries here are quicker so that a table
+    // created just after the stream is picked up soon, then the delay doubles up to the AWS interval.
+    private static final long FIRST_REDSHIFT_RETRY_DELAY_SECONDS = 5;
+    private static final long MAX_REDSHIFT_RETRY_DELAY_SECONDS = 300;
     private static final int DEFAULT_BUFFERING_SIZE_MBS = 5;
     /**
      * botocore's {@code AWSKMSKeyARNForSSE} shape: a KMS <em>key</em> ARN, not an alias and
@@ -118,6 +123,8 @@ public class FirehoseService implements ResourceProvider {
     // Per stream, the batches staged in S3 whose COPY has not succeeded yet, oldest first. A failed COPY is
     // retried against the object already staged instead of staging the batch again.
     private final Map<String, Deque<PendingRedshiftCopy>> redshiftPending = new ConcurrentHashMap<>();
+    // Serialises the read, version check, merge and write of a Redshift UpdateDestination per stream.
+    private final Map<String, Object> redshiftUpdateLocks = new ConcurrentHashMap<>();
     private final Clock clock;
     private final long tickIntervalSeconds;
     private final int flushRecordCount;
@@ -454,31 +461,39 @@ public class FirehoseService implements ResourceProvider {
     public void updateRedshiftDestination(String name, String currentVersionId, String destinationId,
                                           RedshiftDestination update) {
         String streamKey = scopedKey(name);
-        DeliveryStreamDescription stream = streamGet(streamKey)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Delivery stream not found: " + name, 400));
-        if (!stream.getVersionId().equals(currentVersionId)) {
-            throw new AwsException("ConcurrentModificationException",
-                    "Cannot update firehose: " + name + " since the current version id: " + stream.getVersionId()
-                            + " and specified version id: " + currentVersionId + " do not match", 400);
+        synchronized (redshiftUpdateLocks.computeIfAbsent(streamKey, k -> new Object())) {
+            DeliveryStreamDescription stream = streamGet(streamKey)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "Delivery stream not found: " + name, 400));
+            if (!stream.getVersionId().equals(currentVersionId)) {
+                throw new AwsException("ConcurrentModificationException",
+                        "Cannot update firehose: " + name + " since the current version id: " + stream.getVersionId()
+                                + " and specified version id: " + currentVersionId + " do not match", 400);
+            }
+            DeliveryStreamDescription.Destination destination = stream.getDestinations() != null
+                    && !stream.getDestinations().isEmpty() ? stream.getDestinations().get(0) : null;
+            if (destination == null || !destination.getDestinationId().equals(destinationId)) {
+                throw new AwsException("InvalidArgumentException", "Destination Id " + destinationId + " not found", 400);
+            }
+            RedshiftDestination current = destination.getRedshiftDestinationDescription();
+            if (current == null) {
+                throw new AwsException("InvalidArgumentException",
+                        "The delivery stream " + name + " does not have a Redshift destination.", 400);
+            }
+            RedshiftDestinationValidator.validateBackupTransition(current.getS3BackupMode(), update.getS3BackupMode());
+            String effectiveBackupMode = update.getS3BackupMode() != null
+                    ? update.getS3BackupMode() : current.getS3BackupMode();
+            if ("Enabled".equals(effectiveBackupMode) && update.getS3Backup() == null && current.getS3Backup() == null) {
+                throw new AwsException("InvalidArgumentException",
+                        "S3BackupMode is Enabled but no S3 backup configuration is set.", 400);
+            }
+            validateBufferingHints(update.getS3());
+            mergeRedshiftDestination(current, update);
+            stream.setVersionId(String.valueOf(parseVersionId(stream.getVersionId()) + 1));
+            stream.setLastUpdateTimestamp(Instant.now());
+            streamPut(streamKey, stream);
+            LOG.infov("Updated Redshift destination {0} of Firehose delivery stream {1}", destinationId, name);
         }
-        DeliveryStreamDescription.Destination destination = stream.getDestinations() != null && !stream.getDestinations().isEmpty()
-                ? stream.getDestinations().get(0)
-                : null;
-        if (destination == null || !destination.getDestinationId().equals(destinationId)) {
-            throw new AwsException("InvalidArgumentException", "Destination Id " + destinationId + " not found", 400);
-        }
-        RedshiftDestination current = destination.getRedshiftDestinationDescription();
-        if (current == null) {
-            throw new AwsException("InvalidArgumentException",
-                    "The delivery stream " + name + " does not have a Redshift destination.", 400);
-        }
-        RedshiftDestinationValidator.validateBackupTransition(current.getS3BackupMode(), update.getS3BackupMode());
-        validateBufferingHints(update.getS3());
-        mergeRedshiftDestination(current, update);
-        stream.setVersionId(String.valueOf(parseVersionId(stream.getVersionId()) + 1));
-        stream.setLastUpdateTimestamp(Instant.now());
-        streamPut(streamKey, stream);
-        LOG.infov("Updated Redshift destination {0} of Firehose delivery stream {1}", destinationId, name);
     }
 
     /** Members present in the update replace the stored ones; absent members are kept. */
@@ -782,6 +797,7 @@ public class FirehoseService implements ResourceProvider {
         buffers.remove(streamKey);
         bufferSince.remove(streamKey);
         redshiftPending.remove(streamKey);
+        redshiftUpdateLocks.remove(streamKey);
         pendingSourceIterators.remove(streamKey);
         iteratorDelete(streamKey);
         LOG.infov("Deleted Firehose delivery stream: {0}", name);
@@ -1066,14 +1082,20 @@ public class FirehoseService implements ResourceProvider {
                 }
             }
 
-            byte[] body = compression.compress(payload.toByteArray());
+            byte[] rawPayload = payload.toByteArray();
+            if (isRedshiftStream(stream)) {
+                // Before the primary object: a failed backup write then restores the buffer with nothing staged yet,
+                // instead of leaving a staged batch that the retry would stage a second time.
+                writeRedshiftBackup(stream, stream.getDestinations().get(0).getRedshiftDestinationDescription(),
+                        rawPayload);
+            }
+            byte[] body = compression.compress(rawPayload);
             s3Service.putObject(bucket, key, body, "application/octet-stream", Map.of(),
                     new PutObjectOptions().withContentEncoding(compression.contentEncoding()));
             LOG.infov("Flushed {0} records from stream {1} to s3://{2}/{3} ({4})",
                     records.size(), streamName, bucket, key, compression.wireValue());
             if (isRedshiftStream(stream)) {
                 RedshiftDestination redshift = stream.getDestinations().get(0).getRedshiftDestinationDescription();
-                writeRedshiftBackup(stream, redshift, key, body);
                 redshiftPending.computeIfAbsent(streamName, k -> new ConcurrentLinkedDeque<>())
                         .addLast(new PendingRedshiftCopy(bucket, key));
                 drainRedshiftCopies(streamName, stream);
@@ -1087,11 +1109,17 @@ public class FirehoseService implements ResourceProvider {
         }
     }
 
-    /** A batch already staged in S3 and waiting for its COPY; {@code failingSince} is set on the first failure. */
+    /**
+     * A batch already staged in S3 and waiting for its COPY. {@code failingSince} is set on the first failure and
+     * {@code nextAttempt} spaces the retries out, so a failing load neither floods the log nor holds the shared tick
+     * thread for a connection attempt on every tick.
+     */
     private static final class PendingRedshiftCopy {
         private final String bucket;
         private final String key;
         private Instant failingSince;
+        private Instant nextAttempt;
+        private int failures;
 
         private PendingRedshiftCopy(String bucket, String key) {
             this.bucket = bucket;
@@ -1140,39 +1168,68 @@ public class FirehoseService implements ResourceProvider {
                     + "the batch stays in s3://{1}/{2}", streamKey, pending.bucket, pending.key);
             return true;
         }
+        Instant now = clock.instant();
+        if (pending.nextAttempt != null && now.isBefore(pending.nextAttempt)) {
+            return false;
+        }
         try {
             String region = AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(),
                     regionResolver.getDefaultRegion());
             redshiftDelivery.copy(stream.getAccountId(), region, redshift, pending.bucket, pending.key);
             return true;
         } catch (RuntimeException e) {
-            Instant now = clock.instant();
+            boolean expected = e instanceof AwsException || e instanceof IllegalStateException
+                    || e instanceof IllegalArgumentException;
             if (pending.failingSince == null) {
                 pending.failingSince = now;
             }
+            pending.failures++;
             int window = redshift.getRetryOptions() != null && redshift.getRetryOptions().getDurationInSeconds() != null
                     ? redshift.getRetryOptions().getDurationInSeconds() : DEFAULT_REDSHIFT_RETRY_SECONDS;
             if (window > 0 && now.isBefore(pending.failingSince.plusSeconds(window))) {
-                LOG.warnv("Redshift delivery of s3://{0}/{1} into table {2} failed for stream {3}, will retry: {4}",
-                        pending.bucket, pending.key, table, streamKey, e.getMessage());
+                long delaySeconds = Math.min(MAX_REDSHIFT_RETRY_DELAY_SECONDS,
+                        FIRST_REDSHIFT_RETRY_DELAY_SECONDS << Math.min(pending.failures - 1, 6));
+                pending.nextAttempt = now.plusSeconds(delaySeconds);
+                String reason = describe(e);
+                if (!expected) {
+                    LOG.errorv(e, "Unexpected failure delivering s3://{0}/{1} into table {2} for stream {3}; "
+                            + "retrying in {4}s", pending.bucket, pending.key, table, streamKey, delaySeconds);
+                } else if (pending.failures == 1) {
+                    LOG.warnv("Redshift delivery of s3://{0}/{1} into table {2} failed for stream {3}, "
+                            + "retrying in {4}s: {5}", pending.bucket, pending.key, table, streamKey, delaySeconds,
+                            reason);
+                } else {
+                    LOG.debugv("Redshift delivery of s3://{0}/{1} into table {2} failed again for stream {3} "
+                            + "(attempt {4}), retrying in {5}s: {6}", pending.bucket, pending.key, table, streamKey,
+                            pending.failures, delaySeconds, reason);
+                }
                 return false;
             }
             LOG.errorv("Redshift delivery into table {0} failed for stream {1} and the retry window of {2}s is over; "
                     + "the batch stays in s3://{3}/{4}: {5}", table, streamKey, window, pending.bucket, pending.key,
-                    e.getMessage());
+                    describe(e));
             return true;
         }
     }
 
-    private void writeRedshiftBackup(DeliveryStreamDescription stream, RedshiftDestination redshift, String key,
-                                     byte[] body) {
-        if (!"Enabled".equals(redshift.getS3BackupMode()) || redshift.getS3Backup() == null
-                || redshift.getS3Backup().bucketName() == null) {
+    private static String describe(RuntimeException e) {
+        return e.getMessage() != null ? e.getMessage() : e.toString();
+    }
+
+    /** Writes the raw batch to the backup location under that location's own prefix, compression and bucket. */
+    private void writeRedshiftBackup(DeliveryStreamDescription stream, RedshiftDestination redshift,
+                                     byte[] rawPayload) throws IOException {
+        S3Destination backup = redshift.getS3Backup();
+        if (!"Enabled".equals(redshift.getS3BackupMode()) || backup == null || backup.bucketName() == null) {
             return;
         }
-        String backupBucket = redshift.getS3Backup().bucketName();
-        ensureBucket(backupBucket, stream);
-        s3Service.putObject(backupBucket, key, body, "application/octet-stream", Map.of(), new PutObjectOptions());
+        FirehoseCompression compression = FirehoseCompression.forDelivery(backup.getCompressionFormat());
+        String backupKey = S3ObjectKeyResolver.resolveKey(backup, stream.getDeliveryStreamName(),
+                stream.getVersionId(), clock.instant(), compression);
+        ensureBucket(backup.bucketName(), stream);
+        s3Service.putObject(backup.bucketName(), backupKey, compression.compress(rawPayload),
+                "application/octet-stream", Map.of(),
+                new PutObjectOptions().withContentEncoding(compression.contentEncoding()));
     }
 
     private static boolean isRedshiftStream(DeliveryStreamDescription stream) {

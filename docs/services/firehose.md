@@ -139,8 +139,10 @@ intermediate S3 location. `S3BackupMode` can be switched on after creation but n
 ### Delivery
 
 A flush writes the batch to the intermediate S3 location, then runs
-`COPY <DataTableName> [(<DataTableColumns>)] FROM 's3://<bucket>/<key>' IAM_ROLE '<RoleARN>' <CopyOptions>` against
-the cluster. The `COPY` goes through the cluster's wire proxy, so it behaves like a `COPY` sent by any other client
+`COPY <DataTableName> [(<DataTableColumns>)] FROM 's3://<bucket>/<key>' <CopyOptions>` against the cluster. The
+`COPY` names no `IAM_ROLE`: AWS gives the cluster temporary credentials of the stream's `RoleARN`, and Floci instead
+lets the proxy read the staged object from its own S3, so `RoleARN` is validated and stored but not used for the load
+(an `IAM_ROLE` would have to exist in IAM and be associated with the cluster). The `COPY` goes through the cluster's wire proxy, so it behaves like a `COPY` sent by any other client
 (see [Redshift COPY from S3](redshift.md#copy-from-s3)). Credentials come from `Username` and `Password`, or from
 the secret in `SecretsManagerConfiguration` when `Enabled` is true (the secret JSON needs `username` and `password`).
 An empty `DataTableColumns` omits the column list, so the proxy discovers the table columns.
@@ -151,11 +153,17 @@ with an optional schema, and a comma-separated list of column names. `CopyOption
 quoted value. Create and update reject anything else.
 
 A batch is staged in S3 once. If its `COPY` fails (missing table or cluster, bad data), the staged object stays in S3
-and the `COPY` is retried against that same object on every flush tick until `RetryOptions.DurationInSeconds` has
-elapsed since the first failure (default 3600, `0` means a single attempt). Batches are loaded in order, so a newer
+and the `COPY` is retried against that same object, after 5 seconds and then at doubling intervals up to the 5 minutes
+AWS uses, until `RetryOptions.DurationInSeconds` has elapsed since the first failure (default 3600, `0` means a single
+attempt). Only the first failure of a batch is logged as a warning. Batches are loaded in order, so a newer
 batch waits behind an older failing one. After the window the batch is given up with an error log and the staged
-object is kept. Pending copies are held in memory and are lost on restart. With `S3BackupMode` set to `Enabled`, each
-batch is also written once to the `S3BackupConfiguration` bucket.
+object is kept. Pending copies are held in memory and are lost on restart. With `S3BackupMode` set to `Enabled`, which
+needs an `S3BackupConfiguration`, each batch is also written once to that bucket under its own prefix and compression.
+
+The intermediate `Prefix` must not contain whitespace or quotes, because the `COPY` emulation cannot read such object
+keys. Compression of the intermediate objects is not added to the `COPY` for you: as on AWS, put `GZIP` in
+`CopyOptions` when the intermediate `CompressionFormat` is `GZIP`. `DataFormatConversionConfiguration` is ignored on
+the Redshift `S3Configuration`, which AWS does not define.
 
 Floci does not write the `redshift_failed` manifest objects that AWS creates after a failed `COPY`.
 

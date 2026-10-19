@@ -67,7 +67,7 @@ public class FirehoseRedshiftDelivery {
         String[] credentials = credentials(destination, cluster, region);
         RedshiftDestination.CopyCommand command = destination.getCopyCommand();
         String sql = RedshiftCopySql.build(command.getDataTableName(), command.getDataTableColumns(), bucket, key,
-                destination.getRoleArn(), command.getCopyOptions());
+                command.getCopyOptions());
         // The database name in the URL is ignored: the emulated container database is always "dev".
         String jdbcUrl = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort()
                 + "/dev?preferQueryMode=simple";
@@ -96,6 +96,10 @@ public class FirehoseRedshiftDelivery {
                         + " does not contain username and password fields.");
             }
             return new String[] {node.get("username").asText(), node.get("password").asText()};
+        }
+        if (destination.getPassword() == null) {
+            throw new IllegalStateException("The Redshift destination for cluster " + cluster.getClusterIdentifier()
+                    + " has no Password and no enabled SecretsManagerConfiguration, so Firehose cannot sign in.");
         }
         String user = destination.getUsername() != null ? destination.getUsername() : cluster.getMasterUsername();
         return new String[] {user, destination.getPassword()};

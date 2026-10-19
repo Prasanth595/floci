@@ -55,13 +55,15 @@ public class FirehoseJsonHandler {
                     S3DestinationValidator.validateWireShape(s3, "extendedS3DestinationConfiguration");
                 }
                 RedshiftDestination redshift = null;
-                if (request.has("RedshiftDestinationConfiguration")) {
+                if (request.hasNonNull("RedshiftDestinationConfiguration")) {
                     if (s3 != null) {
                         throw new AwsException("InvalidArgumentException",
                                 "Only one destination configuration may be specified.", 400);
                     }
                     redshift = mapper.treeToValue(request.get("RedshiftDestinationConfiguration"),
                             RedshiftDestination.class);
+                    dropExtendedOnlyMembersFromLegacyShape(redshift.getS3());
+                    dropExtendedOnlyMembersFromLegacyShape(redshift.getS3Backup());
                     RedshiftDestinationValidator.validateConfiguration(redshift, "redshiftDestinationConfiguration");
                 }
                 List<io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Tag> tags = new ArrayList<>();
@@ -97,13 +99,15 @@ public class FirehoseJsonHandler {
                     dropExtendedOnlyMembersFromLegacyShape(update);
                     S3DestinationValidator.validateWireShape(update, "s3DestinationUpdate");
                 }
-                if (request.has("RedshiftDestinationUpdate")) {
+                if (request.hasNonNull("RedshiftDestinationUpdate")) {
                     if (update != null) {
                         throw new AwsException("InvalidArgumentException",
                                 "Only one destination update may be specified.", 400);
                     }
                     RedshiftDestination redshiftUpdate = mapper.treeToValue(request.get("RedshiftDestinationUpdate"),
                             RedshiftDestination.class);
+                    dropExtendedOnlyMembersFromLegacyShape(redshiftUpdate.getS3());
+                    dropExtendedOnlyMembersFromLegacyShape(redshiftUpdate.getS3Backup());
                     RedshiftDestinationValidator.validateUpdate(redshiftUpdate, "redshiftDestinationUpdate");
                     firehoseService.updateRedshiftDestination(name, currentVersionId, destinationId, redshiftUpdate);
                 } else {
