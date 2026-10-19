@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.ValidatableResponse;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -17,6 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
@@ -37,7 +39,7 @@ class CloudFormationNestedStackLeftoverIntegrationTest {
 
     private static final String CHILD_TEMPLATE = """
         {
-          "Parameters": {"VpcId": {"Type": "String"}},
+          "Parameters": {"VpcId": {"Type": "String"}, "Label": {"Type": "String"}},
           "Resources": {
             "Subnet": {"Type": "AWS::EC2::Subnet",
                        "Properties": {"VpcId": {"Ref": "VpcId"}, "CidrBlock": "10.97.1.0/24",
@@ -47,6 +49,9 @@ class CloudFormationNestedStackLeftoverIntegrationTest {
 
     @InjectSpy
     Ec2Service ec2Service;
+
+    @Inject
+    CloudFormationService cloudFormationService;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -73,7 +78,8 @@ class CloudFormationNestedStackLeftoverIntegrationTest {
                 ,
                     "Network": {"Type": "AWS::CloudFormation::Stack",
                                 "Properties": {"TemplateURL": "http://localhost/%1$s/child.json",
-                                               "Parameters": {"VpcId": {"Ref": "Vpc"}}}},
+                                               "Parameters": {"VpcId": {"Ref": "Vpc"},
+                                                              "Label": "%2$s-label"}}},
                     "BadSecret": {"Type": "AWS::SecretsManager::Secret", "DependsOn": "Network",
                                   "Properties": {"Name": "%2$s-secret", "SecretString": "explicit",
                                                  "GenerateSecretString": {"PasswordLength": 32}}}"""
@@ -89,6 +95,11 @@ class CloudFormationNestedStackLeftoverIntegrationTest {
             assertEquals(1, XmlParser.extractAll(ec2("DescribeSubnets", "Filter.1.Name", "vpc-id",
                     "Filter.1.Value.1", created.get("Vpc")).statusCode(200).extract().asString(), "subnetId")
                     .size(), "the skipped nested stack's subnet is left in place");
+            // The VPC its definition named is kept for the leftover; the literal label names nothing.
+            Map<String, String> kept = cloudFormationService.describeStacks(stack, "us-east-1").getFirst()
+                    .getResources().get("Network").getAttributes();
+            assertEquals(created.get("Vpc"), kept.get("__FlociUsesResource.Vpc"));
+            assertFalse(kept.containsValue(stack + "-label"), kept::toString);
 
             request("DeleteStack", "StackName", stack).statusCode(200);
             CfnStackWaits.awaitStackDeleted(stack, CFN_AUTH);

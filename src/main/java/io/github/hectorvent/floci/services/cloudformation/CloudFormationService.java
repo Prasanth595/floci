@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -30,7 +29,6 @@ import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.CustomResourceCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -2000,6 +1998,8 @@ public class CloudFormationService implements ResourceProvider {
             StackResource failedResource = null;
             if (resources.isObject()) {
                 List<String> sortedLogicalIds = topologicalSort(resources, conditions);
+                Set<String> templateIds = new LinkedHashSet<>();
+                resources.fieldNames().forEachRemaining(templateIds::add);
 
                 if (!isCreate) {
                     for (String logicalId : sortedLogicalIds) {
@@ -2088,6 +2088,10 @@ public class CloudFormationService implements ResourceProvider {
                     // Both branches return a fresh StackResource, so the policy is carried over here
                     // rather than on the instance the loop started with.
                     resource.setDeletionPolicy(deletionPolicy);
+                    if ("AWS::CloudFormation::Stack".equals(type) || dispatcher.isCustomResourceType(type)) {
+                        recordTemplateUses(resource, collectResourceDependencies(resDef, templateIds, conditions),
+                                physicalIds);
+                    }
                     stack.getResources().put(logicalId, resource);
 
                     physicalIds.put(logicalId, resource.getPhysicalId());
@@ -2841,6 +2845,7 @@ public class CloudFormationService implements ResourceProvider {
                     boolean recoveredPendingUpdate = dispatcher.requiresUpdateRecovery(previous);
                     resource.setStatus(recoveredPendingUpdate ? "UPDATE_COMPLETE" : previous.getStatus());
                     resource.setStatusReason(recoveredPendingUpdate ? null : previous.getStatusReason());
+                    restoreTemplateUses(resource, previous);
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "UPDATE_COMPLETE",
                             "Resource update rolled back");
@@ -3403,8 +3408,10 @@ public class CloudFormationService implements ResourceProvider {
 
     /**
      * Types whose physical id is the id of the resource they depend on: a bucket policy is named by
-     * its bucket, a secret target attachment by its secret's ARN, a function URL by the ARN of the
-     * function or alias it serves, and a cluster's capacity provider associations by the cluster.
+     * its bucket, a secret target attachment by its secret's ARN, a function URL on an alias by the
+     * alias's ARN, and a cluster's capacity provider associations by the cluster. (A function URL
+     * without a qualifier takes its function's ARN, which matches nothing: the function's own id
+     * is its name.)
      */
     private static final Set<String> SAME_ID_DEPENDENT_TYPES = Set.of("AWS::S3::BucketPolicy",
             "AWS::SecretsManager::SecretTargetAttachment", "AWS::Lambda::Url",
@@ -3442,15 +3449,15 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * The values in a resource's record that may name what it uses, for leftover ordering: what it
-     * was given, not what it produced. For most resources that is every attribute value. Two kinds
-     * of resource have attributes that are outputs, which can name a resource depending on them as
-     * easily as one they use, so other values count instead. A custom resource's attributes are its
-     * handler's response Data: its resolved properties count, with the name of any Lambda function
-     * they give by ARN, since a function's physical id is its name, and of its attributes only
-     * Floci's own {@code __Floci} keys. A nested stack's {@code Outputs.*} are its child's outputs:
-     * the parameters it passed the child count, recorded under {@link CfnRollback#USES_ATTR_PREFIX}
-     * keys.
+     * The values in a resource's record that may name, by physical id, what it uses, for leftover
+     * ordering. For most resources that is every attribute value: some, such as a subnet's
+     * {@code VpcId}, say what the resource was given, and the rest describe the resource itself.
+     * Two kinds of resource hold attributes that can as easily name a resource depending on them:
+     * a custom resource's are its handler's response Data, and a nested stack's {@code Outputs.*}
+     * are its child's outputs. Those do not count. What their definitions named counts instead,
+     * kept by {@link #recordTemplateUses}, with a custom resource's other {@code __Floci} keys such
+     * as its ServiceToken. A Lambda ServiceToken, an ARN, also names its function by name, which is
+     * the function's physical id.
      */
     private Collection<String> referenceValues(StackResource resource) {
         List<String> values = new ArrayList<>();
@@ -3458,21 +3465,10 @@ public class CloudFormationService implements ResourceProvider {
             for (Map.Entry<String, String> attribute : resource.getAttributes().entrySet()) {
                 if (attribute.getKey().startsWith("__Floci")) {
                     values.add(attribute.getValue());
-                }
-            }
-            String properties = resource.getAttributes().get(CustomResourceCfnProvisioner.CR_PROPERTIES_ATTR);
-            if (properties != null) {
-                try {
-                    addTextValues(objectMapper.readTree(properties), values);
-                } catch (JsonProcessingException e) {
-                    LOG.debugv("Custom resource {0} keeps properties that are not JSON: {1}",
-                            resource.getLogicalId(), e.getMessage());
-                }
-            }
-            for (int i = 0, given = values.size(); i < given; i++) {
-                String function = lambdaFunctionName(values.get(i));
-                if (function != null) {
-                    values.add(function);
+                    String function = lambdaFunctionName(attribute.getValue());
+                    if (function != null) {
+                        values.add(function);
+                    }
                 }
             }
             return values;
@@ -3484,19 +3480,6 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
         return values;
-    }
-
-    /** Adds every text value in {@code node}, at any depth, to {@code values}. */
-    private static void addTextValues(JsonNode node, List<String> values) {
-        Deque<JsonNode> pending = new ArrayDeque<>(List.of(node));
-        while (!pending.isEmpty()) {
-            JsonNode current = pending.pop();
-            if (current.isTextual()) {
-                values.add(current.asText());
-            } else {
-                current.forEach(pending::push);
-            }
-        }
     }
 
     /** The name of the Lambda function {@code value} gives by ARN, qualified or not, or else null. */
@@ -4134,7 +4117,6 @@ public class CloudFormationService implements ResourceProvider {
 
         resource.setPhysicalId(childStack.getStackId());
         resource.getAttributes().put("Arn", childStack.getStackId());
-        recordParameterUses(resource, parameters);
         childStack.getOutputs().forEach((k, v) -> resource.getAttributes().put("Outputs." + k, v));
 
         if (NESTED_STACK_SUCCESS_STATUSES.contains(childStack.getStatus())) {
@@ -4158,24 +4140,36 @@ public class CloudFormationService implements ResourceProvider {
         return resource;
     }
 
+    /** Prefixes the keys {@link #recordTemplateUses} keeps, one per resource a definition names. */
+    private static final String TEMPLATE_USES_PREFIX = CfnRollback.USES_ATTR_PREFIX + "Resource.";
+
     /**
-     * Keeps the parameter values a nested stack passed its child, a list's items one by one, under
-     * {@link CfnRollback#USES_ATTR_PREFIX} keys: what the child was given names what it uses, such as
-     * a VPC it creates subnets in, where its outputs can as well name a resource depending on it.
+     * Keeps, under {@link CfnRollback#USES_ATTR_PREFIX} keys, the physical id of each resource a
+     * definition names through {@code Ref}, {@code Fn::GetAtt}, {@code Fn::Sub} or {@code DependsOn},
+     * in place of what an earlier operation kept. A custom resource's or nested stack's attributes are
+     * outputs, so these are what orders it before the resources it uses once the template no longer
+     * names it; a literal value it was given names nothing, even if another resource has that name.
      */
-    private static void recordParameterUses(StackResource resource, JsonNode parameters) {
-        if (parameters == null || !parameters.isObject()) {
+    private static void recordTemplateUses(StackResource resource, Set<String> dependencies,
+                                           Map<String, String> physicalIds) {
+        resource.getAttributes().keySet().removeIf(key -> key.startsWith(TEMPLATE_USES_PREFIX));
+        for (String dependency : dependencies) {
+            String physicalId = physicalIds.get(dependency);
+            if (physicalId != null && !dependency.equals(resource.getLogicalId())) {
+                resource.getAttributes().put(TEMPLATE_USES_PREFIX + dependency, physicalId);
+            }
+        }
+    }
+
+    /** Puts back the {@link #recordTemplateUses} keys a resource held before an update now rolled back. */
+    private static void restoreTemplateUses(StackResource resource, StackResource previous) {
+        if (resource.getAttributes() == previous.getAttributes()) {
             return;
         }
-        String prefix = CfnRollback.USES_ATTR_PREFIX + "Parameters.";
-        parameters.properties().forEach(parameter -> {
-            JsonNode value = parameter.getValue();
-            if (value.isArray()) {
-                for (int i = 0; i < value.size(); i++) {
-                    resource.getAttributes().put(prefix + parameter.getKey() + "." + i, value.get(i).asText());
-                }
-            } else if (value.isValueNode() && !value.isNull()) {
-                resource.getAttributes().put(prefix + parameter.getKey(), value.asText());
+        resource.getAttributes().keySet().removeIf(key -> key.startsWith(TEMPLATE_USES_PREFIX));
+        previous.getAttributes().forEach((key, value) -> {
+            if (key.startsWith(TEMPLATE_USES_PREFIX)) {
+                resource.getAttributes().put(key, value);
             }
         });
     }

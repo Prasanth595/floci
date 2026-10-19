@@ -18,7 +18,6 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResour
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.CustomResourceCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
@@ -1059,17 +1058,16 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
-     * A custom resource's resolved properties are what it was given, so a leftover one goes before
-     * the bucket they name, at any depth, which its handler may need to empty first.
+     * A leftover custom resource goes before the bucket its definition named, which its handler may
+     * need to empty first: provisioning kept that bucket's id for it.
      */
     @Test
-    void deleteStack_deletesALeftoverCustomResourceBeforeTheBucketItsPropertiesName() {
+    void deleteStack_deletesALeftoverCustomResourceBeforeTheBucketItsDefinitionNamed() {
         String token = "arn:aws:sns:us-east-1:000000000000:emptier";
         Stack stack = leftoverStack("delete-leftover-custom-uses", "{\"Bucket\": {\"Type\": \"AWS::S3::Bucket\"}}");
         StackResource emptier = resource("Emptier", "emptier-1", "Custom::EmptyBucket", "UPDATE_COMPLETE");
         emptier.getAttributes().put("__FlociServiceToken", token);
-        emptier.getAttributes().put(CustomResourceCfnProvisioner.CR_PROPERTIES_ATTR,
-                "{\"ServiceToken\": \"" + token + "\", \"Target\": {\"Buckets\": [\"bucket-1\"]}}");
+        emptier.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "Resource.Bucket", "bucket-1");
         StackResource bucket = resource("Bucket", "bucket-1", "AWS::S3::Bucket", "CREATE_COMPLETE");
         hold(stack, emptier, bucket);
 
@@ -1078,6 +1076,33 @@ class CloudFormationServiceRollbackTest {
         InOrder deletes = inOrder(provisioner);
         deletes.verify(provisioner).delete(emptier, REGION);
         deletes.verify(provisioner).delete(bucket, REGION);
+    }
+
+    /**
+     * A literal a custom resource was given names nothing, even when another resource has that
+     * name: a leftover certificate resource given a domain's name still goes after the leftover
+     * custom domain that uses the certificate.
+     */
+    @Test
+    void deleteStack_infersNoLeftoverOrderFromACustomResourcesLiteralProperties() {
+        String token = "arn:aws:lambda:us-east-1:000000000000:function:cert-requestor";
+        String certArn = "arn:aws:acm:us-east-1:000000000000:certificate/abc";
+        Stack stack = leftoverStack("delete-leftover-custom-literal", "{\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}");
+        StackResource queue = resource("Queue", "queue-1", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource cert = resource("Cert", certArn, "Custom::DNSValidatedCertificate", "UPDATE_COMPLETE");
+        cert.getAttributes().put("__FlociServiceToken", token);
+        cert.getAttributes().put("__FlociResourceProperties",
+                "{\"ServiceToken\": \"" + token + "\", \"DomainName\": \"auth.example.com\"}");
+        cert.getAttributes().put("Arn", certArn);
+        StackResource domain = resource("Domain", "auth.example.com", "AWS::Cognito::UserPoolDomain",
+                "UPDATE_COMPLETE");
+        hold(stack, queue, cert, domain);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(domain, REGION);
+        deletes.verify(provisioner).delete(cert, REGION);
     }
 
     /**
@@ -1161,8 +1186,8 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
-     * A leftover nested stack goes before the VPC it passed its child, where the child created
-     * subnets; the parameters it passed are recorded for this.
+     * A leftover nested stack goes before the VPC its definition passed its child, where the child
+     * created subnets: provisioning kept that VPC's id for it.
      */
     @Test
     void deleteStack_deletesALeftoverNestedStackBeforeTheVpcItPassedItsChild() {
@@ -1170,7 +1195,7 @@ class CloudFormationServiceRollbackTest {
         Stack stack = leftoverStack("delete-leftover-nested-uses", "{\"Vpc\": {\"Type\": \"AWS::EC2::VPC\"}}");
         StackResource nested = resource("Network", childId, "AWS::CloudFormation::Stack", "UPDATE_COMPLETE");
         nested.getAttributes().put("Arn", childId);
-        nested.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "Parameters.VpcId", "vpc-1");
+        nested.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "Resource.Vpc", "vpc-1");
         StackResource vpc = resource("Vpc", "vpc-1", "AWS::EC2::VPC", "CREATE_COMPLETE");
         hold(stack, nested, vpc);
 
@@ -1300,6 +1325,25 @@ class CloudFormationServiceRollbackTest {
         alias.getAttributes().put("AliasArn", aliasArn);
         StackResource fn = resource("Fn", "fn", "AWS::Lambda::Function", "CREATE_COMPLETE");
         hold(stack, url, alias, fn);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(url, REGION);
+        deletes.verify(provisioner).delete(alias, REGION);
+    }
+
+    /** A leftover alias recorded before its leftover URL still does not count its ARN as using it. */
+    @Test
+    void deleteStack_aLeftoverAliasRecordedFirstStillGoesAfterItsUrl() {
+        String aliasArn = "arn:aws:lambda:us-east-1:000000000000:function:fn:live";
+        Stack stack = leftoverStack("delete-leftover-url-alias-first", "{\"Fn\": {\"Type\": \"AWS::Lambda::Function\"}}");
+        StackResource alias = resource("Live", aliasArn, "AWS::Lambda::Alias", "UPDATE_COMPLETE");
+        alias.getAttributes().put("AliasArn", aliasArn);
+        StackResource url = resource("Url", aliasArn, "AWS::Lambda::Url", "UPDATE_COMPLETE");
+        url.getAttributes().put("FunctionArn", aliasArn);
+        StackResource fn = resource("Fn", "fn", "AWS::Lambda::Function", "CREATE_COMPLETE");
+        hold(stack, alias, url, fn);
 
         service.deleteStackResources(stack, REGION, ACCOUNT);
 

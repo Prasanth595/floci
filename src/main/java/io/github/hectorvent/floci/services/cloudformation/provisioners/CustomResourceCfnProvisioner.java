@@ -47,11 +47,7 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
 
     /** Reserved attribute keys used to carry custom-resource state to the later Delete invocation. */
     private static final String CR_SERVICE_TOKEN_ATTR = "__FlociServiceToken";
-    /**
-     * The resolved ResourceProperties, ServiceToken included, as a JSON object. They are what the
-     * resource was given, so they also tell the stack what it uses.
-     */
-    public static final String CR_PROPERTIES_ATTR = "__FlociResourceProperties";
+    private static final String CR_PROPERTIES_ATTR = "__FlociResourceProperties";
     private static final String CR_STACK_ID_ATTR = "__FlociStackId";
     /** Prefix of every attribute Floci keeps for itself; the others are the handler's {@code Data}. */
     private static final String RESERVED_ATTR_PREFIX = "__Floci";
