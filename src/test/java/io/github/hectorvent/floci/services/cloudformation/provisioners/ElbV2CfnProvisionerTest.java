@@ -22,6 +22,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -450,6 +451,36 @@ class ElbV2CfnProvisionerTest {
 
         assertTrue(provisioner.rollbackUpdate(lb));
         verify(elb).setSubnets(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
+    }
+
+    /** The subnets a load balancer is on, as its hidden uses attributes record them. */
+    private static Set<String> usedSubnets(StackResource lb) {
+        Set<String> used = new HashSet<>();
+        lb.getAttributes().forEach((key, value) -> {
+            if (key.startsWith(CfnRollback.USES_ATTR_PREFIX)) {
+                used.add(value);
+            }
+        });
+        return used;
+    }
+
+    @Test
+    void theLoadBalancerRecordsTheSubnetsItIsOnAcrossAMoveAndAMoveBack() {
+        when(elb.createLoadBalancer(eq(REGION), eq("web"), isNull(), isNull(), isNull(),
+                eq(List.of("subnet-1", "subnet-2")), anyList(), any()))
+                .thenReturn(loadBalancerOn("web", "subnet-1", "subnet-2"));
+        ObjectNode props = mapper.createObjectNode().put("Name", "web");
+        props.putArray("Subnets").add("subnet-1").add("subnet-2");
+        StackResource created = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        provisioner.provision(created, props, ctx());
+        assertEquals(Set.of("subnet-1", "subnet-2"), usedSubnets(created));
+
+        StackResource moved = keptLoadBalancerUpdatedTo(loadBalancerOn("web", "subnet-1", "subnet-2"),
+                "subnet-3");
+        assertEquals(Set.of("subnet-3"), usedSubnets(moved));
+
+        assertTrue(provisioner.rollbackUpdate(moved));
+        assertEquals(Set.of("subnet-1", "subnet-2"), usedSubnets(moved));
     }
 
     @Test

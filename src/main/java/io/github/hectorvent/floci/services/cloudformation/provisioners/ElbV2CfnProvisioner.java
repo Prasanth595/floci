@@ -36,6 +36,8 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     private static final String TARGET_GROUP = "AWS::ElasticLoadBalancingV2::TargetGroup";
     private static final String LISTENER = "AWS::ElasticLoadBalancingV2::Listener";
     private static final String LISTENER_RULE = "AWS::ElasticLoadBalancingV2::ListenerRule";
+    /** Prefixes one uses attribute per subnet a load balancer is on, numbered from 1. */
+    private static final String USED_SUBNET_ATTR_PREFIX = CfnRollback.USES_ATTR_PREFIX + "Subnet.";
 
     private final ElbV2Service elbV2Service;
 
@@ -141,8 +143,9 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
             return true;
         }
         String arn = resource.getPhysicalId();
-        elbV2Service.setSubnets(AwsArnUtils.parse(arn).region(), arn,
-                prior.isEmpty() ? List.of() : List.of(prior.split(",")));
+        List<String> priorSubnets = prior.isEmpty() ? List.of() : List.of(prior.split(","));
+        elbV2Service.setSubnets(AwsArnUtils.parse(arn).region(), arn, priorSubnets);
+        recordUsedSubnets(resource, priorSubnets);
         resource.getAttributes().remove(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR);
         return true;
     }
@@ -165,17 +168,19 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
 
         LoadBalancer lb;
+        List<String> onSubnets;
         try {
             lb = elbV2Service.createLoadBalancer(ctx.region(), name, scheme, type, ipAddressType,
                     subnets, securityGroups, tags);
+            onSubnets = subnetIds(lb);
         } catch (AwsException e) {
             if (!"DuplicateLoadBalancerName".equals(e.getErrorCode())) {
                 throw e;
             }
             lb = elbV2Service.describeLoadBalancers(ctx.region(), null, List.of(name), null, null).get(0);
-            if (ctx.reusesPriorEntity(lb.getLoadBalancerArn())) {
-                moveToTemplateSubnets(r, lb, subnets, ctx);
-            }
+            onSubnets = ctx.reusesPriorEntity(lb.getLoadBalancerArn())
+                    ? moveToTemplateSubnets(r, lb, subnets, ctx)
+                    : subnetIds(lb);
         }
 
         r.setPhysicalId(lb.getLoadBalancerArn());
@@ -184,6 +189,23 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("CanonicalHostedZoneID", lb.getCanonicalHostedZoneId());
         r.getAttributes().put("LoadBalancerName", lb.getLoadBalancerName());
         r.getAttributes().put("LoadBalancerFullName", loadBalancerFullName(lb.getLoadBalancerArn()));
+        recordUsedSubnets(r, onSubnets);
+    }
+
+    private static List<String> subnetIds(LoadBalancer lb) {
+        return lb.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList();
+    }
+
+    /**
+     * Records the subnets the balancer is on as uses attributes. EC2 refuses to delete a subnet a
+     * load balancer still uses, and once the template no longer names the balancer, as when an
+     * update removes it together with a subnet it is on, these are what orders it before them.
+     */
+    private static void recordUsedSubnets(StackResource r, List<String> subnetIds) {
+        r.getAttributes().keySet().removeIf(key -> key.startsWith(USED_SUBNET_ATTR_PREFIX));
+        for (int i = 0; i < subnetIds.size(); i++) {
+            r.getAttributes().put(USED_SUBNET_ATTR_PREFIX + (i + 1), subnetIds.get(i));
+        }
     }
 
     /**
@@ -222,19 +244,21 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * {@code Subnets} is not create-only, so an update that keeps the balancer moves it onto the
-     * template's subnets in place, as SetSubnets does. That also releases the subnets it leaves, which
-     * EC2 refuses to delete while a load balancer still uses them, so the update cleanup can delete a
-     * subnet the template dropped or replaced. The prior list is kept for a rollback.
+     * {@code Subnets} and {@code SubnetMappings} are not create-only, so an update that keeps the
+     * balancer moves it onto the template's subnets in place, as SetSubnets does. That also releases
+     * the subnets it leaves, which EC2 refuses to delete while a load balancer still uses them, so the
+     * update cleanup can delete a subnet the template dropped or replaced. The prior list is kept for
+     * a rollback. Returns the subnets the balancer is on afterwards.
      */
-    private void moveToTemplateSubnets(StackResource r, LoadBalancer lb, List<String> subnets,
-                                       ProvisionContext ctx) {
-        List<String> current = lb.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList();
+    private List<String> moveToTemplateSubnets(StackResource r, LoadBalancer lb, List<String> subnets,
+                                               ProvisionContext ctx) {
+        List<String> current = subnetIds(lb);
         if (subnets.isEmpty() || Set.copyOf(subnets).equals(Set.copyOf(current))) {
-            return;
+            return current;
         }
         elbV2Service.setSubnets(ctx.region(), lb.getLoadBalancerArn(), subnets);
         r.getAttributes().put(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR, String.join(",", current));
+        return subnets;
     }
 
     private void provisionTargetGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
