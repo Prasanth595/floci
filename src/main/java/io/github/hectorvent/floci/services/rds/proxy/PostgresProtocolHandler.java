@@ -149,7 +149,9 @@ public class PostgresProtocolHandler {
         client = startup.socket();
         String clientUsername = startup.username();
         InputStream clientIn = client.getInputStream();
-        OutputStream clientOut = client.getOutputStream();
+        // PgBouncer rejects partial login packets; keep the challenge together until flush().
+        // https://github.com/pgbouncer/pgbouncer/blob/pgbouncer_1_24_0/src/server.c#L116-L119
+        OutputStream clientOut = new BufferedOutputStream(client.getOutputStream());
 
         // Phase 2: Challenge client with cleartext password request
         sendMessage(clientOut, 'R', intBytes(3)); // AuthenticationCleartextPassword

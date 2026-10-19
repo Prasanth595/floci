@@ -845,6 +845,11 @@ FLOCI_STORAGE_HOST_PERSISTENT_PATH=/absolute/host/path/data
 
 The RDS auth proxy checks the master username and password at the proxy layer. Other database users authenticate against the backend engine. For PostgreSQL instances with IAM database authentication enabled, the database role's `rds_iam` membership also determines which authentication method it can use.
 
+PostgreSQL authentication responses are buffered before they are flushed to the client,
+so the password challenge is not emitted as separate header and payload writes.
+This supports PgBouncer logins over plaintext and TLS while keeping the same
+password, IAM and database-role checks.
+
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
 
 Aurora members use their cluster's IAM database authentication setting and master
