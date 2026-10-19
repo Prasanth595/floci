@@ -1698,4 +1698,189 @@ class BackupIntegrationTest {
         assertThat(second == null ? "" : second, not(containsString("BackupJob ID : " + oldJob)));
     }
 
+    // ── Logically air-gapped vault ─────────────────────────────────────────────
+
+    private static final String AIR_GAPPED_VAULT = "air-gapped-vault";
+
+    @Test
+    @Order(190)
+    void createLogicallyAirGappedBackupVault() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30,"
+                    + "\"CreatorRequestId\":\"req-1\",\"BackupVaultTags\":{\"env\":\"airgap\"}}")
+        .when()
+            .put("/logically-air-gapped-backup-vaults/" + AIR_GAPPED_VAULT)
+        .then()
+            .statusCode(200)
+            .body("BackupVaultName", equalTo(AIR_GAPPED_VAULT))
+            .body("BackupVaultArn", endsWith(":backup-vault:" + AIR_GAPPED_VAULT))
+            .body("CreationDate", notNullValue())
+            .body("VaultState", equalTo("AVAILABLE"));
+    }
+
+    @Test
+    @Order(191)
+    void describeBackupVaultReportsTheAirGappedVaultTypeAndRetention() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/backup-vaults/" + AIR_GAPPED_VAULT)
+        .then()
+            .statusCode(200)
+            .body("BackupVaultName", equalTo(AIR_GAPPED_VAULT))
+            .body("VaultType", equalTo("LOGICALLY_AIR_GAPPED_BACKUP_VAULT"))
+            .body("VaultState", equalTo("AVAILABLE"))
+            .body("MinRetentionDays", equalTo(7))
+            .body("MaxRetentionDays", equalTo(30))
+            .body("CreatorRequestId", equalTo("req-1"));
+    }
+
+    @Test
+    @Order(192)
+    void airGappedVaultTagsAreReadableThroughListTags() {
+        String arn = given().header("Authorization", AUTH)
+            .when().get("/backup-vaults/" + AIR_GAPPED_VAULT)
+            .then().statusCode(200).extract().path("BackupVaultArn");
+
+        given().header("Authorization", AUTH)
+        .when().get("/tags/" + arn)
+        .then().statusCode(200).body("Tags.env", equalTo("airgap"));
+    }
+
+    @Test
+    @Order(193)
+    void createLogicallyAirGappedBackupVaultTwiceReturnsAlreadyExists() {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30}")
+        .when().put("/logically-air-gapped-backup-vaults/" + AIR_GAPPED_VAULT)
+        .then().statusCode(400).body("__type", equalTo("AlreadyExistsException"));
+    }
+
+    @Test
+    @Order(194)
+    void createLogicallyAirGappedBackupVaultValidatesRetention() {
+        // Both retention values are "Required: Yes", and MinRetentionDays has a documented
+        // floor: "The minimum value accepted is 7 days."
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MaxRetentionDays\":30}")
+        .when().put("/logically-air-gapped-backup-vaults/airgap-missing-min")
+        .then().statusCode(400).body("__type", equalTo("MissingParameterValueException"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7}")
+        .when().put("/logically-air-gapped-backup-vaults/airgap-missing-max")
+        .then().statusCode(400).body("__type", equalTo("MissingParameterValueException"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":6,\"MaxRetentionDays\":30}")
+        .when().put("/logically-air-gapped-backup-vaults/airgap-min-too-low")
+        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":30,\"MaxRetentionDays\":7}")
+        .when().put("/logically-air-gapped-backup-vaults/airgap-max-below-min")
+        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/airgap-missing-min")
+        .then().statusCode(not(200));
+    }
+
+    @Test
+    @Order(195)
+    void airGappedVaultIsLockedSoRetentionEnforcementApplies() {
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + AIR_GAPPED_VAULT)
+        .then().statusCode(200).body("Locked", equalTo(true));
+    }
+
+    @Test
+    @Order(196)
+    void vaultLockCallsCannotChangeOrRemoveAirGappedRetention() {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":1,\"MaxRetentionDays\":2}")
+        .when().put("/backup-vaults/" + AIR_GAPPED_VAULT + "/vault-lock")
+        .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + AIR_GAPPED_VAULT + "/vault-lock")
+        .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + AIR_GAPPED_VAULT)
+        .then().body("MinRetentionDays", equalTo(7)).body("MaxRetentionDays", equalTo(30));
+    }
+
+    @Test
+    @Order(197)
+    void listBackupVaultsFiltersByVaultType() {
+        given().header("Authorization", AUTH).queryParam("vaultType", "LOGICALLY_AIR_GAPPED_BACKUP_VAULT")
+        .when().get("/backup-vaults/")
+        .then().statusCode(200)
+            .body("BackupVaultList.BackupVaultName", hasItem(AIR_GAPPED_VAULT))
+            .body("BackupVaultList.BackupVaultName", not(hasItem("lock-enforcement-vault")));
+
+        given().header("Authorization", AUTH).queryParam("vaultType", "BACKUP_VAULT")
+        .when().get("/backup-vaults/")
+        .then().statusCode(200)
+            .body("BackupVaultList.BackupVaultName", hasItem("lock-enforcement-vault"))
+            .body("BackupVaultList.BackupVaultName", not(hasItem(AIR_GAPPED_VAULT)));
+    }
+
+    @Test
+    @Order(198)
+    void deleteBackupVaultRemovesTheAirGappedVault() {
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + AIR_GAPPED_VAULT)
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + AIR_GAPPED_VAULT)
+        .then().body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(199)
+    void anAirGappedVaultRefusesToDeleteARecoveryPointInsideMinRetention() {
+        // Same mechanism as aLockedVaultRefusesToDeleteARecoveryPointInsideMinRetention, but
+        // the lock comes from creation alone: no PutBackupVaultLockConfiguration call. Asserting
+        // Locked=true is not enough; this is the behaviour Locked is supposed to buy.
+        String vault = "air-gapped-retention-vault";
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30}")
+        .when().put("/logically-air-gapped-backup-vaults/" + vault).then().statusCode(200);
+
+        String jid = given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "%s",
+                  "IamRoleArn": "%s",
+                  "Lifecycle": {"DeleteAfterDays": 14}
+                }
+                """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+
+        awaitJobCompleted(jid);
+        String rpArn = given().header("Authorization", AUTH)
+        .when().get("/backup-jobs/" + jid).then().statusCode(200)
+            .body("State", equalTo("COMPLETED"))
+            .extract().path("RecoveryPointArn");
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + vault + "/recovery-points/" + rpArn)
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", containsString("7"));
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault + "/recovery-points/" + rpArn)
+        .then().statusCode(200);
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault)
+        .then().statusCode(200).body("NumberOfRecoveryPoints", equalTo(1));
+    }
+
 }

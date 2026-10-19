@@ -65,6 +65,14 @@ public class BackupVault {
 
     public static final String VAULT_ID_FIELD = "FlociVaultId";
 
+    // Set only on logically air-gapped vaults. A standard vault leaves both null, so its
+    // DescribeBackupVault response is unchanged by their addition.
+    @JsonProperty("VaultType")
+    private String vaultType;
+
+    @JsonProperty("VaultState")
+    private String vaultState;
+
     public BackupVault() {}
 
     public String getBackupVaultName() { return backupVaultName; }
@@ -102,4 +110,10 @@ public class BackupVault {
 
     public Long getMaxRetentionDays() { return maxRetentionDays; }
     public void setMaxRetentionDays(Long maxRetentionDays) { this.maxRetentionDays = maxRetentionDays; }
+
+    public String getVaultType() { return vaultType; }
+    public void setVaultType(String vaultType) { this.vaultType = vaultType; }
+
+    public String getVaultState() { return vaultState; }
+    public void setVaultState(String vaultState) { this.vaultState = vaultState; }
 }
