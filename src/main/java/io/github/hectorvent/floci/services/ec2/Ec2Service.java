@@ -4114,6 +4114,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .orElse(null);
     }
 
+    /** Whether {@code privateIp} is the primary private address of the instance's primary interface. */
+    private boolean isPrimaryPrivateIp(String region, Instance instance, String privateIp) {
+        if (privateIp.equals(instance.getPrivateIpAddress())) {
+            return true;
+        }
+        if (instance.getNetworkInterfaces() == null || instance.getNetworkInterfaces().isEmpty()) {
+            return false;
+        }
+        InstanceNetworkInterface primary = instance.getNetworkInterfaces().get(0);
+        return privateIp.equals(primary.getPrivateIpAddress())
+                || networkInterfaces.get(key(region, primary.getNetworkInterfaceId()))
+                        .map(ni -> privateIp.equals(ni.getPrivateIpAddress()))
+                        .orElse(false);
+    }
+
     /**
      * The Elastic IP associated with the instance's primary private address, by instance or by
      * the primary interface it was associated through, or null.
@@ -9944,9 +9959,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * Associates the Elastic IP with one private address of the instance.
      *
-     * @param privateIpAddress the instance's private address the Elastic IP is for; null, or an
-     *        address that is not a secondary one of the instance's primary interface, means its
-     *        primary private address
+     * @param privateIpAddress the instance's private address the Elastic IP is for: null or the
+     *        primary private address, or a secondary address of the instance's primary interface;
+     *        any other address is refused before anything changes
      */
     public Address associateAddress(String region, String allocationId, String instanceId, String privateIpAddress) {
         ensureDefaultResources(region);
@@ -9960,12 +9975,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 throw new AwsException("Resource.AlreadyAssociated",
                         "Elastic IP address " + allocationId + " is already associated with a NAT gateway.", 400);
             }
+            Instance target = instanceId == null ? null : instances.get(key(region, instanceId)).orElse(null);
+            String secondary = target == null ? null : secondaryPrivateIpOf(region, target, privateIpAddress);
+            if (target != null && isSet(privateIpAddress) && secondary == null
+                    && !isPrimaryPrivateIp(region, target, privateIpAddress)) {
+                throw new AwsException("InvalidParameterValue", "The private IP address " + privateIpAddress
+                        + " is not assigned to the primary network interface of instance " + instanceId + ".", 400);
+            }
 
             if (addr.getAssociationId() != null) {
                 disassociateAddress(region, addr.getAssociationId());
             }
-            Instance target = instanceId == null ? null : instances.get(key(region, instanceId)).orElse(null);
-            String secondary = target == null ? null : secondaryPrivateIpOf(region, target, privateIpAddress);
             // An Elastic IP already on the same private address of the instance is disassociated and
             // stays allocated, as on AWS. That includes one a retained interface carried onto this
             // instance as its primary.

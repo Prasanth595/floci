@@ -162,8 +162,12 @@ class Ec2MockPublicAddressIntegrationTest {
     @ValueSource(booleans = {true, false})
     void networkInterfacesRejectAnInstanceLevelSubnet(boolean fromTemplate) {
         String owner = Long.toString(ACCOUNTS.incrementAndGet());
+        // A real subnet, so a check made only after the launch would have created something.
+        String subnet = request("DescribeSubnets", owner).formParam("Filter.1.Name", "default-for-az")
+                .formParam("Filter.1.Value.1", true).post("/").then().statusCode(200).extract().xmlPath()
+                .getString("DescribeSubnetsResponse.subnetSet.item[0].subnetId");
         RequestSpecification launch = request("RunInstances", owner).formParam("MinCount", 1)
-                .formParam("MaxCount", 1).formParam("SubnetId", "subnet-conflicting");
+                .formParam("MaxCount", 1).formParam("SubnetId", subnet);
         String template = null;
         if (fromTemplate) {
             template = request("CreateLaunchTemplate", owner)
@@ -182,6 +186,11 @@ class Ec2MockPublicAddressIntegrationTest {
         }
         launch.post("/").then().statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
+        // The refusal leaves nothing behind: no instance and no interface in the caller's account.
+        request("DescribeInstances", owner).post("/").then().statusCode(200)
+                .body("DescribeInstancesResponse.reservationSet.item.size()", equalTo(0));
+        request("DescribeNetworkInterfaces", owner).post("/").then().statusCode(200)
+                .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()", equalTo(0));
         if (template != null) {
             request("DeleteLaunchTemplate", owner).formParam("LaunchTemplateId", template)
                     .post("/").then().statusCode(200);
@@ -443,6 +452,81 @@ class Ec2MockPublicAddressIntegrationTest {
         request("DeleteNetworkInterface", owner).formParam("NetworkInterfaceId", eni).post("/").then().statusCode(200);
         request("DeleteSubnet", owner).formParam("SubnetId", subnet).post("/").then().statusCode(200);
         request("DeleteVpc", owner).formParam("VpcId", vpc).post("/").then().statusCode(200);
+    }
+
+    @Test
+    void aTemplateInterfaceNamingAnExistingInterfaceLaunchesOnIt() {
+        String owner = Long.toString(ACCOUNTS.incrementAndGet());
+        String vpc = request("CreateVpc", owner).formParam("CidrBlock", "10.93.0.0/16")
+                .post("/").then().statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
+        String subnet = request("CreateSubnet", owner).formParam("VpcId", vpc)
+                .formParam("CidrBlock", "10.93.1.0/24").formParam("AvailabilityZone", REGION + "a")
+                .post("/").then().statusCode(200).extract().path("CreateSubnetResponse.subnet.subnetId");
+        request("ModifySubnetAttribute", owner).formParam("SubnetId", subnet)
+                .formParam("MapPublicIpOnLaunch.Value", true).post("/").then().statusCode(200);
+        String eni = request("CreateNetworkInterface", owner).formParam("SubnetId", subnet)
+                .post("/").then().statusCode(200)
+                .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+        String template = request("CreateLaunchTemplate", owner).formParam("LaunchTemplateName", "existing-interface")
+                .formParam("LaunchTemplateData.ImageId", "ami-amazonlinux2023")
+                .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+                .formParam("LaunchTemplateData.NetworkInterface.1.DeviceIndex", 0)
+                .formParam("LaunchTemplateData.NetworkInterface.1.NetworkInterfaceId", eni)
+                .post("/").then().statusCode(200)
+                .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+        String instance = request("RunInstances", owner).formParam("MinCount", 1).formParam("MaxCount", 1)
+                .formParam("LaunchTemplate.LaunchTemplateId", template).post("/").then().statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        // The interface the template names becomes the primary, so the launch lands in its subnet
+        // and, being on an existing interface, takes no automatic address.
+        describe(owner, instance).body(INSTANCE + "networkInterfaceSet.item.networkInterfaceId", equalTo(eni))
+                .body(INSTANCE + "subnetId", equalTo(subnet));
+        assertEquals("", publicIp(owner, instance));
+
+        request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        request("DeleteLaunchTemplate", owner).formParam("LaunchTemplateId", template).post("/").then().statusCode(200);
+        request("DeleteNetworkInterface", owner).formParam("NetworkInterfaceId", eni).post("/").then().statusCode(200);
+        request("DeleteSubnet", owner).formParam("SubnetId", subnet).post("/").then().statusCode(200);
+        request("DeleteVpc", owner).formParam("VpcId", vpc).post("/").then().statusCode(200);
+    }
+
+    @Test
+    void anElasticIpForAnUnknownPrivateAddressIsRefusedWithoutDisplacingAnything() {
+        String owner = Long.toString(ACCOUNTS.incrementAndGet());
+        ValidatableResponse launched = request("RunInstances", owner).formParam("ImageId", "ami-amazonlinux2023")
+                .formParam("InstanceType", "t3.micro").formParam("MinCount", 1).formParam("MaxCount", 1)
+                .post("/").then().statusCode(200);
+        String instance = launched.extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        String privateIp = launched.extract().path("RunInstancesResponse.instancesSet.item.privateIpAddress");
+        ValidatableResponse primary = allocateAddress(owner);
+        String primaryAllocation = primary.extract().path("AllocateAddressResponse.allocationId");
+        String primaryIp = primary.extract().path("AllocateAddressResponse.publicIp");
+        String primaryAssociation = request("AssociateAddress", owner).formParam("AllocationId", primaryAllocation)
+                .formParam("InstanceId", instance).post("/").then().statusCode(200)
+                .extract().path("AssociateAddressResponse.associationId");
+        ValidatableResponse other = allocateAddress(owner);
+        String otherAllocation = other.extract().path("AllocateAddressResponse.allocationId");
+        String otherIp = other.extract().path("AllocateAddressResponse.publicIp");
+
+        request("AssociateAddress", owner).formParam("AllocationId", otherAllocation)
+                .formParam("InstanceId", instance).formParam("PrivateIpAddress", "10.99.99.99")
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+        address(owner, primaryAllocation).body(ADDRESS + "associationId", equalTo(primaryAssociation));
+        address(owner, otherAllocation).body(ADDRESS + "associationId.size()", equalTo(0));
+        assertEquals(primaryIp, publicIp(owner, instance));
+
+        // Naming the primary private address itself is the same as naming none.
+        request("AssociateAddress", owner).formParam("AllocationId", otherAllocation)
+                .formParam("InstanceId", instance).formParam("PrivateIpAddress", privateIp)
+                .post("/").then().statusCode(200);
+        address(owner, primaryAllocation).body(ADDRESS + "associationId.size()", equalTo(0));
+        assertEquals(otherIp, publicIp(owner, instance));
+
+        request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
+        request("ReleaseAddress", owner).formParam("AllocationId", primaryAllocation).post("/").then().statusCode(200);
+        request("ReleaseAddress", owner).formParam("AllocationId", otherAllocation).post("/").then().statusCode(200);
     }
 
     @Test

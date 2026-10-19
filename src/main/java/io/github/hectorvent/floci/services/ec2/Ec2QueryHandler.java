@@ -819,6 +819,12 @@ public class Ec2QueryHandler {
                     if (associatePublicIp == null) {
                         associatePublicIp = primary.getAssociatePublicIpAddress();
                     }
+                    // An existing interface the template names is the instance's primary, as one
+                    // named on the request would be.
+                    if (isSet(primary.getNetworkInterfaceId())) {
+                        networkInterfaceId = primary.getNetworkInterfaceId();
+                        networkInterfaceDeviceIndex = 0;
+                    }
                 }
             }
             if (launchTemplateData.getMetadataOptions() != null) {

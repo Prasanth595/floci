@@ -630,7 +630,8 @@ disassociates the earlier address, which stays allocated, as the
 [AssociateAddress reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_AssociateAddress.html)
 describes. That is the primary private address unless `PrivateIpAddress` names a secondary
 address of the instance's primary interface, so an address on a secondary private address
-leaves the primary one, and the instance's public address, in place.
+leaves the primary one, and the instance's public address, in place. Any other
+`PrivateIpAddress` fails with `InvalidParameterValue` and changes no association.
 
 Deleting an interface, including deletion on instance termination, disassociates its
 Elastic IP without releasing the allocation. A retained interface keeps its association
@@ -742,7 +743,9 @@ Two behaviours worth calling out, because they are what Terraform reads back:
   resolves its security groups from whichever of the two is populated. `RunInstances` and
   `CreateFleet` launches take their subnet and `AssociatePublicIpAddress` from the interface at
   device index 0; when that interface names no subnet, `CreateFleet` still uses the first
-  interface that does. Auto Scaling launches take only its `AssociatePublicIpAddress`, since the
+  interface that does. A `RunInstances` launch whose template interface at device index 0 names
+  an existing `NetworkInterfaceId` launches on that interface, in its subnet, as a request
+  naming it would. Auto Scaling launches take only its `AssociatePublicIpAddress`, since the
   group's `VPCZoneIdentifier` places them. Network interfaces, on the `RunInstances` request or
   in its launch template, cannot be combined with an instance-level `SubnetId`
   (`InvalidParameterCombination`); place the subnet on the primary network interface instead.
