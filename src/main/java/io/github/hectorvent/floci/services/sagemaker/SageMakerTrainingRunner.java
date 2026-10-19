@@ -80,10 +80,14 @@ public class SageMakerTrainingRunner implements ContainerTeardown, Resettable {
     }
 
     public void runAsync(TrainingJobResource job, SageMakerService service) {
-        executor.submit(() -> run(job, service));
+        runAsync(job, service, RetryingTarCopier.DEFAULT_BACKOFF_MS);
     }
 
-    private void run(TrainingJobResource job, SageMakerService service) {
+    void runAsync(TrainingJobResource job, SageMakerService service, long backoffMillis) {
+        executor.submit(() -> run(job, service, backoffMillis));
+    }
+
+    private void run(TrainingJobResource job, SageMakerService service, long backoffMillis) {
         String containerId = null;
         Closeable logs = null;
         try {
@@ -106,7 +110,7 @@ public class SageMakerTrainingRunner implements ContainerTeardown, Resettable {
             containerId = lifecycleManager.create(spec);
             containers.put(job.trainingJobName, containerId);
             job.containerId = containerId;
-            copyTrainingInput(containerId, job, RetryingTarCopier.DEFAULT_BACKOFF_MS);
+            copyTrainingInput(containerId, job, backoffMillis);
             lifecycleManager.startCreated(containerId, spec);
             job.trainingStartTime = System.currentTimeMillis();
             job.secondaryStatus = "Training";

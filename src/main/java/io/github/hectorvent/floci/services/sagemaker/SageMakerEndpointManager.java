@@ -71,10 +71,14 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
     }
 
     public void startEndpointAsync(EndpointResource endpoint, SageMakerService service) {
-        executor.submit(() -> startEndpoint(endpoint, service));
+        startEndpointAsync(endpoint, service, RetryingTarCopier.DEFAULT_BACKOFF_MS);
     }
 
-    private void startEndpoint(EndpointResource endpoint, SageMakerService service) {
+    void startEndpointAsync(EndpointResource endpoint, SageMakerService service, long backoffMillis) {
+        executor.submit(() -> startEndpoint(endpoint, service, backoffMillis));
+    }
+
+    private void startEndpoint(EndpointResource endpoint, SageMakerService service, long backoffMillis) {
         String containerId = null;
         try {
             ModelResource model = service.modelForEndpoint(endpoint);
@@ -98,7 +102,7 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
             containerId = lifecycleManager.create(spec);
             String modelDataUrl = string(c.get("ModelDataUrl"));
             if (modelDataUrl != null && !modelDataUrl.isBlank()) {
-                copyModelData(containerId, modelDataUrl, RetryingTarCopier.DEFAULT_BACKOFF_MS);
+                copyModelData(containerId, modelDataUrl, backoffMillis);
             }
             ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
             EndpointInfo ep = info.getEndpoint(PORT);

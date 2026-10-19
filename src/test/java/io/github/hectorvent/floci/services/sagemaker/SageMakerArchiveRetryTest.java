@@ -249,12 +249,12 @@ class SageMakerArchiveRetryTest {
         }).when(service).updateTrainingJob(job);
 
         if (training) {
-            runner.runAsync(job, service);
+            runner.runAsync(job, service, 0);
         } else {
-            manager.startEndpointAsync(endpoint, service);
+            manager.startEndpointAsync(endpoint, service, 0);
         }
 
-        assertTrue(reported.await(30, TimeUnit.SECONDS));
+        assertTrue(reported.await(5, TimeUnit.SECONDS));
         assertEquals("Failed", training ? job.trainingJobStatus : endpoint.endpointStatus);
         assertTrue((training ? job.failureReason : endpoint.failureReason).contains(reason));
         assertEquals(attempts, commands.size());
