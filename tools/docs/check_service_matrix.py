@@ -205,7 +205,7 @@ def extract_action_counts(repo_root: Path, required_sources: frozenset[str] = fr
     counts: dict[str, int] = {}
 
     # Generated service documents.
-    for slug in matrix_counts:
+    for slug in sorted(extract_matrix_slugs(md_source)):
         doc_path = repo_root / SERVICES_DIR / f"{slug}.md"
 
         if not doc_path.exists():
@@ -215,6 +215,10 @@ def extract_action_counts(repo_root: Path, required_sources: frozenset[str] = fr
         generated_count = count_generated_actions(doc_source)
 
         if generated_count is not None:
+            if slug not in matrix_counts:
+                raise ValueError(
+                    f"{MATRIX_DOC}: '{slug}' needs a numeric matrix row for its generated action table"
+                )
             counts[slug] = generated_count
 
     registry = yaml.safe_load((repo_root / REGISTRY).read_text(encoding="utf-8")) or {}

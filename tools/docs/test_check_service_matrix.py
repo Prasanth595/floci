@@ -173,6 +173,31 @@ def test_non_tabular_action_count_tracks_new_dispatch_cases(tmp_path):
     assert c.extract_action_counts(tmp_path)["glue"] == 3
 
 
+def test_generated_action_table_requires_numeric_matrix_count(tmp_path):
+    matrix = tmp_path / "docs/services/index.md"
+    matrix.parent.mkdir(parents=True)
+    matrix.write_text(
+        "## Service Matrix\n\n| [EFS](efs.md) | REST | REST | TBD |\n"
+        "| [Glue](glue.md) | Query | JSON | 2 |\n\n## Common Setup\n",
+        encoding="utf-8",
+    )
+    (matrix.parent / "efs.md").write_text(
+        "<!-- floci:actions:start -->\n| Action | Description |\n"
+        "| --- | --- |\n| CreateFileSystem | Creates a file system |\n"
+        "<!-- floci:actions:end -->\n",
+        encoding="utf-8",
+    )
+    registry = tmp_path / "tools/docs/service_matrix.yaml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("action_count_sources:\n  glue: src/GlueJsonHandler.java\n", encoding="utf-8")
+    handler = tmp_path / "src/GlueJsonHandler.java"
+    handler.parent.mkdir(parents=True)
+    handler.write_text('case "CreateTable" -> create();\ncase "GetTable" -> get();\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="efs.*numeric matrix row"):
+        c.extract_action_counts(tmp_path)
+
+
 @pytest.mark.parametrize("source_entry", ["[]", "{}", "null"])
 def test_non_tabular_action_sources_cannot_be_disabled(tmp_path, source_entry):
     matrix = tmp_path / "docs/services/index.md"
