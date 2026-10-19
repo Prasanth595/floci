@@ -10,9 +10,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Publishes the {@code aws.ssm} Parameter Store Change events AWS sends to the default EventBridge bus
@@ -79,13 +77,8 @@ public class SsmEventPublisher {
             return;
         }
         try {
-            ArrayNode resources = objectMapper.createArrayNode().add(arn);
-            Map<String, Object> entry = new HashMap<>();
-            entry.put("Source", SOURCE);
-            entry.put("DetailType", DETAIL_TYPE);
-            entry.put("Detail", objectMapper.writeValueAsString(detail));
-            entry.put("Resources", resources);
-            eventBridgeService.putEvents(List.of(entry), region);
+            eventBridgeService.putEvents(List.of(EventBridgeService.serviceEventEntry(SOURCE, DETAIL_TYPE,
+                    objectMapper.writeValueAsString(detail), arn)), region);
         } catch (Exception e) {
             LOG.warnv(e, "Failed to publish Parameter Store Change for {0}", arn);
         }

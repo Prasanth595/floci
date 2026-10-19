@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -765,6 +766,26 @@ public class EventBridgeService implements ResourceProvider {
     // ──────────────────────────── PutEvents ────────────────────────────
 
     public record PutEventsResult(int failedCount, List<Map<String, String>> entries) {}
+
+    /**
+     * The entry an AWS service sends on its own behalf, for {@link #putEvents}. {@code Resources} is
+     * always present, because rule matching reads it for any rule with a {@code resources} filter,
+     * and holds {@code resourceArn} unless that is null or blank. With no {@code EventBusName} the
+     * entry goes to the default bus; the map is mutable so a caller can name another.
+     */
+    public static Map<String, Object> serviceEventEntry(String source, String detailType, String detail,
+                                                        String resourceArn) {
+        ArrayNode resources = JsonNodeFactory.instance.arrayNode();
+        if (resourceArn != null && !resourceArn.isBlank()) {
+            resources.add(resourceArn);
+        }
+        Map<String, Object> entry = new HashMap<>();
+        entry.put("Source", source);
+        entry.put("DetailType", detailType);
+        entry.put("Detail", detail);
+        entry.put("Resources", resources);
+        return entry;
+    }
 
     public PutEventsResult putEvents(List<Map<String, Object>> entries, String region) {
         return putEvents(entries, region, null);
