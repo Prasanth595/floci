@@ -4761,9 +4761,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * Moves an external instance's tags, stored by bare id before tags were regional and kept by
-     * {@link #migrateTagsToRegionKeys}, under the region the instance is now found in.
+     * {@link #migrateTagsToRegionKeys}, under the region the instance is now found in. With no
+     * region to file them under, the tags are read in place and left for a regional lookup.
      */
     private Optional<List<Tag>> claimLegacyInstanceTags(String accountId, String region, String instanceId) {
+        if (region == null || region.isBlank()) {
+            return tags instanceof AccountAwareStorageBackend<List<Tag>> aware
+                    ? aware.getForAccount(accountId, instanceId)
+                    : tags.get(instanceId);
+        }
         synchronized (lockFor(key(region, instanceId))) {
             if (tags instanceof AccountAwareStorageBackend<List<Tag>> aware) {
                 Optional<List<Tag>> legacy = aware.getForAccount(accountId, instanceId);
@@ -4832,7 +4838,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (source.getNetworkInterfaces() != null) {
             copy.setNetworkInterfaces(new ArrayList<>(source.getNetworkInterfaces()));
         }
-        List<Tag> effectiveTags = getTagsForAccount(accountId, region, source.getInstanceId(), source.getTags());
+        String tagRegion = region != null && !region.isBlank() ? region : source.getRegion();
+        List<Tag> effectiveTags = getTagsForAccount(accountId, tagRegion, source.getInstanceId(), source.getTags());
         copy.setTags(effectiveTags != null ? new ArrayList<>(effectiveTags) : new ArrayList<>());
         return copy;
     }

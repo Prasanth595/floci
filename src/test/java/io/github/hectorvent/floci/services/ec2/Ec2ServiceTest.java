@@ -847,6 +847,38 @@ class Ec2ServiceTest {
         assertFalse(tagStore.keys().contains(nodeId));
     }
 
+    @Test
+    void regionlessLookupFilesClusterNodeTagsUnderTheNodesRegion() {
+        AccountAwareStorageBackend<List<Tag>> tagStore = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = tagTestService(new InMemoryStorageFactory(Map.of("ec2-tags.json", tagStore)));
+        String nodeId = "i-0de0000000000002b";
+        tagStore.put(nodeId, new ArrayList<>(List.of(new Tag("Team", "node"))));
+        service.migrateTagsToRegionKeys();
+        Instance node = new Instance();
+        node.setInstanceId(nodeId);
+        node.setRegion("eu-west-1");
+        node.setPlacement(new Placement("eu-west-1a"));
+        node.setState(InstanceState.running());
+        node.setInstanceType("m5.large");
+        service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
+            @Override
+            public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
+                return nodeId.equals(instanceId) && (region == null || "eu-west-1".equals(region))
+                        ? Optional.of(node) : Optional.empty();
+            }
+
+            @Override
+            public List<Instance> listInstances(String accountId, String region) {
+                return region == null || "eu-west-1".equals(region) ? List.of(node) : List.of();
+            }
+        });
+
+        assertEquals("node", service.findInstanceById(nodeId).getTags().getFirst().getValue());
+
+        assertEquals(List.of(nodeId), tagResourceIds(service.describeTags("eu-west-1", Map.of("key", List.of("Team")))));
+        assertFalse(tagStore.keys().contains("null::" + nodeId));
+    }
+
     private static Ec2Service tagTestService(StorageFactory storageFactory) {
         return new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), storageFactory);
