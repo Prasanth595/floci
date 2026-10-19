@@ -8,21 +8,18 @@ import org.junit.jupiter.api.Test;
 
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SNIHostName;
-import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
-import javax.net.ssl.TrustManagerFactory;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.nio.file.Path;
-import java.security.KeyStore;
 import java.security.cert.X509Certificate;
 import java.util.List;
 import java.util.Set;
-import java.util.TreeSet;
 
+import static io.github.hectorvent.floci.config.TlsTestSupport.dnsSans;
+import static io.github.hectorvent.floci.config.TlsTestSupport.trustOnlyTheCa;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -51,7 +48,7 @@ class TlsEnsureHostIntegrationTest {
     @Test
     void ensureHostIsVisibleToTheNextHandshakeAndResetTakesItBack() throws Exception {
         X509Certificate boot = peerLeaf();
-        assertFalse(sans(boot).contains(NEW_HOST), "precondition: the boot leaf does not cover " + NEW_HOST);
+        assertFalse(dnsSans(boot).contains(NEW_HOST), "precondition: the boot leaf does not cover " + NEW_HOST);
         assertThrows(SSLHandshakeException.class, this::handshakeVerifyingNewHost,
                 "precondition: a client verifying the new name rejects the boot leaf");
         assertEquals(200, healthOverHttpsAsLocalhost(), "the configured name is served before");
@@ -59,7 +56,7 @@ class TlsEnsureHostIntegrationTest {
         manager.ensureHost(NEW_HOST);
 
         X509Certificate extended = peerLeaf();
-        Set<String> sans = sans(extended);
+        Set<String> sans = dnsSans(extended);
         assertTrue(sans.contains(NEW_HOST), sans.toString());
         assertTrue(sans.contains("localhost"), "configured names are still served: " + sans);
         assertEquals(boot.getPublicKey(), extended.getPublicKey(), "same key pair across the reload");
@@ -68,7 +65,7 @@ class TlsEnsureHostIntegrationTest {
 
         given().when().post("/_floci/state/reset").then().statusCode(200);
 
-        Set<String> afterReset = sans(peerLeaf());
+        Set<String> afterReset = dnsSans(peerLeaf());
         assertFalse(afterReset.contains(NEW_HOST), "reset drops the learned name: " + afterReset);
         assertTrue(afterReset.contains("localhost"), afterReset.toString());
         assertThrows(SSLHandshakeException.class, this::handshakeVerifyingNewHost, "reset: the new name is rejected again");
@@ -113,25 +110,5 @@ class TlsEnsureHostIntegrationTest {
         } finally {
             connection.disconnect();
         }
-    }
-
-    private static SSLContext trustOnlyTheCa() throws Exception {
-        KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
-        trust.load(null, null);
-        trust.setCertificateEntry("floci",
-                FlociCertificateAuthority.loadOrCreate(Path.of(SelfSignedTlsProfile.TLS_DIR)).certificate());
-        TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        tmf.init(trust);
-        SSLContext ctx = SSLContext.getInstance("TLS");
-        ctx.init(null, tmf.getTrustManagers(), null);
-        return ctx;
-    }
-
-    private static Set<String> sans(X509Certificate leaf) throws Exception {
-        Set<String> sans = new TreeSet<>();
-        for (List<?> entry : leaf.getSubjectAlternativeNames()) {
-            sans.add(String.valueOf(entry.get(1)));
-        }
-        return sans;
     }
 }

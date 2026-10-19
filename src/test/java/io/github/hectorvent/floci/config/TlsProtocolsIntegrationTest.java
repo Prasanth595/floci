@@ -12,23 +12,21 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.net.ssl.SNIHostName;
-import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
-import javax.net.ssl.TrustManagerFactory;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
-import java.security.KeyStore;
 import java.security.cert.X509Certificate;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+import static io.github.hectorvent.floci.config.TlsTestSupport.dnsSans;
+import static io.github.hectorvent.floci.config.TlsTestSupport.trustOnlyTheCa;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -90,12 +88,12 @@ class TlsProtocolsIntegrationTest {
     void protocolWorksBeforeAndAfterCertificateReload(String protocol) throws Exception {
         String newHost = "tls-" + UUID.randomUUID() + ".reload.localhost.floci.io";
         X509Certificate before = health(publicPort, "localhost", protocol);
-        assertFalse(hasSan(before, newHost), "the new name must require a certificate reload");
+        assertFalse(dnsSans(before).contains(newHost), "the new name must require a certificate reload");
 
         manager.ensureHost(newHost);
 
         X509Certificate after = health(publicPort, newHost, protocol);
-        assertTrue(hasSan(after, newHost), "the listener must serve the newly issued SAN");
+        assertTrue(dnsSans(after).contains(newHost), "the listener must serve the newly issued SAN");
         assertNotEquals(before, after, "the listener must have reloaded its certificate");
     }
 
@@ -109,7 +107,7 @@ class TlsProtocolsIntegrationTest {
         manager.ensureHost(newHost);
 
         X509Certificate after = health(publicPort, newHost, "TLSv1.3");
-        assertTrue(hasSan(after, newHost));
+        assertTrue(dnsSans(after).contains(newHost));
         assertNotEquals(before, after);
         assertProtocolVersionAlert(minorVersion);
     }
@@ -165,26 +163,5 @@ class TlsProtocolsIntegrationTest {
                 return (X509Certificate) socket.getSession().getPeerCertificates()[0];
             }
         }
-    }
-
-    private static SSLContext trustOnlyTheCa() throws Exception {
-        KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
-        trust.load(null, null);
-        trust.setCertificateEntry("floci",
-                FlociCertificateAuthority.loadOrCreate(Path.of(SelfSignedTlsProfile.TLS_DIR)).certificate());
-        TrustManagerFactory factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        factory.init(trust);
-        SSLContext context = SSLContext.getInstance("TLS");
-        context.init(null, factory.getTrustManagers(), null);
-        return context;
-    }
-
-    private static boolean hasSan(X509Certificate certificate, String host) throws Exception {
-        for (List<?> entry : certificate.getSubjectAlternativeNames()) {
-            if (Integer.valueOf(2).equals(entry.get(0)) && host.equals(entry.get(1))) {
-                return true;
-            }
-        }
-        return false;
     }
 }
