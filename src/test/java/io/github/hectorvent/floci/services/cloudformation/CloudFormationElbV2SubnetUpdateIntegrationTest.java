@@ -10,6 +10,7 @@ import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -128,6 +129,10 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
             CfnStackWaits.StackState updated = CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE");
 
             assertTrue(updated.reason() == null || updated.reason().isEmpty(), updated.reason());
+            List<String> events = events(stack);
+            assertTrue(events.contains("Alb DELETE_COMPLETE"), String.join(", ", events));
+            assertTrue(events.indexOf("Alb DELETE_COMPLETE") < events.indexOf("SubnetC DELETE_IN_PROGRESS"),
+                    String.join(", ", events));
             ec2("DescribeSubnets", "SubnetId.1", moved.get("SubnetC")).statusCode(400)
                     .body(containsString("InvalidSubnetID.NotFound"));
             request(ELB_AUTH, "DescribeLoadBalancers", "LoadBalancerArns.member.1", moved.get("Alb")).statusCode(400)
@@ -156,6 +161,11 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
             CfnStackWaits.StackState updated = CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE");
 
             assertTrue(updated.reason() == null || updated.reason().isEmpty(), updated.reason());
+            List<String> events = events(stack);
+            assertTrue(events.contains("Alb DELETE_COMPLETE") && events.contains("SubnetC DELETE_COMPLETE"),
+                    String.join(", ", events));
+            assertTrue(events.lastIndexOf("Alb DELETE_COMPLETE") < events.indexOf("SubnetC DELETE_COMPLETE"),
+                    String.join(", ", events));
             Map<String, String> outputs = outputs(stack);
             assertNotEquals(created.get("Alb"), outputs.get("Alb"));
             request(ELB_AUTH, "DescribeLoadBalancers", "LoadBalancerArns.member.1", created.get("Alb")).statusCode(400)
@@ -629,6 +639,20 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
         request(CFN_AUTH, "UpdateStack", "StackName", stack, "TemplateBody", templateBody).statusCode(200);
         CfnStackWaits.awaitStatus(stack, expectedStatus);
         return outputs(stack);
+    }
+
+    /** The stack's events, oldest first, each as its logical id and status. */
+    private static List<String> events(String stack) {
+        String xml = request(CFN_AUTH, "DescribeStackEvents", "StackName", stack).statusCode(200)
+                .extract().asString();
+        List<String> ids = XmlParser.extractAll(xml, "LogicalResourceId");
+        List<String> statuses = XmlParser.extractAll(xml, "ResourceStatus");
+        assertEquals(ids.size(), statuses.size());
+        List<String> events = new ArrayList<>();
+        for (int i = ids.size() - 1; i >= 0; i--) {
+            events.add(ids.get(i) + " " + statuses.get(i));
+        }
+        return events;
     }
 
     private static Map<String, String> outputs(String stack) {

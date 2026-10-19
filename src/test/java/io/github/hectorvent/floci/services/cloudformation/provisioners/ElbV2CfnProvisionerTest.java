@@ -26,6 +26,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -134,7 +135,7 @@ class ElbV2CfnProvisionerTest {
     void loadBalancerExposesExactlyTheSchemaAttributes() {
         when(elb.createLoadBalancer(eq(REGION), eq("web"), eq("internet-facing"), eq("application"), isNull(),
                 eq(List.of("subnet-1", "subnet-2")), eq(List.of("sg-1")), eq(Map.of("env", "test"))))
-                .thenReturn(loadBalancer("web"));
+                .thenReturn(loadBalancerOn("web", "subnet-1", "subnet-2"));
         ObjectNode props = mapper.createObjectNode().put("Name", "web").put("Scheme", "internet-facing")
                 .put("Type", "application");
         props.putArray("Subnets").add("subnet-1").add("subnet-2");
@@ -145,8 +146,10 @@ class ElbV2CfnProvisionerTest {
         provisioner.provision(r, props, ctx());
 
         assertEquals(LB_ARN, r.getPhysicalId());
+        // Fn::GetAtt resolves no __Floci key, so those are the hidden bookkeeping, not attributes.
         assertEquals(Set.of("LoadBalancerArn", "DNSName", "CanonicalHostedZoneID", "LoadBalancerName",
-                "LoadBalancerFullName"), r.getAttributes().keySet());
+                "LoadBalancerFullName"), r.getAttributes().keySet().stream()
+                .filter(key -> !key.startsWith("__Floci")).collect(Collectors.toSet()));
         assertEquals("app/web/50dc6c495c0c9188", r.getAttributes().get("LoadBalancerFullName"));
         assertEquals("web", r.getAttributes().get("LoadBalancerName"));
         assertEquals("Z35SXDOTRQ7X7K", r.getAttributes().get("CanonicalHostedZoneID"));
