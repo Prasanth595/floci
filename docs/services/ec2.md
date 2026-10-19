@@ -641,8 +641,9 @@ after termination; release still follows that interface's VPC rules.
 
 AllocateAddress draws Elastic IPs from `203.0.113.0/24`, a range reserved for documentation that
 no host answers on, in every mode, so a client never reaches someone else's host through one. An
-account's Elastic IPs and its instances' public addresses never share an address; once all 254 are
-taken, AllocateAddress fails with `AddressLimitExceeded`. Associating an Elastic IP with an
+allocation never takes an address the account's other Elastic IPs or instances already hold; once
+all 254 are taken, AllocateAddress fails with `AddressLimitExceeded`. Elastic IPs allocated by an
+earlier Floci version keep their `54.x.x.x` address until released. Associating an Elastic IP with an
 instance that has a container re-points it at the address the instance is actually reachable on
 (the same value DescribeInstances reports), and so does associating one with a mock instance's
 primary private address under `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES=fixed`, where it becomes

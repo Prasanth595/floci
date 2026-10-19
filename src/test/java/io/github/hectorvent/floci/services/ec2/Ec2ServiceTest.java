@@ -1383,6 +1383,47 @@ class Ec2ServiceTest {
         assertNull(instance.getPublicIpAddress(), "the launch asked for no automatic address");
     }
 
+    @Test
+    void anElasticIpReturnsToItsAllocatedAddressOnceTheSettingIsNoLongerFixed() {
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().mockPublicAddresses())
+                .thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.FIXED);
+        Ec2Service service = mockModeService(config);
+        String region = "us-east-1";
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), privateSubnet(service, region, "10.238.0.0/24"), null, List.of(), null, null,
+                null).getInstances().getFirst();
+        service.describeInstances(region, List.of(instance.getInstanceId()), Map.of());
+        Address elastic = service.allocateAddress(region);
+        String allocated = elastic.getPublicIp();
+        service.associateAddress(region, elastic.getAllocationId(), instance.getInstanceId());
+        assertEquals("127.0.0.1", instance.getPublicIpAddress());
+
+        // As after a restart under another setting: the next read shows the allocated address again.
+        when(config.services().ec2().mockPublicAddresses())
+                .thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.NONE);
+        assertEquals(allocated, service.describeAddresses(region, List.of(elastic.getAllocationId()), Map.of())
+                .getFirst().getPublicIp());
+        assertEquals(allocated, instance.getPublicIpAddress());
+    }
+
+    @Test
+    void anInstanceAddressIsNeverAllocatedAsAnElasticIp() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        for (int i = 0; i < 253; i++) {
+            service.allocateAddress(region);
+        }
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), publicSubnet(service, region, "10.237.0.0/24"), null, List.of(), null, null,
+                null).getInstances().getFirst();
+        service.describeInstances(region, List.of(instance.getInstanceId()), Map.of());
+        assertEquals("203.0.113.254", instance.getPublicIpAddress());
+
+        AwsException full = assertThrows(AwsException.class, () -> service.allocateAddress(region));
+        assertEquals("AddressLimitExceeded", full.getErrorCode());
+    }
+
     private static String privateSubnet(Ec2Service service, String region, String cidr) {
         return service.createSubnet(region, service.createVpc(region, cidr, false).getVpcId(), cidr, region + "a")
                 .getSubnetId();

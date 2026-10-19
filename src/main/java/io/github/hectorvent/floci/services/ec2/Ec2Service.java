@@ -10115,7 +10115,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * Re-points an associated EIP at an address that actually answers.
      *
-     * <p>{@link #allocateAddress} can only invent a plausible {@code 54.x.x.x}, because at
+     * <p>{@link #allocateAddress} can only hand out an address from 203.0.113.0/24, because at
      * allocation time there is no instance to be reachable at. Real AWS then keeps that address
      * fixed and makes the network route it; Floci cannot, so an EIP left at its allocated value
      * routes nowhere — and it is precisely the value Terraform surfaces as
@@ -10162,7 +10162,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         } else if (config.services().ec2().mock() && secondary == null) {
             // With no container to reach, the address on the primary private address replaces any
             // automatic one: the configured address under mock-public-addresses: fixed, re-pointed
-            // as a container's is, otherwise the allocated one. A terminated instance keeps none,
+            // as a container's is, otherwise the allocated one, which also undoes a re-point made
+            // under an earlier setting or with a container. A terminated instance keeps none,
             // an unchanged address is not written again, and neither is one disassociated since
             // the caller read it.
             String fixed = fixedMockPublicAddress();
@@ -10171,9 +10172,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 String state = inst.getState() == null ? null : inst.getState().getName();
                 if (!"terminated".equals(state) && !"shutting-down".equals(state)
                         && addr.getAssociationId() != null && instanceId.equals(addr.getInstanceId())) {
-                    if (fixed != null) {
-                        addr.setPublicIp(fixed);
-                    }
+                    // The allocated address again once the setting is no longer fixed.
+                    addr.setPublicIp(fixed != null ? fixed : addr.getAllocatedPublicIp());
                     if (!Objects.equals(addr.getPublicIp(), inst.getPublicIpAddress())) {
                         setPublicAddress(inst, addr.getPublicIp());
                         changed = true;
