@@ -1128,23 +1128,32 @@ include every image that process should expose. Missing or invalid files fail on
 catalog use; leaving the setting unset preserves the bundled catalog. Containerized
 Floci needs the file mounted at the configured container path.
 
-### Public IPv4 addresses in mock mode
+### Public IPv4 addresses
 
-Mock instances apply `MapPublicIpOnLaunch` unless the primary launch interface explicitly
-sets `AssociatePublicIpAddress`. Direct launches, EC2 Fleet launches and Auto Scaling launch
-templates preserve both `true` and `false` overrides. An automatically assigned public address
-appears when the instance reaches `running`, whether DescribeInstances or
-DescribeInstanceStatus observes it first. It remains stable while running, is released on stop
-or termination, and is replaced on restart; the private address remains unchanged. As the
-[InstanceNetworkInterfaceSpecification reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_InstanceNetworkInterfaceSpecification.html)
-specifies, only an interface the launch creates gets an automatic address: an instance launched
-on an existing network interface has none. As the
-[EC2 User Guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-instance-addressing.html#concepts-public-addresses)
-describes, a released address is not replaced while a second network interface is attached.
+Whether an instance has an automatic public IPv4 address is decided by the same rule with and
+without containers. Only the address itself depends on the mode. With a container, it is the
+container's reachable address: its own IP when Floci's clients can route to it, otherwise
+`127.0.0.1` with the DNS name `localhost`. In mock mode, where there is no container, it is an
+invented `54.x.x.x` address.
 
-An Elastic IP associated with the instance's primary private address replaces the automatic
-address and is kept across a stop. Disassociating it from a running instance assigns a new
-automatic address when the launch requested one. An Elastic IP that a retained interface
-carries becomes the public address of the next instance launched on that interface, although
-DescribeAddresses does not report that instance as its `InstanceId`. A terminated instance has
-no public address, and stopping it does not bring it back.
+- An instance applies `MapPublicIpOnLaunch` unless the primary launch interface explicitly sets
+  `AssociatePublicIpAddress`. Direct launches, EC2 Fleet launches and Auto Scaling launch
+  templates preserve both `true` and `false` overrides.
+- As the
+  [InstanceNetworkInterfaceSpecification reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_InstanceNetworkInterfaceSpecification.html)
+  specifies, only an interface the launch creates gets an automatic address. An instance launched
+  on an existing network interface has none.
+- The address appears when the instance reaches `running` and remains stable while it runs. A
+  stop or termination releases it, and a restart assigns a new one; the private address does not
+  change. As the
+  [EC2 User Guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-instance-addressing.html#concepts-public-addresses)
+  describes, a released address is not replaced while a second network interface is attached.
+- An Elastic IP associated with the instance's primary private address takes the place of the
+  automatic address and is kept across a stop. Disassociating it from a running instance assigns
+  a new automatic address when the rule above allows one.
+
+In mock mode, the address appears whether DescribeInstances or DescribeInstanceStatus observes the
+launch first. An Elastic IP that a retained interface carries becomes the public address of the
+next mock instance launched on that interface, although DescribeAddresses does not report that
+instance as its `InstanceId`. A terminated mock instance has no public address, and stopping it
+does not bring it back.

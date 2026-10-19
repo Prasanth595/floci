@@ -65,6 +65,7 @@ import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
@@ -1076,6 +1077,111 @@ class Ec2ServiceTest {
         service.associateAddress(region, address.getAllocationId(), instance.getInstanceId(), launchAddress);
         assertNotNull(address.getAssociationId());
         assertEquals(instance.getInstanceId(), address.getInstanceId());
+    }
+
+    @Test
+    void containerModeStopReleasesTheAutomaticAddressButKeepsAnElasticIp() {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.239.0.0/24");
+        Instance automatic = runningContainerInstance(service, region, subnetId, null);
+        Instance elastic = runningContainerInstance(service, region, subnetId, null);
+        Address address = service.allocateAddress(region);
+        service.associateAddress(region, address.getAllocationId(), elastic.getInstanceId());
+
+        service.stopInstances(region, List.of(automatic.getInstanceId(), elastic.getInstanceId()));
+
+        assertNull(automatic.getPublicIpAddress());
+        assertNull(automatic.getPublicDnsName());
+        assertEquals("127.0.0.1", elastic.getPublicIpAddress());
+    }
+
+    @Test
+    void containerModeTerminationLeavesNoPublicAddress() {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        Instance instance = runningContainerInstance(service, region, publicSubnet(service, region, "10.240.0.0/24"), null);
+
+        service.terminateInstances(region, List.of(instance.getInstanceId()));
+
+        assertNull(instance.getPublicIpAddress());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void anInstanceLaunchedOnAnExistingInterfaceIsNotDueAnAutomaticAddressInEitherMode(boolean mockMode) {
+        Ec2Service service = mockMode ? mockModeService() : containerModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.241.0.0/24");
+        NetworkInterface eni = service.createNetworkInterface(region, subnetId, null, null, List.of(), List.of(), List.of());
+        Instance onExisting = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null,
+                null, eni.getNetworkInterfaceId(), 0).getInstances().getFirst();
+        Instance onNew = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null, null).getInstances().getFirst();
+
+        assertFalse(onExisting.isAssociatePublicIp());
+        assertTrue(onNew.isAssociatePublicIp());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,1,127.0.0.1", "true,2,", "false,1,"})
+    void containerModeDisassociationGivesBackOnlyAnAddressTheRulesAllow(boolean publicSubnet, int interfaces,
+                                                                        String expected) {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet
+                ? publicSubnet(service, region, "10.242.0.0/24")
+                : service.createSubnet(region, service.createVpc(region, "10.243.0.0/24", false).getVpcId(),
+                        "10.243.0.0/26", region + "a").getSubnetId();
+        Instance instance = runningContainerInstance(service, region, subnetId, null);
+        Address address = service.allocateAddress(region);
+        service.associateAddress(region, address.getAllocationId(), instance.getInstanceId());
+        assertEquals("127.0.0.1", instance.getPublicIpAddress());
+        if (interfaces > 1) {
+            NetworkInterface extra = service.createNetworkInterface(region, subnetId, null, null, List.of(), List.of(),
+                    List.of());
+            service.attachNetworkInterface(region, extra.getNetworkInterfaceId(), instance.getInstanceId(), 1);
+        }
+
+        service.disassociateAddress(region, address.getAssociationId());
+
+        assertEquals(expected, instance.getPublicIpAddress());
+    }
+
+    /** Ec2Service in container mode, with a container manager whose containers answer on loopback. */
+    private static Ec2Service containerModeService() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.reachablePublicAddress(any())).thenAnswer(invocation -> {
+            Instance instance = invocation.getArgument(0);
+            return instance.getDockerContainerId() == null ? null : "127.0.0.1";
+        });
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        return new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class), images,
+                mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+    }
+
+    private static String publicSubnet(Ec2Service service, String region, String cidr) {
+        String subnetId = service.createSubnet(region, service.createVpc(region, cidr, false).getVpcId(),
+                cidr, region + "a").getSubnetId();
+        service.modifySubnetAttribute(region, subnetId, "mapPublicIpOnLaunch", "true");
+        return subnetId;
+    }
+
+    /** Launches an instance and does what the container manager does once its container runs. */
+    private static Instance runningContainerInstance(Ec2Service service, String region, String subnetId,
+                                                     String networkInterfaceId) {
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null,
+                null, networkInterfaceId, 0).getInstances().getFirst();
+        instance.setDockerContainerId("container-" + instance.getInstanceId());
+        instance.setState(InstanceState.running());
+        if (instance.isAssociatePublicIp()) {
+            instance.setPublicIpAddress("127.0.0.1");
+            instance.setPublicDnsName("localhost");
+        }
+        return instance;
     }
 
     @Test

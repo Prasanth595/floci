@@ -3505,10 +3505,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         inst.setVpcId(vpcId);
                         // AWS precedence (#1984): the launch-time AssociatePublicIpAddress
                         // override wins in both directions; the subnet's MapPublicIpOnLaunch
-                        // attribute is only the default when the launch does not specify it.
-                        inst.setAssociatePublicIp(associatePublicIp != null
+                        // attribute is only the default when the launch does not specify it. An
+                        // interface the caller created never takes an automatic address.
+                        inst.setAssociatePublicIp(suppliedEni == null && (associatePublicIp != null
                                 ? associatePublicIp
-                                : subnet != null && subnet.isMapPublicIpOnLaunch());
+                                : subnet != null && subnet.isMapPublicIpOnLaunch()));
                         inst.setPrivateIpAddress(privateIp);
                         inst.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(privateIp, region));
                         inst.setKeyName(keyName);
@@ -4037,7 +4038,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 if (elastic != null) {
                     setPublicAddress(instance, elastic.getPublicIp());
                 } else {
-                    assignMockPublicAddress(region, instance, restart);
+                    assignAutomaticAddress(instance, restart);
                 }
                 instance.setState(InstanceState.running());
                 return true;
@@ -4046,28 +4047,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * Gives a mock instance an automatic public address when its launch asked for one. As on AWS,
-     * only an interface the launch created gets one, and an address released by a stop or by a
-     * disassociated Elastic IP is not replaced while a second interface is attached.
+     * Gives an instance the automatic public address {@link AutomaticPublicAddress} says it is due:
+     * the container's reachable address, or an invented one where there is no container.
      */
-    private void assignMockPublicAddress(String region, Instance instance, boolean replacement) {
-        if (!instance.isAssociatePublicIp() || instance.getPublicIpAddress() != null
-                || launchedOnExistingInterface(region, instance)
-                || replacement && instance.getNetworkInterfaces() != null && instance.getNetworkInterfaces().size() > 1) {
+    private void assignAutomaticAddress(Instance instance, boolean replacement) {
+        if (instance.getPublicIpAddress() != null || !AutomaticPublicAddress.isDue(instance, replacement)) {
             return;
         }
-        setPublicAddress(instance, randomPublicIpv4());
+        String address = config.services().ec2().mock() ? randomPublicIpv4()
+                : containerManager.reachablePublicAddress(instance);
+        if (address != null) {
+            setPublicAddress(instance, address);
+        }
     }
 
-    /** A stopped mock instance keeps the Elastic IP on its primary private address and loses an automatic one. */
-    private void releaseMockPublicAddress(String region, Instance instance) {
+    /** A stopped instance keeps the Elastic IP on its primary private address and loses an automatic one. */
+    private void releaseAutomaticAddress(String region, Instance instance) {
         Address elastic = primaryElasticAddress(region, instance);
         setPublicAddress(instance, elastic == null ? null : elastic.getPublicIp());
     }
 
     private static void setPublicAddress(Instance instance, String publicIp) {
         instance.setPublicIpAddress(publicIp);
-        instance.setPublicDnsName(publicIp);
+        instance.setPublicDnsName("127.0.0.1".equals(publicIp) ? "localhost" : publicIp);
     }
 
     private static void clearPublicAddress(Instance instance) {
@@ -4090,12 +4092,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .map(NetworkInterface::getAttachment)
                 .map(NetworkInterfaceAttachment::getInstanceId)
                 .orElse(null);
-    }
-
-    /** Whether the instance's primary interface is one the caller created and handed to the launch. */
-    private boolean launchedOnExistingInterface(String region, Instance instance) {
-        String primaryInterfaceId = primaryInterfaceId(instance);
-        return primaryInterfaceId != null && networkInterfaces.get(key(region, primaryInterfaceId)).isPresent();
     }
 
     /**
@@ -4189,6 +4185,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 // daemon and, without this, nothing would try again.
                 containerManager.terminate(inst, () ->
                         RequestScopes.runAs(owner, () -> reclaimCapturesPinnedBy(region, inst, terminating)));
+                // Termination releases the public address with a container too.
+                synchronized (inst) {
+                    clearPublicAddress(inst);
+                }
             }
             // Delete root volume if deleteOnTermination (matches real AWS behavior)
             if (inst.getRootVolumeId() != null) {
@@ -4299,12 +4299,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         String state = inst.getState() == null ? null : inst.getState().getName();
                         if (!"terminated".equals(state) && !"shutting-down".equals(state)) {
                             inst.setState(InstanceState.stopped());
-                            releaseMockPublicAddress(region, inst);
+                            releaseAutomaticAddress(region, inst);
                         }
                     }
                 }
             } else {
                 containerManager.stop(inst);
+                // A stop releases the automatic address with a container too; the next start
+                // decides on a replacement, and re-points an Elastic IP kept here.
+                synchronized (privateIpAllocationLock) {
+                    synchronized (inst) {
+                        releaseAutomaticAddress(region, inst);
+                    }
+                }
             }
             instances.put(key(region, id), inst);
             Map<String, String> entry = new LinkedHashMap<>();
@@ -10159,8 +10166,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         addr.setPublicIp(addr.getAllocatedPublicIp());
                     }
                     addresses.put(key(region, addr.getAllocationId()), addr);
-                    if (config.services().ec2().mock() && instanceId != null) {
-                        releaseMockElasticAddress(region, instanceId, associatedPublicIp);
+                    if (instanceId != null) {
+                        releaseElasticAddress(region, instanceId, associatedPublicIp);
                     }
                     return;
                 }
@@ -10169,10 +10176,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * A running mock instance whose Elastic IP is disassociated gets a new automatic address when
-     * its launch assigned one, as on AWS; otherwise it is left without a public address.
+     * A running instance whose Elastic IP is disassociated gets a new automatic address when
+     * {@link AutomaticPublicAddress} says it is due, as on AWS; otherwise it is left without one.
      */
-    private void releaseMockElasticAddress(String region, String instanceId, String elasticPublicIp) {
+    private void releaseElasticAddress(String region, String instanceId, String elasticPublicIp) {
         instances.get(key(region, instanceId)).ifPresent(inst -> {
             synchronized (inst) {
                 if (!Objects.equals(elasticPublicIp, inst.getPublicIpAddress())) {
@@ -10180,7 +10187,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
                 clearPublicAddress(inst);
                 if ("running".equals(inst.getState().getName())) {
-                    assignMockPublicAddress(region, inst, true);
+                    assignAutomaticAddress(inst, true);
                 }
             }
             instances.put(key(region, instanceId), inst);

@@ -38,6 +38,8 @@ import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.io.Closeable;
@@ -352,6 +354,42 @@ class Ec2ContainerManagerTest {
         assertEquals("172.17.0.9", instance.getImdsSourceIp(),
                 "the stale address would otherwise stay registered while IMDS requests arrive "
                         + "from an address nothing knows about");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"1,,127.0.0.1", "2,,", "2,127.0.0.1,127.0.0.1"})
+    void startReplacesAReleasedAddressOnlyWhileTheInstanceHasOneInterface(int interfaces, String kept,
+                                                                         String expected) throws Exception {
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(dockerClient.startContainerCmd(TEST_CONTAINER_ID))
+                .thenReturn(mock(StartContainerCmd.class, RETURNS_SELF));
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse response = inspectResponse("172.17.0.9");
+        when(inspect.exec()).thenReturn(response);
+        Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
+        Ec2ContainerManager manager = managerWith(lifecycleManager, dockerClient, metadataServer);
+
+        // A stopped instance whose launch asked for an address: the stop released the automatic
+        // one, and an Elastic IP, when there is one, kept its address.
+        Instance instance = new Instance();
+        instance.setInstanceId("i-restarted");
+        instance.setDockerContainerId(TEST_CONTAINER_ID);
+        instance.setAssociatePublicIp(true);
+        instance.setPublicIpAddress(kept);
+        List<InstanceNetworkInterface> attached = new ArrayList<>();
+        for (int i = 0; i < interfaces; i++) {
+            attached.add(new InstanceNetworkInterface());
+        }
+        instance.setNetworkInterfaces(attached);
+
+        manager.start(instance);
+        verify(metadataServer, timeout(2000)).registerContainer("172.17.0.9", "i-restarted", instance);
+
+        // As on AWS, a released address is not replaced while a second interface is attached.
+        assertEquals(expected, instance.getPublicIpAddress());
     }
 
     @Test
