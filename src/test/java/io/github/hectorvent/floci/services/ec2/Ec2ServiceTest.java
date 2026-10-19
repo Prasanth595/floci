@@ -1057,6 +1057,28 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void aContainerInstanceReportingItsBridgeAddressStillTakesAnElasticIpForItsLaunchAddress() {
+        EmulatorConfig config = mockConfig(true);
+        Ec2Service service = new Ec2Service(config, mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null, null).getInstances().getFirst();
+        String launchAddress = instance.getPrivateIpAddress();
+        // Container mode without AWS-faithful private addresses: the container manager replaces the
+        // reported address with the Docker bridge one once the container runs.
+        when(config.services().ec2().mock()).thenReturn(false);
+        instance.setPrivateIpAddress("172.17.0.5");
+        instance.getNetworkInterfaces().getFirst().setPrivateIpAddress("172.17.0.5");
+
+        Address address = service.allocateAddress(region);
+        service.associateAddress(region, address.getAllocationId(), instance.getInstanceId(), launchAddress);
+        assertNotNull(address.getAssociationId());
+        assertEquals(instance.getInstanceId(), address.getInstanceId());
+    }
+
+    @Test
     void networkInterfaceAssociationFiltersExcludeSecondaryAddressAssociations() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),

@@ -630,8 +630,10 @@ disassociates the earlier address, which stays allocated, as the
 [AssociateAddress reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_AssociateAddress.html)
 describes. That is the primary private address unless `PrivateIpAddress` names a secondary
 address of the instance's primary interface, so an address on a secondary private address
-leaves the primary one, and the instance's public address, in place. Any other
-`PrivateIpAddress` fails with `InvalidParameterValue` and changes no association.
+leaves the primary one, and the instance's public address, in place. For an existing instance,
+any other `PrivateIpAddress` fails with `InvalidParameterValue` and changes no association. The
+exception is container mode without AWS-faithful private addresses: the instance reports its Docker
+bridge address there, so any value means its primary address.
 
 Deleting an interface, including deletion on instance termination, disassociates its
 Elastic IP without releasing the allocation. A retained interface keeps its association

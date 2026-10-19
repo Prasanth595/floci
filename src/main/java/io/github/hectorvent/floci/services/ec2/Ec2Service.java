@@ -9977,7 +9977,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             Instance target = instanceId == null ? null : instances.get(key(region, instanceId)).orElse(null);
             String secondary = target == null ? null : secondaryPrivateIpOf(region, target, privateIpAddress);
-            if (target != null && isSet(privateIpAddress) && secondary == null
+            // A container instance reporting its Docker bridge address no longer records the subnet
+            // address it launched with, which callers may still name, so there only the mock and
+            // AWS-faithful address modes can tell a stray address from the primary one.
+            boolean addressesKnown = config.services().ec2().mock() || config.services().ec2().awsFaithfulPrivateIp();
+            if (addressesKnown && target != null && isSet(privateIpAddress) && secondary == null
                     && !isPrimaryPrivateIp(region, target, privateIpAddress)) {
                 throw new AwsException("InvalidParameterValue", "The private IP address " + privateIpAddress
                         + " is not assigned to the primary network interface of instance " + instanceId + ".", 400);
