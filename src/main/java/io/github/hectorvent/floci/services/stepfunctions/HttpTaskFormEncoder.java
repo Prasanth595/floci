@@ -1,9 +1,8 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
 
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.StringJoiner;
@@ -59,9 +58,9 @@ final class HttpTaskFormEncoder {
                     if (element.isContainerNode()) {
                         throw new IllegalArgumentException("Floci COMMAS arrays currently require scalar values");
                     }
-                    values.add(component(element.isNull() ? "" : element.asText()));
+                    values.add(SigV4Canonicalization.uriEncode(element.isNull() ? "" : element.asText()));
                 }
-                pairs.add(component(key) + "=" + values);
+                pairs.add(SigV4Canonicalization.uriEncode(key) + "=" + values);
                 return;
             }
             for (int index = 0; index < value.size(); index++) {
@@ -73,12 +72,8 @@ final class HttpTaskFormEncoder {
                 append(pairs, arrayKey, value.get(index), format);
             }
         } else {
-            pairs.add(component(key) + "=" + component(value.isNull() ? "" : value.asText()));
+            pairs.add(SigV4Canonicalization.uriEncode(key) + "="
+                    + SigV4Canonicalization.uriEncode(value.isNull() ? "" : value.asText()));
         }
-    }
-
-    private static String component(String value) {
-        return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20")
-                .replace("*", "%2A").replace("%7E", "~");
     }
 }

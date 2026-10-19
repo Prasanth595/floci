@@ -4815,9 +4815,6 @@ public class AslExecutor {
     }
 
     private HttpResponse<Buffer> sendHttpRequest(HttpRequest<Buffer> request, HttpRequestPayload payload) throws NoStackTraceTimeoutException {
-        if (payload.form() != null) {
-            return request.sendFormAndAwait(payload.form());
-        }
         if (payload.body() != null) {
             return request.sendBufferAndAwait(payload.body());
         }
@@ -4915,19 +4912,18 @@ public class AslExecutor {
         if ("URL_ENCODED".equalsIgnoreCase(requestBodyEncoding)) {
             try {
                 return new HttpRequestPayload(Buffer.buffer(HttpTaskFormEncoder.encode(requestBody, options)),
-                        null, "application/x-www-form-urlencoded");
+                        "application/x-www-form-urlencoded");
             } catch (IllegalArgumentException e) {
                 throw new FailStateException("States.TaskFailed", e.getMessage());
             }
         } else if ("NONE".equalsIgnoreCase(requestBodyEncoding)) {
             try {
                 if (requestBody.isMissingNode() || requestBody.isNull()) {
-                    return new HttpRequestPayload(null, null, null);
+                    return new HttpRequestPayload(null, null);
                 }
 
                 return new HttpRequestPayload(
                     Buffer.buffer(objectMapper.writeValueAsString(requestBody)),
-                    null,
                     "application/json");
             } catch (Exception e) {
                 throw new FailStateException("States.TaskFailed",
@@ -4939,7 +4935,7 @@ public class AslExecutor {
         }
     }
 
-    private record HttpRequestPayload(Buffer body, MultiMap form, String contentType) {
+    private record HttpRequestPayload(Buffer body, String contentType) {
     }
 
     private record HttpTaskResponse(
