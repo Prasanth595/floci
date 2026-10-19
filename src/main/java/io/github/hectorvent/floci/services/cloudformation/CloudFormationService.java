@@ -3178,6 +3178,7 @@ public class CloudFormationService implements ResourceProvider {
                 rank.put(creationOrder.get(i), i);
             }
             Map<String, List<StackResource>> holdersByPhysicalId = new HashMap<>();
+            Map<String, StackResource> held = new HashMap<>();
             int leftovers = 0;
             for (StackResource resource : ordered) {
                 if (!rank.containsKey(resource.getLogicalId())) {
@@ -3187,13 +3188,15 @@ public class CloudFormationService implements ResourceProvider {
                     holdersByPhysicalId.computeIfAbsent(resource.getPhysicalId(), id -> new ArrayList<>())
                             .add(resource);
                 }
+                held.put(resource.getLogicalId(), resource);
             }
             double step = 1.0 / (leftovers + 1);
             Map<String, Double> position = new HashMap<>();
+            Function<StackResource, Collection<String>> references = resource -> referenceValues(resource, held);
             for (StackResource resource : ordered) {
                 position.put(resource.getLogicalId(),
                         leftoverPosition(resource, rank, holdersByPhysicalId, step, position, new HashSet<>(),
-                                this::referenceValues));
+                                references));
             }
             ordered.sort(Comparator.comparingDouble(r -> position.get(r.getLogicalId())));
         } catch (Exception e) {
@@ -3456,27 +3459,32 @@ public class CloudFormationService implements ResourceProvider {
      * a custom resource's are its handler's response Data, and a nested stack's {@code Outputs.*}
      * are its child's outputs. Those do not count. What their definitions named counts instead,
      * kept by {@link #recordTemplateUses}, with a custom resource's other {@code __Floci} keys such
-     * as its ServiceToken. A Lambda ServiceToken, an ARN, also names its function by name, which is
-     * the function's physical id.
+     * as its ServiceToken; a Lambda function ARN among those also names the function by name, which
+     * is the function's physical id. A resource a definition named also counts as whatever the
+     * stack now holds under its logical id ({@code held}), since a later update may have replaced
+     * it without touching a resource that only {@code DependsOn} it.
      */
-    private Collection<String> referenceValues(StackResource resource) {
+    private Collection<String> referenceValues(StackResource resource, Map<String, StackResource> held) {
         List<String> values = new ArrayList<>();
-        if (dispatcher.isCustomResourceType(resource.getResourceType())) {
-            for (Map.Entry<String, String> attribute : resource.getAttributes().entrySet()) {
-                if (attribute.getKey().startsWith("__Floci")) {
-                    values.add(attribute.getValue());
-                    String function = lambdaFunctionName(attribute.getValue());
-                    if (function != null) {
-                        values.add(function);
-                    }
-                }
-            }
-            return values;
-        }
+        boolean custom = dispatcher.isCustomResourceType(resource.getResourceType());
         boolean nestedStack = "AWS::CloudFormation::Stack".equals(resource.getResourceType());
         for (Map.Entry<String, String> attribute : resource.getAttributes().entrySet()) {
-            if (!nestedStack || !attribute.getKey().startsWith("Outputs.")) {
-                values.add(attribute.getValue());
+            String key = attribute.getKey();
+            if (custom ? !key.startsWith("__Floci") : nestedStack && key.startsWith("Outputs.")) {
+                continue;
+            }
+            values.add(attribute.getValue());
+            if (custom) {
+                String function = lambdaFunctionName(attribute.getValue());
+                if (function != null) {
+                    values.add(function);
+                }
+            }
+            if (key.startsWith(TEMPLATE_USES_PREFIX)) {
+                StackResource named = held.get(key.substring(TEMPLATE_USES_PREFIX.length()));
+                if (named != null && named != resource && named.getPhysicalId() != null) {
+                    values.add(named.getPhysicalId());
+                }
             }
         }
         return values;
@@ -4149,6 +4157,8 @@ public class CloudFormationService implements ResourceProvider {
      * in place of what an earlier operation kept. A custom resource's or nested stack's attributes are
      * outputs, so these are what orders it before the resources it uses once the template no longer
      * names it; a literal value it was given names nothing, even if another resource has that name.
+     * One provisioned before these keys were kept has none until it next changes, so as a leftover
+     * it orders by its ServiceToken alone, or by nothing for a nested stack.
      */
     private static void recordTemplateUses(StackResource resource, Set<String> dependencies,
                                            Map<String, String> physicalIds) {

@@ -1205,6 +1205,26 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
+     * A resource a nested stack only {@code DependsOn} can be replaced by a later update that leaves
+     * the nested stack alone, so the id kept for it is stale: the leftover still goes before what the
+     * stack now holds under that logical id.
+     */
+    @Test
+    void deleteStack_deletesALeftoverNestedStackBeforeAReplacedResourceItDependsOn() {
+        String childId = "arn:aws:cloudformation:us-east-1:000000000000:stack/parent-Network/1";
+        Stack stack = leftoverStack("delete-leftover-nested-stale", "{\"Policy\": {\"Type\": \"AWS::IAM::Policy\"}}");
+        StackResource nested = resource("Network", childId, "AWS::CloudFormation::Stack", "UPDATE_COMPLETE");
+        nested.getAttributes().put("Arn", childId);
+        nested.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "Resource.Policy", "old-policy");
+        StackResource policy = resource("Policy", "new-policy", "AWS::IAM::Policy", "UPDATE_COMPLETE");
+        hold(stack, nested, policy);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        assertEquals(List.of("Network", "Policy"), deletesInProgress(stack));
+    }
+
+    /**
      * A nested stack's {@code Outputs.*} are its child's outputs: a leftover bucket named after
      * one, created after the nested stack, still goes first.
      */
@@ -1337,7 +1357,8 @@ class CloudFormationServiceRollbackTest {
     @Test
     void deleteStack_aLeftoverAliasRecordedFirstStillGoesAfterItsUrl() {
         String aliasArn = "arn:aws:lambda:us-east-1:000000000000:function:fn:live";
-        Stack stack = leftoverStack("delete-leftover-url-alias-first", "{\"Fn\": {\"Type\": \"AWS::Lambda::Function\"}}");
+        Stack stack = leftoverStack("delete-leftover-url-alias-first",
+                "{\"Fn\": {\"Type\": \"AWS::Lambda::Function\"}}");
         StackResource alias = resource("Live", aliasArn, "AWS::Lambda::Alias", "UPDATE_COMPLETE");
         alias.getAttributes().put("AliasArn", aliasArn);
         StackResource url = resource("Url", aliasArn, "AWS::Lambda::Url", "UPDATE_COMPLETE");
