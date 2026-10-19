@@ -44,11 +44,11 @@ class CloudFrontWebFunctionOriginServingTest {
     @Test
     void anEndpointOriginIsReachedWhateverPortAndProtocolTheOriginNames() {
         String functionName = "cf-disabled-" + Long.toString(System.nanoTime(), 36);
-        String domain = createFunction(functionName, "ApplicationManaged");
+        String domain = createFunction(s3Service, cleanup, functionName, "ApplicationManaged");
         given().contentType("application/json").body("{\"throttleConfig\": {\"rateLimit\": 0}}")
                 .when().patch(BASE + "/web-functions/" + functionName + "/endpoints/dev")
                 .then().statusCode(202);
-        Distribution created = createDistribution(domain,
+        Distribution created = createDistribution(cloudFrontService, cleanup, domain,
                 CloudFrontService.MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID);
 
         given().header("Host", created.getDomainName()).when().get("/")
@@ -59,7 +59,8 @@ class CloudFrontWebFunctionOriginServingTest {
 
     @Test
     void anIamAuthEndpointRefusesTheUnsignedRequestOfADistributionWithoutOriginAccessControl() {
-        Distribution created = createDistribution(createFunction("cf-iam-" + Long.toString(System.nanoTime(), 36), "IamAuth"),
+        String domain = createFunction(s3Service, cleanup, "cf-iam-" + Long.toString(System.nanoTime(), 36), "IamAuth");
+        Distribution created = createDistribution(cloudFrontService, cleanup, domain,
                 CloudFrontService.MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID);
 
         given().header("Host", created.getDomainName()).when().get("/")
@@ -71,15 +72,16 @@ class CloudFrontWebFunctionOriginServingTest {
 
     @Test
     void forwardingTheViewerHostToAnEndpointIsABadGateway() {
-        Distribution created = createDistribution(
-                createFunction("cf-host-" + Long.toString(System.nanoTime(), 36), "ApplicationManaged"),
+        String domain = createFunction(s3Service, cleanup, "cf-host-" + Long.toString(System.nanoTime(), 36),
+                "ApplicationManaged");
+        Distribution created = createDistribution(cloudFrontService, cleanup, domain,
                 CloudFrontService.MANAGED_ALL_VIEWER_ORIGIN_REQUEST_POLICY_ID);
 
         given().header("Host", created.getDomainName()).when().get("/")
                 .then().statusCode(502);
     }
 
-    private String createFunction(String functionName, String authType) {
+    static String createFunction(S3Service s3Service, PartitionCleanup cleanup, String functionName, String authType) {
         s3Service.createBucket(BUCKET, "us-east-1");
         s3Service.putObject(BUCKET, "app.zip", "zip".getBytes(StandardCharsets.UTF_8), "application/zip", Map.of());
         String domain = given().contentType("application/json")
@@ -100,7 +102,8 @@ class CloudFrontWebFunctionOriginServingTest {
     }
 
     /** The origin names the endpoint as on AWS: its host without a port, over HTTPS on 443. */
-    private Distribution createDistribution(String endpointDomain, String originRequestPolicyId) {
+    static Distribution createDistribution(CloudFrontService cloudFrontService, PartitionCleanup cleanup,
+                                           String endpointDomain, String originRequestPolicyId) {
         Origin origin = new Origin();
         origin.setId("web");
         origin.setDomainName(endpointDomain.substring(0, endpointDomain.lastIndexOf(':')));

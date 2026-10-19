@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService;
 import io.github.hectorvent.floci.services.s3.ByteRange;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import io.quarkus.vertx.http.HttpServer;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpVersion;
@@ -109,17 +110,19 @@ public class CloudFrontServingController {
     private final S3Service s3Service;
     private final LambdaWebService lambdaWebService;
     private final CurrentVertxRequest currentVertxRequest;
+    private final HttpServer httpServer;
     private final CloudFrontOriginHttpClient httpClient;
     private final CloudFrontOriginHttpClient flociClient = CloudFrontOriginHttpClient.toFloci();
 
     @Inject
     public CloudFrontServingController(CloudFrontService service, S3Service s3Service,
                                        LambdaWebService lambdaWebService, EmulatorConfig emulatorConfig,
-                                       CurrentVertxRequest currentVertxRequest) {
+                                       CurrentVertxRequest currentVertxRequest, HttpServer httpServer) {
         this.service = service;
         this.s3Service = s3Service;
         this.lambdaWebService = lambdaWebService;
         this.currentVertxRequest = currentVertxRequest;
+        this.httpServer = httpServer;
         this.httpClient = new CloudFrontOriginHttpClient(
                 emulatorConfig.services().cloudfront().allowedPrivateOriginHosts().orElse(List.of()));
     }
@@ -834,11 +837,14 @@ public class CloudFrontServingController {
         }
     }
 
-    /** The address the viewer reached Floci at, which also serves the Web Function endpoints. */
+    /**
+     * The plain HTTP port at the address the viewer reached Floci at, which also serves the Web
+     * Function endpoints. A viewer over TLS reached the HTTPS port instead.
+     */
     private URI flociListenerUri(String forwardUri, String rawQuery) {
         SocketAddress local = currentVertxRequest.getCurrent().request().localAddress();
         String host = local.hostAddress().indexOf(':') >= 0 ? "[" + local.hostAddress() + "]" : local.hostAddress();
-        return buildCustomOriginUri("http", host, local.port(), forwardUri, rawQuery);
+        return buildCustomOriginUri("http", host, httpServer.getPort(), forwardUri, rawQuery);
     }
 
     /**

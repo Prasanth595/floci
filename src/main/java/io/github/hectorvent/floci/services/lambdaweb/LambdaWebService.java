@@ -143,6 +143,8 @@ public class LambdaWebService implements Resettable {
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
     /** Every endpoint domain, filled from storage at start and kept by the create and delete paths. */
     private final ConcurrentHashMap<String, EndpointLocator> domains = new ConcurrentHashMap<>();
+    /** Each endpoint domain keyed by its host as a CloudFront origin names it. */
+    private final ConcurrentHashMap<String, String> originHosts = new ConcurrentHashMap<>();
 
     @Inject
     public LambdaWebService(RegionResolver regionResolver, StorageFactory storageFactory, EmulatorConfig config,
@@ -164,6 +166,7 @@ public class LambdaWebService implements Resettable {
         this.functions = storageFactory.create("lambda", "lambda-web-functions.json",
                 new TypeReference<Map<String, WebFunction>>() {});
         domains.clear();
+        originHosts.clear();
         List<WebFunction> all = functions instanceof AccountAwareStorageBackend<WebFunction> aware
                 ? aware.scanAllAccounts()
                 : functions.scan(key -> true);
@@ -176,6 +179,7 @@ public class LambdaWebService implements Resettable {
     public void clear() {
         functions.clear();
         domains.clear();
+        originHosts.clear();
     }
 
     /** Where a request to an endpoint domain goes. Domains are unique across accounts and regions. */
@@ -195,6 +199,7 @@ public class LambdaWebService implements Resettable {
                 Optional<WebFunction> stored = functions.get(key(locator.region(), locator.functionName()));
                 if (stored.isEmpty() || !stored.get().endpoints.containsKey(locator.endpointName())) {
                     domains.remove(host, locator);
+                    originHosts.remove(originHost(host), host);
                     return Optional.empty();
                 }
                 WebFunction fn = copy(stored.get(), WebFunction.class);
@@ -205,29 +210,37 @@ public class LambdaWebService implements Resettable {
     }
 
     /**
-     * The endpoint domain that {@code host} names, as a CloudFront origin names it. An origin domain
-     * has no port, while the domain Floci mints carries the port of its base URL.
+     * The endpoint domain that a CloudFront origin names by {@code host}, which is lowercase with no
+     * trailing dot or port. The domain Floci mints keeps the authority of its base URL.
      */
     public Optional<String> endpointDomain(String host) {
-        for (String domain : domains.keySet()) {
-            int colon = domain.lastIndexOf(':');
-            if (domain.equals(host) || (colon > 0 && domain.substring(0, colon).equals(host))) {
-                return Optional.of(domain);
-            }
-        }
-        return Optional.empty();
+        return Optional.ofNullable(originHosts.get(host));
     }
 
     private void indexDomains(WebFunction fn, WebFunctionEndpoint endpoint) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.functionArn);
         EndpointLocator locator = new EndpointLocator(arn.accountId(), arn.region(), fn.functionName, endpoint.endpointName);
-        domains.put(endpoint.domainName, locator);
-        endpoint.regionalDomainNames.values().forEach(domain -> domains.put(domain, locator));
+        index(endpoint.domainName, locator);
+        endpoint.regionalDomainNames.values().forEach(domain -> index(domain, locator));
+    }
+
+    private void index(String domain, EndpointLocator locator) {
+        domains.put(domain, locator);
+        originHosts.put(originHost(domain), domain);
     }
 
     private void unindexDomains(WebFunctionEndpoint endpoint) {
-        domains.remove(endpoint.domainName);
-        endpoint.regionalDomainNames.values().forEach(domains::remove);
+        unindex(endpoint.domainName);
+        endpoint.regionalDomainNames.values().forEach(this::unindex);
+    }
+
+    private void unindex(String domain) {
+        domains.remove(domain);
+        originHosts.remove(originHost(domain), domain);
+    }
+
+    private static String originHost(String domain) {
+        return domain.replaceFirst("\\.*(:\\d+)?$", "").toLowerCase(Locale.ROOT);
     }
 
     /** The revision a request goes to, drawn by the endpoint's weights. */
