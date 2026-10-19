@@ -71,7 +71,7 @@ Floci implements the CodeDeploy API — stored-state management for applications
 | Operation | Notes |
 |---|---|
 | `RegisterOnPremisesInstance` | Registers an instance name with an IAM session or user ARN |
-| `DeregisterOnPremisesInstance` | Removes a registered instance |
+| `DeregisterOnPremisesInstance` | Marks an instance as `Deregistered` while retaining its registration record |
 | `GetOnPremisesInstance` | Returns registration information for one instance |
 | `BatchGetOnPremisesInstances` | Returns registration information for named instances |
 | `ListOnPremisesInstances` | Lists registered names, optionally filtered by status or tags |

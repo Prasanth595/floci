@@ -189,6 +189,36 @@ def test_non_tabular_action_sources_cannot_be_disabled(tmp_path, source_entry):
         c.extract_action_counts(tmp_path)
 
 
+def test_non_tabular_action_source_cannot_be_removed_silently(tmp_path):
+    matrix = tmp_path / "docs/services/index.md"
+    matrix.parent.mkdir(parents=True)
+    matrix.write_text(
+        "## Service Matrix\n\n| [Glue](glue.md) | Query | JSON | 2 |\n"
+        "| [EC2](ec2.md) | Query | Query | 1 |\n\n## Common Setup\n",
+        encoding="utf-8",
+    )
+    registry = tmp_path / "tools/docs/service_matrix.yaml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        "action_count_sources:\n  glue: src/GlueJsonHandler.java\n"
+        "  ec2: src/Ec2QueryHandler.java\n", encoding="utf-8",
+    )
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "GlueJsonHandler.java").write_text(
+        'case "CreateTable" -> create();\ncase "GetTable" -> get();\n', encoding="utf-8",
+    )
+    (source_dir / "Ec2QueryHandler.java").write_text(
+        'case "DescribeInstances" -> describe();\n', encoding="utf-8",
+    )
+
+    required = frozenset({"glue", "ec2"})
+    assert c.extract_action_counts(tmp_path, required) == {"glue": 2, "ec2": 1}
+    registry.write_text("action_count_sources:\n  glue: src/GlueJsonHandler.java\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="required action count source\\(s\\) missing: ec2"):
+        c.extract_action_counts(tmp_path, required)
+
+
 def test_extract_matrix_slugs_raises_on_missing_heading():
     # A renamed/reordered heading must fail loudly rather than silently returning an
     # empty slug set, which would make every registered service look undocumented.

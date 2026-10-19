@@ -69,7 +69,7 @@ EC2 instance can use a default subnet in a different zone.
 | Operation | Notes |
 |---|---|
 | `DescribeAutoScalingInstances` | Returns all ASG-tracked instances with lifecycle state and health status |
-| `SetInstanceHealth` | Updates an instance's health status, optionally respecting its grace period |
+| `SetInstanceHealth` | Updates an instance's health status immediately; accepts but does not enforce the grace-period flag |
 | `SetInstanceProtection` | Enables or disables scale-in protection for named instances in a group |
 | `SetDesiredCapacity` | Updates desired count; reconciler handles scale-out / scale-in within 10 s |
 | `AttachInstances` | Attaches existing EC2 instances to a group; sets lifecycle state to `InService` |

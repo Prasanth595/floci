@@ -45,6 +45,14 @@ CATALOG_SOURCE = "src/main/java/io/github/hectorvent/floci/core/common/ResolvedS
 MATRIX_DOC = "docs/services/index.md"
 REGISTRY = "tools/docs/service_matrix.yaml"
 
+# These grouped rows already have one dispatcher each; removing a registry entry
+# must not silently turn off their count check.
+REQUIRED_ACTION_COUNT_SOURCES = frozenset({
+    "autoscaling", "cloudmap", "codebuild", "codedeploy", "cognito", "config",
+    "ec2", "ecs", "elastic-beanstalk", "elb", "elb-classic", "glue", "iam",
+    "resource-groups-tagging",
+})
+
 MATRIX_HEADING = "## Service Matrix"
 MATRIX_END_HEADING = "## Common Setup"
 
@@ -183,7 +191,7 @@ def count_generated_actions(md_source: str) -> int | None:
     return count
 
 
-def extract_action_counts(repo_root: Path) -> dict[str, int]:
+def extract_action_counts(repo_root: Path, required_sources: frozenset[str] = frozenset()) -> dict[str, int]:
     """Extract mechanically verifiable action counts.
     Generated service documents are counted from their generated action-table
     markers. Explicitly mapped non-tabular Query/JSON dispatchers are counted
@@ -213,6 +221,9 @@ def extract_action_counts(repo_root: Path) -> dict[str, int]:
     sources = registry.get("action_count_sources")
     if not isinstance(sources, dict) or not sources:
         raise ValueError(f"{REGISTRY}: action_count_sources must be a non-empty mapping")
+    missing = required_sources - sources.keys()
+    if missing:
+        raise ValueError(f"{REGISTRY}: required action count source(s) missing: {', '.join(sorted(missing))}")
     for slug, relative_path in sources.items():
         if slug not in matrix_counts:
             raise ValueError(f"{REGISTRY}: action count source '{slug}' has no numeric matrix row")
@@ -348,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         matrix_action_counts = extract_matrix_action_counts(md_source)
-        source_action_counts = extract_action_counts(repo_root)
+        source_action_counts = extract_action_counts(repo_root, REQUIRED_ACTION_COUNT_SOURCES)
     except (ValueError, OSError, yaml.YAMLError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
