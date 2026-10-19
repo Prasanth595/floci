@@ -175,8 +175,10 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         // Rewrite path from /key to /bucket/key
         String newPath = "/" + bucket + (path.startsWith("/") ? "" : "/") + path;
 
+        // RESTEasy keeps the decoded path of the URI it is given and decodes it again to route,
+        // so escape it once more to leave the raw path in place, as a path-style request has it.
         URI newUri = UriBuilder.fromUri(uri)
-                .replacePath(newPath)
+                .replacePath(newPath.replace("%", "%25"))
                 .build();
 
         requestContext.setProperty(ORIGINAL_REQUEST_URI_PROPERTY, uri);

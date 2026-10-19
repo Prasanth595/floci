@@ -16,10 +16,10 @@ public final class S3ObjectKeys {
 
     /**
      * The decoded key in {@code rawPath}, the path as the client sent it, for a request on
-     * {@code bucket}. {@code requestUriPath} is the request URI's raw path, which
-     * {@link S3VirtualHostFilter} rewrites to {@code /<bucket>/<key>} for a virtual-hosted request,
-     * whose raw path is then the key alone. Returns null when the raw path does not carry the
-     * bucket, or does not decode.
+     * {@code bucket}. {@code requestUriPath} is the request URI's decoded path, which
+     * {@link S3VirtualHostFilter} rewrites to {@code /<bucket>} followed by the raw path for a
+     * virtual-hosted request, whose raw path is then the key alone. Returns null when the raw path
+     * does not carry the bucket, or does not decode.
      */
     public static String fromRawPath(String rawPath, String requestUriPath, String bucket) {
         String rawKey;

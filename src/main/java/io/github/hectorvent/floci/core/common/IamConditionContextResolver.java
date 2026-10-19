@@ -28,6 +28,7 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -441,11 +442,12 @@ public class IamConditionContextResolver {
         if (bucket == null) {
             return null;
         }
-        String requestUriPath = ctx.getUriInfo().getRequestUri() == null
-                ? null : ctx.getUriInfo().getRequestUri().getRawPath();
+        URI requestUri = ctx.getUriInfo().getRequestUri();
         RoutingContext current = currentVertxRequest == null ? null : currentVertxRequest.getCurrent();
-        String rawPath = current != null && current.request() != null ? current.request().path() : requestUriPath;
-        String key = rawPath == null ? null : S3ObjectKeys.fromRawPath(rawPath, requestUriPath, bucket);
+        String rawPath = current != null && current.request() != null ? current.request().path()
+                : requestUri == null ? null : requestUri.getRawPath();
+        String key = rawPath == null ? null
+                : S3ObjectKeys.fromRawPath(rawPath, requestUri == null ? null : requestUri.getPath(), bucket);
         if (key == null) {
             key = s3PathObjectKey(ctx.getUriInfo().getPath());
         }

@@ -4321,7 +4321,7 @@ public class S3Controller {
         // A virtual-hosted raw path is the key alone (see S3ObjectKeys.isVirtualHostedRawPath):
         // searching it for "/<bucket>/" finds that string only when the KEY happens to contain the
         // bucket's name as a segment, and everything up to that segment was then dropped from the key.
-        String key = S3ObjectKeys.fromRawPath(rawPath, uriInfo.getRequestUri().getRawPath(), bucket);
+        String key = S3ObjectKeys.fromRawPath(rawPath, uriInfo.getRequestUri().getPath(), bucket);
         if (key == null) {
             // Should not happen on standard /{bucket}/{key:.+} routes, but can happen when
             // requests are rerouted from a single-segment route (e.g. createBucket / handleBucketPost)

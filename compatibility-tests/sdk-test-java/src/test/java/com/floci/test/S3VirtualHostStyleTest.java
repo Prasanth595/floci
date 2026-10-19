@@ -7,6 +7,7 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -149,6 +150,28 @@ class S3VirtualHostStyleTest {
 
     @Test
     @Order(10)
+    void keysWithPercentSign() throws Exception {
+        List<String> keys = List.of("a%b", "a%/b", "a%25b");
+        for (String key : keys) {
+            s3.putObject(PutObjectRequest.builder().bucket(BUCKET).key(key).build(),
+                    RequestBody.fromString(key));
+
+            ResponseInputStream<GetObjectResponse> response = s3.getObject(GetObjectRequest.builder()
+                    .bucket(BUCKET).key(key).build());
+            assertThat(new String(response.readAllBytes(), StandardCharsets.UTF_8)).isEqualTo(key);
+        }
+
+        ListObjectsV2Response listed = s3.listObjectsV2(
+                ListObjectsV2Request.builder().bucket(BUCKET).build());
+        assertThat(listed.contents()).extracting(S3Object::key).containsExactlyInAnyOrderElementsOf(keys);
+
+        for (String key : keys) {
+            s3.deleteObject(DeleteObjectRequest.builder().bucket(BUCKET).key(key).build());
+        }
+    }
+
+    @Test
+    @Order(11)
     void deleteBucket() {
         s3.deleteBucket(DeleteBucketRequest.builder().bucket(BUCKET).build());
     }
