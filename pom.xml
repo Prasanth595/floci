@@ -332,12 +332,6 @@
         <!-- Testing -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
-            <artifactId>cloudformation</artifactId>
-            <version>${aws.sdk.version}</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3vectors</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>

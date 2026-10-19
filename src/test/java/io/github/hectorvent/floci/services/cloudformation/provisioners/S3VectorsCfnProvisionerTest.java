@@ -18,6 +18,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -99,6 +100,8 @@ class S3VectorsCfnProvisionerTest {
         assertEquals(BUCKET_ARN, resource.getPhysicalId());
         assertEquals(BUCKET_ARN, resource.getAttributes().get("VectorBucketArn"));
         assertEquals(CREATION_TIME.toString(), resource.getAttributes().get("CreationTime"));
+        assertEquals(Set.of("VectorBucketArn", "CreationTime", "__FlociS3VectorsProperties"),
+                resource.getAttributes().keySet());
     }
 
     @ParameterizedTest
@@ -154,7 +157,7 @@ class S3VectorsCfnProvisionerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"null", "{}"})
+    @ValueSource(strings = {"null", "{}", "{\"SseType\":null}"})
     void optionalEncryptionConfigurationPreservesDefaults(String configuration) throws Exception {
         stubCreates();
         JsonNode config = MAPPER.readTree(configuration);
@@ -164,7 +167,7 @@ class S3VectorsCfnProvisionerTest {
         Map<String, String> expected = config.isNull() ? null : Map.of("sseType", "AES256");
         verify(service).createVectorBucket("my-bucket", expected, Map.of(), REGION);
         verify(service).createIndex("my-bucket", "my-index", 3, "float32", "cosine",
-                List.of(), expected, Map.of(), REGION);
+                List.of(), null, Map.of(), REGION);
     }
 
     private static ObjectNode encryptionProps(String type, JsonNode configuration) throws Exception {
@@ -317,6 +320,29 @@ class S3VectorsCfnProvisionerTest {
         assertTrue(provisioner.rollbackUpdate(resource));
         verify(service).replaceBucketTags(name, Map.of("old", "value"), REGION);
         verify(service, times(1)).createVectorBucket(anyString(), any(), anyMap(), eq(REGION));
+    }
+
+    @Test
+    void indexTagUpdatesAndRollbackPreserveIdentity() throws Exception {
+        stubCreates();
+        StackResource resource = resource("Index");
+        provisioner.provision(resource, indexProps(), context(null));
+        VectorIndex index = new VectorIndex("my-index", INDEX_ARN, "my-bucket", 3, "float32", "cosine");
+        index.setCreationTime(CREATION_TIME);
+        index.setTags(Map.of("old", "value"));
+        when(service.getIndex("my-bucket", "my-index", REGION)).thenReturn(index);
+        ObjectNode props = indexProps();
+        props.set("Tags", MAPPER.readTree("[{\"Key\":\"new\",\"Value\":\"value\"}]"));
+
+        provisioner.provision(resource, props, context(INDEX_ARN));
+
+        assertEquals(INDEX_ARN, resource.getPhysicalId());
+        assertEquals(CREATION_TIME.toString(), resource.getAttributes().get("CreationTime"));
+        verify(service).replaceIndexTags("my-bucket", "my-index", Map.of("new", "value"), REGION);
+        assertTrue(provisioner.rollbackUpdate(resource));
+        verify(service).replaceIndexTags("my-bucket", "my-index", Map.of("old", "value"), REGION);
+        verify(service, times(1)).createIndex(anyString(), anyString(), anyInt(), anyString(), anyString(),
+                anyList(), any(), anyMap(), eq(REGION));
     }
 
     @Test

@@ -4,10 +4,24 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CfnCreateOnlyPropertiesTest {
+
+    @Test
+    void s3VectorsCreateOnlyPropertiesMatchTheRegistrySchemas() {
+        assertEquals(Set.of("DataType", "Dimension", "DistanceMetric", "EncryptionConfiguration", "IndexName",
+                        "MetadataConfiguration", "VectorBucketArn", "VectorBucketName"),
+                CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::S3Vectors::Index"));
+        assertEquals(Set.of("VectorBucketName", "EncryptionConfiguration"),
+                CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::S3Vectors::VectorBucket"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::S3Vectors::Index", "Dimension"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::S3Vectors::VectorBucket", "EncryptionConfiguration"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::S3Vectors::Index", "Tags"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::S3Vectors::VectorBucket", "Tags"));
+    }
 
     @Test
     void isCreateOnly_matchesSchemaDefinedProperties() {

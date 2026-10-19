@@ -25,7 +25,7 @@ import java.util.regex.Pattern;
 public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String PROPERTIES = "FlociS3VectorsProperties";
+    private static final String PROPERTIES = "__FlociS3VectorsProperties";
     private static final String TAG_SNAPSHOT = "__FlociS3VectorsTagsBeforeUpdate";
     private static final Pattern KMS_KEY_ARN = Pattern.compile(
             "arn:" + AwsArnUtils.PARTITION_REGEX + ":kms:[-a-z0-9]*:[0-9]{12}:key/.+");
@@ -71,7 +71,7 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
         } else {
             String name = physicalName(props, "VectorBucketName", resource, ctx, false);
             rejectSameNameReplacement(ctx, updatesEntity, "bucket/" + name);
-            bucket = service.createVectorBucket(name, encryption(props, ctx), tags, ctx.region());
+            bucket = service.createVectorBucket(name, encryption(props, ctx, "AES256"), tags, ctx.region());
         }
         resource.setPhysicalId(bucket.getVectorBucketArn());
         resource.getAttributes().put("VectorBucketArn", bucket.getVectorBucketArn());
@@ -109,7 +109,7 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
                 }
             }
             index = service.createIndex(bucketName, name, dimension, dataType, distanceMetric,
-                    keys, encryption(props, ctx), tags, ctx.region());
+                    keys, encryption(props, ctx, null), tags, ctx.region());
         }
         resource.setPhysicalId(index.getIndexArn());
         resource.getAttributes().put("IndexArn", index.getIndexArn());
@@ -172,7 +172,7 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private static Object encryption(JsonNode props, ProvisionContext ctx) {
+    private static Object encryption(JsonNode props, ProvisionContext ctx, String defaultType) {
         JsonNode config = props.path("EncryptionConfiguration");
         if (config.isMissingNode() || config.isNull()) {
             return null;
@@ -180,11 +180,14 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
         if (!config.isObject()) {
             throw validation("EncryptionConfiguration must be an object.");
         }
-        String type = ctx.resolveOrDefault(config, "SseType", "AES256");
+        String type = ctx.resolveOrDefault(config, "SseType", defaultType);
         String key = ctx.resolveOptional(config, "KmsKeyArn");
-        if ((!"AES256".equals(type) && !"aws:kms".equals(type))
+        if ((type != null && !"AES256".equals(type) && !"aws:kms".equals(type))
                 || (key != null && !"aws:kms".equals(type))) {
             throw validation("EncryptionConfiguration requires AES256 or aws:kms; KmsKeyArn requires aws:kms.");
+        }
+        if (type == null) {
+            return null;
         }
         Map<String, String> result = new LinkedHashMap<>();
         result.put("sseType", type);

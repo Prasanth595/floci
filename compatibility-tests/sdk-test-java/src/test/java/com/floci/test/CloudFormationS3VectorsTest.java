@@ -1,33 +1,32 @@
-package io.github.hectorvent.floci.services.cloudformation;
+package com.floci.test;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.services.s3vectors.S3VectorsService;
-import io.github.hectorvent.floci.services.s3vectors.model.VectorIndex;
-import io.quarkus.test.common.http.TestHTTPResource;
-import io.quarkus.test.junit.QuarkusTest;
-import jakarta.inject.Inject;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import software.amazon.awssdk.services.cloudformation.model.ChangeSetType;
 import software.amazon.awssdk.services.cloudformation.model.CloudFormationException;
+import software.amazon.awssdk.services.cloudformation.model.DescribeChangeSetResponse;
 import software.amazon.awssdk.services.cloudformation.model.Output;
 import software.amazon.awssdk.services.cloudformation.model.Parameter;
+import software.amazon.awssdk.services.cloudformation.model.ResourceChange;
 import software.amazon.awssdk.services.cloudformation.model.Stack;
 import software.amazon.awssdk.services.s3vectors.S3VectorsClient;
 import software.amazon.awssdk.services.s3vectors.model.Index;
+import software.amazon.awssdk.services.s3vectors.model.IndexSummary;
 import software.amazon.awssdk.services.s3vectors.model.NotFoundException;
 import software.amazon.awssdk.services.s3vectors.model.PutInputVector;
 import software.amazon.awssdk.services.s3vectors.model.VectorBucket;
 import software.amazon.awssdk.services.s3vectors.model.VectorData;
 
-import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
@@ -37,11 +36,11 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import static org.awaitility.Awaitility.await;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@QuarkusTest
-class CloudFormationS3VectorsIntegrationTest {
+@DisplayName("CloudFormation S3 Vectors resources")
+class CloudFormationS3VectorsTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String TEMPLATE = """
@@ -68,15 +67,9 @@ class CloudFormationS3VectorsIntegrationTest {
             }
             """;
 
-    @TestHTTPResource
-    URI endpoint;
-
-    @Inject
-    S3VectorsService service;
-
     @ParameterizedTest
     @ValueSource(strings = {"us-east-1", "us-gov-west-1"})
-    void sdkStackLifecyclePreservesDataOnTagUpdatesAndReplacesImmutableIndexes(String region) {
+    void sdkStackLifecyclePreservesDataOnTagUpdatesAndReplacesImmutableIndexes(String region) throws Exception {
         String stackName = "cfn-vectors-" + UUID.randomUUID().toString().substring(0, 8);
         try (CloudFormationClient cfn = cloudFormation(region); S3VectorsClient vectors = vectors(region)) {
             try {
@@ -84,45 +77,44 @@ class CloudFormationS3VectorsIntegrationTest {
                         .parameters(parameter("Tag", "first"), parameter("Dimension", "3")));
                 Stack created = awaitStack(cfn, stackName, "CREATE_COMPLETE");
                 Map<String, String> outputs = outputs(created);
-                assertEquals(outputs.get("BucketRef"), outputs.get("BucketArn"));
-                assertEquals(outputs.get("IndexRef"), outputs.get("IndexArn"));
+                assertThat(outputs.get("BucketArn")).isEqualTo(outputs.get("BucketRef"));
+                assertThat(outputs.get("IndexArn")).isEqualTo(outputs.get("IndexRef"));
                 String partition = region.startsWith("us-gov-") ? "aws-us-gov" : "aws";
-                assertTrue(outputs.get("BucketArn").startsWith("arn:" + partition + ":s3vectors:" + region + ":"));
+                assertThat(outputs.get("BucketArn")).startsWith("arn:" + partition + ":s3vectors:" + region + ":");
                 String bucketName = leaf(outputs.get("BucketArn"));
                 String indexName = leaf(outputs.get("IndexArn"));
                 VectorBucket bucket = vectors.getVectorBucket(request -> request.vectorBucketName(bucketName)).vectorBucket();
                 Index index = vectors.getIndex(request -> request.vectorBucketName(bucketName).indexName(indexName)).index();
-                assertEquals(outputs.get("BucketArn"), bucket.vectorBucketArn());
-                assertEquals(outputs.get("IndexArn"), index.indexArn());
-                assertEquals(Instant.parse(outputs.get("BucketCreated")).toEpochMilli(), bucket.creationTime().toEpochMilli());
-                assertEquals(Instant.parse(outputs.get("IndexCreated")).toEpochMilli(), index.creationTime().toEpochMilli());
-                assertEquals("AES256", index.encryptionConfiguration().sseTypeAsString());
-                assertEquals(List.of("text"), index.metadataConfiguration().nonFilterableMetadataKeys());
+                assertThat(bucket.vectorBucketArn()).isEqualTo(outputs.get("BucketArn"));
+                assertThat(index.indexArn()).isEqualTo(outputs.get("IndexArn"));
+                assertThat(bucket.creationTime().toEpochMilli()).isEqualTo(Instant.parse(outputs.get("BucketCreated")).toEpochMilli());
+                assertThat(index.creationTime().toEpochMilli()).isEqualTo(Instant.parse(outputs.get("IndexCreated")).toEpochMilli());
+                assertThat(index.encryptionConfiguration().sseTypeAsString()).isEqualTo("AES256");
+                assertThat(index.metadataConfiguration().nonFilterableMetadataKeys()).containsExactly("text");
                 vectors.putVectors(request -> request.vectorBucketName(bucketName).indexName(indexName)
                         .vectors(PutInputVector.builder().key("vector")
                                 .data(VectorData.builder().float32(1.0f, 0.0f, 0.0f).build()).build()));
 
                 cfn.updateStack(request -> request.stackName(stackName).templateBody(TEMPLATE)
                         .parameters(parameter("Tag", "second"), parameter("Dimension", "3")));
-                assertEquals(outputs, outputs(awaitStack(cfn, stackName, "UPDATE_COMPLETE")));
-                assertEquals(Map.of("version", "second"), service.getVectorBucket(bucketName, region).getTags());
-                assertEquals(Map.of("version", "second"), service.getIndex(bucketName, indexName, region).getTags());
-                assertEquals(1, vectors.getVectors(request -> request.vectorBucketName(bucketName)
-                        .indexName(indexName).keys("vector")).vectors().size());
+                assertThat(outputs(awaitStack(cfn, stackName, "UPDATE_COMPLETE"))).isEqualTo(outputs);
+                assertThat(vectors.getVectors(request -> request.vectorBucketName(bucketName)
+                        .indexName(indexName).keys("vector")).vectors()).hasSize(1);
 
                 cfn.updateStack(request -> request.stackName(stackName).templateBody(TEMPLATE)
                         .parameters(parameter("Tag", "second"), parameter("Dimension", "4")));
                 Map<String, String> replaced = outputs(awaitStack(cfn, stackName, "UPDATE_COMPLETE"));
-                assertEquals(outputs.get("BucketArn"), replaced.get("BucketArn"));
-                assertNotEquals(outputs.get("IndexArn"), replaced.get("IndexArn"));
-                assertEquals(4, vectors.getIndex(request -> request.vectorBucketName(bucketName)
-                        .indexName(leaf(replaced.get("IndexArn")))).index().dimension());
-                assertThrows(NotFoundException.class,
-                        () -> vectors.getIndex(request -> request.vectorBucketName(bucketName).indexName(indexName)));
+                assertThat(replaced.get("BucketArn")).isEqualTo(outputs.get("BucketArn"));
+                assertThat(replaced.get("IndexArn")).isNotEqualTo(outputs.get("IndexArn"));
+                assertThat(vectors.getIndex(request -> request.vectorBucketName(bucketName)
+                        .indexName(leaf(replaced.get("IndexArn")))).index().dimension()).isEqualTo(4);
+                assertThatThrownBy(() -> vectors.getIndex(request -> request.vectorBucketName(bucketName).indexName(indexName)))
+                        .isInstanceOf(NotFoundException.class);
 
                 cfn.deleteStack(request -> request.stackName(stackName));
                 awaitDeleted(cfn, stackName);
-                assertThrows(NotFoundException.class, () -> vectors.getVectorBucket(request -> request.vectorBucketName(bucketName)));
+                assertThatThrownBy(() -> vectors.getVectorBucket(request -> request.vectorBucketName(bucketName)))
+                        .isInstanceOf(NotFoundException.class);
             } finally {
                 cfn.deleteStack(request -> request.stackName(stackName));
                 awaitDeleted(cfn, stackName);
@@ -132,10 +124,10 @@ class CloudFormationS3VectorsIntegrationTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"VectorBucketName", "VectorBucketArn"})
-    void namedResourcesCanReferenceAnExistingBucketAndTolerateExternalDeletion(String selector) {
+    void namedResourcesCanReferenceAnExistingBucketAndTolerateExternalDeletion(String selector) throws Exception {
         String bucketName = "cfn-existing-" + UUID.randomUUID().toString().substring(0, 8);
         String stackName = bucketName + "-stack";
-        try (CloudFormationClient cfn = cloudFormation("us-east-1"); S3VectorsClient vectors = vectors("us-east-1")) {
+        try (CloudFormationClient cfn = TestFixtures.cloudFormationClient(); S3VectorsClient vectors = TestFixtures.s3vectorsClient()) {
             String bucketArn = vectors.createVectorBucket(request -> request.vectorBucketName(bucketName)).vectorBucketArn();
             String template = """
                     {"Resources":{"Index":{"Type":"AWS::S3Vectors::Index","Properties":{
@@ -144,7 +136,7 @@ class CloudFormationS3VectorsIntegrationTest {
                     """.formatted(selector, "VectorBucketName".equals(selector) ? bucketName : bucketArn);
             try {
                 cfn.createStack(request -> request.stackName(stackName).templateBody(template));
-                assertEquals(bucketArn + "/index/named-index", outputs(awaitStack(cfn, stackName, "CREATE_COMPLETE")).get("Arn"));
+                assertThat(outputs(awaitStack(cfn, stackName, "CREATE_COMPLETE")).get("Arn")).isEqualTo(bucketArn + "/index/named-index");
                 vectors.deleteIndex(request -> request.vectorBucketName(bucketName).indexName("named-index"));
                 cfn.deleteStack(request -> request.stackName(stackName));
                 awaitDeleted(cfn, stackName);
@@ -188,22 +180,22 @@ class CloudFormationS3VectorsIntegrationTest {
         }
         String template = MAPPER.writeValueAsString(Map.of("Resources", Map.of("Vectors", Map.of(
                 "Type", "AWS::S3Vectors::" + type, "Properties", props))));
-        try (CloudFormationClient cfn = cloudFormation("us-east-1"); S3VectorsClient vectors = vectors("us-east-1")) {
+        try (CloudFormationClient cfn = TestFixtures.cloudFormationClient(); S3VectorsClient vectors = TestFixtures.s3vectorsClient()) {
             if (index) {
                 vectors.createVectorBucket(request -> request.vectorBucketName(name));
             }
             try {
                 cfn.createStack(request -> request.stackName(name).templateBody(template));
                 awaitStack(cfn, name, "ROLLBACK_COMPLETE");
-                assertTrue(cfn.describeStackEvents(request -> request.stackName(name)).stackEvents().stream()
+                assertThat(cfn.describeStackEvents(request -> request.stackName(name)).stackEvents().stream()
                         .anyMatch(event -> "Vectors".equals(event.logicalResourceId())
                                 && "CREATE_FAILED".equals(event.resourceStatusAsString())
-                                && event.resourceStatusReason().contains(errorMember)));
+                                && event.resourceStatusReason().contains(errorMember))).isTrue();
                 if (index) {
-                    assertTrue(vectors.listIndexes(request -> request.vectorBucketName(name)).indexes().isEmpty());
+                    assertThat(vectors.listIndexes(request -> request.vectorBucketName(name)).indexes()).isEmpty();
                 } else {
-                    assertThrows(NotFoundException.class,
-                            () -> vectors.getVectorBucket(request -> request.vectorBucketName(name)));
+                    assertThatThrownBy(() -> vectors.getVectorBucket(request -> request.vectorBucketName(name)))
+                        .isInstanceOf(NotFoundException.class);
                 }
             } finally {
                 cfn.deleteStack(request -> request.stackName(name));
@@ -239,10 +231,10 @@ class CloudFormationS3VectorsIntegrationTest {
                         .indexName(leaf(outputs.get("IndexArn")))).index();
                 String key = outputs.get("BucketArn").split(":bucket/")[0].replace(":s3vectors:", ":kms:")
                         + ":key/1234abcd-12ab-34cd-56ef-1234567890ab";
-                assertEquals("aws:kms", bucket.encryptionConfiguration().sseTypeAsString());
-                assertEquals(key, bucket.encryptionConfiguration().kmsKeyArn());
-                assertEquals("aws:kms", index.encryptionConfiguration().sseTypeAsString());
-                assertEquals(key, index.encryptionConfiguration().kmsKeyArn());
+                assertThat(bucket.encryptionConfiguration().sseTypeAsString()).isEqualTo("aws:kms");
+                assertThat(bucket.encryptionConfiguration().kmsKeyArn()).isEqualTo(key);
+                assertThat(index.encryptionConfiguration().sseTypeAsString()).isEqualTo("aws:kms");
+                assertThat(index.encryptionConfiguration().kmsKeyArn()).isEqualTo(key);
             } finally {
                 cfn.deleteStack(request -> request.stackName(name));
                 awaitDeleted(cfn, name);
@@ -255,7 +247,7 @@ class CloudFormationS3VectorsIntegrationTest {
     void invalidIndexSettingsFailThroughCloudFormation(String dataType, String distanceMetric,
                                                                    List<String> keys, String errorMember) throws Exception {
         String name = "invalid-vectors-" + UUID.randomUUID().toString().substring(0, 8);
-        try (CloudFormationClient cfn = cloudFormation("us-east-1"); S3VectorsClient vectors = vectors("us-east-1")) {
+        try (CloudFormationClient cfn = TestFixtures.cloudFormationClient(); S3VectorsClient vectors = TestFixtures.s3vectorsClient()) {
             vectors.createVectorBucket(request -> request.vectorBucketName(name));
             try {
                 String template = MAPPER.writeValueAsString(Map.of("Resources", Map.of("Index", Map.of(
@@ -265,16 +257,16 @@ class CloudFormationS3VectorsIntegrationTest {
                                 "MetadataConfiguration", Map.of("NonFilterableMetadataKeys", keys))))));
                 cfn.createStack(request -> request.stackName(name).templateBody(template));
                 awaitStack(cfn, name, "ROLLBACK_COMPLETE");
-                assertTrue(cfn.describeStackEvents(request -> request.stackName(name)).stackEvents().stream()
+                assertThat(cfn.describeStackEvents(request -> request.stackName(name)).stackEvents().stream()
                         .anyMatch(event -> "Index".equals(event.logicalResourceId())
                                 && "CREATE_FAILED".equals(event.resourceStatusAsString())
-                                && event.resourceStatusReason().contains(errorMember)));
-                assertTrue(vectors.listIndexes(request -> request.vectorBucketName(name)).indexes().isEmpty());
+                                && event.resourceStatusReason().contains(errorMember))).isTrue();
+                assertThat(vectors.listIndexes(request -> request.vectorBucketName(name)).indexes()).isEmpty();
             } finally {
                 cfn.deleteStack(request -> request.stackName(name));
                 awaitDeleted(cfn, name);
-                for (VectorIndex index : service.listIndexes(name, "us-east-1")) {
-                    vectors.deleteIndex(request -> request.vectorBucketName(name).indexName(index.getIndexName()));
+                for (IndexSummary index : vectors.listIndexes(request -> request.vectorBucketName(name)).indexes()) {
+                    vectors.deleteIndex(request -> request.vectorBucketName(name).indexName(index.indexName()));
                 }
                 vectors.deleteVectorBucket(request -> request.vectorBucketName(name));
             }
@@ -293,29 +285,140 @@ class CloudFormationS3VectorsIntegrationTest {
         String realTemplate = template.toString();
         String stubTemplate = realTemplate.replace("AWS::S3Vectors::VectorBucket", "AWS::Unsupported::VectorBucket")
                 .replace("AWS::S3Vectors::Index", "AWS::Unsupported::Index");
-        try (CloudFormationClient cfn = cloudFormation("us-east-1"); S3VectorsClient vectors = vectors("us-east-1")) {
+        try (CloudFormationClient cfn = TestFixtures.cloudFormationClient(); S3VectorsClient vectors = TestFixtures.s3vectorsClient()) {
             try {
                 cfn.createStack(request -> request.stackName(name).templateBody(stubTemplate)
                         .parameters(parameter("Tag", "first"), parameter("Dimension", "3")));
                 Map<String, String> before = outputs(awaitStack(cfn, name, "CREATE_COMPLETE"));
-                assertTrue(before.get("BucketRef").matches("Bucket-[0-9a-f]{8}"));
-                assertTrue(before.get("IndexRef").matches("Index-[0-9a-f]{8}"));
+                assertThat(before.get("BucketRef").matches("Bucket-[0-9a-f]{8}")).isTrue();
+                assertThat(before.get("IndexRef").matches("Index-[0-9a-f]{8}")).isTrue();
 
                 cfn.updateStack(request -> request.stackName(name).templateBody(realTemplate)
                         .parameters(parameter("Tag", "second"), parameter("Dimension", "3")));
                 Map<String, String> after = outputs(awaitStack(cfn, name, "UPDATE_COMPLETE"));
-                assertNotEquals(before.get("BucketRef"), after.get("BucketRef"));
-                assertEquals(after.get("BucketRef"), after.get("BucketArn"));
-                assertEquals(after.get("IndexRef"), after.get("IndexArn"));
+                assertThat(after.get("BucketRef")).isNotEqualTo(before.get("BucketRef"));
+                assertThat(after.get("BucketArn")).isEqualTo(after.get("BucketRef"));
+                assertThat(after.get("IndexArn")).isEqualTo(after.get("IndexRef"));
                 String bucketName = leaf(after.get("BucketArn"));
                 Index index = vectors.getIndex(request -> request.vectorBucketName(bucketName)
                         .indexName(leaf(after.get("IndexArn")))).index();
-                assertEquals(after.get("IndexArn"), index.indexArn());
-                assertEquals(Instant.parse(after.get("IndexCreated")).toEpochMilli(), index.creationTime().toEpochMilli());
+                assertThat(index.indexArn()).isEqualTo(after.get("IndexArn"));
+                assertThat(index.creationTime().toEpochMilli()).isEqualTo(Instant.parse(after.get("IndexCreated")).toEpochMilli());
                 cfn.deleteStack(request -> request.stackName(name));
                 awaitDeleted(cfn, name);
-                assertThrows(NotFoundException.class,
-                        () -> vectors.getVectorBucket(request -> request.vectorBucketName(bucketName)));
+                assertThatThrownBy(() -> vectors.getVectorBucket(request -> request.vectorBucketName(bucketName)))
+                        .isInstanceOf(NotFoundException.class);
+            } finally {
+                cfn.deleteStack(request -> request.stackName(name));
+                awaitDeleted(cfn, name);
+            }
+        }
+    }
+
+    static Stream<Arguments> changeSetProperties() {
+        return Stream.of(
+                Arguments.of("Index", "Dimension", "4", "True"),
+                Arguments.of("Bucket", "EncryptionConfiguration", """
+                        {"SseType":"aws:kms","KmsKeyArn":{"Fn::Sub":
+                        "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/1234abcd-12ab-34cd-56ef-1234567890ab"}}
+                        """, "True"),
+                Arguments.of("Bucket", "Tags", "[{\"Key\":\"version\",\"Value\":\"second\"}]", "False"),
+                Arguments.of("Index", "Tags", "[{\"Key\":\"version\",\"Value\":\"second\"}]", "False"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("changeSetProperties")
+    void changeSetsReportReplacementForImmutableProperties(String logicalId, String property,
+                                                           String value, String replacement) throws Exception {
+        String name = TestFixtures.uniqueName("cfn-vectors-change-set");
+        ObjectNode template = (ObjectNode) MAPPER.readTree(TEMPLATE);
+        ((ObjectNode) template.path("Resources").path(logicalId).path("Properties"))
+                .set(property, MAPPER.readTree(value));
+        try (CloudFormationClient cfn = TestFixtures.cloudFormationClient()) {
+            try {
+                cfn.createStack(request -> request.stackName(name).templateBody(TEMPLATE)
+                        .parameters(parameter("Tag", "first"), parameter("Dimension", "3")));
+                awaitStack(cfn, name, "CREATE_COMPLETE");
+                String changeSet = cfn.createChangeSet(request -> request.stackName(name).changeSetName("update")
+                        .changeSetType(ChangeSetType.UPDATE).templateBody(template.toString())
+                        .parameters(parameter("Tag", "first"), parameter("Dimension", "3"))).id();
+                TestFixtures.await(() -> {
+                    DescribeChangeSetResponse response = cfn.describeChangeSet(request -> request.changeSetName(changeSet));
+                    assertThat(response.statusAsString()).as(response.statusReason()).isNotEqualTo("FAILED");
+                    return "CREATE_COMPLETE".equals(response.statusAsString());
+                }, changeSet, "CREATE_COMPLETE", Duration.ofSeconds(60).toNanos(), 100);
+                ResourceChange change = cfn.describeChangeSet(request -> request.changeSetName(changeSet)).changes()
+                        .stream().map(item -> item.resourceChange())
+                        .filter(item -> logicalId.equals(item.logicalResourceId())).findFirst().orElseThrow();
+                assertThat(change.actionAsString()).isEqualTo("Modify");
+                assertThat(change.replacementAsString()).isEqualTo(replacement);
+            } finally {
+                cfn.deleteStack(request -> request.stackName(name));
+                awaitDeleted(cfn, name);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"absent", "null", "{}", "{\"SseType\":null}", "{\"SseType\":\"AES256\"}"})
+    void indexesInheritBucketEncryptionUnlessExplicitlyOverridden(String configuration) throws Exception {
+        String name = TestFixtures.uniqueName("cfn-vectors-inherit");
+        ObjectNode template = (ObjectNode) MAPPER.readTree(TEMPLATE);
+        ObjectNode bucketProps = (ObjectNode) template.path("Resources").path("Bucket").path("Properties");
+        ObjectNode encryption = bucketProps.putObject("EncryptionConfiguration").put("SseType", "aws:kms");
+        encryption.putObject("KmsKeyArn").put("Fn::Sub",
+                "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/1234abcd-12ab-34cd-56ef-1234567890ab");
+        if (!"absent".equals(configuration)) {
+            ((ObjectNode) template.path("Resources").path("Index").path("Properties"))
+                    .set("EncryptionConfiguration", MAPPER.readTree(configuration));
+        }
+        try (CloudFormationClient cfn = TestFixtures.cloudFormationClient();
+                S3VectorsClient vectors = TestFixtures.s3vectorsClient()) {
+            try {
+                cfn.createStack(request -> request.stackName(name).templateBody(template.toString())
+                        .parameters(parameter("Tag", "kms"), parameter("Dimension", "3")));
+                Map<String, String> outputs = outputs(awaitStack(cfn, name, "CREATE_COMPLETE"));
+                String bucketName = leaf(outputs.get("BucketArn"));
+                VectorBucket bucket = vectors.getVectorBucket(request -> request.vectorBucketName(bucketName)).vectorBucket();
+                Index index = vectors.getIndex(request -> request.vectorBucketName(bucketName)
+                        .indexName(leaf(outputs.get("IndexArn")))).index();
+                assertThat(bucket.encryptionConfiguration().sseTypeAsString()).isEqualTo("aws:kms");
+                if (configuration.contains("AES256")) {
+                    assertThat(index.encryptionConfiguration().sseTypeAsString()).isEqualTo("AES256");
+                    assertThat(index.encryptionConfiguration().kmsKeyArn()).isNull();
+                } else {
+                    assertThat(index.encryptionConfiguration()).isEqualTo(bucket.encryptionConfiguration());
+                }
+            } finally {
+                cfn.deleteStack(request -> request.stackName(name));
+                awaitDeleted(cfn, name);
+            }
+        }
+    }
+
+    @Test
+    void propertySnapshotsAreNotExposedThroughGetAtt() throws Exception {
+        String name = TestFixtures.uniqueName("cfn-vectors-private");
+        ObjectNode template = (ObjectNode) MAPPER.readTree(TEMPLATE);
+        ObjectNode outputs = (ObjectNode) template.path("Outputs");
+        for (String logicalId : List.of("Bucket", "Index")) {
+            for (String key : List.of("FlociS3VectorsProperties", "__FlociS3VectorsProperties")) {
+                String output = logicalId + (key.startsWith("__") ? "Private" : "Legacy");
+                outputs.putObject(output).putObject("Value")
+                        .putArray("Fn::GetAtt").add(logicalId).add(key);
+            }
+        }
+        try (CloudFormationClient cfn = TestFixtures.cloudFormationClient()) {
+            try {
+                cfn.createStack(request -> request.stackName(name).templateBody(template.toString())
+                        .parameters(parameter("Tag", "first"), parameter("Dimension", "3")));
+                Map<String, String> values = outputs(awaitStack(cfn, name, "CREATE_COMPLETE"));
+                for (String logicalId : List.of("Bucket", "Index")) {
+                    assertThat(values.get(logicalId + "Private"))
+                            .isEqualTo(logicalId + ".__FlociS3VectorsProperties");
+                    assertThat(values.get(logicalId + "Legacy"))
+                            .isEqualTo(logicalId + ".FlociS3VectorsProperties");
+                }
             } finally {
                 cfn.deleteStack(request -> request.stackName(name));
                 awaitDeleted(cfn, name);
@@ -324,35 +427,45 @@ class CloudFormationS3VectorsIntegrationTest {
     }
 
     private CloudFormationClient cloudFormation(String region) {
-        return CloudFormationClient.builder().endpointOverride(endpoint).region(Region.of(region))
+        return CloudFormationClient.builder().endpointOverride(TestFixtures.endpoint()).region(Region.of(region))
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .httpClientBuilder(UrlConnectionHttpClient.builder()).build();
+                .build();
     }
 
     private S3VectorsClient vectors(String region) {
-        return S3VectorsClient.builder().endpointOverride(endpoint).region(Region.of(region))
+        return S3VectorsClient.builder().endpointOverride(TestFixtures.endpoint()).region(Region.of(region))
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .httpClientBuilder(UrlConnectionHttpClient.builder()).build();
+                .build();
     }
 
     private static Parameter parameter(String name, String value) {
         return Parameter.builder().parameterKey(name).parameterValue(value).build();
     }
 
-    private static Stack awaitStack(CloudFormationClient client, String name, String status) {
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
-            Stack stack = client.describeStacks(request -> request.stackName(name)).stacks().getFirst();
-            assertEquals(status, stack.stackStatusAsString(), stack.stackStatusReason());
-        });
-        return client.describeStacks(request -> request.stackName(name)).stacks().getFirst();
+    private static Stack awaitStack(CloudFormationClient client, String name, String status) throws InterruptedException {
+        TestFixtures.await(() -> {
+            Stack stack = client.describeStacks(request -> request.stackName(name)).stacks().get(0);
+            String actual = stack.stackStatusAsString();
+            if (!status.equals(actual) && (actual.endsWith("_FAILED") || actual.endsWith("ROLLBACK_COMPLETE"))) {
+                throw new AssertionError(name + " reached " + actual + ": " + stack.stackStatusReason());
+            }
+            return status.equals(actual);
+        }, name, status, Duration.ofSeconds(60).toNanos(), 100);
+        return client.describeStacks(request -> request.stackName(name)).stacks().get(0);
     }
 
-    private static void awaitDeleted(CloudFormationClient client, String name) {
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
-            CloudFormationException error = assertThrows(CloudFormationException.class,
-                    () -> client.describeStacks(request -> request.stackName(name)));
-            assertTrue(error.getMessage().contains("does not exist"), error.getMessage());
-        });
+    private static void awaitDeleted(CloudFormationClient client, String name) throws InterruptedException {
+        TestFixtures.await(() -> {
+            try {
+                client.describeStacks(request -> request.stackName(name));
+                return false;
+            } catch (CloudFormationException error) {
+                if (!error.getMessage().contains("does not exist")) {
+                    throw error;
+                }
+                return true;
+            }
+        }, name, "deleted", Duration.ofSeconds(60).toNanos(), 100);
     }
 
     private static Map<String, String> outputs(Stack stack) {

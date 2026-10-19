@@ -718,6 +718,20 @@
   "AWS::S3::BucketPolicy": [
     "Bucket"
   ],
+  "AWS::S3Vectors::Index": [
+    "DataType",
+    "Dimension",
+    "DistanceMetric",
+    "EncryptionConfiguration",
+    "IndexName",
+    "MetadataConfiguration",
+    "VectorBucketArn",
+    "VectorBucketName"
+  ],
+  "AWS::S3Vectors::VectorBucket": [
+    "VectorBucketName",
+    "EncryptionConfiguration"
+  ],
   "AWS::Scheduler::ScheduleGroup": [
     "Name"
   ],
