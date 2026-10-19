@@ -29,7 +29,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DisplayName("CloudFormation AWS::Events::Rule targets")
 class CloudFormationEventsRuleTargetTest {
 
-    private static final Duration DEPLOY_TIMEOUT = Duration.ofSeconds(60);
+    /** Floci finishes these stacks in milliseconds; AWS takes minutes for the queues. */
+    private static final Duration DEPLOY_TIMEOUT =
+            TestFixtures.isRealAws() ? Duration.ofMinutes(10) : Duration.ofSeconds(10);
     private static final String KEPT_STACK = TestFixtures.uniqueName("compat-cfn-rule-targets");
     private static final String STRING_SUBNETS_STACK = TestFixtures.uniqueName("compat-cfn-rule-subnets");
     private static final String FLOAT_STACK = TestFixtures.uniqueName("compat-cfn-rule-float");
