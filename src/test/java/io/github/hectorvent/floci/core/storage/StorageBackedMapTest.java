@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.core.storage;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -15,6 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -150,6 +153,100 @@ class StorageBackedMapTest
 
         assertFalse(storage.get("alpha").isPresent());
         assertTrue(map.isEmpty());
+    }
+
+    @Test
+    void valuesSkipsKeyDeletedAfterIterationStarted()
+    {
+        StorageBackedMap<String> map = mapOf("alpha", "beta", "gamma");
+
+        List<String> seen = new ArrayList<>();
+        Iterator<String> iterator = map.values().iterator();
+        while (iterator.hasNext()) {
+            String value = iterator.next();
+            if (seen.isEmpty()) {
+                map.remove(otherKey(value));
+            }
+            seen.add(value);
+        }
+
+        assertEquals(2, seen.size());
+        assertFalse(seen.contains(null));
+    }
+
+    @Test
+    void entrySetSkipsKeyDeletedAfterIterationStarted()
+    {
+        StorageBackedMap<String> map = mapOf("alpha", "beta", "gamma");
+
+        List<Map.Entry<String, String>> seen = new ArrayList<>();
+        for (Map.Entry<String, String> entry : map.entrySet()) {
+            if (seen.isEmpty()) {
+                map.remove(otherKey(entry.getKey()));
+            }
+            seen.add(entry);
+        }
+
+        assertEquals(2, seen.size());
+        for (Map.Entry<String, String> entry : seen) {
+            assertNotNull(entry.getValue());
+            assertEquals(entry.getKey() + "-value", entry.getValue());
+        }
+    }
+
+    @Test
+    void valuesStreamSurvivesKeyDeletedDuringStream()
+    {
+        StorageBackedMap<String> map = mapOf("alpha", "beta", "gamma");
+        AtomicInteger calls = new AtomicInteger();
+
+        List<String> values = map.values().stream()
+                .map(value -> {
+                    if (calls.getAndIncrement() == 0) {
+                        map.remove(otherKey(value));
+                    }
+                    return value;
+                })
+                .toList();
+
+        assertEquals(2, values.size());
+        assertFalse(values.contains(null));
+    }
+
+    @Test
+    void keySetStreamSurvivesKeyDeletedDuringStream()
+    {
+        StorageBackedMap<String> map = mapOf("alpha", "beta", "gamma");
+        AtomicInteger calls = new AtomicInteger();
+
+        List<String> keys = map.keySet().stream()
+                .map(key -> {
+                    if (calls.getAndIncrement() == 0) {
+                        map.remove(otherKey(key));
+                    }
+                    return key;
+                })
+                .toList();
+
+        assertEquals(2, keys.size());
+        assertFalse(keys.contains(null));
+    }
+
+    private static StorageBackedMap<String> mapOf(String... keys)
+    {
+        StorageBackedMap<String> map = new StorageBackedMap<>(new InMemoryStorage<>());
+        for (String key : keys) {
+            map.put(key, key + "-value");
+        }
+        return map;
+    }
+
+    // Some key other than the one just yielded, so the deletion lands on a key the
+    // iterator has snapshotted but not reached, whatever order storage returns keys in.
+    private static String otherKey(String yielded)
+    {
+        String key = yielded.replace("-value", "");
+        return key.equals("gamma") ? "alpha" : "gamma";
     }
 
     private static void await(CountDownLatch latch)
