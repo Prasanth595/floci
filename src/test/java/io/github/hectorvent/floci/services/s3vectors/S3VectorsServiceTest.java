@@ -60,6 +60,26 @@ class S3VectorsServiceTest {
     }
 
     @Test
+    void persistsCreationTimesConfigurationAndReconciledTags() throws Exception {
+        Map<String, String> encryption = Map.of("sseType", "aws:kms", "kmsKeyArn", "key");
+        VectorBucket bucket = service.createVectorBucket("bucket", encryption, Map.of("old", "value"), REGION);
+        VectorIndex index = service.createIndex("bucket", "index", 3, "float32", "cosine", List.of("text"),
+                null, Map.of("old", "value"), REGION);
+        service.replaceBucketTags("bucket", Map.of("new", "value"), REGION);
+        service.replaceIndexTags("bucket", "index", Map.of(), REGION);
+
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        VectorBucket restored = mapper.readValue(mapper.writeValueAsString(bucket), VectorBucket.class);
+        VectorIndex restoredIndex = restored.getIndexes().get("index");
+        assertEquals(bucket.getCreationTime(), restored.getCreationTime());
+        assertEquals(index.getCreationTime(), restoredIndex.getCreationTime());
+        assertEquals(encryption, restoredIndex.getEncryptionConfiguration());
+        assertEquals(List.of("text"), restoredIndex.getNonFilterableMetadataKeys());
+        assertEquals(Map.of("new", "value"), restored.getTags());
+        assertEquals(Map.of(), restoredIndex.getTags());
+    }
+
+    @Test
     void indexEncryptionCanOverrideTheBucketDefault() {
         VectorBucket bucket = service.createVectorBucket("bucket", null, REGION);
         assertEquals(Map.of("sseType", "AES256"), bucket.getEncryptionConfiguration());

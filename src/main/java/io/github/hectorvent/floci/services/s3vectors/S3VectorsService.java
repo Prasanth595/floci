@@ -230,6 +230,23 @@ public class S3VectorsService {
         }
     }
 
+    public void replaceBucketTags(String bucketName, Map<String, String> tags, String region) {
+        synchronized (lockFor(bucketName, region)) {
+            VectorBucket bucket = getVectorBucket(bucketName, region);
+            bucket.setTags(new ConcurrentHashMap<>(tags));
+            store.put(buildStorageKey(region, bucketName), bucket);
+        }
+    }
+
+    public void replaceIndexTags(String bucketName, String indexName, Map<String, String> tags, String region) {
+        synchronized (lockFor(bucketName, region)) {
+            VectorBucket bucket = getVectorBucket(bucketName, region);
+            VectorIndex index = getIndex(bucket, indexName);
+            index.setTags(new ConcurrentHashMap<>(tags));
+            store.put(buildStorageKey(region, bucketName), bucket);
+        }
+    }
+
     public void putVectors(String bucketName, String indexName, List<VectorData> vectors, String region) {
         synchronized (lockFor(bucketName, region)) {
             VectorBucket bucket = getVectorBucket(bucketName, region);
