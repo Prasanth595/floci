@@ -65,7 +65,7 @@ class AcmTest {
     // ============================================
     // Helper: generate a self-signed certificate using openssl
     // ============================================
-    private static byte[][] generateSelfSignedCert() throws Exception {
+    static byte[][] generateSelfSignedCert() throws Exception {
         Path keyFile = Files.createTempFile("test-key", ".pem");
         Path certFile = Files.createTempFile("test-cert", ".pem");
         try {

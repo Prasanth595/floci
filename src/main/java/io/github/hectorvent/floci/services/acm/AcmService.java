@@ -402,7 +402,9 @@ public class AcmService implements ResourceProvider {
 
         // Parse and validate private key
         try {
-            Pem.parsePrivateKey(privateKeyPem);
+            if (!Pem.isPair(Pem.parsePrivateKey(privateKeyPem), x509Cert.getPublicKey())) {
+                throw new IllegalArgumentException("The private key does not match the certificate");
+            }
         } catch (Exception e) {
             throw new AwsException("ValidationException", "Invalid private key: " + e.getMessage(), 400);
         }

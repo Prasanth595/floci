@@ -73,6 +73,46 @@ class AcmServiceTest {
         service = newService(0);
     }
 
+    @ParameterizedTest
+    @EnumSource(value = KeyAlgorithm.class, names = {"RSA_2048", "EC_prime256v1"})
+    void importRefusesAMismatchedKeyWithoutAllocatingACertificate(KeyAlgorithm algorithm) {
+        CertificateGenerator.GeneratedCertificate first = generator.generateSelfSignedCertificate(
+                "import.example.test", List.of(), algorithm);
+        CertificateGenerator.GeneratedCertificate other = generator.generateSelfSignedCertificate(
+                "other.example.test", List.of(), algorithm);
+        AwsException failure = assertThrows(AwsException.class, () -> service.importCertificate(
+                first.certificatePem(), other.privateKeyPem(), null, null, null, REGION));
+        assertEquals("ValidationException", failure.getErrorCode());
+        assertTrue(service.getResources().isEmpty());
+        Certificate retry = service.importCertificate(first.certificatePem(), first.privateKeyPem(),
+                null, null, null, REGION);
+        assertEquals(first.certificatePem(), service.getCertificate(retry.getArn(), REGION).getCertificateBody());
+        assertEquals(first.privateKeyPem(), service.getCertificate(retry.getArn(), REGION).getPrivateKey());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = KeyAlgorithm.class, names = {"RSA_2048", "EC_prime256v1"})
+    void reimportRefusesAMismatchedKeyWithoutReplacingTheExistingMaterial(KeyAlgorithm algorithm) {
+        CertificateGenerator.GeneratedCertificate original = generator.generateSelfSignedCertificate(
+                "existing.example.test", List.of(), algorithm);
+        Certificate existing = service.importCertificate(original.certificatePem(), original.privateKeyPem(),
+                null, null, null, REGION);
+        CertificateGenerator.GeneratedCertificate replacement = generator.generateSelfSignedCertificate(
+                "replacement.example.test", List.of(), algorithm);
+        AwsException failure = assertThrows(AwsException.class, () -> service.importCertificate(
+                replacement.certificatePem(), original.privateKeyPem(), null, existing.getArn(), null, REGION));
+        assertEquals("ValidationException", failure.getErrorCode());
+        Certificate unchanged = service.getCertificate(existing.getArn(), REGION);
+        assertEquals(original.certificatePem(), unchanged.getCertificateBody());
+        assertEquals(original.privateKeyPem(), unchanged.getPrivateKey());
+        assertEquals(1, service.getResources().size());
+        Certificate retry = service.importCertificate(replacement.certificatePem(), replacement.privateKeyPem(),
+                null, existing.getArn(), null, REGION);
+        assertEquals(existing.getArn(), retry.getArn());
+        assertEquals(replacement.certificatePem(), service.getCertificate(existing.getArn(), REGION).getCertificateBody());
+        assertEquals(replacement.privateKeyPem(), service.getCertificate(existing.getArn(), REGION).getPrivateKey());
+    }
+
     private AcmService newService(int validationWaitSeconds) {
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
