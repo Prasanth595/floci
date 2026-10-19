@@ -204,6 +204,20 @@ public class LambdaWebService implements Resettable {
         });
     }
 
+    /**
+     * The endpoint domain that {@code host} names, as a CloudFront origin names it. An origin domain
+     * has no port, while the domain Floci mints carries the port of its base URL.
+     */
+    public Optional<String> endpointDomain(String host) {
+        for (String domain : domains.keySet()) {
+            int colon = domain.lastIndexOf(':');
+            if (domain.equals(host) || (colon > 0 && domain.substring(0, colon).equals(host))) {
+                return Optional.of(domain);
+            }
+        }
+        return Optional.empty();
+    }
+
     private void indexDomains(WebFunction fn, WebFunctionEndpoint endpoint) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.functionArn);
         EndpointLocator locator = new EndpointLocator(arn.accountId(), arn.region(), fn.functionName, endpoint.endpointName);

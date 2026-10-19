@@ -247,6 +247,12 @@ PUT, PATCH and DELETE).
 - Origin `Set-Cookie` headers always reach the viewer. With legacy `Forward=none`, AWS strips them
   from the response; Floci does not.
 - Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
+- A custom origin whose domain is a [Lambda Web Function](lambda-web-functions.md) endpoint of this Floci is
+  served by Floci itself, at the address the viewer reached. The origin names the endpoint's
+  `domainName` with or without its port, and its protocol and ports do not matter, so neither DNS nor
+  the private address check applies. A forwarded viewer `Host` is a 502, as on AWS, where the endpoint's
+  certificate does not name it. Origin access control does not sign these requests yet, so an
+  `IamAuth` endpoint answers them with its 403 page.
 - Response headers policies validate the AWS configuration shape and are applied after the origin
   response, including CORS preflight fields, origin override behavior, custom headers, security
   headers, allowed header removals, and sampled `Server-Timing` metrics. `Pragma: server-timing`

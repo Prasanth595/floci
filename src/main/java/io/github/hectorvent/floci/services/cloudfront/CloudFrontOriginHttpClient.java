@@ -76,15 +76,21 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
         this(delegate, allowedPrivateOriginHosts, null);
     }
 
+    /** Reaches Floci's own listener, whose address the private address check refuses. */
+    static CloudFrontOriginHttpClient toFloci() {
+        return new CloudFrontOriginHttpClient(SystemDefaultDnsResolver.INSTANCE, (SSLContext) null);
+    }
+
     CloudFrontOriginHttpClient(
             DnsResolver delegate,
             Collection<String> allowedPrivateOriginHosts,
             SSLContext sslContext) {
-        Set<String> allowedHosts = allowedPrivateOriginHosts.stream()
+        this(new ValidatingDnsResolver(delegate, allowedPrivateOriginHosts.stream()
                 .map(CloudFrontServingController::normalizeHost)
-                .collect(Collectors.toUnmodifiableSet());
-        DnsResolver validatingResolver = new ValidatingDnsResolver(delegate, allowedHosts);
+                .collect(Collectors.toUnmodifiableSet())), sslContext);
+    }
 
+    private CloudFrontOriginHttpClient(DnsResolver resolver, SSLContext sslContext) {
         ConnectionConfig connectionConfig = ConnectionConfig.custom()
                 .setConnectTimeout(Timeout.of(CONNECT_TIMEOUT))
                 .setSocketTimeout(Timeout.of(RESPONSE_TIMEOUT))
@@ -95,7 +101,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
                 .build();
         PoolingHttpClientConnectionManagerBuilder connectionManagerBuilder =
                 PoolingHttpClientConnectionManagerBuilder.create()
-                        .setDnsResolver(validatingResolver)
+                        .setDnsResolver(resolver)
                         .setDefaultConnectionConfig(connectionConfig)
                         .setDefaultTlsConfig(tlsConfig)
                         // CloudFront has no per-origin connection limit, and a streamed response holds its
