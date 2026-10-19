@@ -1708,6 +1708,14 @@ public class RedshiftService {
         if (!"redshift".equals(arn.service())) {
             throw new AwsException("InvalidParameterValue", "Invalid resource name: " + resourceName, 400);
         }
+        // Resources here are stored per caller account and their ARNs minted in the caller's
+        // region, so an ARN naming another account or region cannot be a local resource.
+        // ResourceNotFoundFault (404) is the not-found fault CreateTags/DeleteTags/DescribeTags
+        // all model; resolving by id alone would tag the local resource of the same name.
+        if (!regionResolver.getAccountId().equals(arn.accountId())
+                || !regionResolver.getRegion().equals(arn.region())) {
+            throw new AwsException("ResourceNotFoundFault", "Resource " + resourceName + " not found", 404);
+        }
         String resource = arn.resource();
         int sep = resource.indexOf(':');
         if (sep < 0) {
