@@ -76,6 +76,35 @@ class Ec2LaunchTemplateMetadataOptionsIntegrationTest {
         }
     }
 
+    /**
+     * A template stores its metadata options unchecked, as AWS does, so the launch is where they fail.
+     * A dry run answers that failure too rather than DryRunOperation.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void createFleetRefusesInvalidTemplateMetadataWithOrWithoutDryRun(boolean dryRun) {
+        String template = request("ec2", "CreateLaunchTemplate")
+                .formParam("LaunchTemplateName", "bad-metadata-" + UUID.randomUUID().toString().substring(0, 8))
+                .formParam("LaunchTemplateData.ImageId", "ami-amazonlinux2023")
+                .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+                .formParam("LaunchTemplateData.MetadataOptions.HttpTokens", "invalid")
+                .post("/").then().statusCode(200)
+                .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+        try {
+            request("ec2", "CreateFleet").formParam("Type", "instant").formParam("DryRun", String.valueOf(dryRun))
+                    .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", template)
+                    .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
+                    .formParam("TargetCapacitySpecification.TotalTargetCapacity", 1)
+                    .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
+                    .post("/").then().statusCode(400)
+                    .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
+                    .body("Response.Errors.Error.Message", equalTo(
+                            "Value (invalid) for parameter HttpTokens is invalid. Valid values are: optional, required."));
+        } finally {
+            request("ec2", "DeleteLaunchTemplate").formParam("LaunchTemplateId", template).post("/");
+        }
+    }
+
     private static RequestSpecification request(String service, String action) {
         return given().header("Authorization", EnforcementFixtures.auth(OWNER, service)).formParam("Action", action);
     }

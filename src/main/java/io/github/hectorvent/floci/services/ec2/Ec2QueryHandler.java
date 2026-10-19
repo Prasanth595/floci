@@ -937,6 +937,8 @@ public class Ec2QueryHandler {
                 throw new AwsException("MissingParameter",
                         "Each fleet launch must specify an InstanceType in the launch template or override.", 400);
             }
+            // The template stored them unchecked; the launch would refuse them, so the dry run does.
+            Ec2Service.validateMetadataOptions(launch.metadataOptions());
         }
         checkDryRun(p);
 
