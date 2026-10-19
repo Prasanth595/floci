@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.firehose;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
 import org.junit.jupiter.api.Test;
 
@@ -53,6 +54,40 @@ class RedshiftDestinationValidatorTest {
         assertTrue(message.contains("redshiftDestinationConfiguration.clusterJDBCURL"), message);
         assertTrue(message.contains("redshiftDestinationConfiguration.copyCommand"), message);
         assertTrue(message.contains("redshiftDestinationConfiguration.s3Configuration"), message);
+    }
+
+    @Test
+    void intermediateConfigurationWithoutBucketOrRoleIsRejected() throws Exception {
+        RedshiftDestination dest = valid();
+        dest.getS3().setBucketArn(null);
+        dest.getS3().setRoleArn(null);
+
+        String message = messageOf(dest);
+
+        assertTrue(message.contains("redshiftDestinationConfiguration.s3Configuration.bucketARN"), message);
+        assertTrue(message.contains("redshiftDestinationConfiguration.s3Configuration.roleARN"), message);
+    }
+
+    @Test
+    void backupConfigurationWithoutABucketIsRejected() throws Exception {
+        RedshiftDestination dest = valid();
+        dest.setS3BackupMode("Enabled");
+        S3Destination backup = new S3Destination();
+        backup.setRoleArn("arn:aws:iam::000000000000:role/firehose");
+        dest.setS3Backup(backup);
+
+        assertTrue(messageOf(dest).contains("s3BackupConfiguration.bucketARN"));
+    }
+
+    @Test
+    void secretsManagerRoleMustBeAnIamRoleArn() throws Exception {
+        RedshiftDestination dest = valid();
+        RedshiftDestination.SecretsManagerConfiguration secrets = new RedshiftDestination.SecretsManagerConfiguration();
+        secrets.setEnabled(false);
+        secrets.setRoleArn("not-an-arn");
+        dest.setSecretsManagerConfiguration(secrets);
+
+        assertTrue(messageOf(dest).contains("secretsManagerConfiguration.roleARN"));
     }
 
     @Test

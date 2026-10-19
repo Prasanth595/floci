@@ -16,7 +16,10 @@ final class RedshiftCopySql {
     private static final String NAME = "(?:[A-Za-z_][A-Za-z0-9_$]*|\"[^\"]+\")";
     private static final Pattern QUALIFIED_NAME = Pattern.compile(NAME + "(?:\\." + NAME + ")?");
     private static final Pattern SIMPLE_NAME = Pattern.compile(NAME);
-    private static final Pattern DOLLAR_QUOTE = Pattern.compile("\\$[A-Za-z_]*\\$");
+    // PostgreSQL reads a tag as an identifier: letters, digits after the first character, underscores and any
+    // non-ASCII character, so $a1$ and a tag of non-ASCII letters open a dollar-quoted string just as $$ does.
+    private static final Pattern DOLLAR_QUOTE =
+            Pattern.compile("\\$(?:[A-Za-z_\\u0080-\\uFFFF][A-Za-z0-9_\\u0080-\\uFFFF]*)?\\$");
 
     private RedshiftCopySql() {}
 

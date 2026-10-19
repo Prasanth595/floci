@@ -96,6 +96,13 @@ class RedshiftCopySqlTest {
     }
 
     @Test
+    void dollarQuoteTagsWithDigitsOrNonAsciiLettersCannotHideASecondStatement() {
+        assertTrue(RedshiftCopySql.hasStatementSeparator("NULL AS $a1$'$a1$; drop table t; --'"));
+        assertTrue(RedshiftCopySql.hasStatementSeparator("NULL AS $é$'$é$;x;--'"));
+        assertTrue(RedshiftCopySql.hasStatementSeparator("NULL AS $_tag9$ x $_tag9$"));
+    }
+
+    @Test
     void dollarQuotingAndCommentsAreRefused() {
         assertTrue(RedshiftCopySql.hasStatementSeparator("NULL AS $$'$$ gzip"));
         assertTrue(RedshiftCopySql.hasStatementSeparator("gzip -- trailing"));

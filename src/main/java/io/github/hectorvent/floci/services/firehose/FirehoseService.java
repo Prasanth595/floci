@@ -344,6 +344,7 @@ public class FirehoseService implements ResourceProvider {
         validateBufferingHints(s3Config);
         if (redshift != null) {
             validateBufferingHints(redshift.getS3());
+            validateBufferingHints(redshift.getS3Backup());
         }
         DataFormatConversionValidator.validateEffective(s3Config);
         ProcessingConfigurationValidator.validateEffective(s3Config);
@@ -468,6 +469,10 @@ public class FirehoseService implements ResourceProvider {
                         "S3BackupMode is Enabled but no S3 backup configuration is set.", 400);
             }
             validateBufferingHints(update.getS3());
+            validateBufferingHints(update.getS3Backup());
+            if (update.getS3Backup() != null && current.getS3Backup() == null) {
+                RedshiftDestinationValidator.validateNewBackup(update.getS3Backup(), "redshiftDestinationUpdate");
+            }
             mergeRedshiftDestination(current, update);
             stream.setVersionId(String.valueOf(parseVersionId(stream.getVersionId()) + 1));
             stream.setLastUpdateTimestamp(Instant.now());
@@ -769,14 +774,18 @@ public class FirehoseService implements ResourceProvider {
 
     public void deleteDeliveryStream(String accountId, String region, String name) {
         String streamKey = scopedKey(accountId, region, name);
-        describeDeliveryStream(streamKey, name);
-        streamDelete(streamKey);
+        // Under the lock a Redshift update holds across its read and write: an update that read the stream just before
+        // this delete would otherwise write it back afterwards. The lock entry is kept, because removing it while an
+        // update waits on it would let a later caller take a second lock for the same stream.
+        synchronized (redshiftUpdateLocks.computeIfAbsent(streamKey, k -> new Object())) {
+            describeDeliveryStream(streamKey, name);
+            streamDelete(streamKey);
+        }
         // Pending records are discarded, not flushed: verified against real AWS
         // (2026-07-13, eu-west-1) — 3 records buffered under a 300s/5MB hint never
         // reached the bucket after DeleteDeliveryStream completed.
         buffers.remove(streamKey);
         bufferSince.remove(streamKey);
-        redshiftUpdateLocks.remove(streamKey);
         pendingSourceIterators.remove(streamKey);
         iteratorDelete(streamKey);
         LOG.infov("Deleted Firehose delivery stream: {0}", name);

@@ -41,6 +41,11 @@ final class RedshiftDestinationValidator {
         }
         if (config.getS3() == null) {
             violations.add(violation(shapeName, "s3Configuration", "Member must not be null"));
+        } else {
+            requireS3Locators(config.getS3(), shapeName, "s3Configuration", violations);
+        }
+        if (config.getS3Backup() != null) {
+            requireS3Locators(config.getS3Backup(), shapeName, "s3BackupConfiguration", violations);
         }
         if ("Enabled".equals(config.getS3BackupMode()) && config.getS3Backup() == null) {
             violations.add(violation(shapeName, "s3BackupConfiguration",
@@ -64,6 +69,16 @@ final class RedshiftDestinationValidator {
         if (update.getS3Backup() != null) {
             S3DestinationValidator.validateWireShape(update.getS3Backup(), shapeName + ".s3BackupUpdate");
         }
+    }
+
+    /**
+     * A backup location an update supplies when none is stored yet is a whole new S3 configuration, so its required
+     * members must be present: the merge has nothing to take them from.
+     */
+    static void validateNewBackup(S3Destination backup, String shapeName) {
+        List<String> violations = new ArrayList<>();
+        requireS3Locators(backup, shapeName, "s3BackupUpdate", violations);
+        throwIfAny(violations);
     }
 
     /** Backup can be switched on after creation but never off again. */
@@ -135,6 +150,11 @@ final class RedshiftDestinationValidator {
                 violations.add(violation(shape, "secretsManagerConfiguration.secretARN",
                         "Member must not be null when Enabled is true"));
             }
+            if (secrets.getRoleArn() != null) {
+                checkLength(secrets.getRoleArn(), 1, 512, shape, "secretsManagerConfiguration.roleARN", violations);
+                checkPattern(secrets.getRoleArn(), ROLE_ARN, ROLE_ARN_REGEX, shape,
+                        "secretsManagerConfiguration.roleARN", violations);
+            }
             if (secrets.getSecretArn() != null) {
                 checkLength(secrets.getSecretArn(), 1, 2048, shape, "secretsManagerConfiguration.secretARN", violations);
                 checkPattern(secrets.getSecretArn(), SECRET_ARN, SECRET_ARN_REGEX, shape,
@@ -151,6 +171,12 @@ final class RedshiftDestinationValidator {
             violations.add(violation(shape, "s3Configuration.compressionFormat",
                     "Member must not be SNAPPY or ZIP: the Amazon Redshift COPY command cannot read these formats"));
         }
+    }
+
+    /** The bucket and role an S3 configuration cannot do without: with no bucket, staging falls back to a shared one. */
+    private static void requireS3Locators(S3Destination s3, String shape, String member, List<String> violations) {
+        require(s3.getBucketArn(), shape, member + ".bucketARN", violations);
+        require(s3.getRoleArn(), shape, member + ".roleARN", violations);
     }
 
     private static void require(String value, String shape, String member, List<String> violations) {

@@ -61,6 +61,22 @@ class FirehoseRedshiftDestinationIntegrationTest {
         return RS_CONFIG.formatted(name, JDBC_URL, bucket);
     }
 
+    private static void assertStreamAbsent(String name) {
+        post("DescribeDeliveryStream", "{\"DeliveryStreamName\": \"" + name + "\"}")
+                .statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    /** A rejected update must leave the stored destination and its version exactly as they were. */
+    private static void assertUnchanged(String name, String version, String table) {
+        post("DescribeDeliveryStream", "{\"DeliveryStreamName\": \"" + name + "\"}")
+                .statusCode(200)
+                .body("DeliveryStreamDescription.VersionId", equalTo(version))
+                .body("DeliveryStreamDescription.Destinations[0].RedshiftDestinationDescription"
+                        + ".CopyCommand.DataTableName", equalTo(table))
+                .body("DeliveryStreamDescription.Destinations[0].RedshiftDestinationDescription"
+                        + ".S3BackupMode", nullValue());
+    }
+
     @Test
     void createAndDescribeNeverReturnsThePassword() {
         post("CreateDeliveryStream", createBody("rs-describe", "rs-describe-stage")).statusCode(200);
@@ -97,6 +113,7 @@ class FirehoseRedshiftDestinationIntegrationTest {
                                 + " \"BucketARN\": \"arn:aws:s3:::b\"}, \"RedshiftDestinationConfiguration\"");
 
         post("CreateDeliveryStream", body).statusCode(400).body("__type", equalTo("InvalidArgumentException"));
+        assertStreamAbsent("rs-two");
     }
 
     @Test
@@ -105,6 +122,67 @@ class FirehoseRedshiftDestinationIntegrationTest {
 
         post("CreateDeliveryStream", body).statusCode(400)
                 .body("message", containsString("clusterJDBCURL"));
+        assertStreamAbsent("rs-bad-url");
+    }
+
+    @Test
+    void createRejectsAnIntermediateConfigurationWithoutABucketOrRole() {
+        String body = createBody("rs-no-bucket", "unused")
+                .replace("\"S3Configuration\": {\"RoleARN\": \"arn:aws:iam::000000000000:role/firehose\","
+                        + " \"BucketARN\": \"arn:aws:s3:::unused\"}", "\"S3Configuration\": {}");
+
+        post("CreateDeliveryStream", body).statusCode(400)
+                .body("message", containsString("s3Configuration.bucketARN"))
+                .body("message", containsString("s3Configuration.roleARN"));
+        assertStreamAbsent("rs-no-bucket");
+    }
+
+    @Test
+    void createRejectsABackupConfigurationWithoutABucket() {
+        String body = createBody("rs-backup-no-bucket", "rs-backup-no-bucket-stage")
+                .replace("\"Username\": \"admin\"", "\"S3BackupMode\": \"Enabled\","
+                        + " \"S3BackupConfiguration\": {\"RoleARN\": \"arn:aws:iam::000000000000:role/firehose\"},"
+                        + " \"Username\": \"admin\"");
+
+        post("CreateDeliveryStream", body).statusCode(400)
+                .body("message", containsString("s3BackupConfiguration.bucketARN"));
+        assertStreamAbsent("rs-backup-no-bucket");
+    }
+
+    @Test
+    void createRejectsOnlyHalfOfTheBackupBufferingHints() {
+        String body = createBody("rs-backup-hints", "rs-backup-hints-stage")
+                .replace("\"Username\": \"admin\"", "\"S3BackupMode\": \"Enabled\","
+                        + " \"S3BackupConfiguration\": {\"RoleARN\": \"arn:aws:iam::000000000000:role/firehose\","
+                        + " \"BucketARN\": \"arn:aws:s3:::rs-backup-hints-copy\","
+                        + " \"BufferingHints\": {\"SizeInMBs\": 5}}, \"Username\": \"admin\"");
+
+        post("CreateDeliveryStream", body).statusCode(400).body("__type", equalTo("InvalidArgumentException"));
+        assertStreamAbsent("rs-backup-hints");
+    }
+
+    @Test
+    void createRejectsAMalformedSecretsManagerRole() {
+        String body = createBody("rs-secret-role", "rs-secret-role-stage")
+                .replace("\"Username\": \"admin\"", "\"SecretsManagerConfiguration\": {\"Enabled\": false,"
+                        + " \"RoleARN\": \"not-an-arn\"}, \"Username\": \"admin\"");
+
+        post("CreateDeliveryStream", body).statusCode(400)
+                .body("message", containsString("secretsManagerConfiguration.roleARN"));
+        assertStreamAbsent("rs-secret-role");
+    }
+
+    @Test
+    void updateAfterDeleteDoesNotBringTheStreamBack() {
+        post("CreateDeliveryStream", createBody("rs-deleted", "rs-deleted-stage")).statusCode(200);
+        post("DeleteDeliveryStream", "{\"DeliveryStreamName\": \"rs-deleted\"}").statusCode(200);
+
+        post("UpdateDestination", """
+                {"DeliveryStreamName": "rs-deleted", "CurrentDeliveryStreamVersionId": "1",
+                 "DestinationId": "%s",
+                 "RedshiftDestinationUpdate": {"CopyCommand": {"DataTableName": "events2"}}}
+                """.formatted(DESTINATION_ID)).statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+        assertStreamAbsent("rs-deleted");
     }
 
     @Test
@@ -132,6 +210,7 @@ class FirehoseRedshiftDestinationIntegrationTest {
                  "DestinationId": "%s",
                  "ExtendedS3DestinationUpdate": {"BucketARN": "arn:aws:s3:::other"}}
                 """.formatted(DESTINATION_ID)).statusCode(400).body("__type", equalTo("InvalidArgumentException"));
+        assertUnchanged("rs-wrong-update", "1", "events");
     }
 
     @Test
@@ -200,6 +279,36 @@ class FirehoseRedshiftDestinationIntegrationTest {
                  "DestinationId": "%s",
                  "RedshiftDestinationUpdate": {"CopyCommand": {"CopyOptions": "CSV"}}}
                 """.formatted(DESTINATION_ID)).statusCode(400);
+        assertUnchanged("rs-copy-no-table", "1", "events");
+    }
+
+    @Test
+    void updateRejectsANewBackupWithoutABucketAndKeepsTheStream() {
+        post("CreateDeliveryStream", createBody("rs-new-backup", "rs-new-backup-stage")).statusCode(200);
+
+        post("UpdateDestination", """
+                {"DeliveryStreamName": "rs-new-backup", "CurrentDeliveryStreamVersionId": "1",
+                 "DestinationId": "%s",
+                 "RedshiftDestinationUpdate": {"S3BackupMode": "Enabled",
+                   "S3BackupUpdate": {"Prefix": "bk/"}}}
+                """.formatted(DESTINATION_ID)).statusCode(400)
+                .body("message", containsString("s3BackupUpdate.bucketARN"));
+        assertUnchanged("rs-new-backup", "1", "events");
+    }
+
+    @Test
+    void updateRejectsOnlyHalfOfTheBackupBufferingHints() {
+        post("CreateDeliveryStream", createBody("rs-upd-hints", "rs-upd-hints-stage")).statusCode(200);
+
+        post("UpdateDestination", """
+                {"DeliveryStreamName": "rs-upd-hints", "CurrentDeliveryStreamVersionId": "1",
+                 "DestinationId": "%s",
+                 "RedshiftDestinationUpdate": {"S3BackupMode": "Enabled",
+                   "S3BackupUpdate": {"RoleARN": "arn:aws:iam::000000000000:role/firehose",
+                                      "BucketARN": "arn:aws:s3:::rs-upd-hints-copy",
+                                      "BufferingHints": {"IntervalInSeconds": 60}}}}
+                """.formatted(DESTINATION_ID)).statusCode(400).body("__type", equalTo("InvalidArgumentException"));
+        assertUnchanged("rs-upd-hints", "1", "events");
     }
 
     @Test
