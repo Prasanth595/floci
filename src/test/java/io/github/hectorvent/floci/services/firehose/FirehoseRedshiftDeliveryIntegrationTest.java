@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.firehose;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
+import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.quarkus.test.junit.QuarkusTest;
