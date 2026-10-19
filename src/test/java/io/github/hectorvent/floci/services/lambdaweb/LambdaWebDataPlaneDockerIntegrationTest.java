@@ -333,6 +333,12 @@ class LambdaWebDataPlaneDockerIntegrationTest {
             assertTrue(response.contains("\r\nlambda-web-error-type: Platform.EndpointMaxEnvThrottle\r\n"), response);
             assertTrue(response.contains("<p>Request rate exceeded. Please try again later.</p>"), response);
         }
+        Map<String, String> usage = Map.of("FunctionName", functionName, "EndpointName", "dev",
+                "ExecutionRegion", "us-east-1");
+        assertEquals(3, LambdaWebMetricStatistics.await(LambdaWebMetrics.USAGE_NAMESPACE,
+                "EndpointActiveEnvironmentThrottles", usage, "Sum", 3));
+        assertEquals(2, LambdaWebMetricStatistics.await(LambdaWebMetrics.USAGE_NAMESPACE, "EndpointActiveEnvironments",
+                usage, "Maximum", 2));
 
         // Requests one after another rotate over the two environments.
         Set<String> logStreams = new HashSet<>();
@@ -381,6 +387,8 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         for (String response : limited) {
             assertTrue(response.contains("\r\nlambda-web-error-type: Platform.EndpointRequestThrottle\r\n"), response);
         }
+        assertEquals(limited.size(), LambdaWebMetricStatistics.await(LambdaWebMetrics.USAGE_NAMESPACE,
+                "EndpointRequestThrottles", usage, "Sum", limited.size()));
     }
 
     private static List<String> parallel(int count, Callable<String> call) throws Exception {
@@ -476,8 +484,9 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         assertEquals(2, crashReport.getInt("record.metrics.totalRequests"));
         assertEquals("success", platformEvent(crash, "platform.spinDownReport").getString("record.status"));
 
-        String stopped = given().header("Host", domain).when().get("/").then().statusCode(200)
-                .extract().header("lambda-web-logstream");
+        Response echoed = given().header("Host", domain).when().get("/");
+        echoed.then().statusCode(200);
+        String stopped = echoed.header("lambda-web-logstream");
         environments.discard(environments.environmentOf(stopped));
         List<String> stop = awaitLogEvents(group, stopped, events -> types(events).contains("platform.spinDownReport"));
         assertEquals(List.of("platform.initStart", "platform.initReport", "platform.invokeStart",
@@ -489,6 +498,29 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         assertEquals(1, stopReport.getInt("record.metrics.totalRequests"));
         assertEquals(1, platformEvent(stop, "platform.invokeSummary").getInt("record.metrics.requests"));
         assertEquals("success", platformEvent(stop, "platform.spinDownReport").getString("record.status"));
+
+        // Each environment has a datapoint at init and one when it ends, with the body bytes of its requests.
+        Map<String, String> function = Map.of("FunctionName", functionName);
+        Map<String, String> endpoint = Map.of("FunctionName", functionName, "EndpointName", "dev");
+        Map<String, String> usage = Map.of("FunctionName", functionName, "EndpointName", "dev",
+                "ExecutionRegion", "us-east-1");
+        assertEquals(4, LambdaWebMetricStatistics.await(LambdaWebMetrics.NAMESPACE, "EnvironmentActiveTime", function,
+                "SampleCount", 4));
+        assertEquals(11 + echoed.asByteArray().length, LambdaWebMetricStatistics.of(LambdaWebMetrics.NAMESPACE,
+                "ResponseBytes", function, "Sum"));
+        assertEquals(1, LambdaWebMetricStatistics.of(LambdaWebMetrics.NAMESPACE, "EnvironmentConcurrentRequests",
+                function, "Maximum"));
+        assertTrue(LambdaWebMetricStatistics.of(LambdaWebMetrics.NAMESPACE, "EnvironmentMaxMemoryUsage", function,
+                "Maximum") > 0);
+        assertEquals(3, LambdaWebMetricStatistics.of(LambdaWebMetrics.NAMESPACE, "ExecutedRequests", endpoint, "Sum"));
+        assertEquals(1, LambdaWebMetricStatistics.of(LambdaWebMetrics.NAMESPACE, "HTTPResponseStatusClass5XX",
+                endpoint, "Sum"));
+        assertEquals(0, LambdaWebMetricStatistics.of(LambdaWebMetrics.NAMESPACE, "HTTPResponseStatusClass4XX",
+                endpoint, "Sum"));
+        assertEquals(3, LambdaWebMetricStatistics.of(LambdaWebMetrics.USAGE_NAMESPACE, "ExecutedRequests", usage,
+                "Sum"));
+        assertEquals(3, LambdaWebMetricStatistics.of(LambdaWebMetrics.USAGE_NAMESPACE, "EndpointActiveEnvironments",
+                usage, "SampleCount"));
     }
 
     @Test

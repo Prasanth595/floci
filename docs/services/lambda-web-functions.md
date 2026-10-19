@@ -41,7 +41,7 @@ The `Lambda Web` service model (apiVersion 2025-03-07, `aws lambda-web` in the A
 - **ARNs** given as identifiers must name the request's region and the caller's account, as on AWS. A revision or endpoint ARN resolves by its id or name only.
 - **Page tokens** are base64 cursors that carry the request and the position of the page, not the UUIDs AWS issues. A token reused with other parameters gets the AWS "does not match the request" error, and any other token the "invalid or has expired" error.
 - **Domain names** take the form `<id>.001.lambda-web.<region>.<floci host>` and `<id>.lambda-web.global.<floci host>`, with the host and port of `floci.base-url`. A `PerRegion` endpoint gets one domain per region in `regionalEndpoints`.
-- **Not implemented yet:** SigV4a on `MultiRegion` endpoints, the check that a policy's principal exists, the automatic deletion of revisions past 50, the metadata API, the metrics, and serving a `MultiRegion` or `PerRegion` endpoint in its other regions.
+- **Not implemented yet:** SigV4a on `MultiRegion` endpoints, the check that a policy's principal exists, the automatic deletion of revisions past 50, the metadata API, and serving a `MultiRegion` or `PerRegion` endpoint in its other regions.
 
 ### `aws lambda-web deploy`
 
@@ -115,6 +115,20 @@ The platform writes the `platform.*` events of the [system log schema](https://d
 | `platform.logsDropped` | Before the next event, after events were dropped because more than 10,000 were waiting |
 
 CPU time and memory come from the container's cgroup, read at each report. Floci cannot read them once the container has stopped, so the CPU time since the last reading is lost when the process exits on its own, an init that fails because the process exited reports neither, and `spinDownReport` has no CPU time. AWS reports the memory of its whole environment, so its numbers are higher.
+
+## Metrics
+
+Floci publishes the [Web Function metrics](https://docs.aws.amazon.com/lambda/latest/dg/web-functions-monitoring-metrics.html) to CloudWatch in the function's account and region:
+
+| Namespace | Metrics | Dimensions | Datapoints |
+| --- | --- | --- | --- |
+| `AWS/Lambda/Web` | `ExecutedRequests` | `FunctionName`, `EndpointName` | 1 for each request that reached an environment, also one answered with `Runtime.OriginRequestError` or `Runtime.RequestTimeout` |
+| `AWS/Lambda/Web` | `HTTPResponseStatusClass4XX`, `HTTPResponseStatusClass5XX` | `FunctionName`, `EndpointName` | 1 for each answer in the class, also the platform pages. The `400`, `404` and `505` pages are not counted, as on AWS. An answer cut after its head counts under the status it began with |
+| `AWS/Lambda/Web` | `EnvironmentActiveTime`, `EnvironmentCPUTime`, `EnvironmentMaxMemoryUsage`, `EnvironmentConcurrentRequests`, `ResponseBytes` | `FunctionName` | One per environment at `initReport`, also when the init fails, and one with each `invokeSummary`, for the time since the previous one |
+| `AWS/Lambda/Web/Usage` | `ExecutedRequests`, `EndpointActiveEnvironments` | `FunctionName`, `EndpointName`, `ExecutionRegion` | One for each request that reached an environment. `EndpointActiveEnvironments` is the number of environments of the endpoint, those that are starting included |
+| `AWS/Lambda/Web/Usage` | `EndpointRequestThrottles`, `EndpointActiveEnvironmentThrottles` | `FunctionName`, `EndpointName`, `ExecutionRegion` | 1 for each `429` of the `rateLimit` or of `maxEnvironments` |
+
+The account quotas are not applied, so `AccountRequestThrottles` and `AccountActiveVCPUArm64Throttles` never appear. CPU time and memory have the gaps of the platform events.
 
 ## CloudFormation
 

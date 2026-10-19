@@ -134,6 +134,33 @@ class LambdaWebDataPlaneIntegrationTest {
     }
 
     @Test
+    void aPageWithoutAnEnvironmentCountsOnlyItsStatusClass() throws InterruptedException {
+        String functionName = "dp-metrics-" + Long.toString(System.nanoTime(), 36);
+        String domain = createFunction(functionName, "IamAuth");
+        given().header("Host", domain).when().get("/").then().statusCode(403);
+        given().header("Host", domain).when().get("/").then().statusCode(403);
+        given().contentType("application/json").body("{\"throttleConfig\": {\"rateLimit\": 0}}")
+                .when().patch(BASE + "/web-functions/" + functionName + "/endpoints/dev")
+                .then().statusCode(202);
+        given().header("Host", domain).when().get("/").then().statusCode(503);
+
+        Map<String, String> endpoint = Map.of("FunctionName", functionName, "EndpointName", "dev");
+        Map<String, String> usage = Map.of("FunctionName", functionName, "EndpointName", "dev",
+                "ExecutionRegion", "us-east-1");
+        assertEquals(2, LambdaWebMetricStatistics.await(LambdaWebMetrics.NAMESPACE, "HTTPResponseStatusClass4XX",
+                endpoint, "Sum", 2));
+        assertEquals(1, LambdaWebMetricStatistics.await(LambdaWebMetrics.NAMESPACE, "HTTPResponseStatusClass5XX",
+                endpoint, "Sum", 1));
+        assertEquals(0, LambdaWebMetricStatistics.of(LambdaWebMetrics.NAMESPACE, "ExecutedRequests", endpoint, "Sum"));
+        assertEquals(0, LambdaWebMetricStatistics.of(LambdaWebMetrics.USAGE_NAMESPACE, "ExecutedRequests", usage,
+                "Sum"));
+        assertEquals(0, LambdaWebMetricStatistics.of(LambdaWebMetrics.USAGE_NAMESPACE, "EndpointActiveEnvironments",
+                usage, "SampleCount"));
+
+        given().when().delete(BASE + "/web-functions/" + functionName).then().statusCode(204);
+    }
+
+    @Test
     void httpOneDotZeroIsRefused() throws IOException {
         String response = raw("GET / HTTP/1.0\r\nHost: " + UNKNOWN_HOST + "\r\n\r\n");
         assertTrue(response.startsWith("HTTP/1.0 505 HTTP Version Not Supported\r\n"), response);

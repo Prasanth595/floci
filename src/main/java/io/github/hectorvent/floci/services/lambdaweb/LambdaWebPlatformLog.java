@@ -6,15 +6,17 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.UUID;
 
 /**
- * The {@code platform.*} events of one environment. AWS reports the CPU time and the peak memory of
- * the whole environment, which Floci reads from the container's cgroup. A reading that fails keeps
- * the last one, so CPU time after the last reading is lost when the process exits on its own.
+ * The {@code platform.*} events and the environment metrics of one environment. AWS reports the CPU
+ * time and the peak memory of the whole environment, which Floci reads from the container's cgroup. A
+ * reading that fails keeps the last one, so CPU time after the last reading is lost when the process
+ * exits on its own.
  */
 final class LambdaWebPlatformLog {
 
@@ -35,12 +37,14 @@ final class LambdaWebPlatformLog {
     private final String revisionId;
     private final String runtime;
     private final String applicationLogLevel;
+    private final LambdaWebMetrics.EnvironmentMetrics environmentMetrics;
     private final String instanceId = UUID.randomUUID().toString();
     private long initStarted;
     private long invokeStarted;
     private Instant windowStart;
     private int windowRequests;
     private int windowConcurrency;
+    private long windowBytes;
     private int totalRequests;
     private int totalConcurrency;
     private long cpuMicros;
@@ -51,13 +55,15 @@ final class LambdaWebPlatformLog {
     private boolean ended;
 
     LambdaWebPlatformLog(LambdaWebLogs.Sink sink, String region, String functionName, String revisionId,
-                         String runtime, String applicationLogLevel) {
+                         String runtime, String applicationLogLevel,
+                         LambdaWebMetrics.EnvironmentMetrics environmentMetrics) {
         this.sink = sink;
         this.region = region;
         this.functionName = functionName;
         this.revisionId = revisionId;
         this.runtime = runtime;
         this.applicationLogLevel = applicationLogLevel;
+        this.environmentMetrics = environmentMetrics;
     }
 
     synchronized void initStart() {
@@ -76,14 +82,16 @@ final class LambdaWebPlatformLog {
     /** {@code errorType} is null when the app listens. */
     synchronized void initReport(String errorType, Usage usage) {
         read(usage);
+        long initNanos = System.nanoTime() - initStarted;
         ObjectNode record = status(errorType);
         record.put("instanceId", instanceId);
         record.put("initializationType", INIT_TYPE);
         ObjectNode metrics = record.putObject("metrics");
-        metrics.put("totalDurationMs", wholeMillis(System.nanoTime() - initStarted));
+        metrics.put("totalDurationMs", wholeMillis(initNanos));
         metrics.put("totalCpuTimeMs", wholeMillis(cpuMicros * 1000));
         metrics.put("maxMemoryUsageMb", peakMemoryMb);
         sink.platform(Instant.now(), errorType == null ? "INFO" : "WARN", "platform.initReport", record);
+        environmentMetrics.publish(millis(initNanos), millis(cpuMicros * 1000), peakMemoryMb, 0, 0);
     }
 
     /** A failure AWS writes in the shape of console output, with the time as Node prints it, and drops at FATAL. */
@@ -129,6 +137,7 @@ final class LambdaWebPlatformLog {
                                       long durationNanos, long responseBytes) {
         windowRequests++;
         totalRequests++;
+        windowBytes += responseBytes;
         ObjectNode record = JSON.createObjectNode();
         record.put("requestId", requestId);
         record.put("endpointName", endpointName);
@@ -159,8 +168,11 @@ final class LambdaWebPlatformLog {
         metrics.put("cpuTimeMs", wholeMillis((cpuMicros - cpuAtWindowStart) * 1000));
         metrics.put("maxMemoryUsageMb", peakMemoryMb);
         sink.platform(now, "INFO", "platform.invokeSummary", record);
+        environmentMetrics.publish(Duration.between(windowStart, now).toMillis(),
+                millis((cpuMicros - cpuAtWindowStart) * 1000), peakMemoryMb, windowConcurrency, windowBytes);
         windowStart = now;
         windowRequests = 0;
+        windowBytes = 0;
         windowConcurrency = inFlight;
         cpuAtWindowStart = cpuMicros;
     }
@@ -216,6 +228,10 @@ final class LambdaWebPlatformLog {
             record.put("errorType", errorType);
         }
         return record;
+    }
+
+    private static long millis(long nanos) {
+        return Math.round(nanos / 1_000_000.0);
     }
 
     /** AWS writes these durations in whole milliseconds with three decimals. */

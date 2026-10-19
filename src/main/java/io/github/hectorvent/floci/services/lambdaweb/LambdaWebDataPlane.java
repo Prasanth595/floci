@@ -73,6 +73,7 @@ public class LambdaWebDataPlane {
     private final LambdaWebService service;
     private final LambdaWebEnvironmentManager environments;
     private final LambdaWebIamAuth iamAuth;
+    private final LambdaWebMetrics metrics;
     private final ServiceConfigAccess serviceConfigAccess;
     private final Vertx vertx;
     private final HttpClient client;
@@ -80,10 +81,12 @@ public class LambdaWebDataPlane {
 
     @Inject
     public LambdaWebDataPlane(LambdaWebService service, LambdaWebEnvironmentManager environments,
-                              LambdaWebIamAuth iamAuth, ServiceConfigAccess serviceConfigAccess, Vertx vertx) {
+                              LambdaWebIamAuth iamAuth, LambdaWebMetrics metrics,
+                              ServiceConfigAccess serviceConfigAccess, Vertx vertx) {
         this.service = service;
         this.environments = environments;
         this.iamAuth = iamAuth;
+        this.metrics = metrics;
         this.serviceConfigAccess = serviceConfigAccess;
         this.vertx = vertx;
         this.client = vertx.createHttpClient(new HttpClientOptions()
@@ -121,6 +124,7 @@ public class LambdaWebDataPlane {
         Integer rateLimit = target.endpoint().throttleConfig == null ? null : target.endpoint().throttleConfig.rateLimit;
         if (Integer.valueOf(0).equals(rateLimit)) {
             page(request, LambdaWebErrorPages.ENDPOINT_DISABLED, requestId, false);
+            metrics.answered(target, LambdaWebErrorPages.ENDPOINT_DISABLED.status());
             return;
         }
         if (!IAM_AUTH.equals(target.endpoint().authType)) {
@@ -139,9 +143,11 @@ public class LambdaWebDataPlane {
             if (allowed.failed()) {
                 LOG.errorv(allowed.cause(), "Could not check the caller of {0}", host);
                 internalError(request, requestId);
+                metrics.answered(target, 502);
                 return;
             }
             page(request, LambdaWebErrorPages.FORBIDDEN, requestId, false);
+            metrics.answered(target, LambdaWebErrorPages.FORBIDDEN.status());
         });
     }
 
@@ -150,12 +156,14 @@ public class LambdaWebDataPlane {
         if (rateLimit != null && !rateLimiter.tryAcquire(endpointKey(target), rateLimit)) {
             request.resume();
             page(request, LambdaWebErrorPages.ENDPOINT_REQUEST_THROTTLE, requestId, false);
+            metrics.throttled(target, LambdaWebMetrics.REQUEST_THROTTLES);
             return;
         }
         WebFunctionRevision revision = LambdaWebService.pickRevision(target);
         if (revision == null) {
             request.resume();
             page(request, LambdaWebErrorPages.ORIGIN_REQUEST_ERROR, requestId, false);
+            metrics.answered(target, LambdaWebErrorPages.ORIGIN_REQUEST_ERROR.status());
             return;
         }
         if ("100-continue".equalsIgnoreCase(request.getHeader("Expect"))) {
@@ -187,14 +195,17 @@ public class LambdaWebDataPlane {
                     request.resume();
                     if (error instanceof StartFailure failure) {
                         page(request, failure.page(), requestId, false);
+                        metrics.answered(target, failure.page().status());
                         return;
                     }
                     if (error instanceof Throttled) {
                         page(request, LambdaWebErrorPages.ENDPOINT_MAX_ENV_THROTTLE, requestId, false);
+                        metrics.throttled(target, LambdaWebMetrics.ACTIVE_ENVIRONMENT_THROTTLES);
                         return;
                     }
                     LOG.errorv(error, "Could not start an environment for {0}", host);
                     internalError(request, requestId);
+                    metrics.answered(target, 502);
                 });
     }
 
@@ -206,7 +217,7 @@ public class LambdaWebDataPlane {
     private void forward(HttpServerRequest request, String host, WebFunctionTarget target,
                          WebFunctionRevision revision, Environment environment, String requestId, boolean firstTry) {
         long started = System.nanoTime();
-        Exchange exchange = new Exchange(request, environment, requestId, target.endpoint().endpointName, started);
+        Exchange exchange = new Exchange(request, environment, requestId, target, started);
         boolean hasBody = hasRequestBody(request);
         AtomicBoolean bodyIn = new AtomicBoolean(!hasBody);
         AtomicBoolean expired = new AtomicBoolean();
@@ -326,38 +337,42 @@ public class LambdaWebDataPlane {
 
     /**
      * One request against one environment. The first finisher releases the reservation and the deadline, and reports
-     * the request in {@code platform.requestComplete}.
+     * the request in {@code platform.requestComplete} and the request metrics.
      */
     private final class Exchange {
         private final HttpServerRequest request;
         private final Environment environment;
         private final String requestId;
+        private final WebFunctionTarget target;
         private final String endpointName;
         private final long started;
         private final AtomicBoolean finished = new AtomicBoolean();
         private long deadline = -1;
 
-        Exchange(HttpServerRequest request, Environment environment, String requestId, String endpointName,
+        Exchange(HttpServerRequest request, Environment environment, String requestId, WebFunctionTarget target,
                  long started) {
             this.request = request;
             this.environment = environment;
             this.requestId = requestId;
-            this.endpointName = endpointName;
+            this.target = target;
+            this.endpointName = target.endpoint().endpointName;
             this.started = started;
             environment.exchangeOpened();
         }
 
-        /** The answer of the app, cut when {@code errorType} is set. */
+        /** The answer of the app, cut when {@code errorType} is set. A cut answer counts under its first status. */
         void relayed(String errorType) {
             HttpServerResponse response = request.response();
             environment.requestComplete(requestId, endpointName, response.getStatusCode(), errorType,
                     System.nanoTime() - started, response.bytesWritten());
+            metrics.executed(target, response.getStatusCode(), environments.environmentCount(endpointKey(target)));
         }
 
         /** A page in place of the app's answer. AWS counts none of its bytes. */
         void replaced(LambdaWebErrorPages.Page page) {
             environment.requestComplete(requestId, endpointName, page.status(), page.errorType(),
                     System.nanoTime() - started, 0);
+            metrics.executed(target, page.status(), environments.environmentCount(endpointKey(target)));
         }
 
         boolean finish() {

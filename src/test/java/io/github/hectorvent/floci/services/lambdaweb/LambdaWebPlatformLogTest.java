@@ -11,6 +11,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -30,6 +31,7 @@ class LambdaWebPlatformLogTest {
     CloudWatchLogsService cloudWatchLogs;
 
     private LambdaWebLogs logs;
+    private final List<List<Long>> datapoints = new ArrayList<>();
 
     @BeforeEach
     void start() {
@@ -54,7 +56,7 @@ class LambdaWebPlatformLogTest {
     void aRequestIsReportedWithItsDurationInMillisecondsToThreeDecimals() {
         LambdaWebPlatformLog platform = new LambdaWebPlatformLog(
                 logs.open("111122223333", "eu-west-1", GROUP, STREAM, "DEBUG"), "eu-west-1", "web", "rev-abcde",
-                "nodejs24.x", "INFO");
+                "nodejs24.x", "INFO", this::datapoint);
 
         platform.requestComplete("KXH25FBDZ33GP4TQ4ARAUYSTSA", "dev", 504, "Runtime.RequestTimeout", 3_000_716_400L, 0);
 
@@ -70,7 +72,7 @@ class LambdaWebPlatformLogTest {
     void eventsBelowTheSystemLogLevelAreDroppedAndAFailedReportIsWarn() {
         LambdaWebPlatformLog platform = new LambdaWebPlatformLog(
                 logs.open("111122223333", "eu-west-1", GROUP, STREAM, "WARN"), "eu-west-1", "web", "rev-abcde",
-                "nodejs24.x", "INFO");
+                "nodejs24.x", "INFO", this::datapoint);
         platform.initStart();
         platform.initReport(null, new LambdaWebPlatformLog.Usage(178_400, 142L * 1024 * 1024 + 5));
         platform.invokeStart(1);
@@ -91,12 +93,50 @@ class LambdaWebPlatformLogTest {
     void theListenFailureIsDroppedAtFatal() {
         LambdaWebPlatformLog platform = new LambdaWebPlatformLog(
                 logs.open("111122223333", "eu-west-1", GROUP, STREAM, "DEBUG"), "eu-west-1", "web", "rev-abcde",
-                "nodejs24.x", "FATAL");
+                "nodejs24.x", "FATAL", this::datapoint);
 
         platform.applicationError("Application.TimeoutListenError: nothing was listening");
         platform.spinDownStart();
 
         assertEquals("platform.spinDownStart", JsonPath.from(firstMessage()).getString("type"));
+    }
+
+    @Test
+    void anEnvironmentPublishesItsMetricsAtInitAndForEachWindowWhateverTheSystemLogLevel() {
+        LambdaWebPlatformLog platform = new LambdaWebPlatformLog(
+                logs.open("111122223333", "eu-west-1", GROUP, STREAM, "WARN"), "eu-west-1", "web", "rev-abcde",
+                "nodejs24.x", "INFO", this::datapoint);
+        platform.initStart();
+        platform.initReport(null, new LambdaWebPlatformLog.Usage(178_400, 142L * 1024 * 1024 + 5));
+        platform.invokeStart(1);
+        platform.concurrency(2);
+        platform.requestComplete("KXH25FBDZ33GP4TQ4ARAUYSTSA", "dev", 200, null, 1_000_000, 18);
+        platform.requestComplete("Q2TRUVQ6VJ5RQHBA4ZKSBWQO7A", "dev", 503, "Runtime.OriginRequestError", 1_000_000, 0);
+        platform.invokeSummary(new LambdaWebPlatformLog.Usage(250_000, 150L * 1024 * 1024), 1);
+        platform.end(null, "Runtime.ExitError");
+        platform.invokeSummary(new LambdaWebPlatformLog.Usage(300_000, 150L * 1024 * 1024), 0);
+
+        assertEquals(3, datapoints.size(), datapoints.toString());
+        assertEquals(List.of(178L, 142L, 0L, 0L), datapoints.get(0).subList(1, 5));
+        assertEquals(List.of(72L, 150L, 2L, 18L), datapoints.get(1).subList(1, 5));
+        assertEquals(List.of(0L, 150L, 1L, 0L), datapoints.get(2).subList(1, 5));
+    }
+
+    @Test
+    void aFailedInitPublishesOneDatapoint() {
+        LambdaWebPlatformLog platform = new LambdaWebPlatformLog(
+                logs.open("111122223333", "eu-west-1", GROUP, STREAM, "INFO"), "eu-west-1", "web", "rev-abcde",
+                "nodejs24.x", "INFO", this::datapoint);
+        platform.initStart();
+        platform.initReport("Runtime.ExitError", null);
+
+        assertEquals(1, datapoints.size(), datapoints.toString());
+        assertEquals(List.of(0L, 0L, 0L, 0L), datapoints.getFirst().subList(1, 5));
+    }
+
+    private void datapoint(long activeMillis, long cpuMillis, long maxMemoryMb, int concurrentRequests,
+                           long responseBytes) {
+        datapoints.add(List.of(activeMillis, cpuMillis, maxMemoryMb, (long) concurrentRequests, responseBytes));
     }
 
     @SuppressWarnings("unchecked")
