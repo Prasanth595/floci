@@ -26,7 +26,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -138,7 +137,8 @@ class LambdaWebMetricsTest {
     private List<String> published(int count) {
         ArgumentCaptor<String> namespaces = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<MetricDatum> datums = ArgumentCaptor.forClass(MetricDatum.class);
-        verify(cloudWatch, timeout(5_000).times(count)).publishMetricForAccount(eq(ACCOUNT), namespaces.capture(),
+        metrics.awaitPublished(Duration.ofSeconds(5));
+        verify(cloudWatch, times(count)).publishMetricForAccount(eq(ACCOUNT), namespaces.capture(),
                 datums.capture(), eq(REGION), anyString());
         List<String> published = new ArrayList<>();
         for (int i = 0; i < count; i++) {

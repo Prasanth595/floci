@@ -116,6 +116,9 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     @Inject
     LambdaWebEnvironmentManager environments;
 
+    @Inject
+    LambdaWebMetrics metrics;
+
     private String functionName;
 
     @BeforeAll
@@ -335,10 +338,11 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         }
         Map<String, String> usage = Map.of("FunctionName", functionName, "EndpointName", "dev",
                 "ExecutionRegion", "us-east-1");
-        assertEquals(3, LambdaWebMetricStatistics.await(LambdaWebMetrics.USAGE_NAMESPACE,
-                "EndpointActiveEnvironmentThrottles", usage, "Sum", 3));
-        assertEquals(2, LambdaWebMetricStatistics.await(LambdaWebMetrics.USAGE_NAMESPACE, "EndpointActiveEnvironments",
-                usage, "Maximum", 2));
+        metrics.awaitPublished(Duration.ofSeconds(5));
+        assertEquals(3, LambdaWebMetricStatistics.of(LambdaWebMetrics.USAGE_NAMESPACE,
+                "EndpointActiveEnvironmentThrottles", usage, "Sum"));
+        assertEquals(2, LambdaWebMetricStatistics.of(LambdaWebMetrics.USAGE_NAMESPACE, "EndpointActiveEnvironments",
+                usage, "Maximum"));
 
         // Requests one after another rotate over the two environments.
         Set<String> logStreams = new HashSet<>();
@@ -387,8 +391,9 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         for (String response : limited) {
             assertTrue(response.contains("\r\nlambda-web-error-type: Platform.EndpointRequestThrottle\r\n"), response);
         }
-        assertEquals(limited.size(), LambdaWebMetricStatistics.await(LambdaWebMetrics.USAGE_NAMESPACE,
-                "EndpointRequestThrottles", usage, "Sum", limited.size()));
+        metrics.awaitPublished(Duration.ofSeconds(5));
+        assertEquals(limited.size(), LambdaWebMetricStatistics.of(LambdaWebMetrics.USAGE_NAMESPACE,
+                "EndpointRequestThrottles", usage, "Sum"));
     }
 
     private static List<String> parallel(int count, Callable<String> call) throws Exception {
@@ -504,8 +509,9 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         Map<String, String> endpoint = Map.of("FunctionName", functionName, "EndpointName", "dev");
         Map<String, String> usage = Map.of("FunctionName", functionName, "EndpointName", "dev",
                 "ExecutionRegion", "us-east-1");
-        assertEquals(4, LambdaWebMetricStatistics.await(LambdaWebMetrics.NAMESPACE, "EnvironmentActiveTime", function,
-                "SampleCount", 4));
+        metrics.awaitPublished(Duration.ofSeconds(5));
+        assertEquals(4, LambdaWebMetricStatistics.of(LambdaWebMetrics.NAMESPACE, "EnvironmentActiveTime", function,
+                "SampleCount"));
         assertEquals(11 + echoed.asByteArray().length, LambdaWebMetricStatistics.of(LambdaWebMetrics.NAMESPACE,
                 "ResponseBytes", function, "Sum"));
         assertEquals(1, LambdaWebMetricStatistics.of(LambdaWebMetrics.NAMESPACE, "EnvironmentConcurrentRequests",

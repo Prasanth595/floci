@@ -21,6 +21,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Stream;
 
 /**
  * The CloudWatch metrics of Web Functions: one datapoint per request when it is answered, and one
@@ -75,10 +76,10 @@ public class LambdaWebMetrics {
         List<Dimension> request = requestDimensions(target);
         List<Dimension> usage = usageDimensions(target);
         List<Datapoint> datapoints = new ArrayList<>();
-        datapoints.add(new Datapoint(NAMESPACE, datum("ExecutedRequests", "Count", 1, request, now)));
-        datapoints.add(new Datapoint(USAGE_NAMESPACE, datum("ExecutedRequests", "Count", 1, usage, now)));
+        datapoints.add(new Datapoint(NAMESPACE, MetricDatum.of("ExecutedRequests", "Count", 1, request, now)));
+        datapoints.add(new Datapoint(USAGE_NAMESPACE, MetricDatum.of("ExecutedRequests", "Count", 1, usage, now)));
         datapoints.add(new Datapoint(USAGE_NAMESPACE,
-                datum("EndpointActiveEnvironments", "Count", activeEnvironments, usage, now)));
+                MetricDatum.of("EndpointActiveEnvironments", "Count", activeEnvironments, usage, now)));
         statusClass(datapoints, status, request, now);
         publish(target.accountId(), target.region(), datapoints);
     }
@@ -94,7 +95,8 @@ public class LambdaWebMetrics {
     void throttled(WebFunctionTarget target, String metric) {
         long now = Instant.now().getEpochSecond();
         List<Datapoint> datapoints = new ArrayList<>();
-        datapoints.add(new Datapoint(USAGE_NAMESPACE, datum(metric, "Count", 1, usageDimensions(target), now)));
+        datapoints.add(new Datapoint(USAGE_NAMESPACE,
+                MetricDatum.of(metric, "Count", 1, usageDimensions(target), now)));
         statusClass(datapoints, 429, requestDimensions(target), now);
         publish(target.accountId(), target.region(), datapoints);
     }
@@ -103,14 +105,13 @@ public class LambdaWebMetrics {
         List<Dimension> dimensions = List.of(new Dimension("FunctionName", functionName));
         return (activeMillis, cpuMillis, maxMemoryMb, concurrentRequests, responseBytes) -> {
             long now = Instant.now().getEpochSecond();
-            publish(accountId, region, List.of(
-                    new Datapoint(NAMESPACE, datum("EnvironmentActiveTime", "Milliseconds", activeMillis, dimensions, now)),
-                    new Datapoint(NAMESPACE, datum("EnvironmentCPUTime", "Milliseconds", cpuMillis, dimensions, now)),
-                    new Datapoint(NAMESPACE,
-                            datum("EnvironmentMaxMemoryUsage", "Megabytes", maxMemoryMb, dimensions, now)),
-                    new Datapoint(NAMESPACE,
-                            datum("EnvironmentConcurrentRequests", "Count", concurrentRequests, dimensions, now)),
-                    new Datapoint(NAMESPACE, datum("ResponseBytes", "Bytes", responseBytes, dimensions, now))));
+            publish(accountId, region, Stream.of(
+                    MetricDatum.of("EnvironmentActiveTime", "Milliseconds", activeMillis, dimensions, now),
+                    MetricDatum.of("EnvironmentCPUTime", "Milliseconds", cpuMillis, dimensions, now),
+                    MetricDatum.of("EnvironmentMaxMemoryUsage", "Megabytes", maxMemoryMb, dimensions, now),
+                    MetricDatum.of("EnvironmentConcurrentRequests", "Count", concurrentRequests, dimensions, now),
+                    MetricDatum.of("ResponseBytes", "Bytes", responseBytes, dimensions, now))
+                    .map(datum -> new Datapoint(NAMESPACE, datum)).toList());
         };
     }
 
@@ -133,9 +134,11 @@ public class LambdaWebMetrics {
     /** The status classes have no datapoint of 0. */
     private static void statusClass(List<Datapoint> datapoints, int status, List<Dimension> dimensions, long now) {
         if (400 <= status && status <= 499) {
-            datapoints.add(new Datapoint(NAMESPACE, datum("HTTPResponseStatusClass4XX", "Count", 1, dimensions, now)));
+            datapoints.add(new Datapoint(NAMESPACE,
+                    MetricDatum.of("HTTPResponseStatusClass4XX", "Count", 1, dimensions, now)));
         } else if (500 <= status && status <= 599) {
-            datapoints.add(new Datapoint(NAMESPACE, datum("HTTPResponseStatusClass5XX", "Count", 1, dimensions, now)));
+            datapoints.add(new Datapoint(NAMESPACE,
+                    MetricDatum.of("HTTPResponseStatusClass5XX", "Count", 1, dimensions, now)));
         }
     }
 
@@ -148,16 +151,6 @@ public class LambdaWebMetrics {
         return List.of(new Dimension("FunctionName", target.function().functionName),
                 new Dimension("EndpointName", target.endpoint().endpointName),
                 new Dimension("ExecutionRegion", target.region()));
-    }
-
-    private static MetricDatum datum(String name, String unit, double value, List<Dimension> dimensions, long timestamp) {
-        MetricDatum datum = new MetricDatum();
-        datum.setMetricName(name);
-        datum.setUnit(unit);
-        datum.setValue(value);
-        datum.setDimensions(dimensions);
-        datum.setTimestamp(timestamp);
-        return datum;
     }
 
     private void publish(String accountId, String region, List<Datapoint> datapoints) {

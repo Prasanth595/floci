@@ -294,14 +294,10 @@ public class SesEventPublisher {
                 dimensions.add(new Dimension(cfg.getDimensionName(), value));
             }
         }
-        MetricDatum datum = new MetricDatum();
-        datum.setNamespace(SES_METRIC_NAMESPACE);
-        datum.setMetricName(SesEventPayload.cloudWatchMetricName(eventType));
-        datum.setValue(1.0);
-        datum.setUnit("Count");
-        datum.setDimensions(dimensions);
-        // Leave timestamp unset: CloudWatchMetricsService.putMetricData defaults a zero
-        // timestamp to Instant.now().getEpochSecond() (epoch seconds, not milliseconds).
+        // A zero timestamp: CloudWatchMetricsService.putMetricData defaults it to
+        // Instant.now().getEpochSecond() (epoch seconds, not milliseconds).
+        MetricDatum datum = MetricDatum.of(SesEventPayload.cloudWatchMetricName(eventType), "Count", 1.0,
+                dimensions, 0);
         try {
             cloudWatchMetricsService.putMetricData(SES_METRIC_NAMESPACE, List.of(datum),
                     defaultRegion);

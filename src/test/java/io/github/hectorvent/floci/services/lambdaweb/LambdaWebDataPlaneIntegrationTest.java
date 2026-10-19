@@ -12,6 +12,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -33,6 +34,9 @@ class LambdaWebDataPlaneIntegrationTest {
 
     @Inject
     S3Service s3Service;
+
+    @Inject
+    LambdaWebMetrics metrics;
 
     @Test
     void anUnknownEndpointDomainIsNotFound() {
@@ -134,7 +138,7 @@ class LambdaWebDataPlaneIntegrationTest {
     }
 
     @Test
-    void aPageWithoutAnEnvironmentCountsOnlyItsStatusClass() throws InterruptedException {
+    void aPageWithoutAnEnvironmentCountsOnlyItsStatusClass() {
         String functionName = "dp-metrics-" + Long.toString(System.nanoTime(), 36);
         String domain = createFunction(functionName, "IamAuth");
         given().header("Host", domain).when().get("/").then().statusCode(403);
@@ -147,10 +151,11 @@ class LambdaWebDataPlaneIntegrationTest {
         Map<String, String> endpoint = Map.of("FunctionName", functionName, "EndpointName", "dev");
         Map<String, String> usage = Map.of("FunctionName", functionName, "EndpointName", "dev",
                 "ExecutionRegion", "us-east-1");
-        assertEquals(2, LambdaWebMetricStatistics.await(LambdaWebMetrics.NAMESPACE, "HTTPResponseStatusClass4XX",
-                endpoint, "Sum", 2));
-        assertEquals(1, LambdaWebMetricStatistics.await(LambdaWebMetrics.NAMESPACE, "HTTPResponseStatusClass5XX",
-                endpoint, "Sum", 1));
+        metrics.awaitPublished(Duration.ofSeconds(5));
+        assertEquals(2, LambdaWebMetricStatistics.of(LambdaWebMetrics.NAMESPACE, "HTTPResponseStatusClass4XX",
+                endpoint, "Sum"));
+        assertEquals(1, LambdaWebMetricStatistics.of(LambdaWebMetrics.NAMESPACE, "HTTPResponseStatusClass5XX",
+                endpoint, "Sum"));
         assertEquals(0, LambdaWebMetricStatistics.of(LambdaWebMetrics.NAMESPACE, "ExecutedRequests", endpoint, "Sum"));
         assertEquals(0, LambdaWebMetricStatistics.of(LambdaWebMetrics.USAGE_NAMESPACE, "ExecutedRequests", usage,
                 "Sum"));

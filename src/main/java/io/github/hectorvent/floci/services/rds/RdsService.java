@@ -4672,12 +4672,9 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private void publishZeroCapacity(String accountId, String region, Dimension dimension, Instant at) {
         for (String metricName : List.of("ServerlessDatabaseCapacity", "ACUUtilization", "CPUUtilization")) {
-            MetricDatum datum = new MetricDatum();
-            datum.setMetricName(metricName);
-            datum.setUnit("ServerlessDatabaseCapacity".equals(metricName) ? "Count" : "Percent");
-            datum.setDimensions(List.of(dimension));
-            datum.setTimestamp(at.getEpochSecond());
-            datum.setValue(0.0);
+            MetricDatum datum = MetricDatum.of(metricName,
+                    "ServerlessDatabaseCapacity".equals(metricName) ? "Count" : "Percent", 0.0, List.of(dimension),
+                    at.getEpochSecond());
             metricsService.publishMetricForAccount(accountId, "AWS/RDS", datum, region,
                     "rds-auto-pause:" + dimension.name() + "=" + dimension.value() + ":" + metricName + ":" + at);
         }

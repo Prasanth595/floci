@@ -123,8 +123,8 @@ public class LambdaWebDataPlane {
         WebFunctionTarget target = located.get();
         Integer rateLimit = target.endpoint().throttleConfig == null ? null : target.endpoint().throttleConfig.rateLimit;
         if (Integer.valueOf(0).equals(rateLimit)) {
-            page(request, LambdaWebErrorPages.ENDPOINT_DISABLED, requestId, false);
             metrics.answered(target, LambdaWebErrorPages.ENDPOINT_DISABLED.status());
+            page(request, LambdaWebErrorPages.ENDPOINT_DISABLED, requestId, false);
             return;
         }
         if (!IAM_AUTH.equals(target.endpoint().authType)) {
@@ -142,12 +142,12 @@ public class LambdaWebDataPlane {
             request.resume();
             if (allowed.failed()) {
                 LOG.errorv(allowed.cause(), "Could not check the caller of {0}", host);
-                internalError(request, requestId);
                 metrics.answered(target, 502);
+                internalError(request, requestId);
                 return;
             }
-            page(request, LambdaWebErrorPages.FORBIDDEN, requestId, false);
             metrics.answered(target, LambdaWebErrorPages.FORBIDDEN.status());
+            page(request, LambdaWebErrorPages.FORBIDDEN, requestId, false);
         });
     }
 
@@ -155,15 +155,15 @@ public class LambdaWebDataPlane {
         Integer rateLimit = target.endpoint().throttleConfig == null ? null : target.endpoint().throttleConfig.rateLimit;
         if (rateLimit != null && !rateLimiter.tryAcquire(endpointKey(target), rateLimit)) {
             request.resume();
-            page(request, LambdaWebErrorPages.ENDPOINT_REQUEST_THROTTLE, requestId, false);
             metrics.throttled(target, LambdaWebMetrics.REQUEST_THROTTLES);
+            page(request, LambdaWebErrorPages.ENDPOINT_REQUEST_THROTTLE, requestId, false);
             return;
         }
         WebFunctionRevision revision = LambdaWebService.pickRevision(target);
         if (revision == null) {
             request.resume();
-            page(request, LambdaWebErrorPages.ORIGIN_REQUEST_ERROR, requestId, false);
             metrics.answered(target, LambdaWebErrorPages.ORIGIN_REQUEST_ERROR.status());
+            page(request, LambdaWebErrorPages.ORIGIN_REQUEST_ERROR, requestId, false);
             return;
         }
         if ("100-continue".equalsIgnoreCase(request.getHeader("Expect"))) {
@@ -194,18 +194,18 @@ public class LambdaWebDataPlane {
                 .onFailure(error -> {
                     request.resume();
                     if (error instanceof StartFailure failure) {
-                        page(request, failure.page(), requestId, false);
                         metrics.answered(target, failure.page().status());
+                        page(request, failure.page(), requestId, false);
                         return;
                     }
                     if (error instanceof Throttled) {
-                        page(request, LambdaWebErrorPages.ENDPOINT_MAX_ENV_THROTTLE, requestId, false);
                         metrics.throttled(target, LambdaWebMetrics.ACTIVE_ENVIRONMENT_THROTTLES);
+                        page(request, LambdaWebErrorPages.ENDPOINT_MAX_ENV_THROTTLE, requestId, false);
                         return;
                     }
                     LOG.errorv(error, "Could not start an environment for {0}", host);
-                    internalError(request, requestId);
                     metrics.answered(target, 502);
+                    internalError(request, requestId);
                 });
     }
 
@@ -235,11 +235,11 @@ public class LambdaWebDataPlane {
                 if (exchange.finish()) {
                     upstream.reset();
                     if (request.response().headWritten()) {
-                        request.response().close();
                         exchange.relayed(LambdaWebErrorPages.REQUEST_TIMEOUT.errorType());
+                        request.response().close();
                     } else {
-                        page(request, LambdaWebErrorPages.REQUEST_TIMEOUT, requestId, false);
                         exchange.replaced(LambdaWebErrorPages.REQUEST_TIMEOUT);
+                        page(request, LambdaWebErrorPages.REQUEST_TIMEOUT, requestId, false);
                     }
                 }
             };
@@ -263,8 +263,8 @@ public class LambdaWebDataPlane {
                                 environment.containerId(), requestId, error.toString());
                         if (request.response().headWritten()) {
                             if (exchange.finish()) {
-                                request.response().close();
                                 exchange.relayed(null);
+                                request.response().close();
                             }
                             return;
                         }
@@ -300,8 +300,8 @@ public class LambdaWebDataPlane {
                         return;
                     }
                     request.resume();
-                    page(request, LambdaWebErrorPages.ORIGIN_REQUEST_ERROR, requestId, false);
                     exchange.replaced(LambdaWebErrorPages.ORIGIN_REQUEST_ERROR);
+                    page(request, LambdaWebErrorPages.ORIGIN_REQUEST_ERROR, requestId, false);
                 });
     }
 
@@ -317,27 +317,29 @@ public class LambdaWebDataPlane {
         if (response.getHeader("Content-Length") == null && hasBody(request.method(), response.statusCode())) {
             out.setChunked(true);
         }
-        response.pipeTo(out).onComplete(piped -> {
+        response.pipe().endOnSuccess(false).to(out).onComplete(piped -> {
             if (!exchange.finish()) {
                 return;
             }
             if (piped.succeeded()) {
                 exchange.relayed(null);
+                out.end();
                 return;
             }
             if (out.headWritten()) {
-                out.close();
                 exchange.relayed(null);
+                out.close();
             } else {
-                page(request, LambdaWebErrorPages.ORIGIN_REQUEST_ERROR, requestId, false);
                 exchange.replaced(LambdaWebErrorPages.ORIGIN_REQUEST_ERROR);
+                page(request, LambdaWebErrorPages.ORIGIN_REQUEST_ERROR, requestId, false);
             }
         });
     }
 
     /**
      * One request against one environment. The first finisher releases the reservation and the deadline, and reports
-     * the request in {@code platform.requestComplete} and the request metrics.
+     * the request in {@code platform.requestComplete} and the request metrics. Every answer is reported before its
+     * last bytes go out, so a client that has the answer finds its metrics queued.
      */
     private final class Exchange {
         private final HttpServerRequest request;

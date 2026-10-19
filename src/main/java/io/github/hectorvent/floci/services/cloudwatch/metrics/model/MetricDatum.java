@@ -23,6 +23,18 @@ public class MetricDatum {
 
     public MetricDatum() {}
 
+    /** One value as a service publishes it. A {@code timestamp} of 0 is the time it is stored. */
+    public static MetricDatum of(String metricName, String unit, double value, List<Dimension> dimensions,
+                                 long timestamp) {
+        MetricDatum datum = new MetricDatum();
+        datum.setMetricName(metricName);
+        datum.setUnit(unit);
+        datum.setValue(value);
+        datum.setDimensions(dimensions);
+        datum.setTimestamp(timestamp);
+        return datum;
+    }
+
     public String getNamespace() { return namespace; }
     public void setNamespace(String namespace) { this.namespace = namespace; }
 

@@ -6,7 +6,6 @@ import io.restassured.path.json.JsonPath;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static io.restassured.RestAssured.given;
@@ -15,18 +14,6 @@ import static io.restassured.RestAssured.given;
 final class LambdaWebMetricStatistics {
 
     private LambdaWebMetricStatistics() {
-    }
-
-    /** The statistic over the last ten minutes, once it reaches {@code expected} or after 15 seconds. */
-    static double await(String namespace, String metric, Map<String, String> dimensions, String statistic,
-                        double expected) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
-        double value = of(namespace, metric, dimensions, statistic);
-        while (value != expected && System.nanoTime() < deadline) {
-            Thread.sleep(200);
-            value = of(namespace, metric, dimensions, statistic);
-        }
-        return value;
     }
 
     /** {@code Sum} and {@code SampleCount} add up over the periods, {@code Maximum} is the largest. */
