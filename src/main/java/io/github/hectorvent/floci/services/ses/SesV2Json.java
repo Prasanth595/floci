@@ -24,6 +24,14 @@ import java.util.Map;
  */
 final class SesV2Json {
 
+    /** The deserializer's wording, which {@link SesV2RequestShapes}' walk of the body shapes shares. */
+    static final String SERIALIZATION_EXCEPTION = "SerializationException";
+    static final String CONVERSION = "%s can not be converted to a %s";
+    static final String EXPECTED_NULL = "Expected null";
+    static final String EXPECTED_LIST = "Expected list or null";
+    static final String LIST_NOT_EXPECTED = "Start of list found where not expected";
+    static final String OBJECT_NOT_EXPECTED = "Start of structure or map found where not expected.";
+
     private SesV2Json() {
     }
 
@@ -79,7 +87,7 @@ final class SesV2Json {
             // error (AWS returns SerializationException for a scalar/array element; it returns a 500
             // InternalFailure for a null element, a server-side bug we normalize to the same 400).
             if (!t.isObject()) {
-                throw new AwsException("SerializationException", null, 400);
+                throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
             }
             JsonNode key = t.path("Key");
             JsonNode value = t.path("Value");
@@ -88,7 +96,7 @@ final class SesV2Json {
             // SerializationException rather than turning 123 into "123". A missing/null member is left
             // to the downstream service validation, matching AWS.
             if (nonStringMember(key) || nonStringMember(value)) {
-                throw new AwsException("SerializationException", null, 400);
+                throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
             }
             out.add(new Tag(key.asText(null), value.asText(null)));
         }
@@ -134,12 +142,12 @@ final class SesV2Json {
             return switch (node.textValue().toLowerCase(Locale.ROOT)) {
                 case "true", "yes", "y", "t", "1" -> true;
                 case "false", "no", "n", "f", "0" -> false;
-                default -> throw new AwsException("SerializationException",
+                default -> throw new AwsException(SERIALIZATION_EXCEPTION,
                         "STRING_VALUE can not be converted to an Boolean", 400);
             };
         }
         if (node.isNull()) {
-            throw new AwsException("SerializationException", null, 400);
+            throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
         }
         throw scalarTypeError(node, "Boolean");
     }
@@ -223,34 +231,30 @@ final class SesV2Json {
      */
     static AwsException scalarTypeError(JsonNode node, String target) {
         if (node.isNumber()) {
-            return new AwsException("SerializationException",
-                    "NUMBER_VALUE can not be converted to a " + target, 400);
+            return new AwsException(SERIALIZATION_EXCEPTION, CONVERSION.formatted("NUMBER_VALUE", target), 400);
         }
         if (node.isBoolean()) {
-            return new AwsException("SerializationException",
-                    (node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE") + " can not be converted to a " + target,
-                    400);
+            return new AwsException(SERIALIZATION_EXCEPTION,
+                    CONVERSION.formatted(node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE", target), 400);
         }
         return unexpectedStartError(node);
     }
 
     /** The deserializer's message for a structure or map member given a scalar. */
     static AwsException expectedNullError() {
-        return new AwsException("SerializationException", "Expected null", 400);
+        return new AwsException(SERIALIZATION_EXCEPTION, EXPECTED_NULL, 400);
     }
 
     /** The deserializer's message for a list member given a scalar. */
     static AwsException expectedListError() {
-        return new AwsException("SerializationException", "Expected list or null", 400);
+        return new AwsException(SERIALIZATION_EXCEPTION, EXPECTED_LIST, 400);
     }
 
     static AwsException unexpectedStartError(JsonNode node) {
         if (node.isArray()) {
-            return new AwsException("SerializationException",
-                    "Start of list found where not expected", 400);
+            return new AwsException(SERIALIZATION_EXCEPTION, LIST_NOT_EXPECTED, 400);
         }
-        return new AwsException("SerializationException",
-                "Start of structure or map found where not expected.", 400);
+        return new AwsException(SERIALIZATION_EXCEPTION, OBJECT_NOT_EXPECTED, 400);
     }
 
     // Read a typed string member: absent/null returns null, but a present value of the wrong JSON type
@@ -261,7 +265,7 @@ final class SesV2Json {
             return null;
         }
         if (!n.isTextual()) {
-            throw new AwsException("SerializationException", null, 400);
+            throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
         }
         return n.textValue();
     }
@@ -275,12 +279,12 @@ final class SesV2Json {
             return null;
         }
         if (!n.isArray()) {
-            throw new AwsException("SerializationException", null, 400);
+            throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
         }
         List<String> values = new ArrayList<>();
         for (JsonNode item : n) {
             if (!item.isTextual()) {
-                throw new AwsException("SerializationException", null, 400);
+                throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
             }
             values.add(item.textValue());
         }
@@ -296,7 +300,7 @@ final class SesV2Json {
             return null;
         }
         if (!n.isIntegralNumber() || !n.canConvertToInt()) {
-            throw new AwsException("SerializationException", null, 400);
+            throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
         }
         return n.intValue();
     }
