@@ -23,13 +23,17 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * Launch-configuration MetadataOptions outside the documented values (HttpTokens optional or
  * required, HttpEndpoint enabled or disabled, HttpPutResponseHopLimit an integer from 1 to 64), or
  * of the wrong JSON type, fail the resource and roll the stack back without leaving a launch
- * configuration behind. A wrong type fails CloudFormation's schema check, a wrong value Auto
- * Scaling's own validation.
+ * configuration behind. A wrong type fails CloudFormation's template validation, a hop limit beyond
+ * 32 bits the handler's model validation, and a wrong value Auto Scaling's own validation, where a
+ * number or a boolean given for a string member arrives as its text.
  */
 @QuarkusTest
 class CloudFormationLaunchConfigurationMetadataValidationIntegrationTest {
     private static final String ACCOUNT = "222222222222";
     private static final String AUTH = EnforcementFixtures.auth(ACCOUNT, "cloudformation");
+    private static final String BEYOND_32_BITS = "Model validation failed (#/MetadataOptions/HttpPutResponseHopLimit:"
+            + " expected type: Integer, found: String. This may occur when a numeric value exceeds 32-bit integer max"
+            + " (2147483647). Consider using 'number' type or ensure value fits in integer range.)";
 
     static Stream<Arguments> invalidMetadataOptions() {
         return Stream.of(
@@ -45,30 +49,31 @@ class CloudFormationLaunchConfigurationMetadataValidationIntegrationTest {
                 Arguments.of("{\"HttpPutResponseHopLimit\":65}", "1 validation error detected: Value '65' at"
                         + " 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint: Member must have"
                         + " value less than or equal to 64"),
-                Arguments.of("{\"HttpPutResponseHopLimit\":2147483648}", "1 validation error detected: Value"
-                        + " '2147483648' at 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint:"
-                        + " Member must have value less than or equal to 64"),
-                Arguments.of("{\"HttpPutResponseHopLimit\":-2147483649}", "1 validation error detected: Value"
-                        + " '-2147483649' at 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint:"
-                        + " Member must have value greater than or equal to 1"),
-                Arguments.of("{\"HttpPutResponseHopLimit\":\"+002147483648\"}", "1 validation error detected: Value"
-                        + " '2147483648' at 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint:"
-                        + " Member must have value less than or equal to 64"),
-                Arguments.of("{\"HttpTokens\":\"invalid\",\"HttpPutResponseHopLimit\":2147483648}", "2 validation"
-                        + " errors detected: Value 'invalid' at 'metadataOptions.httpTokens' failed to satisfy"
-                        + " constraint: Member must satisfy enum value set: [optional, required]; Value '2147483648'"
-                        + " at 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint: Member must"
-                        + " have value less than or equal to 64"),
-                Arguments.of("{\"HttpPutResponseHopLimit\":\"not-an-integer\"}", "Model validation failed"
-                        + " (#/MetadataOptions/HttpPutResponseHopLimit: expected type: Integer, found: String)"),
-                Arguments.of("{\"HttpPutResponseHopLimit\":[2]}", "Model validation failed"
-                        + " (#/MetadataOptions/HttpPutResponseHopLimit: expected type: Integer, found: JSONArray)"),
-                Arguments.of("{\"HttpTokens\":[\"required\"]}", "Model validation failed"
-                        + " (#/MetadataOptions/HttpTokens: expected type: String, found: JSONArray)"),
-                Arguments.of("{\"HttpEndpoint\":{\"Value\":\"disabled\"}}", "Model validation failed"
-                        + " (#/MetadataOptions/HttpEndpoint: expected type: String, found: JSONObject)"),
-                Arguments.of("\"required\"", "Model validation failed"
-                        + " (#/MetadataOptions: expected type: JSONObject, found: String)"));
+                Arguments.of("{\"HttpTokens\":true}", "1 validation error detected: Value 'true' at"
+                        + " 'metadataOptions.httpTokens' failed to satisfy constraint: Member must satisfy enum value"
+                        + " set: [optional, required]"),
+                Arguments.of("{\"HttpEndpoint\":1}", "1 validation error detected: Value '1' at"
+                        + " 'metadataOptions.httpEndpoint' failed to satisfy constraint: Member must satisfy enum value"
+                        + " set: [disabled, enabled]"),
+                Arguments.of("\"required\"", "Property [MetadataOptions] expected type: JSONObject, found: String"),
+                Arguments.of("{\"HttpTokens\":[\"required\"]}",
+                        "Property [HttpTokens] expected type: String, found: JSONArray"),
+                Arguments.of("{\"HttpEndpoint\":{\"Value\":\"disabled\"}}",
+                        "Property [HttpEndpoint] expected type: String, found: JSONObject"),
+                Arguments.of("{\"HttpPutResponseHopLimit\":[2]}",
+                        "Property [HttpPutResponseHopLimit] expected type: Integer, found: JSONArray"),
+                Arguments.of("{\"HttpPutResponseHopLimit\":\"not-an-integer\"}",
+                        "Property [HttpPutResponseHopLimit] expected type: Integer, found: String"),
+                Arguments.of("{\"HttpPutResponseHopLimit\":4.5}",
+                        "Property [HttpPutResponseHopLimit] expected type: Integer, found: Float"),
+                Arguments.of("{\"HttpPutResponseHopLimit\":\"4.5\"}",
+                        "Property [HttpPutResponseHopLimit] expected type: Integer, found: Float"),
+                Arguments.of("{\"HttpPutResponseHopLimit\":true}",
+                        "Property [HttpPutResponseHopLimit] expected type: Integer, found: Boolean"),
+                Arguments.of("{\"HttpPutResponseHopLimit\":2147483648}", BEYOND_32_BITS),
+                Arguments.of("{\"HttpPutResponseHopLimit\":-2147483649}", BEYOND_32_BITS),
+                // Model validation fails before Auto Scaling is called, so its own check never runs.
+                Arguments.of("{\"HttpTokens\":\"invalid\",\"HttpPutResponseHopLimit\":2147483648}", BEYOND_32_BITS));
     }
 
     @ParameterizedTest

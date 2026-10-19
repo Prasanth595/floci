@@ -14,12 +14,12 @@ import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnPropertyTypes.Type;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -50,6 +50,11 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(AutoScalingGroupCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** The launch configuration's MetadataOptions as its resource schema types them. */
+    private static final Type METADATA_OPTIONS = Type.object(Map.of(
+            "HttpTokens", Type.STRING,
+            "HttpEndpoint", Type.STRING,
+            "HttpPutResponseHopLimit", Type.INTEGER));
 
     private final AutoScalingService autoScalingService;
 
@@ -213,65 +218,30 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", lc.getLaunchConfigurationArn());
     }
 
+    /**
+     * The block read against its schema types, as CloudFormation checks it before the handler sees
+     * it: a value of the wrong type fails template validation, and a hop limit beyond 32 bits the
+     * handler's model validation. Fn::If may select the block or AWS::NoValue, and a member set to
+     * AWS::NoValue is absent.
+     */
     private LaunchTemplateData.MetadataOptions metadataOptions(JsonNode props, ProvisionContext ctx) {
-        // Resolved as a whole, so an Fn::If can select the block or AWS::NoValue and a member set
-        // to AWS::NoValue is absent rather than blank.
-        JsonNode node = props == null ? null
-                : ctx.engine().resolveNodeOmittingNoValue(props.get("MetadataOptions"));
-        if (node == null || node.isNull() || node.isMissingNode()) {
+        if (props == null || !props.has("MetadataOptions")) {
             return null;
         }
-        if (!node.isObject()) {
-            throw typeMismatch("#/MetadataOptions", "JSONObject", node);
+        CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(ctx.engine());
+        JsonNode node = types.read("MetadataOptions", props.get("MetadataOptions"), METADATA_OPTIONS);
+        types.finish();
+        if (node == null) {
+            return null;
         }
         LaunchTemplateData.MetadataOptions options = new LaunchTemplateData.MetadataOptions();
-        options.setHttpTokens(metadataMember(node, "HttpTokens", "String"));
-        options.setHttpEndpoint(metadataMember(node, "HttpEndpoint", "String"));
-        String hops = metadataMember(node, "HttpPutResponseHopLimit", "Integer");
-        if (hops != null) {
-            BigInteger hopLimit;
-            try {
-                hopLimit = new BigInteger(hops);
-            } catch (NumberFormatException invalid) {
-                throw typeMismatch("#/MetadataOptions/HttpPutResponseHopLimit", "Integer",
-                        node.path("HttpPutResponseHopLimit"));
-            }
-            // A whole number too large for an int is still an integer, so it is out of range, not mistyped.
-            if (hopLimit.bitLength() > 31) {
-                throw AutoScalingService.metadataOptionsError(options, hopLimit);
-            }
+        options.setHttpTokens(blankToNull(node.path("HttpTokens").asText(null)));
+        options.setHttpEndpoint(blankToNull(node.path("HttpEndpoint").asText(null)));
+        JsonNode hopLimit = node.path("HttpPutResponseHopLimit");
+        if (hopLimit.isInt()) {
             options.setHttpPutResponseHopLimit(hopLimit.intValue());
         }
         return options;
-    }
-
-    /**
-     * A MetadataOptions member's text, or null when it is absent or blank. A list or an object fails
-     * the schema's type check rather than reading as absent, which would leave the member at its
-     * default.
-     */
-    private String metadataMember(JsonNode metadataOptions, String member, String expectedType) {
-        JsonNode value = metadataOptions.path(member);
-        if (value.isContainerNode()) {
-            throw typeMismatch("#/MetadataOptions/" + member, expectedType, value);
-        }
-        return blankToNull(value.asText(null));
-    }
-
-    /** CloudFormation's schema type error, worded as the S3 and DynamoDB provisioners report it. */
-    private static AwsException typeMismatch(String pointer, String expectedType, JsonNode value) {
-        return new AwsException("InvalidRequest", "Model validation failed (" + pointer
-                + ": expected type: " + expectedType + ", found: " + schemaTypeName(value) + ")", 400);
-    }
-
-    private static String schemaTypeName(JsonNode value) {
-        return switch (value.getNodeType()) {
-            case OBJECT -> "JSONObject";
-            case ARRAY -> "JSONArray";
-            case BOOLEAN -> "Boolean";
-            case NUMBER -> value.isIntegralNumber() ? "Integer" : "Double";
-            default -> "String";
-        };
     }
 
     private LaunchConfiguration requireLaunchConfiguration(String region, String name) {
