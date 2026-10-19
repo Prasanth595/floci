@@ -719,7 +719,9 @@ class BackupIntegrationTest {
         .when().get("/backup-vaults/" + SUB_VAULT)
         .then().statusCode(200)
             .body("Locked", equalTo(false))
-            .body("$", not(hasKey("LockDate")));
+            .body("$", not(hasKey("LockDate")))
+            // A standard vault is stored with VaultType unset; AWS reports it as BACKUP_VAULT.
+            .body("VaultType", equalTo("BACKUP_VAULT"));
     }
 
     @Test
@@ -1724,12 +1726,18 @@ class BackupIntegrationTest {
     @Test
     @Order(191)
     void describeBackupVaultReportsTheAirGappedVaultTypeAndRetention() {
+        // AWS creates the vault with a compliance-mode lock: LockDate equals CreationDate.
+        long creationDate = given().header("Authorization", AUTH)
+            .when().get("/backup-vaults/" + AIR_GAPPED_VAULT)
+            .then().statusCode(200).extract().jsonPath().getLong("CreationDate");
         given()
             .header("Authorization", AUTH)
         .when()
             .get("/backup-vaults/" + AIR_GAPPED_VAULT)
         .then()
             .statusCode(200)
+            .body("Locked", equalTo(true))
+            .body("LockDate", equalTo((int) creationDate))
             .body("BackupVaultName", equalTo(AIR_GAPPED_VAULT))
             .body("VaultType", equalTo("LOGICALLY_AIR_GAPPED_BACKUP_VAULT"))
             .body("VaultState", equalTo("AVAILABLE"))
@@ -1828,6 +1836,17 @@ class BackupIntegrationTest {
         .then().statusCode(200)
             .body("BackupVaultList.BackupVaultName", hasItem("lock-enforcement-vault"))
             .body("BackupVaultList.BackupVaultName", not(hasItem(AIR_GAPPED_VAULT)));
+
+        // The list members carry VaultType and the air-gapped LockDate too, not just Describe.
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/")
+        .then().statusCode(200)
+            .body("BackupVaultList.find { it.BackupVaultName == 'lock-enforcement-vault' }.VaultType",
+                    equalTo("BACKUP_VAULT"))
+            .body("BackupVaultList.find { it.BackupVaultName == '" + AIR_GAPPED_VAULT + "' }.VaultType",
+                    equalTo("LOGICALLY_AIR_GAPPED_BACKUP_VAULT"))
+            .body("BackupVaultList.find { it.BackupVaultName == '" + AIR_GAPPED_VAULT + "' }.LockDate",
+                    notNullValue());
     }
 
     @Test

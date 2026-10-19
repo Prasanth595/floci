@@ -119,6 +119,7 @@ public class BackupService {
         vault.setVaultState("AVAILABLE");
         // Retention is mandatory and fixed at creation, so the existing locked-vault enforcement
         // (backup-job lifecycle window, recovery-point deletion floor) applies to it as well.
+        // createVault sets LockDate to the creation date: a compliance lock, never changeable.
         vault.setLocked(true);
         vault.setMinRetentionDays(minRetentionDays);
         vault.setMaxRetentionDays(maxRetentionDays);
@@ -147,7 +148,14 @@ public class BackupService {
             vault.setBackupVaultName(vaultName);
             vault.setBackupVaultArn(regionResolver.buildArn("backup", region, "backup-vault:" + vaultName));
             vault.setEncryptionKeyArn(encryptionKeyArn);
-            vault.setCreationDate(Instant.now().getEpochSecond());
+            long now = Instant.now().getEpochSecond();
+            vault.setCreationDate(now);
+            // Only an air-gapped vault arrives here locked. AWS creates it with a compliance-mode
+            // lock whose LockDate is the creation date, so the lock is immutable from the start;
+            // a null LockDate would read as a governance lock that can still change.
+            if (vault.isLocked()) {
+                vault.setLockDate(now);
+            }
             vault.setVaultId(UUID.randomUUID().toString());
             vault.setCreatorRequestId(creatorRequestId);
             vault.setNumberOfRecoveryPoints(0);

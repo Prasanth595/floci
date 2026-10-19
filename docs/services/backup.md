@@ -14,7 +14,7 @@
 | `DescribeBackupVault` | `GET` | `/backup-vaults/{backupVaultName}` | Describe a backup vault |
 | `DeleteBackupVault` | `DELETE` | `/backup-vaults/{backupVaultName}` | Delete an empty backup vault, locked or not |
 | `ListBackupVaults` | `GET` | `/backup-vaults/` | List all backup vaults; honours the `vaultType` filter |
-| `CreateLogicallyAirGappedBackupVault` | `PUT` | `/logically-air-gapped-backup-vaults/{backupVaultName}` | Create a logically air-gapped vault, `AVAILABLE` at once; `DescribeBackupVault` reports its `VaultType`, `VaultState` and retention |
+| `CreateLogicallyAirGappedBackupVault` | `PUT` | `/logically-air-gapped-backup-vaults/{backupVaultName}` | Create a logically air-gapped vault, `AVAILABLE` at once; `DescribeBackupVault` reports its `VaultType`, `VaultState`, retention and a compliance lock whose `LockDate` is the creation date |
 
 ### Backup Vault Access Policy
 
@@ -192,7 +192,8 @@ Actual backup is simulated — no data is read from or written to the referenced
 - The access policy and notification configuration are **not** returned by
   `DescribeBackupVault`, matching AWS: each is reachable only through its own `Get`
   operation. The lock fields (`Locked`, `LockDate`, `MinRetentionDays`,
-  `MaxRetentionDays`) are on the vault, also matching AWS.
+  `MaxRetentionDays`) are on the vault, also matching AWS. A standard vault reports
+  `VaultType` `BACKUP_VAULT` in `DescribeBackupVault` and `ListBackupVaults`.
 
 ## Configuration
 

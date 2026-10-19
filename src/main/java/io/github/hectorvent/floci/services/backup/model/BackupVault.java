@@ -65,8 +65,8 @@ public class BackupVault {
 
     public static final String VAULT_ID_FIELD = "FlociVaultId";
 
-    // Set only on logically air-gapped vaults. A standard vault leaves both null, so its
-    // DescribeBackupVault response is unchanged by their addition.
+    // Stored only on logically air-gapped vaults; a standard vault leaves VaultType null and
+    // BackupController reports it as BACKUP_VAULT. VaultState is set on air-gapped vaults only.
     @JsonProperty("VaultType")
     private String vaultType;
 

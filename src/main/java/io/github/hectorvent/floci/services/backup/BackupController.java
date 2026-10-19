@@ -116,6 +116,11 @@ public class BackupController {
     private ObjectNode vaultJson(BackupVault vault) {
         ObjectNode node = objectMapper.valueToTree(vault);
         node.remove(BackupVault.VAULT_ID_FIELD);
+        // AWS reports a standard vault as BACKUP_VAULT. Stored standard vaults (including ones
+        // persisted before VaultType existed) leave it null, so it is filled here at read time.
+        if (vault.getVaultType() == null) {
+            node.put("VaultType", "BACKUP_VAULT");
+        }
         return node;
     }
 
