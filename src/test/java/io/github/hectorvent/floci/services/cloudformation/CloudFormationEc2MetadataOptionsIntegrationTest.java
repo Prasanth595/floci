@@ -17,9 +17,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * MetadataOptions declared through CloudFormation reach the instance: an AWS::EC2::LaunchTemplate
  * stores them, an AWS::EC2::Instance launches with its template's options under its own, and an
- * update changes them in place, as the property's "No interruption" update behavior says. A
- * template with {@code HttpTokens: required} is what CDK's {@code requireImdsv2} generates; the
- * metadata service enforces the stored options ({@code Ec2MetadataTokenRequirementIntegrationTest}).
+ * update changes them in place, as the property's "No interruption" update behavior says, and a
+ * rollback puts them back. A template with {@code HttpTokens: required} is what CDK's
+ * {@code requireImdsv2} generates; the instance then carries it as RunInstances or
+ * ModifyInstanceMetadataOptions would have set it.
  */
 @QuarkusTest
 class CloudFormationEc2MetadataOptionsIntegrationTest {
@@ -287,6 +288,92 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
             XmlPath unchanged = describeInstance(instanceId);
             assertEquals("t3.micro", unchanged.getString(INSTANCE + "instanceType"));
             assertEquals("required", unchanged.getString(INSTANCE + "metadataOptions.httpTokens"));
+        } finally {
+            cfn("DeleteStack", stackName, null);
+        }
+    }
+
+    /**
+     * An update that turns the token requirement off in place, then fails on a later resource,
+     * rolls the instance back to requiring tokens; the stack ends rolled back, not stuck.
+     */
+    @Test
+    void aFailedUpdateRollsTheInstancesMetadataOptionsBack() {
+        String stackName = "cfn-metadata-rollback-" + UUID.randomUUID().toString().substring(0, 8);
+        String created = """
+                {
+                  "Resources": {
+                    "Inst": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {"ImageId": "ami-12345678", "MetadataOptions": {"HttpTokens": "required"}}
+                    }
+                  },
+                  "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
+                }
+                """;
+        // The second instance names a launch template that does not exist, so it fails after Inst
+        // has been updated, which it depends on.
+        String failing = """
+                {
+                  "Resources": {
+                    "Inst": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {"ImageId": "ami-12345678", "MetadataOptions": {"HttpTokens": "optional"}}
+                    },
+                    "Later": {
+                      "Type": "AWS::EC2::Instance",
+                      "DependsOn": "Inst",
+                      "Properties": {"LaunchTemplate": {"LaunchTemplateId": "lt-0123456789abcdef0", "Version": "1"}}
+                    }
+                  },
+                  "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
+                }
+                """;
+        try {
+            cfn("CreateStack", stackName, created);
+            String instanceId = output(describeStack(stackName, "CREATE_COMPLETE"), "InstanceId");
+
+            cfn("UpdateStack", stackName, failing);
+            describeStack(stackName, "UPDATE_ROLLBACK_COMPLETE");
+            assertEquals("required", describeInstance(instanceId).getString(INSTANCE + "metadataOptions.httpTokens"));
+        } finally {
+            cfn("DeleteStack", stackName, null);
+        }
+    }
+
+    /**
+     * LaunchTemplateData given as an {@code Fn::If} keeps the MetadataOptions of the branch its
+     * condition chooses, as it keeps that branch's ImageId.
+     */
+    @ParameterizedTest
+    @CsvSource({"true,required", "false,optional"})
+    void launchTemplateDataChosenByFnIfKeepsItsMetadataOptions(String require, String httpTokens) {
+        String stackName = "cfn-metadata-lt-if-" + UUID.randomUUID().toString().substring(0, 8);
+        String template = """
+                {
+                  "Parameters": {"Require": {"Type": "String", "Default": "%s"}},
+                  "Conditions": {"Requires": {"Fn::Equals": [{"Ref": "Require"}, "true"]}},
+                  "Resources": {
+                    "Lt": {
+                      "Type": "AWS::EC2::LaunchTemplate",
+                      "Properties": {
+                        "LaunchTemplateData": {"Fn::If": ["Requires",
+                          {"ImageId": "ami-12345678", "MetadataOptions": {"HttpTokens": "required"}},
+                          {"ImageId": "ami-12345678"}]}
+                      }
+                    },
+                    "Inst": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {"LaunchTemplate": {"LaunchTemplateId": {"Ref": "Lt"}, "Version": "1"}}
+                    }
+                  },
+                  "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
+                }
+                """.formatted(require);
+        try {
+            cfn("CreateStack", stackName, template);
+            String instanceId = output(describeStack(stackName, "CREATE_COMPLETE"), "InstanceId");
+            assertEquals(httpTokens, describeInstance(instanceId).getString(INSTANCE + "metadataOptions.httpTokens"));
         } finally {
             cfn("DeleteStack", stackName, null);
         }

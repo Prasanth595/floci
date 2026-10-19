@@ -750,6 +750,116 @@ class Ec2InstanceCfnProvisionerTest {
         assertTrue(provisioner.hasReplacementUpdate(r));
     }
 
+    /**
+     * A stack update that changes only the instance's MetadataOptions in place, and then rolls back
+     * because a later resource failed, puts the options and their record back and reports the
+     * rollback done: otherwise the instance would keep options the stack no longer declares.
+     */
+    @Test
+    void aRolledBackInPlaceUpdatePutsTheMetadataOptionsBack() throws Exception {
+        Instance i1 = launchRequiringTokens();
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "required"}}
+                """), ctx(null));
+        Map<String, String> declared = declarations(r);
+
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "optional", "HttpPutResponseHopLimit": 3}}
+                """), ctx("i-1"));
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<LaunchTemplateData.MetadataOptions> applied =
+                ArgumentCaptor.forClass(LaunchTemplateData.MetadataOptions.class);
+        verify(ec2, times(2)).modifyInstanceMetadataOptions(eq("us-east-1"), eq("i-1"), applied.capture());
+        assertEquals("optional", applied.getAllValues().get(0).getHttpTokens());
+        LaunchTemplateData.MetadataOptions restored = applied.getAllValues().get(1);
+        assertEquals("required", restored.getHttpTokens());
+        assertEquals(1, restored.getHttpPutResponseHopLimit());
+        assertEquals(i1.effectiveMetadataOptions().getHttpEndpoint(), restored.getHttpEndpoint());
+        assertEquals(declared, declarations(r));
+        assertFalse(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
+    }
+
+    /**
+     * When the same update also changed something CloudFormation cannot put back in place here
+     * (the instance type), the options still go back, and the rollback still reports that it could
+     * not undo the update.
+     */
+    @Test
+    void aRolledBackUpdateWithOtherInPlaceChangesStillPutsTheMetadataOptionsBack() throws Exception {
+        Instance i1 = launchRequiringTokens();
+        i1.setInstanceType("t3.micro");
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "InstanceType": "t3.micro", "MetadataOptions": {"HttpTokens": "required"}}
+                """), ctx(null));
+
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "InstanceType": "t3.large", "MetadataOptions": {"HttpTokens": "optional"}}
+                """), ctx("i-1"));
+        assertFalse(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<LaunchTemplateData.MetadataOptions> applied =
+                ArgumentCaptor.forClass(LaunchTemplateData.MetadataOptions.class);
+        verify(ec2, times(2)).modifyInstanceMetadataOptions(eq("us-east-1"), eq("i-1"), applied.capture());
+        assertEquals("required", applied.getAllValues().get(1).getHttpTokens());
+        assertFalse(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
+    }
+
+    /** An update that leaves the options as they are saves nothing to put back. */
+    @Test
+    void anInPlaceUpdateThatKeepsTheMetadataOptionsSavesNoCopy() throws Exception {
+        launchRequiringTokens();
+        StackResource r = resource("Server");
+        String template = """
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "required"}}
+                """;
+        provisioner.provision(r, props(template), ctx(null));
+
+        provisioner.provision(r, props(template), ctx("i-1"));
+
+        assertFalse(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
+        assertFalse(provisioner.rollbackUpdate(r));
+        verify(ec2, never()).modifyInstanceMetadataOptions(any(), any(), any());
+    }
+
+    @Test
+    void aCommittedOrClearedInPlaceUpdateDropsTheSavedMetadataOptions() throws Exception {
+        Instance i1 = launchRequiringTokens();
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "required"}}
+                """), ctx(null));
+        String optional = """
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "optional"}}
+                """;
+
+        provisioner.provision(r, props(optional), ctx("i-1"));
+        assertTrue(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
+        provisioner.completeUpdate(r);
+        assertFalse(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
+        i1.getMetadataOptions().setHttpTokens("optional");
+
+        provisioner.provision(r, props(optional.replace("optional", "required")), ctx("i-1"));
+        assertTrue(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
+        provisioner.clearUpdate(r);
+        assertFalse(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
+    }
+
+    /**
+     * One stubbed instance, i-1, of the default type, whose applied options require tokens, as a
+     * launch declaring them gives.
+     */
+    private Instance launchRequiringTokens() {
+        Instance i1 = stubLaunches("i-1").get(0);
+        i1.setInstanceType("t3.micro");
+        LaunchTemplateData.MetadataOptions applied = LaunchTemplateData.MetadataOptions.launchDefaults();
+        applied.setHttpTokens("required");
+        i1.setMetadataOptions(applied);
+        return i1;
+    }
+
     @Test
     void aCommittedOrClearedReplacementDropsTheSavedRecords() throws Exception {
         List<Instance> instances = stubLaunches("i-1", "i-2", "i-3", "i-4");
