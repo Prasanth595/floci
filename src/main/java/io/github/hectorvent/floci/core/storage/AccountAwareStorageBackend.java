@@ -426,6 +426,11 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         delegate.delete(accountId + "/" + key);
     }
 
+    /** Deletes the entry stored under {@code rawKey} exactly, as {@link #scanAllAccountsWithRawKeys} reports it. */
+    public void deleteRaw(String rawKey) {
+        delegate.delete(rawKey);
+    }
+
     public List<V> scanForAccount(String accountId, Predicate<String> keyFilter) {
         String prefix = accountId + "/";
         return delegate.scan(k -> k.startsWith(prefix) && keyFilter.test(k.substring(prefix.length())));
@@ -544,7 +549,8 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return prefix() + "/" + key;
     }
 
-    private static boolean hasAccountPrefix(String key) {
+    /** Whether {@code key} starts with a 12-digit account id and a slash, as account-scoped keys do. */
+    public static boolean hasAccountPrefix(String key) {
         if (key.length() < 13 || key.charAt(12) != '/') {
             return false;
         }

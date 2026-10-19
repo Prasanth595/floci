@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.EmulatorConfig.SqsServiceConfig.EndpointStrategy;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -432,6 +433,10 @@ public class SqsService implements Resettable, ResourceProvider {
         this.requestContextInstance = requestContextInstance;
         this.iamService = iamService;
         this.moveTasksByHandle = new MoveTaskStore(clock);
+        rekeyToAccountAndName(queueStore);
+        rekeyToAccountAndName(messageStore);
+        rekeyToAccountAndName(dedupStore);
+        rekeyToAccountAndName(dedupIdentityStore);
         loadPersistedMessages();
         loadPersistedDedup();
         loadPersistedDedupIdentities();
@@ -453,6 +458,90 @@ public class SqsService implements Resettable, ResourceProvider {
         moveTaskCancellation.values().forEach(MoveTaskCancellation::request);
         moveTaskCancellation.clear();
         moveTasksByHandle.clear();
+    }
+
+    /**
+     * Moves entries stored under a longer queue path, as a base URL with a path of its own gave
+     * them, to the {@code region::/<account>/<name>} key every lookup now uses. It runs in the
+     * constructor, before any request can reach the stores. An entry whose destination already
+     * holds a different value stays where it is, so no stored data is dropped.
+     */
+    private static <V> void rekeyToAccountAndName(StorageBackend<String, V> store) {
+        if (store == null) {
+            return;
+        }
+        if (store instanceof AccountAwareStorageBackend<V> aware) {
+            aware.scanAllAccountsWithRawKeys().forEach((rawKey, value) -> {
+                boolean prefixed = AccountAwareStorageBackend.hasAccountPrefix(rawKey);
+                String storedKey = prefixed ? rawKey.substring(13) : rawKey;
+                if (!hasLongerQueuePath(storedKey)) {
+                    return;
+                }
+                String key = accountAndNameKey(storedKey);
+                String accountId = prefixed ? rawKey.substring(0, 12) : queuePathAccount(key, aware.accountId());
+                Optional<V> existing = aware.getForAccount(accountId, key);
+                if (existing.isEmpty()) {
+                    aware.putForAccount(accountId, key, value);
+                } else if (!sameValue(existing.get(), value)) {
+                    LOG.warnv("SQS entry {0} kept in place; {1} already holds a different value", rawKey, key);
+                    return;
+                }
+                aware.deleteRaw(rawKey);
+            });
+            return;
+        }
+        for (String storedKey : new ArrayList<>(store.keys())) {
+            if (!hasLongerQueuePath(storedKey)) {
+                continue;
+            }
+            Optional<V> value = store.get(storedKey);
+            if (value.isEmpty()) {
+                continue;
+            }
+            String key = accountAndNameKey(storedKey);
+            Optional<V> existing = store.get(key);
+            if (existing.isEmpty()) {
+                store.put(key, value.get());
+            } else if (!sameValue(existing.get(), value.get())) {
+                LOG.warnv("SQS entry {0} kept in place; {1} already holds a different value", storedKey, key);
+                continue;
+            }
+            store.delete(storedKey);
+        }
+    }
+
+    private static final ObjectMapper MIGRATION_MAPPER = new ObjectMapper().registerModule(new JavaTimeModule());
+
+    /** Whether two stored values hold the same data, compared as the storage layer serializes them. */
+    private static boolean sameValue(Object a, Object b) {
+        if (Objects.equals(a, b)) {
+            return true;
+        }
+        try {
+            return MIGRATION_MAPPER.valueToTree(a).equals(MIGRATION_MAPPER.valueToTree(b));
+        } catch (IllegalArgumentException e) {
+            LOG.debugv("SQS migration could not compare stored values: {0}", e.getMessage());
+            return false;
+        }
+    }
+
+    /** The account segment of a {@code region::/<account>/<name>} key, or {@code fallback} when it is not an account id. */
+    private static String queuePathAccount(String key, String fallback) {
+        String path = key.substring(key.indexOf("::") + 2);
+        String account = path.length() > 1 ? path.substring(1, Math.max(1, path.indexOf('/', 1))) : "";
+        return account.matches("\\d{12}") ? account : fallback;
+    }
+
+    private static boolean hasLongerQueuePath(String storageKey) {
+        return !accountAndNameKey(storageKey).equals(storageKey);
+    }
+
+    private static String accountAndNameKey(String storageKey) {
+        int sep = storageKey.indexOf("::");
+        if (sep < 0) {
+            return storageKey;
+        }
+        return storageKey.substring(0, sep + 2) + accountAndName(storageKey.substring(sep + 2));
     }
 
     private void loadPersistedMessages() {
@@ -2054,7 +2143,17 @@ public class SqsService implements Resettable, ResourceProvider {
         if (pathStart < 0) {
             return queueUrl;
         }
-        return queueUrl.substring(pathStart);
+        return accountAndName(queueUrl.substring(pathStart));
+    }
+
+    /**
+     * The last two segments of a queue path, {@code /<account>/<name>}, so a path a base URL
+     * prefixes, such as {@code /sqs/<account>/<name>}, keys the same queue as the AWS form.
+     */
+    private static String accountAndName(String path) {
+        int last = path.lastIndexOf('/');
+        int previous = last > 0 ? path.lastIndexOf('/', last - 1) : -1;
+        return previous > 0 ? path.substring(previous) : path;
     }
 
     private GuardedMessageQueue unexpiredMessages(String storageKey, Queue queue) {

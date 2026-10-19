@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
@@ -392,7 +393,7 @@ class SqsServiceTest {
         assertEquals(BASE_URL + "/000000000000/my-queue", url);
     }
 
-    private SqsService serviceWithStrategy(InMemoryStorage<String, Queue> store, RegionResolver resolver,
+    private SqsService serviceWithStrategy(StorageBackend<String, Queue> store, RegionResolver resolver,
                                            EndpointStrategy strategy) {
         return new SqsService(store, null, null, null, 30, 1048576, BASE_URL, resolver, false, null, clock,
                 ReceiptHandle.DEFAULT_SECRET, null, null, strategy);
@@ -518,6 +519,91 @@ class SqsServiceTest {
 
         assertEquals(expectedUrl, service.listQueues(null, region).getFirst().getQueueUrl());
         assertEquals(expectedUrl, service.getQueueUrl("legacy-queue", region));
+    }
+
+    @Test
+    void aBaseUrlPathKeepsTheSameQueueAcrossAStrategySwitch() {
+        String region = "eu-west-1";
+        String prefixedBase = "http://localhost:4566/sqs";
+        RegionResolver resolver = new RegionResolver("us-east-1", "000000000000");
+        InMemoryStorage<String, Queue> store = new InMemoryStorage<>();
+        SqsService floci = new SqsService(store, null, null, null, 30, 1048576, prefixedBase, resolver, false,
+                null, clock, ReceiptHandle.DEFAULT_SECRET, null, null, EndpointStrategy.FLOCI);
+        assertEquals(prefixedBase + "/000000000000/kept", floci.createQueue("kept", null, region).getQueueUrl());
+
+        SqsService aws = new SqsService(store, null, null, null, 30, 1048576, prefixedBase, resolver, false,
+                null, clock, ReceiptHandle.DEFAULT_SECRET, null, null, EndpointStrategy.AWS);
+        String awsUrl = "https://sqs.eu-west-1.amazonaws.com/000000000000/kept";
+        assertEquals(awsUrl, aws.getQueueUrl("kept", region));
+        assertEquals(awsUrl, aws.createQueue("kept", null, region).getQueueUrl());
+        assertEquals(1, aws.listQueues(null, region).size());
+    }
+
+    @Test
+    void aQueueStoredUnderABaseUrlPathIsRekeyedByAccountAndName() {
+        String region = "eu-west-1";
+        AccountAwareStorageBackend<Queue> store = AccountAwareStorageBackend.inMemory("000000000000");
+        store.putForAccount("000000000000", region + "::/sqs/000000000000/prefixed",
+                prefixedQueue("000000000000", "prefixed"));
+
+        SqsService service = serviceWithStrategy(store, new RegionResolver("us-east-1", "000000000000"),
+                EndpointStrategy.FLOCI);
+
+        assertEquals(List.of("000000000000/" + region + "::/000000000000/prefixed"),
+                List.copyOf(store.scanAllAccountsWithRawKeys().keySet()));
+        assertEquals(BASE_URL + "/000000000000/prefixed", service.getQueueUrl("prefixed", region));
+    }
+
+    @Test
+    void anUnprefixedLegacyEntryMovesToTheAccountInItsQueuePath() {
+        String region = "eu-west-1";
+        InMemoryStorage<String, Queue> raw = new InMemoryStorage<>();
+        Queue stored = prefixedQueue("111111111111", "legacy");
+        raw.put(region + "::/sqs/111111111111/legacy", stored);
+        AccountAwareStorageBackend<Queue> store = new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        serviceWithStrategy(store, new RegionResolver("us-east-1", "000000000000"), EndpointStrategy.FLOCI);
+
+        assertEquals(List.of("111111111111/" + region + "::/111111111111/legacy"),
+                List.copyOf(store.scanAllAccountsWithRawKeys().keySet()));
+        assertEquals(Optional.of(stored), store.getForAccount("111111111111", region + "::/111111111111/legacy"));
+    }
+
+    @Test
+    void anEntryWhoseDestinationHoldsADifferentValueStaysInPlace() {
+        String region = "eu-west-1";
+        AccountAwareStorageBackend<Queue> store = AccountAwareStorageBackend.inMemory("000000000000");
+        Queue current = prefixedQueue("000000000000", "kept");
+        Queue older = prefixedQueue("000000000000", "kept");
+        older.setAttributes(Map.of("VisibilityTimeout", "99"));
+        store.putForAccount("000000000000", region + "::/000000000000/kept", current);
+        store.putForAccount("000000000000", region + "::/sqs/000000000000/kept", older);
+
+        serviceWithStrategy(store, new RegionResolver("us-east-1", "000000000000"), EndpointStrategy.FLOCI);
+
+        assertEquals(Optional.of(current), store.getForAccount("000000000000", region + "::/000000000000/kept"));
+        assertEquals(Optional.of(older), store.getForAccount("000000000000", region + "::/sqs/000000000000/kept"));
+    }
+
+    @Test
+    void anEntryWhoseDestinationHoldsTheSameValueIsRemoved() {
+        String region = "eu-west-1";
+        AccountAwareStorageBackend<Queue> store = AccountAwareStorageBackend.inMemory("000000000000");
+        store.putForAccount("000000000000", region + "::/000000000000/kept", prefixedQueue("000000000000", "kept"));
+        store.putForAccount("000000000000", region + "::/sqs/000000000000/kept", prefixedQueue("000000000000", "kept"));
+
+        serviceWithStrategy(store, new RegionResolver("us-east-1", "000000000000"), EndpointStrategy.FLOCI);
+
+        assertEquals(List.of("000000000000/" + region + "::/000000000000/kept"),
+                List.copyOf(store.scanAllAccountsWithRawKeys().keySet()));
+    }
+
+    private static Queue prefixedQueue(String accountId, String name) {
+        Queue queue = new Queue(name, "http://localhost:4566/sqs/" + accountId + "/" + name);
+        queue.setAccountId(accountId);
+        queue.setCreatedTimestamp(Instant.EPOCH);
+        queue.setLastModifiedTimestamp(Instant.EPOCH);
+        return queue;
     }
 
     @Test
