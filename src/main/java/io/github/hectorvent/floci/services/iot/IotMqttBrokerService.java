@@ -125,6 +125,7 @@ public class IotMqttBrokerService implements Resettable {
     private static final String DUPLICATE_CLIENTID = "DUPLICATE_CLIENTID";
     private static final String API_INITIATED_DISCONNECT = "API_INITIATED_DISCONNECT";
     private static final String CLIENT_ERROR = "CLIENT_ERROR";
+    private static final long KEEP_ALIVE_SLACK_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
 
     private static final long RULES_RESETTING = 1;
     private static final long RULES_STOPPED = 2;
@@ -411,6 +412,7 @@ public class IotMqttBrokerService implements Resettable {
      * every client except one that names a custom authorizer, see {@link #authorizeCustom}.
      */
     void handleEndpoint(MqttEndpoint endpoint, boolean verifyDevice) {
+        long connectNanos = System.nanoTime();
         String clientId = endpoint.clientIdentifier();
         SocketAddress remoteAddress = endpoint.remoteAddress();
         String sourceIp = remoteAddress == null ? null : remoteAddress.host();
@@ -433,11 +435,11 @@ public class IotMqttBrokerService implements Resettable {
             String username = endpoint.auth() == null ? null : endpoint.auth().getUsername();
             String authorizerName = IotCustomAuthorizer.authorizerName(username, upgrade);
             if (authorizerName != null) {
-                authorizeCustom(endpoint, authorizerName, upgrade, sourceIp, sourcePort);
+                authorizeCustom(endpoint, authorizerName, upgrade, sourceIp, sourcePort, connectNanos);
                 return;
             }
         }
-        admit(endpoint, principal, sourceIp, sourcePort);
+        admit(endpoint, principal, sourceIp, sourcePort, connectNanos);
     }
 
     /**
@@ -447,7 +449,7 @@ public class IotMqttBrokerService implements Resettable {
      * MQTT 5 with reason code 0x87, as AWS IoT does.
      */
     private void authorizeCustom(MqttEndpoint endpoint, String authorizerName, IotCustomAuthorizer.WebSocketUpgrade upgrade,
-                                 String sourceIp, int sourcePort) {
+                                 String sourceIp, int sourcePort, long connectNanos) {
         String clientId = endpoint.clientIdentifier();
         String username = endpoint.auth() == null ? null : endpoint.auth().getUsername();
         String password = endpoint.auth() == null ? null : endpoint.auth().getPassword();
@@ -462,7 +464,7 @@ public class IotMqttBrokerService implements Resettable {
                 return;
             }
             if (decision.succeeded() && decision.result()) {
-                admit(endpoint, null, sourceIp, sourcePort);
+                admit(endpoint, null, sourceIp, sourcePort, connectNanos);
                 return;
             }
             LOG.debugv("IoT MQTT client {0} refused by custom authorizer {1}: {2}", clientId, authorizerName,
@@ -482,9 +484,10 @@ public class IotMqttBrokerService implements Resettable {
      * {@code principal} is the certificate id a TLS client was admitted with, null otherwise.
      * {@code clientIp} and {@code clientPort} are the address the client connected from: the
      * socket's, or for a WebSocket client the one the bridge recorded at the upgrade, as the
-     * bridge's own socket is loopback.
+     * bridge's own socket is loopback. {@code connectNanos} is when the CONNECT arrived, which
+     * the keep-alive runs from.
      */
-    private void admit(MqttEndpoint endpoint, String principal, String clientIp, int clientPort) {
+    private void admit(MqttEndpoint endpoint, String principal, String clientIp, int clientPort, long connectNanos) {
         String clientId = endpoint.clientIdentifier();
         boolean cleanSession = endpoint.isCleanSession();
         ClientSession session;
@@ -501,7 +504,7 @@ public class IotMqttBrokerService implements Resettable {
                     principal,
                     versionNumber,
                     new AtomicBoolean(),
-                    new AtomicLong(System.nanoTime()));
+                    new AtomicLong(connectNanos));
             ClientSession previous = sessionsByClient.put(clientId, session);
             if (previous != null && previous.endpoint() != endpoint) {
                 endSession(previous, DUPLICATE_CLIENTID);
@@ -609,8 +612,6 @@ public class IotMqttBrokerService implements Resettable {
 
     private void handleSubscribe(ClientSession session, MqttSubscribeMessage message) {
         session.received();
-        Map<String, Subscription> clientSubscriptions = subscriptionsByClient.computeIfAbsent(
-                session.clientId(), ignored -> new ConcurrentHashMap<>());
         List<MqttQoS> grantedQos = new ArrayList<>();
         List<Subscription> accepted = new ArrayList<>();
 
@@ -623,10 +624,19 @@ public class IotMqttBrokerService implements Resettable {
             }
 
             int granted = qos == MqttQoS.AT_LEAST_ONCE ? 1 : 0;
-            Subscription subscription = new Subscription(topicFilter, granted);
-            clientSubscriptions.put(topicFilter, subscription);
-            accepted.add(subscription);
+            accepted.add(new Subscription(topicFilter, granted));
             grantedQos.add(granted == 1 ? MqttQoS.AT_LEAST_ONCE : MqttQoS.AT_MOST_ONCE);
+        }
+        synchronized (sessionLock) {
+            // An ended session no longer owns its client id's subscriptions; a newer connection may.
+            if (session.ended().get()) {
+                return;
+            }
+            Map<String, Subscription> clientSubscriptions = subscriptionsByClient.computeIfAbsent(
+                    session.clientId(), ignored -> new ConcurrentHashMap<>());
+            for (Subscription subscription : accepted) {
+                clientSubscriptions.put(subscription.topicFilter(), subscription);
+            }
         }
 
         session.endpoint().subscribeAcknowledge(message.messageId(), grantedQos);
@@ -635,13 +645,18 @@ public class IotMqttBrokerService implements Resettable {
 
     private void handleUnsubscribe(ClientSession session, MqttUnsubscribeMessage message) {
         session.received();
-        Map<String, Subscription> clientSubscriptions = subscriptionsByClient.get(session.clientId());
-        if (clientSubscriptions != null) {
-            for (String topic : message.topics()) {
-                clientSubscriptions.remove(topic);
+        synchronized (sessionLock) {
+            if (session.ended().get()) {
+                return;
             }
-            if (clientSubscriptions.isEmpty()) {
-                subscriptionsByClient.remove(session.clientId(), clientSubscriptions);
+            Map<String, Subscription> clientSubscriptions = subscriptionsByClient.get(session.clientId());
+            if (clientSubscriptions != null) {
+                for (String topic : message.topics()) {
+                    clientSubscriptions.remove(topic);
+                }
+                if (clientSubscriptions.isEmpty()) {
+                    subscriptionsByClient.remove(session.clientId(), clientSubscriptions);
+                }
             }
         }
         session.endpoint().unsubscribeAcknowledge(message.messageId());
@@ -879,9 +894,10 @@ public class IotMqttBrokerService implements Resettable {
 
         boolean keepAliveExpired() {
             int keepAlive = endpoint.keepAliveTimeSeconds();
-            // Vert.x closes at 1.5 times the keep-alive from Netty's last read, and a compliant client
-            // sends something within its keep-alive, so silence for a whole one means it timed out.
-            return keepAlive > 0 && System.nanoTime() - lastPacketNanos.get() >= TimeUnit.SECONDS.toNanos(keepAlive);
+            // Vert.x closes a client silent for ceil(1.5 * keep-alive) seconds since Netty's last read.
+            // Every packet is stamped here before Netty stamps it, the CONNECT microseconds after.
+            long timeout = TimeUnit.SECONDS.toNanos((long) Math.ceil(keepAlive * 1.5)) - KEEP_ALIVE_SLACK_NANOS;
+            return keepAlive > 0 && System.nanoTime() - lastPacketNanos.get() >= timeout;
         }
     }
 

@@ -114,7 +114,9 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -1061,7 +1063,7 @@ class IotMqttBrokerServiceTest {
         MqttEndpoint subscribing = keepAliveEndpoint("subscribing");
         MqttEndpoint unsubscribing = keepAliveEndpoint("unsubscribing");
         MqttEndpoint acknowledging = keepAliveEndpoint("acknowledging");
-        Thread.sleep(1_100);
+        Thread.sleep(2_000);
 
         ArgumentCaptor<Handler<MqttPublishMessage>> publish = handlerCaptor();
         verify(publishing).publishHandler(publish.capture());
@@ -1096,6 +1098,89 @@ class IotMqttBrokerServiceTest {
             assertEquals("CONNECTION_LOST",
                     awaitPresence("disconnected", clientId, 1).get(0).get("disconnectReason").asText(), clientId);
         }
+    }
+
+    /** Vert.x times a client out after 1.5 times its keep-alive, so a socket lost before then is a connection loss. */
+    @Test
+    void anAbruptCloseBeforeTheKeepAliveTimeoutIsDueIsAConnectionLoss() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttEndpoint dropped = mock(MqttEndpoint.class);
+        when(dropped.clientIdentifier()).thenReturn("dropped");
+        when(dropped.keepAliveTimeSeconds()).thenReturn(3);
+        broker.handleEndpoint(dropped, false);
+        Thread.sleep(3_100);
+
+        ArgumentCaptor<Handler<Void>> close = handlerCaptor();
+        verify(dropped).closeHandler(close.capture());
+        close.getValue().handle(null);
+
+        assertEquals("CONNECTION_LOST", awaitPresence("disconnected", "dropped", 1).get(0).get("disconnectReason").asText());
+    }
+
+    /**
+     * Vert.x times the keep-alive from the CONNECT, so a client its custom authorizer took a while
+     * to admit, silent since, has timed out when Vert.x closes it.
+     */
+    @Test
+    void aSilentClientTimesOutFromItsConnectNotFromItsCustomAuthorizersDecision() throws Exception {
+        startBrokerRecordingPublishes();
+        when(customAuthorizer.connectPolicies(eq("slow-auth"), eq("slow"), any(), any(), any())).thenAnswer(invocation -> {
+            Thread.sleep(1_500);
+            return List.of("""
+                    {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "iot:Connect", "Resource": "*"}]}""");
+        });
+        SocketAddress bridge = SocketAddress.inetSocketAddress(50125, "127.0.0.1");
+        broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(
+                Map.of(), IotCustomAuthorizer.NAME_PARAM + "=slow-auth", null, "203.0.113.7", 41235));
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn("slow");
+        when(endpoint.remoteAddress()).thenReturn(bridge);
+        when(endpoint.keepAliveTimeSeconds()).thenReturn(1);
+
+        broker.handleEndpoint(endpoint, false);
+        awaitPresence("connected", "slow", 1);
+        Thread.sleep(600);
+        ArgumentCaptor<Handler<Void>> close = handlerCaptor();
+        verify(endpoint, times(2)).closeHandler(close.capture());
+        close.getValue().handle(null);
+
+        assertEquals("MQTT_KEEP_ALIVE_TIMEOUT", awaitPresence("disconnected", "slow", 1).get(0).get("disconnectReason").asText());
+    }
+
+    /**
+     * A SUBSCRIBE or UNSUBSCRIBE the replaced connection still had in flight when a newer one took
+     * its client id over changes nothing: the newer session neither inherits the one nor loses a
+     * subscription to the other.
+     */
+    @Test
+    void aTakenOverSessionNeitherAddsNorRemovesSubscriptions() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttEndpoint replaced = mock(MqttEndpoint.class);
+        when(replaced.clientIdentifier()).thenReturn("taken");
+        when(replaced.isCleanSession()).thenReturn(true);
+        broker.handleEndpoint(replaced, false);
+        ArgumentCaptor<Handler<MqttSubscribeMessage>> lateSubscribe = handlerCaptor();
+        verify(replaced).subscribeHandler(lateSubscribe.capture());
+        ArgumentCaptor<Handler<MqttUnsubscribeMessage>> lateUnsubscribe = handlerCaptor();
+        verify(replaced).unsubscribeHandler(lateUnsubscribe.capture());
+        MqttEndpoint current = mock(MqttEndpoint.class);
+        when(current.clientIdentifier()).thenReturn("taken");
+        when(current.isCleanSession()).thenReturn(true);
+        when(current.isConnected()).thenReturn(true);
+        broker.handleEndpoint(current, false);
+        ArgumentCaptor<Handler<MqttSubscribeMessage>> subscribe = handlerCaptor();
+        verify(current).subscribeHandler(subscribe.capture());
+        subscribe.getValue().handle(subscribeMessage("kept/topic"));
+
+        lateSubscribe.getValue().handle(subscribeMessage("stale/topic"));
+        MqttUnsubscribeMessage unsubscription = mock(MqttUnsubscribeMessage.class);
+        when(unsubscription.topics()).thenReturn(List.of("kept/topic"));
+        lateUnsubscribe.getValue().handle(unsubscription);
+        broker.publish("stale/topic", "{}".getBytes(StandardCharsets.UTF_8));
+        broker.publish("kept/topic", "{}".getBytes(StandardCharsets.UTF_8));
+
+        verify(current, timeout(10_000)).publish(eq("kept/topic"), any(), any(), anyBoolean(), anyBoolean());
+        verify(current, never()).publish(eq("stale/topic"), any(), any(), anyBoolean(), anyBoolean());
     }
 
     /**
@@ -1464,6 +1549,15 @@ class IotMqttBrokerServiceTest {
             }
             Thread.sleep(10);
         }
+    }
+
+    private static MqttSubscribeMessage subscribeMessage(String topicFilter) {
+        MqttTopicSubscription requested = mock(MqttTopicSubscription.class);
+        when(requested.topicName()).thenReturn(topicFilter);
+        when(requested.qualityOfService()).thenReturn(MqttQoS.AT_MOST_ONCE);
+        MqttSubscribeMessage message = mock(MqttSubscribeMessage.class);
+        when(message.topicSubscriptions()).thenReturn(List.of(requested));
+        return message;
     }
 
     /** A connected client with a one-second keep-alive. */
