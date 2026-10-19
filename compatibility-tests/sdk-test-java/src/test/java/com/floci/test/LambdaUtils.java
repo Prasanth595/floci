@@ -334,6 +334,26 @@ public final class LambdaUtils {
         return createZip("lambda_function.py", code);
     }
 
+    /**
+     * ZIP containing a Node.js handler that returns the Lambda proxy result its {@code mode} path
+     * parameter names: one that raises, one without a statusCode, one whose statusCode is not a
+     * number, one whose statusCode is text that spells one, and one outside 100 to 599.
+     */
+    public static byte[] proxyResponseZip() {
+        String code = """
+                exports.handler = async (event) => {
+                    const mode = (event.pathParameters || {}).mode;
+                    if (mode === 'raise') throw new Error('boom');
+                    if (mode === 'nostatus') return { body: 'x', headers: { 'x-probe': '1' } };
+                    if (mode === 'badstatus') return { statusCode: 'abc', body: 'x' };
+                    if (mode === 'textstatus') return { statusCode: '201', body: 'x' };
+                    if (mode === 'highstatus') return { statusCode: 600, body: 'x' };
+                    return { statusCode: 200, body: 'ok' };
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
     private static byte[] createZip(String filename, String content) {
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();

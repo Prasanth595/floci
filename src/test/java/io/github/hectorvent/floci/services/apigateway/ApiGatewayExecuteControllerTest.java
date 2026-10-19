@@ -14,6 +14,9 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -27,6 +30,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.TimeZone;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -245,6 +249,47 @@ class ApiGatewayExecuteControllerTest {
     void omitsEmptyAuthorizerVtlContext() {
         assertNull(ApiGatewayExecuteController.vtlAuthorizerContext(null, null));
         assertNull(ApiGatewayExecuteController.vtlAuthorizerContext(null, Map.of()));
+    }
+
+    // ── HTTP API Lambda proxy responses AWS cannot read ──────
+
+    /**
+     * Measured on HTTP APIs (eu-west-1, 2026-10-19), for payload formats 1.0 and 2.0: a 1.0 result
+     * that is not an object with a statusCode, and a statusCode that is not a whole number from 100
+     * to 599, are answered with 500 and the generic message; a statusCode given as text that spells
+     * one is taken, and headers that are not an object are left out. A function that raises is
+     * covered below.
+     */
+    @ParameterizedTest(name = "{0} payload {1}")
+    @MethodSource("httpApiProxyResponses")
+    void httpApiAnswersAProxyResponseAsAwsReadsIt(String result, String format, int status, String body) {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(proxyPayload(result), true, "2.0".equals(format))) {
+            assertEquals(status, response.getStatus());
+            assertEquals(body, bodyOf(response));
+        }
+    }
+
+    static Stream<Arguments> httpApiProxyResponses() {
+        String error = "{\"message\":\"Internal Server Error\"}";
+        return Stream.of(
+                Arguments.of("\"hello\"", "1.0", 500, error),
+                Arguments.of("null", "1.0", 500, error),
+                Arguments.of("5", "1.0", 500, error),
+                Arguments.of("{\"statusCode\":\"abc\",\"body\":\"x\"}", "1.0", 500, error),
+                Arguments.of("{\"statusCode\":\"abc\",\"body\":\"x\"}", "2.0", 500, error),
+                Arguments.of("{\"statusCode\":99,\"body\":\"x\"}", "1.0", 500, error),
+                Arguments.of("{\"statusCode\":99,\"body\":\"x\"}", "2.0", 500, error),
+                Arguments.of("{\"statusCode\":600,\"body\":\"x\"}", "1.0", 500, error),
+                Arguments.of("{\"statusCode\":600,\"body\":\"x\"}", "2.0", 500, error),
+                Arguments.of("{\"statusCode\":201.5,\"body\":\"x\"}", "1.0", 500, error),
+                Arguments.of("{\"statusCode\":201.5,\"body\":\"x\"}", "2.0", 500, error),
+                Arguments.of("{\"statusCode\":\"201\",\"body\":\"x\"}", "1.0", 201, "x"),
+                Arguments.of("{\"statusCode\":\"201\",\"body\":\"x\"}", "2.0", 201, "x"),
+                Arguments.of("{\"statusCode\":201,\"headers\":\"x\",\"body\":\"x\"}", "1.0", 201, "x"),
+                Arguments.of("{\"statusCode\":201,\"headers\":\"x\",\"body\":\"x\"}", "2.0", 201, "x"),
+                Arguments.of("null", "2.0", 200, "null"),
+                Arguments.of("5", "2.0", 200, "5"));
     }
 
     // ── Lambda proxy response Content-Type header matching ──────
@@ -552,21 +597,21 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = controller(new ObjectMapper());
         try (Response response = controller.buildProxyResponse(functionError(
                 "{\"errorType\":\"Error\",\"errorMessage\":\"boom\",\"trace\":[]}"), true)) {
-            assertEquals(502, response.getStatus());
+            assertEquals(500, response.getStatus());
             assertEquals("application/json", String.valueOf(response.getMediaType()));
             assertEquals("{\"message\":\"Internal Server Error\"}", bodyOf(response));
         }
     }
 
     @Test
-    void httpApiPayloadV1ResponseWithoutStatusCodeIsNotInferred() {
-        // An HTTP API integration configured with payloadFormatVersion 1.0 keeps the 1.0 response rules.
+    void httpApiPayloadV1ResponseWithoutStatusCodeAnswersInternalServerErrorMessage() {
+        // Format 1.0 infers nothing, so a result without a statusCode is one the HTTP API cannot read.
         String payload = "{\"headers\":{\"X-Trace\":\"value\"},\"body\":\"inner\"}";
         ApiGatewayExecuteController controller = controller(new ObjectMapper());
         try (Response response = controller.buildProxyResponse(proxyPayload(payload), true, false)) {
-            assertEquals(200, response.getStatus());
-            assertEquals("inner", bodyOf(response));
-            assertEquals("value", response.getHeaderString("X-Trace"));
+            assertEquals(500, response.getStatus());
+            assertEquals("{\"message\":\"Internal Server Error\"}", bodyOf(response));
+            assertNull(response.getHeaderString("X-Trace"));
         }
     }
 
@@ -575,7 +620,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = controller(new ObjectMapper());
         try (Response response = controller.buildProxyResponse(functionError(
                 "{\"errorType\":\"Error\",\"errorMessage\":\"boom\",\"trace\":[]}"), true, false)) {
-            assertEquals(502, response.getStatus());
+            assertEquals(500, response.getStatus());
             assertEquals("{\"message\":\"Internal Server Error\"}", bodyOf(response));
         }
     }

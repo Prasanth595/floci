@@ -656,6 +656,12 @@ curl http://{apiId}.execute-api.{region}.localhost.floci.io:4566/{stageName}/{pa
 APIs created or updated with `disableExecuteApiEndpoint` reject requests to
 this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 
+A Lambda proxy integration's response is read as AWS reads it (measured): a function that raises, a
+format 1.0 result that is not an object with a `statusCode`, and a `statusCode` that is not a whole
+number from 100 to 599 (text that spells one, such as `"201"`, is taken) are answered `500` with
+`{"message":"Internal Server Error"}`. Format 2.0 takes a result without a `statusCode` as a `200`
+whose body is the result itself.
+
 An API with a `corsConfiguration` applies it as AWS does (measured). It ignores the CORS headers an
 integration returns, and sets its own on whatever answers a route: the integration, or API Gateway
 itself refusing the request (a JWT or Lambda authorizer's `401` or `403`, an unsigned call to an

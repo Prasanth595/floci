@@ -1586,9 +1586,9 @@ public class ApiGatewayExecuteController {
     // response rules (inference and cookies). An HTTP API integration can still use format 1.0.
     Response buildProxyResponse(InvokeResult result, boolean httpApi, boolean payloadV2) {
         if (httpApi && result.getFunctionError() != null) {
-            // An HTTP API never relays the error payload: the client gets AWS's generic message.
-            return Response.status(502).entity(jsonMessage("Internal Server Error"))
-                    .type(MediaType.APPLICATION_JSON).build();
+            // An HTTP API never relays the error payload: the client gets AWS's generic message, as
+            // a 500 (measured, both payload formats, eu-west-1, 2026-10-19).
+            return httpApiError(500, "Internal Server Error");
         }
         if (result.getPayload() == null || result.getPayload().length == 0) {
             return Response.status(result.getFunctionError() != null ? 502 : result.getStatusCode()).build();
@@ -1605,7 +1605,14 @@ public class ApiGatewayExecuteController {
                         : result.getPayload();
                 return Response.status(200).entity(inferredBody).type(MediaType.APPLICATION_JSON).build();
             }
-            int statusCode = node.path("statusCode").asInt(200);
+            if (httpApi && httpApiStatusCode(node) == null) {
+                // Measured (eu-west-1, 2026-10-19): an HTTP API answers a response it cannot read
+                // with 500 and its generic message, in format 1.0 a result that is not an object with
+                // a statusCode, and in either format a statusCode that is not a whole number from 100
+                // to 599, though text spelling one ("201") is taken.
+                return httpApiError(500, "Internal Server Error");
+            }
+            int statusCode = httpApi ? httpApiStatusCode(node) : node.path("statusCode").asInt(200);
             if (result.getFunctionError() != null && !node.has("statusCode")) statusCode = 502;
 
             Response.ResponseBuilder builder = Response.status(statusCode);
@@ -1642,6 +1649,27 @@ public class ApiGatewayExecuteController {
             LOG.warnv("Failed to parse Lambda response: {0}", e.getMessage());
             return Response.status(502).entity(result.getPayload()).type(MediaType.APPLICATION_JSON).build();
         }
+    }
+
+    /** The status and generic message an HTTP API answers with when its Lambda integration fails. */
+    private Response httpApiError(int status, String message) {
+        return Response.status(status).entity(jsonMessage(message)).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    private static final Pattern WHOLE_STATUS = Pattern.compile("\\d{1,3}");
+
+    /**
+     * The status an HTTP API takes from a Lambda proxy response, or null when it cannot read one: a
+     * whole number from 100 to 599, or text that spells one.
+     */
+    private static Integer httpApiStatusCode(JsonNode response) {
+        JsonNode status = response.path("statusCode");
+        String text = status.isIntegralNumber() ? status.asText() : status.isTextual() ? status.textValue() : "";
+        if (!WHOLE_STATUS.matcher(text).matches()) {
+            return null;
+        }
+        int code = Integer.parseInt(text);
+        return code >= 100 && code <= 599 ? code : null;
     }
 
     /**
@@ -2776,9 +2804,7 @@ public class ApiGatewayExecuteController {
             // function that is gone, or one API Gateway may not invoke).
             LOG.debugv("execute-api v2: invoking {0} failed: {1}", functionName, e.getMessage());
             boolean throttled = e.getHttpStatus() == 429;
-            return Response.status(throttled ? 503 : 500)
-                    .entity(jsonMessage(throttled ? "Service Unavailable" : "Internal Server Error"))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return throttled ? httpApiError(503, "Service Unavailable") : httpApiError(500, "Internal Server Error");
         }
     }
 
