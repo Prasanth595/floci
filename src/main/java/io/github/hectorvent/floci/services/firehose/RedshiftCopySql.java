@@ -16,10 +16,6 @@ final class RedshiftCopySql {
     private static final String NAME = "(?:[A-Za-z_][A-Za-z0-9_$]*|\"[^\"]+\")";
     private static final Pattern QUALIFIED_NAME = Pattern.compile(NAME + "(?:\\." + NAME + ")?");
     private static final Pattern SIMPLE_NAME = Pattern.compile(NAME);
-    // PostgreSQL reads a tag as an identifier: letters, digits after the first character, underscores and any
-    // non-ASCII character, so $a1$ and a tag of non-ASCII letters open a dollar-quoted string just as $$ does.
-    private static final Pattern DOLLAR_QUOTE =
-            Pattern.compile("\\$(?:[A-Za-z_\\u0080-\\uFFFF][A-Za-z0-9_\\u0080-\\uFFFF]*)?\\$");
 
     private RedshiftCopySql() {}
 
@@ -52,7 +48,9 @@ final class RedshiftCopySql {
 
     /**
      * True when the text could carry a second statement: a {@code ;} outside a quoted literal other than a single
-     * closing one, an unterminated literal, a dollar-quoted string or a comment. Single-quoted strings honour
+     * closing one, an unterminated literal, any {@code $} or a comment. A {@code $} outside a literal is refused
+     * outright rather than parsed as a dollar-quote tag: CopyOptions never need dollar quoting, and a tag can hold any
+     * non-ASCII character, so a tag pattern here could always fall behind PostgreSQL's lexer. Single-quoted strings honour
      * backslash escapes only in the {@code E'...'} form, double-quoted identifiers are skipped as a whole, and a
      * doubled quote stays inside its literal.
      */
@@ -68,7 +66,7 @@ final class RedshiftCopySql {
                 i = endOfQuoted(body, i + 1, '\'', escapeString);
             } else if (c == '"') {
                 i = endOfQuoted(body, i + 1, '"', false);
-            } else if (c == ';' || startsComment(body, i) || DOLLAR_QUOTE.matcher(body).region(i, length).lookingAt()) {
+            } else if (c == ';' || c == '$' || startsComment(body, i)) {
                 return true;
             } else {
                 i++;

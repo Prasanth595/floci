@@ -103,6 +103,22 @@ class RedshiftCopySqlTest {
     }
 
     @Test
+    void dollarQuoteTagOutsideTheBasicPlaneCannotHideASecondStatement() {
+        assertTrue(RedshiftCopySql.hasStatementSeparator("NULL AS $😀$'$😀$; drop table t; --'"));
+    }
+
+    @Test
+    void dollarSignInsideAQuotedLiteralIsAllowed() {
+        assertFalse(RedshiftCopySql.hasStatementSeparator("NULL AS 'a$b$' CSV"));
+        assertFalse(RedshiftCopySql.hasStatementSeparator("DELIMITER \"$\" CSV"));
+    }
+
+    @Test
+    void anyDollarSignOutsideAQuotedLiteralIsRefused() {
+        assertTrue(RedshiftCopySql.hasStatementSeparator("NULL AS $x"));
+    }
+
+    @Test
     void dollarQuotingAndCommentsAreRefused() {
         assertTrue(RedshiftCopySql.hasStatementSeparator("NULL AS $$'$$ gzip"));
         assertTrue(RedshiftCopySql.hasStatementSeparator("gzip -- trailing"));
