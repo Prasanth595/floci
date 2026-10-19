@@ -95,6 +95,78 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
         }
     }
 
+    /**
+     * An earlier update added SubnetC and moved the load balancer onto it, so SubnetC was recorded
+     * after the load balancer. An update that removes both has to delete the load balancer first,
+     * though the template that named what it uses is gone.
+     */
+    @Test
+    void anUpdateThatRemovesTheLoadBalancerAndASubnetItUsesDeletesTheLoadBalancerFirst() {
+        String stack = "alb-remove-both-" + Long.toString(System.nanoTime(), 36);
+        try {
+            createStack(stack, template(CIDR_B, false, List.of("SubnetA", "SubnetB"), ""));
+            Map<String, String> moved = updateStack(stack,
+                    template(CIDR_B, true, List.of("SubnetA", "SubnetB", "SubnetC"), ""), "UPDATE_COMPLETE");
+            assertEquals(3, loadBalancerSubnets(moved.get("Alb")).size());
+
+            String withoutEither = """
+                {
+                  "Resources": {
+                    "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.93.0.0/16"}},
+                    "SubnetA": {
+                      "Type": "AWS::EC2::Subnet",
+                      "Properties": {"VpcId": {"Ref": "Vpc"}, "CidrBlock": "%s", "AvailabilityZone": "us-east-1a"}
+                    },
+                    "SubnetB": {
+                      "Type": "AWS::EC2::Subnet",
+                      "Properties": {"VpcId": {"Ref": "Vpc"}, "CidrBlock": "%s", "AvailabilityZone": "us-east-1b"}
+                    }
+                  }
+                }
+                """.formatted(CIDR_A, CIDR_B);
+            request(CFN_AUTH, "UpdateStack", "StackName", stack, "TemplateBody", withoutEither).statusCode(200);
+            CfnStackWaits.StackState updated = CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE");
+
+            assertTrue(updated.reason() == null || updated.reason().isEmpty(), updated.reason());
+            ec2("DescribeSubnets", "SubnetId.1", moved.get("SubnetC")).statusCode(400)
+                    .body(containsString("InvalidSubnetID.NotFound"));
+            request(ELB_AUTH, "DescribeLoadBalancers", "LoadBalancerArns.member.1", moved.get("Alb")).statusCode(400)
+                    .body(containsString("LoadBalancerNotFound"));
+        } finally {
+            deleteStack(stack);
+        }
+    }
+
+    /**
+     * A new name replaces the load balancer, and the old one stays on SubnetC until the update's
+     * cleanup deletes it. The same update drops SubnetC, so the cleanup has to delete the old load
+     * balancer before SubnetC.
+     */
+    @Test
+    void anUpdateThatReplacesTheLoadBalancerAndDropsASubnetTheOldOneUsesDeletesTheOldOneFirst() {
+        String stack = "alb-rename-drop-" + Long.toString(System.nanoTime(), 36);
+        String suffix = stack.substring(stack.length() - 8);
+        try {
+            Map<String, String> created = createStack(stack, named(
+                    template(CIDR_B, true, List.of("SubnetA", "SubnetB", "SubnetC"), ""), "old-" + suffix));
+
+            request(CFN_AUTH, "UpdateStack", "StackName", stack, "TemplateBody",
+                    named(template(CIDR_B, false, List.of("SubnetA", "SubnetB"), ""), "new-" + suffix))
+                    .statusCode(200);
+            CfnStackWaits.StackState updated = CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE");
+
+            assertTrue(updated.reason() == null || updated.reason().isEmpty(), updated.reason());
+            Map<String, String> outputs = outputs(stack);
+            assertNotEquals(created.get("Alb"), outputs.get("Alb"));
+            request(ELB_AUTH, "DescribeLoadBalancers", "LoadBalancerArns.member.1", created.get("Alb")).statusCode(400)
+                    .body(containsString("LoadBalancerNotFound"));
+            ec2("DescribeSubnets", "SubnetId.1", created.get("SubnetC")).statusCode(400)
+                    .body(containsString("InvalidSubnetID.NotFound"));
+        } finally {
+            deleteStack(stack);
+        }
+    }
+
     @Test
     void aFailedUpdateMovesTheLoadBalancerBackToItsSubnets() {
         String stack = "alb-subnets-rollback-" + Long.toString(System.nanoTime(), 36);
@@ -450,6 +522,12 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
               }
             }
             """.formatted(CIDR_A, cidrB, subnetC, refs, extraResources, subnetCOutput);
+    }
+
+    /** A {@link #template} whose ALB has the given name, which is create-only. */
+    private static String named(String template, String name) {
+        return template.replace("\"Scheme\": \"internal\", \"Subnets\"",
+                "\"Name\": \"" + name + "\", \"Scheme\": \"internal\", \"Subnets\"");
     }
 
     /**

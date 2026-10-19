@@ -2270,11 +2270,21 @@ public class CloudFormationService implements ResourceProvider {
                     // resources are deleted during post-update cleanup.
                     persistStack(stack);
                 }
-                // Both cleanup paths feed the single final status/reason writer.
-                List<UpdateCleanupFailure> cleanupFailures =
-                        new ArrayList<>(deleteRemovedOrConditionFalseResources(
-                                stack, resources, conditions, region));
-                cleanupFailures.addAll(finishCommittedResourceCleanup(stack, region));
+                // Both cleanup paths feed the single final status/reason writer. A removed resource
+                // whose delete failed is tried once more after the replacement cleanup, as an entity
+                // a replacement displaced can still use it: an old load balancer on a subnet the same
+                // update removed.
+                List<StackResource> retried = deleteRemovedOrConditionFalseResources(
+                        stack, resources, conditions, region);
+                List<UpdateCleanupFailure> displacedFailures = finishCommittedResourceCleanup(stack, region);
+                List<UpdateCleanupFailure> cleanupFailures = new ArrayList<>();
+                for (StackResource resource : retried) {
+                    UpdateCleanupFailure failure = deleteRemovedResource(stack, resource, region, true);
+                    if (failure != null) {
+                        cleanupFailures.add(failure);
+                    }
+                }
+                cleanupFailures.addAll(displacedFailures);
                 finishCommittedStackUpdate(stack, cleanupFailures);
                 return;
             }
@@ -3059,16 +3069,21 @@ public class CloudFormationService implements ResourceProvider {
      * as {@code DELETE_FAILED}, so a later {@code DeleteStack} or {@code UpdateStack} can retry the cleanup
      * instead of orphaning the backing resource.
      *
-     * @return one {@link UpdateCleanupFailure} per resource whose physical deletion failed
+     * <p>Dependents go first, in the order {@link #resourcesInCreationOrder} gives rather than the map's:
+     * a subnet an earlier update added sits after the load balancer it moved onto it, and the template
+     * that named what a removed resource uses is gone. A failed delete is not reported here, since the
+     * caller tries it again after the replacement cleanup.
+     *
+     * @return the resources whose physical deletion failed, for {@link #deleteRemovedResource} to try again
      */
-    private List<UpdateCleanupFailure> deleteRemovedOrConditionFalseResources(Stack stack, JsonNode resources,
+    private List<StackResource> deleteRemovedOrConditionFalseResources(Stack stack, JsonNode resources,
                                                            Map<String, Boolean> conditions, String region) {
         if (!resources.isObject()) {
             return List.of();
         }
 
-        List<UpdateCleanupFailure> failures = new ArrayList<>();
-        List<StackResource> ordered = new ArrayList<>(stack.resourcesSnapshot().values());
+        List<StackResource> failed = new ArrayList<>();
+        List<StackResource> ordered = resourcesInCreationOrder(stack, region);
         Collections.reverse(ordered);
         for (StackResource resource : ordered) {
             JsonNode resDef = resources.get(resource.getLogicalId());
@@ -3086,31 +3101,49 @@ public class CloudFormationService implements ResourceProvider {
 
             addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                     resource.getResourceType(), "DELETE_IN_PROGRESS", null);
-            try {
-                deleteResourcePhysically(resource, region, ownerAccount(stack));
-                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
-                        resource.getResourceType(), "DELETE_COMPLETE", null);
-                stack.getResources().remove(resource.getLogicalId());
-            } catch (Exception e) {
-                String reason = e.getMessage() != null
-                        ? e.getMessage()
-                        : "Resource deletion failed during update cleanup";
-                failures.add(new UpdateCleanupFailure(
-                        resource.getLogicalId(), resource.getPhysicalId(), reason));
-                // Keep the resource under stack management as DELETE_FAILED. Removing it here would
-                // drop it from DescribeStackResources while the backing resource still exists,
-                // orphaning it and preventing a later DeleteStack/UpdateStack from retrying cleanup.
-                resource.setStatus("DELETE_FAILED");
-                resource.setStatusReason(reason);
-                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
-                        resource.getResourceType(), "DELETE_FAILED", reason);
-                LOG.warnv("Failed to delete removed or condition-disabled {0} ({1}) in stack {2}: {3}",
-                        resource.getResourceType(), resource.getPhysicalId(),
-                        stack.getStackName(), reason);
+            if (deleteRemovedResource(stack, resource, region, false) != null) {
+                failed.add(resource);
             }
         }
 
-        return failures;
+        return failed;
+    }
+
+    /**
+     * Deletes one removed or condition-disabled resource, and reports a failure only on the last
+     * attempt.
+     *
+     * @return the failure, or null once the resource is deleted
+     */
+    private UpdateCleanupFailure deleteRemovedResource(Stack stack, StackResource resource, String region,
+                                                       boolean lastAttempt) {
+        try {
+            deleteResourcePhysically(resource, region, ownerAccount(stack));
+            addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                    resource.getResourceType(), "DELETE_COMPLETE", null);
+            stack.getResources().remove(resource.getLogicalId());
+            return null;
+        } catch (Exception e) {
+            String reason = e.getMessage() != null
+                    ? e.getMessage()
+                    : "Resource deletion failed during update cleanup";
+            UpdateCleanupFailure failure = new UpdateCleanupFailure(
+                    resource.getLogicalId(), resource.getPhysicalId(), reason);
+            if (!lastAttempt) {
+                return failure;
+            }
+            // Keep the resource under stack management as DELETE_FAILED. Removing it here would
+            // drop it from DescribeStackResources while the backing resource still exists,
+            // orphaning it and preventing a later DeleteStack/UpdateStack from retrying cleanup.
+            resource.setStatus("DELETE_FAILED");
+            resource.setStatusReason(reason);
+            addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                    resource.getResourceType(), "DELETE_FAILED", reason);
+            LOG.warnv("Failed to delete removed or condition-disabled {0} ({1}) in stack {2}: {3}",
+                    resource.getResourceType(), resource.getPhysicalId(),
+                    stack.getStackName(), reason);
+            return failure;
+        }
     }
 
     /**
