@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
 import io.github.hectorvent.floci.core.common.SsrfProtection;
+import org.apache.hc.client5.http.ConnectTimeoutException;
 import org.apache.hc.client5.http.DnsResolver;
 import org.apache.hc.client5.http.SystemDefaultDnsResolver;
 import org.apache.hc.client5.http.classic.methods.HttpUriRequestBase;
@@ -31,6 +32,7 @@ import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
+import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
@@ -56,9 +58,11 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
 
     private static final Logger LOG = Logger.getLogger(CloudFrontOriginHttpClient.class);
 
-    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
-    private static final Duration RESPONSE_TIMEOUT = Duration.ofSeconds(30);
-    /** CloudFront retries only the methods it treats as idempotent when an origin times out. */
+    private static final String ORIGIN_TIMEOUT_MESSAGE =
+            "The origin didn't respond before the request expired.";
+    private static final Duration CONNECT_TIMEOUT = CloudFrontOriginTimeouts.DEFAULT_CONNECTION_TIMEOUT;
+    private static final Duration RESPONSE_TIMEOUT = CloudFrontOriginTimeouts.DEFAULT_ORIGIN_READ_TIMEOUT;
+    /** CloudFront retries a response timeout only for the methods it treats as idempotent. */
     private static final Set<String> IDEMPOTENT_METHODS = Set.of("GET", "HEAD");
     static final int MAX_CONNECTIONS = 100;
 
@@ -155,12 +159,13 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
     }
 
     /**
-     * Sends {@code request}, honoring {@code timeouts}. A timeout before the origin answered is
-     * retried up to the configured connection attempts for an idempotent method (GET, HEAD), whose
-     * request has no body to replay; every other method is attempted once, as CloudFront does not
-     * retry it. When the last attempt times out, {@link CloudFrontOriginTimeoutException} is thrown
-     * so the viewer is answered 504 rather than 502. A non-timeout failure, such as a refused
-     * connection, propagates unchanged.
+     * Sends {@code request}, honoring {@code timeouts}. A connection attempt counts for every
+     * method, so a connect timeout or a refused connection is retried up to the configured
+     * connection attempts whatever the method is. A response timeout is retried only for an
+     * idempotent method (GET, HEAD), whose request has no body to replay; every other method is
+     * attempted once for it, as CloudFront does not retry it. When the attempts run out, a timeout
+     * raises {@link CloudFrontOriginTimeoutException} so the viewer is answered 504 rather than
+     * 502, while a refused connection propagates unchanged, as a bad gateway.
      */
     OpenResponse open(HttpRequest request,
                       List<CloudFrontOriginRequestBuilder.Header> forwardedHeaders,
@@ -170,21 +175,30 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
         OriginTimeouts effective = timeouts != null
                 ? timeouts
                 : new OriginTimeouts(CONNECT_TIMEOUT, request.timeout().orElse(RESPONSE_TIMEOUT), 1);
-        int attempts = retryable(request.method()) ? Math.max(1, effective.connectionAttempts()) : 1;
-        SocketTimeoutException lastTimeout = null;
+        int attempts = Math.max(1, effective.connectionAttempts());
+        IOException lastFailure = null;
         for (int attempt = 1; attempt <= attempts; attempt++) {
             try {
                 return send(request, forwardedHeaders, originHeaders, requestBody, requestBodyLength, effective);
+            } catch (ConnectTimeoutException e) {
+                lastFailure = e;
             } catch (SocketTimeoutException e) {
-                lastTimeout = e;
-                if (attempt < attempts) {
-                    LOG.debugv("CloudFront origin request timed out on attempt {0} of {1}; retrying",
-                            attempt, attempts);
+                if (!idempotent(request.method())) {
+                    throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE, e);
                 }
+                lastFailure = e;
+            } catch (ConnectException e) {
+                lastFailure = e;
+            }
+            if (attempt < attempts) {
+                LOG.debugv("CloudFront origin connection attempt {0} of {1} failed; retrying",
+                        attempt, attempts);
             }
         }
-        throw new CloudFrontOriginTimeoutException(
-                "The origin didn't respond before the request expired.", lastTimeout);
+        if (lastFailure instanceof SocketTimeoutException timeout) {
+            throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE, timeout);
+        }
+        throw lastFailure;
     }
 
     private OpenResponse send(HttpRequest request,
@@ -223,7 +237,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
         }
     }
 
-    private static boolean retryable(String method) {
+    private static boolean idempotent(String method) {
         return method != null && IDEMPOTENT_METHODS.contains(method.toUpperCase(Locale.ROOT));
     }
 

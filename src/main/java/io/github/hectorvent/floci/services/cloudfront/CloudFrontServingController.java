@@ -103,14 +103,6 @@ public class CloudFrontServingController {
     private static final Set<String> BODY_METHODS = Set.of("POST", "PUT", "PATCH", "DELETE");
     /** The 504 body CloudFront returns when the origin did not answer in time. */
     static final String ORIGIN_TIMEOUT_MESSAGE = "The origin didn't respond before the request expired.";
-    private static final int DEFAULT_CONNECTION_TIMEOUT_SECONDS = 10;
-    private static final int MIN_CONNECTION_TIMEOUT_SECONDS = 1;
-    private static final int MAX_CONNECTION_TIMEOUT_SECONDS = 10;
-    private static final int DEFAULT_CONNECTION_ATTEMPTS = 3;
-    private static final int MAX_CONNECTION_ATTEMPTS = 3;
-    private static final int DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS = 30;
-    private static final int MIN_ORIGIN_READ_TIMEOUT_SECONDS = 1;
-    private static final int MAX_ORIGIN_READ_TIMEOUT_SECONDS = 120;
 
     private final CloudFrontService service;
     private final S3Service s3Service;
@@ -823,15 +815,18 @@ public class CloudFrontServingController {
      */
     private static CloudFrontOriginHttpClient.OriginTimeouts originTimeouts(Origin origin) {
         int connectSeconds = clampToDefault(origin.getConnectionTimeout(),
-                MIN_CONNECTION_TIMEOUT_SECONDS, MAX_CONNECTION_TIMEOUT_SECONDS,
-                DEFAULT_CONNECTION_TIMEOUT_SECONDS);
+                CloudFrontOriginTimeouts.MIN_CONNECTION_TIMEOUT_SECONDS,
+                CloudFrontOriginTimeouts.MAX_CONNECTION_TIMEOUT_SECONDS,
+                CloudFrontOriginTimeouts.DEFAULT_CONNECTION_TIMEOUT_SECONDS);
         int readSeconds = clampToDefault(
                 intOrDefault(origin.getCustomOriginConfig(), "OriginReadTimeout",
-                        DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS),
-                MIN_ORIGIN_READ_TIMEOUT_SECONDS, MAX_ORIGIN_READ_TIMEOUT_SECONDS,
-                DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS);
+                        CloudFrontOriginTimeouts.DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS),
+                CloudFrontOriginTimeouts.MIN_ORIGIN_READ_TIMEOUT_SECONDS,
+                CloudFrontOriginTimeouts.MAX_ORIGIN_READ_TIMEOUT_SECONDS,
+                CloudFrontOriginTimeouts.DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS);
         int attempts = clampToDefault(origin.getConnectionAttempts(),
-                1, MAX_CONNECTION_ATTEMPTS, DEFAULT_CONNECTION_ATTEMPTS);
+                1, CloudFrontOriginTimeouts.MAX_CONNECTION_ATTEMPTS,
+                CloudFrontOriginTimeouts.DEFAULT_CONNECTION_ATTEMPTS);
         return new CloudFrontOriginHttpClient.OriginTimeouts(
                 Duration.ofSeconds(connectSeconds), Duration.ofSeconds(readSeconds), attempts);
     }
