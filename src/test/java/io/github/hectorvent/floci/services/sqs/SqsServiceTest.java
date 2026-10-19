@@ -398,13 +398,13 @@ class SqsServiceTest {
                 ReceiptHandle.DEFAULT_SECRET, null, null, strategy);
     }
 
-    private SqsService standardService() {
+    private SqsService awsService() {
         return serviceWithStrategy(new InMemoryStorage<>(), new RegionResolver("us-east-1", "000000000000"),
                 EndpointStrategy.AWS);
     }
 
     @Test
-    void defaultPathStrategyReturnsTheEmulatorUrlForm() {
+    void defaultFlociStrategyReturnsTheEmulatorUrlForm() {
         String region = "eu-west-1";
         sqsService.createQueue("path-queue", null, region);
         sqsService.createQueue("path-source", Map.of("RedrivePolicy",
@@ -421,8 +421,8 @@ class SqsServiceTest {
     }
 
     @Test
-    void standardStrategyReturnsTheAwsUrlForm() {
-        SqsService service = standardService();
+    void awsStrategyReturnsTheAwsUrlForm() {
+        SqsService service = awsService();
         String region = "eu-west-1";
 
         assertEquals("https://sqs.eu-west-1.amazonaws.com/000000000000/std-queue",
@@ -432,8 +432,8 @@ class SqsServiceTest {
     }
 
     @Test
-    void standardStrategyListQueuesReturnsAwsUrls() {
-        SqsService service = standardService();
+    void awsStrategyListQueuesReturnsAwsUrls() {
+        SqsService service = awsService();
         String region = "us-west-2";
         service.createQueue("listed-queue", null, region);
 
@@ -444,8 +444,8 @@ class SqsServiceTest {
     }
 
     @Test
-    void standardStrategyCarriesThePartitionDnsSuffix() {
-        SqsService service = standardService();
+    void awsStrategyCarriesThePartitionDnsSuffix() {
+        SqsService service = awsService();
         assertEquals("https://sqs.cn-north-1.amazonaws.com.cn/000000000000/cn-queue",
                 service.createQueue("cn-queue", null, "cn-north-1").getQueueUrl());
         service.createQueue("gov-queue", null, "us-gov-west-1");
@@ -454,8 +454,8 @@ class SqsServiceTest {
     }
 
     @Test
-    void standardStrategyCreateQueueForAnExistingQueueReturnsTheAwsUrl() {
-        SqsService service = standardService();
+    void awsStrategyCreateQueueForAnExistingQueueReturnsTheAwsUrl() {
+        SqsService service = awsService();
         String region = "eu-west-1";
         service.createQueue("again", null, region);
         assertEquals("https://sqs.eu-west-1.amazonaws.com/000000000000/again",
@@ -463,8 +463,8 @@ class SqsServiceTest {
     }
 
     @Test
-    void standardStrategyListDeadLetterSourceQueuesReturnsAwsUrls() {
-        SqsService service = standardService();
+    void awsStrategyListDeadLetterSourceQueuesReturnsAwsUrls() {
+        SqsService service = awsService();
         String region = "eu-west-1";
         service.createQueue("dlq", null, region);
         service.createQueue("source", Map.of("RedrivePolicy",
@@ -476,7 +476,7 @@ class SqsServiceTest {
     }
 
     @Test
-    void standardStrategyUsesTheQueueOwnerAccount() {
+    void awsStrategyUsesTheQueueOwnerAccount() {
         SqsService service = serviceWithStrategy(new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "111122223333"), EndpointStrategy.AWS);
 
