@@ -1019,6 +1019,119 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
+     * A custom resource's attributes are its handler's response Data, which can name any resource,
+     * such as a bucket created after it and depending on it. Leftover ordering infers nothing from
+     * them, so two leftovers keep their reverse creation order: the bucket goes before the custom
+     * resource it depends on.
+     */
+    @Test
+    void deleteStack_infersNoLeftoverOrderFromACustomResourcesData() {
+        Stack stack = new Stack();
+        stack.setStackName("delete-leftover-custom-data");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
+        stack.setTemplateBody("""
+                {"Resources": {"Queue": {"Type": "AWS::SQS::Queue"}}}""");
+        StackResource queue = resource("Queue", "queue-1", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource namer = resource("Namer", "namer-1", "Custom::BucketNamer", "UPDATE_COMPLETE");
+        namer.getAttributes().put("BucketName", "bucket-1");
+        StackResource bucket = resource("Bucket", "bucket-1", "AWS::S3::Bucket", "UPDATE_COMPLETE");
+        for (StackResource resource : new StackResource[] {queue, namer, bucket}) {
+            stack.getResources().put(resource.getLogicalId(), resource);
+        }
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        when(provisioner.isCustomResourceType("Custom::BucketNamer")).thenReturn(true);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(bucket, REGION);
+        deletes.verify(provisioner).delete(namer, REGION);
+    }
+
+    /**
+     * {@code Custom::DynamoDBReplica} has its own provisioner, and its {@code TableName} names the
+     * table it replicates, so a leftover replica still goes before that table.
+     */
+    @Test
+    void deleteStack_deletesALeftoverDynamoDbReplicaBeforeItsTable() {
+        Stack stack = leftoverStack("delete-leftover-replica", "{\"Table\": {\"Type\": \"AWS::DynamoDB::Table\"}}");
+        StackResource table = resource("Table", "table-1", "AWS::DynamoDB::Table", "CREATE_COMPLETE");
+        StackResource replica = resource("Replica", "table-1-replica", "Custom::DynamoDBReplica", "UPDATE_COMPLETE");
+        replica.getAttributes().put("TableName", "table-1");
+        hold(stack, table, replica);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(replica, REGION);
+        deletes.verify(provisioner).delete(table, REGION);
+    }
+
+    /**
+     * Floci's own attributes on a custom resource are not handler Data: a leftover custom resource
+     * still goes before the topic its {@code ServiceToken} names, so its Delete reaches the handler.
+     */
+    @Test
+    void deleteStack_deletesALeftoverCustomResourceBeforeItsServiceToken() {
+        String topicArn = "arn:aws:sns:us-east-1:000000000000:handler";
+        Stack stack = leftoverStack("delete-leftover-custom-token", "{\"Topic\": {\"Type\": \"AWS::SNS::Topic\"}}");
+        StackResource topic = resource("Topic", topicArn, "AWS::SNS::Topic", "CREATE_COMPLETE");
+        StackResource custom = resource("Notifier", "notifier-1", "Custom::Notifier", "UPDATE_COMPLETE");
+        custom.getAttributes().put("__FlociServiceToken", topicArn);
+        hold(stack, topic, custom);
+        when(provisioner.isCustomResourceType("Custom::Notifier")).thenReturn(true);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(custom, REGION);
+        deletes.verify(provisioner).delete(topic, REGION);
+    }
+
+    /**
+     * A parameter's {@code Value} is a value passed through, not what the parameter uses: a bucket
+     * named after it, created after it, still goes first. (A nested stack's {@code Outputs.*} are
+     * left out the same way; its delete does not go through the dispatcher, so it is not observed
+     * here.)
+     */
+    @Test
+    void deleteStack_infersNoLeftoverOrderFromAParametersValue() {
+        String type = "AWS::SSM::Parameter";
+        String attribute = "Value";
+        Stack stack = leftoverStack("delete-leftover-passthrough", "{\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}");
+        StackResource queue = resource("Queue", "queue-1", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource source = resource("Source", "source-1", type, "UPDATE_COMPLETE");
+        source.getAttributes().put(attribute, "bucket-1");
+        StackResource bucket = resource("Bucket", "bucket-1", "AWS::S3::Bucket", "UPDATE_COMPLETE");
+        hold(stack, queue, source, bucket);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(bucket, REGION);
+        deletes.verify(provisioner).delete(source, REGION);
+    }
+
+    private static Stack leftoverStack(String name, String resources) {
+        Stack stack = new Stack();
+        stack.setStackName(name);
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
+        stack.setTemplateBody("{\"Resources\": " + resources + "}");
+        return stack;
+    }
+
+    private void hold(Stack stack, StackResource... resources) {
+        for (StackResource resource : resources) {
+            stack.getResources().put(resource.getLogicalId(), resource);
+        }
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+    }
+
+    /**
      * A leftover may name another leftover: a VPC an update added and a subnet in it, both left by
      * a failed rollback. The subnet goes before its VPC, which names only itself.
      */

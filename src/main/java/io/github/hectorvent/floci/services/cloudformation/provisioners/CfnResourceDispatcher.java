@@ -14,6 +14,7 @@ import org.jboss.logging.Logger;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
@@ -48,6 +49,16 @@ public class CfnResourceDispatcher {
         this.registry = registry;
         this.dynamicReferences = dynamicReferences;
         this.config = config;
+    }
+
+    /**
+     * Whether a resource type is served by the generic custom-resource handler, whose attributes are
+     * the handler's response Data. An exactly registered {@code Custom::} type, such as
+     * {@code Custom::DynamoDBReplica}, has its own provisioner and is not.
+     */
+    public boolean isCustomResourceType(String resourceType) {
+        Optional<CfnResourceProvisioner> generic = registry.forType("AWS::CloudFormation::CustomResource");
+        return generic.isPresent() && registry.forType(resourceType).equals(generic);
     }
 
     /**

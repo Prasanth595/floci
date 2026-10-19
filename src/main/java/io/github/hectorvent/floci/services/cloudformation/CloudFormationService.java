@@ -59,6 +59,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -3182,7 +3183,8 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, Double> position = new HashMap<>();
             for (StackResource resource : ordered) {
                 position.put(resource.getLogicalId(),
-                        leftoverPosition(resource, rank, holdersByPhysicalId, step, position, new HashSet<>()));
+                        leftoverPosition(resource, rank, holdersByPhysicalId, step, position, new HashSet<>(),
+                                this::referenceValues));
             }
             ordered.sort(Comparator.comparingDouble(r -> position.get(r.getLogicalId())));
         } catch (Exception e) {
@@ -3296,11 +3298,12 @@ public class CloudFormationService implements ResourceProvider {
      * A resource's place in {@link #resourcesInCreationOrder}: its template rank, or for a leftover
      * one step after the latest held resource its attributes name, leftovers included, or else -1.
      * A chain of leftovers stays below the next template rank, and a cycle among them is cut where
-     * it closes.
+     * it closes. Only the values {@code references} gives count; see {@link #referenceValues}.
      */
     private static double leftoverPosition(StackResource resource, Map<String, Integer> rank,
                                            Map<String, List<StackResource>> holdersByPhysicalId,
-                                           double step, Map<String, Double> position, Set<String> visiting) {
+                                           double step, Map<String, Double> position, Set<String> visiting,
+                                           Function<StackResource, Collection<String>> references) {
         Integer resourceRank = rank.get(resource.getLogicalId());
         if (resourceRank != null) {
             return resourceRank;
@@ -3311,17 +3314,41 @@ public class CloudFormationService implements ResourceProvider {
         }
         visiting.add(resource.getLogicalId());
         double placed = -1;
-        for (String value : resource.getAttributes().values()) {
+        for (String value : references.apply(resource)) {
             for (StackResource holder : holdersByPhysicalId.getOrDefault(value, List.of())) {
                 if (!visiting.contains(holder.getLogicalId())) {
                     placed = Math.max(placed,
-                            leftoverPosition(holder, rank, holdersByPhysicalId, step, position, visiting) + step);
+                            leftoverPosition(holder, rank, holdersByPhysicalId, step, position, visiting,
+                                    references) + step);
                 }
             }
         }
         visiting.remove(resource.getLogicalId());
         position.put(resource.getLogicalId(), placed);
         return placed;
+    }
+
+    /**
+     * The attribute values of a resource that may name what it uses, for leftover ordering. A custom
+     * resource's attributes are its handler's response Data, which can name a resource that depends
+     * on it as easily as one it uses, so only Floci's own {@code __Floci} keys count, such as its
+     * {@code ServiceToken}. A nested stack's {@code Outputs.*} and a parameter's {@code Value} are
+     * values passed through, not references, and do not count either.
+     */
+    private Collection<String> referenceValues(StackResource resource) {
+        boolean custom = dispatcher.isCustomResourceType(resource.getResourceType());
+        String type = resource.getResourceType();
+        List<String> values = new ArrayList<>();
+        for (Map.Entry<String, String> attribute : resource.getAttributes().entrySet()) {
+            String key = attribute.getKey();
+            boolean passedThrough = custom ? !key.startsWith("__Floci")
+                    : ("AWS::CloudFormation::Stack".equals(type) && key.startsWith("Outputs."))
+                    || ("AWS::SSM::Parameter".equals(type) && "Value".equals(key));
+            if (!passedThrough) {
+                values.add(attribute.getValue());
+            }
+        }
+        return values;
     }
 
     void deleteStackResources(Stack stack, String region, String accountId) {

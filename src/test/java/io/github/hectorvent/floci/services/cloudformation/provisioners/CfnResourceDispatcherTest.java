@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -34,6 +35,25 @@ class CfnResourceDispatcherTest {
     private final CfnDynamicReferences dynamicReferences = mock(CfnDynamicReferences.class);
     private final CfnResourceDispatcher dispatcher =
             new CfnResourceDispatcher(mapper, registry, dynamicReferences, null);
+
+    /**
+     * A type routed to the generic custom-resource handler is a custom resource; an exactly
+     * registered {@code Custom::} type with its own provisioner, and any other type, is not.
+     */
+    @Test
+    void onlyTypesRoutedToTheCustomResourceHandlerAreCustomResources() {
+        CfnResourceProvisioner generic = provisioner((resource, ctx) -> { });
+        CfnResourceProvisioner replica = provisioner((resource, ctx) -> { });
+        when(registry.forType("AWS::CloudFormation::CustomResource")).thenReturn(Optional.of(generic));
+        when(registry.forType("Custom::Namer")).thenReturn(Optional.of(generic));
+        when(registry.forType("Custom::DynamoDBReplica")).thenReturn(Optional.of(replica));
+        when(registry.forType(TYPE)).thenReturn(Optional.empty());
+
+        assertTrue(dispatcher.isCustomResourceType("AWS::CloudFormation::CustomResource"));
+        assertTrue(dispatcher.isCustomResourceType("Custom::Namer"));
+        assertFalse(dispatcher.isCustomResourceType("Custom::DynamoDBReplica"));
+        assertFalse(dispatcher.isCustomResourceType(TYPE));
+    }
 
     @Test
     void provisionStandaloneResolvesDynamicReferencesThroughTheService() {
