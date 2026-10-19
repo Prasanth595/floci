@@ -150,6 +150,26 @@ class ElbV2StickinessIntegrationTest {
         assertEquals(null, next.getCookie("AWSALB"));
     }
 
+    @Test
+    void inheritedCrossZoneSettingControlsExistingCookies() {
+        enableStickiness(true);
+        Response initial = request(null);
+        String cookie = initial.getCookie("AWSALB");
+        assertNotNull(cookie);
+        query("ModifyLoadBalancerAttributes", "LoadBalancerArn", loadBalancerArn,
+                "Attributes.member.1.Key", "load_balancing.cross_zone.enabled", "Attributes.member.1.Value", false);
+        Response next = request("AWSALB=" + cookie);
+        assertNotEquals(initial.asString(), next.asString());
+        assertEquals(null, next.getCookie("AWSALB"));
+        assertEquals(null, next.getCookie("AWSALBCORS"));
+
+        query("ModifyTargetGroupAttributes", "TargetGroupArn", targetGroupArn,
+                "Attributes.member.1.Key", "load_balancing.cross_zone.enabled", "Attributes.member.1.Value", true);
+        Response overridden = request("AWSALB=" + cookie);
+        assertEquals(initial.asString(), overridden.asString());
+        assertNotNull(overridden.getCookie("AWSALB"));
+    }
+
     private void enableStickiness(boolean enabled) {
         query("ModifyTargetGroupAttributes", "TargetGroupArn", targetGroupArn,
                 "Attributes.member.1.Key", "stickiness.enabled", "Attributes.member.1.Value", enabled);
