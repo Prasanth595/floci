@@ -1226,7 +1226,8 @@ class CloudFormationServiceRollbackTest {
 
     /**
      * A nested stack's {@code Outputs.*} are its child's outputs: a leftover bucket named after
-     * one, created after the nested stack, still goes first.
+     * one, created after the nested stack, still goes first. (The nested stack keeps what its
+     * definition named, here a resource the stack no longer holds.)
      */
     @Test
     void deleteStack_infersNoLeftoverOrderFromANestedStacksOutputs() {
@@ -1235,6 +1236,7 @@ class CloudFormationServiceRollbackTest {
         StackResource queue = resource("Queue", "queue-1", "AWS::SQS::Queue", "CREATE_COMPLETE");
         StackResource nested = resource("Names", childId, "AWS::CloudFormation::Stack", "UPDATE_COMPLETE");
         nested.getAttributes().put("Arn", childId);
+        nested.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "Resource.Source", "source-1");
         nested.getAttributes().put("Outputs.BucketName", "bucket-1");
         StackResource bucket = resource("Bucket", "bucket-1", "AWS::S3::Bucket", "UPDATE_COMPLETE");
         hold(stack, queue, nested, bucket);
@@ -1242,6 +1244,55 @@ class CloudFormationServiceRollbackTest {
         service.deleteStackResources(stack, REGION, ACCOUNT);
 
         assertEquals(List.of("Queue", "Bucket", "Names"), deletesInProgress(stack));
+    }
+
+    /**
+     * A nested stack saved before Floci kept what its definition named still orders by its outputs,
+     * as it did then: a leftover one echoing the VPC it was passed goes before that VPC.
+     */
+    @Test
+    void deleteStack_ordersALeftoverNestedStackSavedWithoutKeptUsesByItsOutputs() {
+        String childId = "arn:aws:cloudformation:us-east-1:000000000000:stack/parent-Network/1";
+        Stack stack = leftoverStack("delete-leftover-nested-legacy", "{\"Vpc\": {\"Type\": \"AWS::EC2::VPC\"}}");
+        StackResource nested = resource("Network", childId, "AWS::CloudFormation::Stack", "UPDATE_COMPLETE");
+        nested.getAttributes().put("Arn", childId);
+        nested.getAttributes().put("Outputs.VpcId", "vpc-1");
+        StackResource vpc = resource("Vpc", "vpc-1", "AWS::EC2::VPC", "CREATE_COMPLETE");
+        hold(stack, nested, vpc);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        assertEquals(List.of("Network", "Vpc"), deletesInProgress(stack));
+    }
+
+    /**
+     * CDK's S3AutoDeleteObjects resource takes its bucket's name as its id, depends on the bucket
+     * and its policy, and empties the bucket on delete. Left over with both, it goes first: what its
+     * definition named outweighs the bucket's own name, and the policy does not count it as the
+     * holder of its id it depends on.
+     */
+    @Test
+    void deleteStack_deletesALeftoverAutoDeleteObjectsResourceBeforeItsPolicyAndBucket() {
+        Stack stack = leftoverStack("delete-leftover-auto-delete", "{\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}");
+        StackResource queue = resource("Queue", "queue-1", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource bucket = resource("Bucket", "bucket-1", "AWS::S3::Bucket", "UPDATE_COMPLETE");
+        bucket.getAttributes().put("BucketName", "bucket-1");
+        bucket.getAttributes().put("Arn", "arn:aws:s3:::bucket-1");
+        StackResource policy = resource("BucketPolicy", "bucket-1", "AWS::S3::BucketPolicy", "UPDATE_COMPLETE");
+        StackResource autoDelete = resource("AutoDelete", "bucket-1", "Custom::S3AutoDeleteObjects",
+                "UPDATE_COMPLETE");
+        autoDelete.getAttributes().put("__FlociServiceToken",
+                "arn:aws:lambda:us-east-1:000000000000:function:provider");
+        autoDelete.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "Resource.Bucket", "bucket-1");
+        autoDelete.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "Resource.BucketPolicy", "bucket-1");
+        hold(stack, queue, bucket, policy, autoDelete);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(autoDelete, REGION);
+        deletes.verify(provisioner).delete(policy, REGION);
+        deletes.verify(provisioner).delete(bucket, REGION);
     }
 
     /**
@@ -1288,7 +1339,8 @@ class CloudFormationServiceRollbackTest {
 
     /**
      * A leftover secret target attachment whose secret the template still names goes before that
-     * secret: it shares the secret's id, and its type says which of the two depends on the other.
+     * secret: it shares the secret's id, and its type alone says which of the two depends on the
+     * other.
      */
     @Test
     void deleteStack_deletesALeftoverSecretAttachmentBeforeTheSecretTheTemplateStillNames() {
@@ -1297,7 +1349,6 @@ class CloudFormationServiceRollbackTest {
                 "{\"Secret\": {\"Type\": \"AWS::SecretsManager::Secret\"}}");
         StackResource attachment = resource("Attachment", secretArn,
                 "AWS::SecretsManager::SecretTargetAttachment", "UPDATE_COMPLETE");
-        attachment.getAttributes().put("Id", secretArn);
         StackResource secret = resource("Secret", secretArn, "AWS::SecretsManager::Secret", "CREATE_COMPLETE");
         secret.getAttributes().put("Arn", secretArn);
         hold(stack, attachment, secret);

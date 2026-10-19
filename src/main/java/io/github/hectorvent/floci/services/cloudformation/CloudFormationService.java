@@ -2101,13 +2101,11 @@ public class CloudFormationService implements ResourceProvider {
                         boolean replaced = dispatcher.hasReplacementUpdate(resource)
                                 || (priorId != null && !priorId.equals(resource.getPhysicalId()));
                         if (replaced) {
-                            Set<String> allResourceIds = new LinkedHashSet<>();
-                            resources.fieldNames().forEachRemaining(allResourceIds::add);
                             for (String candidateId : sortedLogicalIds) {
                                 if (!changedResourceIds.contains(candidateId)) {
                                     Set<String> deps = new LinkedHashSet<>();
                                     collectDependencies(resources.path(candidateId).path("Properties"),
-                                            allResourceIds, deps, conditions);
+                                            templateIds, deps, conditions);
                                     if (deps.contains(logicalId)) {
                                         changedResourceIds.add(candidateId);
                                     }
@@ -3192,7 +3190,9 @@ public class CloudFormationService implements ResourceProvider {
             }
             double step = 1.0 / (leftovers + 1);
             Map<String, Double> position = new HashMap<>();
-            Function<StackResource, Collection<String>> references = resource -> referenceValues(resource, held);
+            Map<String, LeftoverReferences> read = new HashMap<>();
+            Function<StackResource, LeftoverReferences> references = resource -> read.computeIfAbsent(
+                    resource.getLogicalId(), id -> leftoverReferences(resource, held));
             for (StackResource resource : ordered) {
                 position.put(resource.getLogicalId(),
                         leftoverPosition(resource, rank, holdersByPhysicalId, step, position, new HashSet<>(),
@@ -3310,19 +3310,20 @@ public class CloudFormationService implements ResourceProvider {
      * A resource's place in {@link #resourcesInCreationOrder}: its template rank, or for a leftover
      * one step after the latest held resource it uses, leftovers included, or else -1. A chain of
      * leftovers stays below the next template rank, and a cycle among them is cut where it closes.
-     * A leftover uses a held resource whose physical id one of the values {@code references} gives
-     * names (see {@link #referenceValues}), unless that resource's id extends the leftover's. A value
-     * equal to the leftover's own id names the leftover itself, so it does not make the leftover use
-     * a dependent that takes the same id, such as its bucket policy. It still names any other
-     * resource that shares the id, such as the event bus of a rule with the bus's name. A leftover
-     * also uses the resource whose id its own extends, {@code parent-1} for {@code parent-1/child-1},
-     * and a type that takes its parent's id (see {@link #SAME_ID_DEPENDENT_TYPES}) uses whatever else
-     * holds that id.
+     * A leftover uses what its definition named, and a held resource whose physical id one of its
+     * values names (both per {@link #leftoverReferences}), unless that resource's id extends the
+     * leftover's or that resource's own definition named the leftover. A value equal to the
+     * leftover's own id names the leftover itself, so it does not make the leftover use a dependent
+     * that takes the same id, such as its bucket policy. It still names any other resource that
+     * shares the id, such as the event bus of a rule with the bus's name. A leftover also uses the
+     * resource whose id its own extends, {@code parent-1} for {@code parent-1/child-1}, and a type
+     * that takes its parent's id (see {@link #SAME_ID_DEPENDENT_TYPES}) uses whatever else holds
+     * that id.
      */
     private static double leftoverPosition(StackResource resource, Map<String, Integer> rank,
                                            Map<String, List<StackResource>> holdersByPhysicalId,
                                            double step, Map<String, Double> position, Set<String> visiting,
-                                           Function<StackResource, Collection<String>> references) {
+                                           Function<StackResource, LeftoverReferences> references) {
         Integer resourceRank = rank.get(resource.getLogicalId());
         if (resourceRank != null) {
             return resourceRank;
@@ -3379,10 +3380,11 @@ public class CloudFormationService implements ResourceProvider {
     /** The held resources a leftover uses, per {@link #leftoverPosition}. */
     private static List<StackResource> leftoverUses(StackResource resource,
                                                     Map<String, List<StackResource>> holdersByPhysicalId,
-                                                    Function<StackResource, Collection<String>> references) {
+                                                    Function<StackResource, LeftoverReferences> references) {
+        LeftoverReferences named = references.apply(resource);
         String own = resource.getPhysicalId();
-        List<StackResource> uses = new ArrayList<>();
-        for (String value : references.apply(resource)) {
+        List<StackResource> uses = new ArrayList<>(named.declared());
+        for (String value : named.values()) {
             if (value == null) {
                 continue;
             }
@@ -3390,18 +3392,22 @@ public class CloudFormationService implements ResourceProvider {
             for (StackResource holder : holdersByPhysicalId.getOrDefault(value, List.of())) {
                 // Its own id names the leftover, not a dependent that takes the same id.
                 if (holder != resource && !extendsId(holder.getPhysicalId(), own)
-                        && !(ownId && takesParentId(holder))) {
+                        && !(ownId && takesParentId(holder)) && !declares(holder, resource, references)) {
                     uses.add(holder);
                 }
             }
         }
         for (String prefix : idPrefixes(own)) {
-            uses.addAll(holdersByPhysicalId.getOrDefault(prefix, List.of()));
+            for (StackResource holder : holdersByPhysicalId.getOrDefault(prefix, List.of())) {
+                if (!declares(holder, resource, references)) {
+                    uses.add(holder);
+                }
+            }
         }
         if (takesParentId(resource)) {
             // A type that takes its parent's id as its own uses whatever else holds that id.
             for (StackResource holder : holdersByPhysicalId.getOrDefault(own, List.of())) {
-                if (holder != resource && !takesParentId(holder)) {
+                if (holder != resource && !takesParentId(holder) && !declares(holder, resource, references)) {
                     uses.add(holder);
                 }
             }
@@ -3409,12 +3415,22 @@ public class CloudFormationService implements ResourceProvider {
         return uses;
     }
 
+    /** Whether {@code holder}'s definition named {@code resource}: then it depends on it, not the reverse. */
+    private static boolean declares(StackResource holder, StackResource resource,
+                                    Function<StackResource, LeftoverReferences> references) {
+        return references.apply(holder).declared().contains(resource);
+    }
+
+    /** What a resource's record says it uses; see {@link #leftoverReferences}. */
+    private record LeftoverReferences(List<String> values, List<StackResource> declared) {
+    }
+
     /**
      * Types whose physical id is the id of the resource they depend on: a bucket policy is named by
      * its bucket, a secret target attachment by its secret's ARN, a function URL on an alias by the
-     * alias's ARN, and a cluster's capacity provider associations by the cluster. (A function URL
-     * without a qualifier takes its function's ARN, which matches nothing: the function's own id
-     * is its name.)
+     * alias's ARN, and a cluster's capacity provider associations, given the cluster by name, by the
+     * cluster. (A function URL without a qualifier takes its function's ARN, which matches nothing:
+     * the function's own id is its name.)
      */
     private static final Set<String> SAME_ID_DEPENDENT_TYPES = Set.of("AWS::S3::BucketPolicy",
             "AWS::SecretsManager::SecretTargetAttachment", "AWS::Lambda::Url",
@@ -3452,25 +3468,38 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * The values in a resource's record that may name, by physical id, what it uses, for leftover
-     * ordering. For most resources that is every attribute value: some, such as a subnet's
-     * {@code VpcId}, say what the resource was given, and the rest describe the resource itself.
-     * Two kinds of resource hold attributes that can as easily name a resource depending on them:
-     * a custom resource's are its handler's response Data, and a nested stack's {@code Outputs.*}
-     * are its child's outputs. Those do not count. What their definitions named counts instead,
-     * kept by {@link #recordTemplateUses}, with a custom resource's other {@code __Floci} keys such
-     * as its ServiceToken; a Lambda function ARN among those also names the function by name, which
-     * is the function's physical id. A resource a definition named also counts as whatever the
-     * stack now holds under its logical id ({@code held}), since a later update may have replaced
-     * it without touching a resource that only {@code DependsOn} it.
+     * What a resource's record says it uses, for leftover ordering. Its {@code values} may name a
+     * held resource by physical id: for most resources that is every attribute value, as some, such
+     * as a subnet's {@code VpcId}, say what the resource was given and the rest describe the
+     * resource itself. Two kinds of resource hold attributes that can as easily name a resource
+     * depending on them: a custom resource's are its handler's response Data, and a nested stack's
+     * {@code Outputs.*} are its child's outputs. Those do not count. A custom resource gives only
+     * Floci's own {@code __Floci} values, such as its ServiceToken, with the name of any Lambda
+     * function one gives by ARN, a function's physical id being its name. What the definition of
+     * either kind named, kept by {@link #recordTemplateUses}, is {@code declared}: the resources
+     * {@code held} under those logical ids now, as a later update may have replaced one without
+     * touching a resource that only {@code DependsOn} it. A nested stack saved before those were
+     * kept still counts its outputs, as Floci did then.
      */
-    private Collection<String> referenceValues(StackResource resource, Map<String, StackResource> held) {
+    private LeftoverReferences leftoverReferences(StackResource resource, Map<String, StackResource> held) {
         List<String> values = new ArrayList<>();
+        List<StackResource> declared = new ArrayList<>();
+        boolean recorded = false;
+        for (String key : resource.getAttributes().keySet()) {
+            if (key.startsWith(TEMPLATE_USES_PREFIX)) {
+                recorded = true;
+                StackResource named = held.get(key.substring(TEMPLATE_USES_PREFIX.length()));
+                if (named != null && named != resource) {
+                    declared.add(named);
+                }
+            }
+        }
         boolean custom = dispatcher.isCustomResourceType(resource.getResourceType());
-        boolean nestedStack = "AWS::CloudFormation::Stack".equals(resource.getResourceType());
+        boolean nestedOutputs = recorded && "AWS::CloudFormation::Stack".equals(resource.getResourceType());
         for (Map.Entry<String, String> attribute : resource.getAttributes().entrySet()) {
             String key = attribute.getKey();
-            if (custom ? !key.startsWith("__Floci") : nestedStack && key.startsWith("Outputs.")) {
+            if (key.startsWith(TEMPLATE_USES_PREFIX)
+                    || (custom ? !key.startsWith("__Floci") : nestedOutputs && key.startsWith("Outputs."))) {
                 continue;
             }
             values.add(attribute.getValue());
@@ -3480,14 +3509,8 @@ public class CloudFormationService implements ResourceProvider {
                     values.add(function);
                 }
             }
-            if (key.startsWith(TEMPLATE_USES_PREFIX)) {
-                StackResource named = held.get(key.substring(TEMPLATE_USES_PREFIX.length()));
-                if (named != null && named != resource && named.getPhysicalId() != null) {
-                    values.add(named.getPhysicalId());
-                }
-            }
         }
-        return values;
+        return new LeftoverReferences(values, declared);
     }
 
     /** The name of the Lambda function {@code value} gives by ARN, qualified or not, or else null. */
@@ -4158,7 +4181,7 @@ public class CloudFormationService implements ResourceProvider {
      * outputs, so these are what orders it before the resources it uses once the template no longer
      * names it; a literal value it was given names nothing, even if another resource has that name.
      * One provisioned before these keys were kept has none until it next changes, so as a leftover
-     * it orders by its ServiceToken alone, or by nothing for a nested stack.
+     * a custom resource orders by its ServiceToken alone, and a nested stack by its outputs.
      */
     private static void recordTemplateUses(StackResource resource, Set<String> dependencies,
                                            Map<String, String> physicalIds) {
@@ -4173,9 +4196,6 @@ public class CloudFormationService implements ResourceProvider {
 
     /** Puts back the {@link #recordTemplateUses} keys a resource held before an update now rolled back. */
     private static void restoreTemplateUses(StackResource resource, StackResource previous) {
-        if (resource.getAttributes() == previous.getAttributes()) {
-            return;
-        }
         resource.getAttributes().keySet().removeIf(key -> key.startsWith(TEMPLATE_USES_PREFIX));
         previous.getAttributes().forEach((key, value) -> {
             if (key.startsWith(TEMPLATE_USES_PREFIX)) {
