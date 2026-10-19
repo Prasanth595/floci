@@ -16,6 +16,7 @@ import org.mockito.Mockito;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -562,14 +563,6 @@ class CloudFormationContinueUpdateRollbackIntegrationTest {
         logs("DeleteLogGroup", "{\"logGroupName\":\"" + stack.logGroup() + "\"}");
         logs("DeleteLogGroup", "{\"logGroupName\":\"" + stack.logGroup() + "/stable\"}");
         logs("DeleteLogGroup", "{\"logGroupName\":\"" + stack.outsideGroup() + "\"}");
-    }
-
-    /** A Query request for {@code action}, naming the stack unless {@code stackName} is null. */
-    private static RequestSpecification cfn(String action, String stackName) {
-        RequestSpecification request = given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", action);
-        return stackName == null ? request : request.formParam("StackName", stackName);
     }
 
     private static Response logs(String target, String body) {

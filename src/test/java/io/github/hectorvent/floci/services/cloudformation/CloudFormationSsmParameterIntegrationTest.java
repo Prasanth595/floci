@@ -3,10 +3,10 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.allOf;
@@ -240,13 +240,6 @@ class CloudFormationSsmParameterIntegrationTest {
         .then()
             .statusCode(200);
         CfnStackWaits.awaitStackDeleted(stackName);
-    }
-
-    private static RequestSpecification cfn(String action, String stackName) {
-        return given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", action)
-            .formParam("StackName", stackName);
     }
 
     private static String output(XmlPath describe, String key) {

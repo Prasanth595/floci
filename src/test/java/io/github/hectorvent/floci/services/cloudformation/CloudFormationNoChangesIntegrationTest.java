@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -65,7 +66,7 @@ class CloudFormationNoChangesIntegrationTest {
     @AfterEach
     void cleanUp() {
         for (String stackName : stacksToDelete) {
-            request("DeleteStack", stackName).when().post("/");
+            cfn("DeleteStack", stackName).when().post("/");
         }
         stacksToDelete.clear();
         for (String parameter : parametersToDelete) {
@@ -342,7 +343,7 @@ class CloudFormationNoChangesIntegrationTest {
                                   "InlineCode": {"Fn::Sub": "exports.handler = async () => '${Release}';"}}}}}"""
                 .formatted(name("sam-params-func"));
         String stackName = name("no-change-sam-params");
-        request("CreateStack", stackName).formParam("TemplateBody", template)
+        cfn("CreateStack", stackName).formParam("TemplateBody", template)
                 .formParam("Capabilities.member.1", "CAPABILITY_IAM")
                 .formParam("Parameters.member.1.ParameterKey", "Release")
                 .formParam("Parameters.member.1.ParameterValue", "second")
@@ -350,7 +351,7 @@ class CloudFormationNoChangesIntegrationTest {
         stacksToDelete.add(stackName);
         assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
-        request("UpdateStack", stackName).formParam("TemplateBody", template)
+        cfn("UpdateStack", stackName).formParam("TemplateBody", template)
                 .formParam("Capabilities.member.1", "CAPABILITY_IAM")
                 .formParam("Parameters.member.1.ParameterKey", "Release")
                 .formParam("Parameters.member.1.ParameterValue", "second")
@@ -432,12 +433,12 @@ class CloudFormationNoChangesIntegrationTest {
     void tagsArePartOfWhatAnUpdateSubmits() {
         String stackName = name("tags");
         String template = TEMPLATE.formatted(name("tags-topic"));
-        withTags(request("CreateStack", stackName).formParam("TemplateBody", template), "Env", "a", "Team", "x")
+        withTags(cfn("CreateStack", stackName).formParam("TemplateBody", template), "Env", "a", "Team", "x")
                 .when().post("/").then().statusCode(200);
         stacksToDelete.add(stackName);
         assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
-        withTags(request("UpdateStack", stackName).formParam("TemplateBody", template), "Team", "x", "Env", "a")
+        withTags(cfn("UpdateStack", stackName).formParam("TemplateBody", template), "Team", "x", "Env", "a")
                 .when().post("/").then()
                 .statusCode(400)
                 .body(containsString("<Message>No updates are to be performed.</Message>"));
@@ -455,16 +456,16 @@ class CloudFormationNoChangesIntegrationTest {
                 .body(containsString("<Status>CREATE_COMPLETE</Status>"))
                 .body(containsString("<ExecutionStatus>AVAILABLE</ExecutionStatus>"));
 
-        withTags(request("UpdateStack", stackName).formParam("TemplateBody", template), "Env", "b")
+        withTags(cfn("UpdateStack", stackName).formParam("TemplateBody", template), "Env", "b")
                 .when().post("/").then().statusCode(200);
         assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
         assertEquals(Map.of("Env", "b"), tags(stackName));
 
-        request("UpdateStack", stackName).formParam("TemplateBody", template).formParam("Tags", "")
+        cfn("UpdateStack", stackName).formParam("TemplateBody", template).formParam("Tags", "")
                 .when().post("/").then().statusCode(200);
         assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
         assertEquals(Map.of(), tags(stackName));
-        request("UpdateStack", stackName).formParam("TemplateBody", template).formParam("Tags", "")
+        cfn("UpdateStack", stackName).formParam("TemplateBody", template).formParam("Tags", "")
                 .when().post("/").then()
                 .statusCode(400)
                 .body(containsString("<Message>No updates are to be performed.</Message>"));
@@ -534,21 +535,15 @@ class CloudFormationNoChangesIntegrationTest {
                 .when().post("/").then();
     }
 
-    private static RequestSpecification request(String action, String stackName) {
-        return given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", action)
-                .formParam("StackName", stackName);
-    }
-
     private static RequestSpecification changeSet(String stackName, String changeSetName, String template) {
-        return request("CreateChangeSet", stackName)
+        return cfn("CreateChangeSet", stackName)
                 .formParam("ChangeSetName", changeSetName)
                 .formParam("ChangeSetType", "UPDATE")
                 .formParam("TemplateBody", template);
     }
 
     private static ValidatableResponse describeChangeSet(String stackName, String changeSetName) {
-        return request("DescribeChangeSet", stackName)
+        return cfn("DescribeChangeSet", stackName)
                 .formParam("ChangeSetName", changeSetName)
                 .when().post("/").then().statusCode(200);
     }
@@ -563,7 +558,7 @@ class CloudFormationNoChangesIntegrationTest {
     }
 
     private static Map<String, String> tags(String stackName) {
-        String xml = request("DescribeStacks", stackName).when().post("/")
+        String xml = cfn("DescribeStacks", stackName).when().post("/")
                 .then().statusCode(200).extract().asString();
         return XmlParser.extractPairs(xml, "member", "Key", "Value");
     }

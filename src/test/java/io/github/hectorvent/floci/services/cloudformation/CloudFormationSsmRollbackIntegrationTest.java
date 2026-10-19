@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -558,11 +559,6 @@ class CloudFormationSsmRollbackIntegrationTest {
                 .map(event -> event.get("ResourceStatusReason"))
                 .findFirst()
                 .orElse("");
-    }
-
-    private static RequestSpecification cfn(String action, String stack) {
-        return given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", action).formParam("StackName", stack);
     }
 
     private static Response ssm(String operation, Map<String, ?> body) throws JsonProcessingException {

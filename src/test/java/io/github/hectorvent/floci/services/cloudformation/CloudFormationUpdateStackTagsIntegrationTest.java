@@ -8,7 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
@@ -21,18 +21,18 @@ class CloudFormationUpdateStackTagsIntegrationTest {
                 {"Resources":{"Queue":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"%s"}}}}
                 """.formatted(stackName);
         try {
-            withTags(request("CreateStack", stackName).formParam("TemplateBody", template),
+            withTags(cfn("CreateStack", stackName).formParam("TemplateBody", template),
                     "before", "original")
                     .when().post("/").then().statusCode(200);
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
-            withTags(request("UpdateStack", stackName).formParam("TemplateBody", template),
+            withTags(cfn("UpdateStack", stackName).formParam("TemplateBody", template),
                     "after", "new")
                     .when().post("/").then().statusCode(200);
             assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
             assertEquals(Map.of("Env", "after", "Team", "new"), tags(stackName));
 
-            withTags(request("CreateChangeSet", stackName)
+            withTags(cfn("CreateChangeSet", stackName)
                     .formParam("TemplateBody", template)
                     .formParam("ChangeSetName", "tags-only")
                     .formParam("ChangeSetType", "UPDATE"), "final", "latest")
@@ -47,13 +47,13 @@ class CloudFormationUpdateStackTagsIntegrationTest {
                       "ZFail":{"Type":"AWS::CloudFormation::Stack","Properties":{}}
                     }}
                     """.formatted(stackName);
-            withTags(request("UpdateStack", stackName).formParam("TemplateBody", failingTemplate),
+            withTags(cfn("UpdateStack", stackName).formParam("TemplateBody", failingTemplate),
                     "failed", "attempt")
                     .when().post("/").then().statusCode(200);
             assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
             assertEquals(Map.of("Env", "final", "Team", "latest"), tags(stackName));
         } finally {
-            request("DeleteStack", stackName).when().post("/").then().statusCode(200);
+            cfn("DeleteStack", stackName).when().post("/").then().statusCode(200);
             CfnStackWaits.awaitStackDeleted(stackName);
         }
     }
@@ -67,7 +67,7 @@ class CloudFormationUpdateStackTagsIntegrationTest {
                    "QueueName":"%s","VisibilityTimeout":{"Ref":"Timeout"}}}}}
                 """.formatted(stackName);
         try {
-            withTags(request("CreateStack", stackName).formParam("TemplateBody", template),
+            withTags(cfn("CreateStack", stackName).formParam("TemplateBody", template),
                     "before", "original")
                     .when().post("/").then().statusCode(200);
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
@@ -118,19 +118,14 @@ class CloudFormationUpdateStackTagsIntegrationTest {
             executeChangeSet(stackName, "clear-tags");
             assertEquals(Map.of(), tags(stackName));
         } finally {
-            request("DeleteStack", stackName).when().post("/").then().statusCode(200);
+            cfn("DeleteStack", stackName).when().post("/").then().statusCode(200);
             CfnStackWaits.awaitStackDeleted(stackName);
         }
     }
 
-    private static RequestSpecification request(String action, String stackName) {
-        return given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", action).formParam("StackName", stackName);
-    }
-
     private static RequestSpecification updateRequest(String action, String stackName,
                                                       String template, String timeout) {
-        return request(action, stackName).formParam("TemplateBody", template)
+        return cfn(action, stackName).formParam("TemplateBody", template)
                 .formParam("Parameters.member.1.ParameterKey", "Timeout")
                 .formParam("Parameters.member.1.ParameterValue", timeout);
     }
@@ -145,13 +140,13 @@ class CloudFormationUpdateStackTagsIntegrationTest {
     }
 
     private static Map<String, String> tags(String stackName) {
-        String xml = request("DescribeStacks", stackName).when().post("/")
+        String xml = cfn("DescribeStacks", stackName).when().post("/")
                 .then().statusCode(200).extract().asString();
         return XmlParser.extractPairs(xml, "member", "Key", "Value");
     }
 
     private static void executeChangeSet(String stackName, String changeSetName) {
-        request("ExecuteChangeSet", stackName).formParam("ChangeSetName", changeSetName)
+        cfn("ExecuteChangeSet", stackName).formParam("ChangeSetName", changeSetName)
                 .when().post("/").then().statusCode(200);
         assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
     }
