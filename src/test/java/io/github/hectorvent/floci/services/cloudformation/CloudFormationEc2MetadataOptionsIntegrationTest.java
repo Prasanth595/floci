@@ -325,6 +325,67 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
     }
 
     /**
+     * The same holds inside a launch template's LaunchTemplateData, for a member and for the whole
+     * block: AWS::NoValue leaves it out rather than failing the template.
+     */
+    @Test
+    void intrinsicsAndNoValueResolveInsideLaunchTemplateMetadataOptions() {
+        String stackName = "cfn-metadata-lt-intrinsic-" + UUID.randomUUID().toString().substring(0, 8);
+        String template = """
+                {
+                  "Parameters": {"Tokens": {"Type": "String", "Default": "required"}},
+                  "Conditions": {"Never": {"Fn::Equals": ["a", "b"]}},
+                  "Resources": {
+                    "MemberLt": {
+                      "Type": "AWS::EC2::LaunchTemplate",
+                      "Properties": {
+                        "LaunchTemplateData": {
+                          "ImageId": "ami-12345678",
+                          "MetadataOptions": {
+                            "HttpTokens": {"Ref": "Tokens"},
+                            "HttpPutResponseHopLimit": {"Fn::If": ["Never", 5, {"Ref": "AWS::NoValue"}]}
+                          }
+                        }
+                      }
+                    },
+                    "BlockLt": {
+                      "Type": "AWS::EC2::LaunchTemplate",
+                      "Properties": {
+                        "LaunchTemplateData": {
+                          "ImageId": "ami-12345678",
+                          "MetadataOptions": {"Fn::If": ["Never", {"HttpTokens": "required"}, {"Ref": "AWS::NoValue"}]}
+                        }
+                      }
+                    },
+                    "MemberInst": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {"LaunchTemplate": {"LaunchTemplateId": {"Ref": "MemberLt"}, "Version": "1"}}
+                    },
+                    "BlockInst": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {"LaunchTemplate": {"LaunchTemplateId": {"Ref": "BlockLt"}, "Version": "1"}}
+                    }
+                  },
+                  "Outputs": {
+                    "MemberInstance": {"Value": {"Ref": "MemberInst"}},
+                    "BlockInstance": {"Value": {"Ref": "BlockInst"}}
+                  }
+                }
+                """;
+        try {
+            cfn("CreateStack", stackName, template);
+            XmlPath stack = describeStack(stackName, "CREATE_COMPLETE");
+            XmlPath member = describeInstance(output(stack, "MemberInstance"));
+            assertEquals("required", member.getString(INSTANCE + "metadataOptions.httpTokens"));
+            assertEquals("1", member.getString(INSTANCE + "metadataOptions.httpPutResponseHopLimit"));
+            assertEquals("optional",
+                    describeInstance(output(stack, "BlockInstance")).getString(INSTANCE + "metadataOptions.httpTokens"));
+        } finally {
+            cfn("DeleteStack", stackName, null);
+        }
+    }
+
+    /**
      * A MetadataOptions block or member of the wrong type fails the resource with CloudFormation's
      * template validation error, on the instance and on the launch template alike. A list or object
      * member must not read as absent: {@code HttpTokens: [required]} would otherwise launch an
@@ -339,7 +400,9 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
             "Instance|{\"HttpPutResponseHopLimit\": 4.5}|Property [HttpPutResponseHopLimit] expected type: Integer, found: Float",
             "LaunchTemplate|{\"HttpTokens\": [\"required\"]}|Property [HttpTokens] expected type: String, found: JSONArray",
             "LaunchTemplate|[\"required\"]|Property [MetadataOptions] expected type: JSONObject, found: JSONArray",
-            "LaunchTemplate|{\"HttpPutResponseHopLimit\": \"two\"}|Property [HttpPutResponseHopLimit] expected type: Integer, found: String"
+            "LaunchTemplate|{\"HttpTokens\": {\"Value\": \"required\"}}|Property [HttpTokens] expected type: String, found: JSONObject",
+            "LaunchTemplate|{\"HttpPutResponseHopLimit\": \"two\"}|Property [HttpPutResponseHopLimit] expected type: Integer, found: String",
+            "LaunchTemplate|{\"HttpPutResponseHopLimit\": 4.5}|Property [HttpPutResponseHopLimit] expected type: Integer, found: Float"
     })
     void aMetadataOptionsValueOfTheWrongTypeFailsTheResource(String resource, String block, String message) {
         String stackName = "cfn-metadata-type-" + UUID.randomUUID().toString().substring(0, 8);
