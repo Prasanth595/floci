@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -230,6 +231,45 @@ class StorageBackedMapTest
 
         assertEquals(2, keys.size());
         assertFalse(keys.contains(null));
+    }
+
+    @Test
+    void iteratorRemoveAfterLookaheadRemovesTheYieldedKey()
+    {
+        StorageBackedMap<String> map = mapOf("alpha", "beta", "gamma");
+
+        Iterator<Map.Entry<String, String>> iterator = map.entrySet().iterator();
+        String removed = iterator.next().getKey();
+        // hasNext() reads one element ahead; remove() must still hit the yielded key.
+        assertTrue(iterator.hasNext());
+        iterator.remove();
+
+        assertFalse(map.containsKey(removed));
+        assertEquals(2, map.size());
+    }
+
+    @Test
+    void iteratorThrowsNoSuchElementAtExhaustion()
+    {
+        StorageBackedMap<String> map = mapOf("alpha");
+
+        Iterator<String> iterator = map.values().iterator();
+        iterator.next();
+
+        assertFalse(iterator.hasNext());
+        assertThrows(NoSuchElementException.class, iterator::next);
+    }
+
+    @Test
+    void entrySetValueWritesThrough()
+    {
+        StorageBackedMap<String> map = mapOf("alpha");
+
+        Map.Entry<String, String> entry = map.entrySet().iterator().next();
+        assertEquals("alpha-value", entry.setValue("updated"));
+
+        assertEquals("updated", entry.getValue());
+        assertEquals("updated", map.get("alpha"));
     }
 
     private static StorageBackedMap<String> mapOf(String... keys)
