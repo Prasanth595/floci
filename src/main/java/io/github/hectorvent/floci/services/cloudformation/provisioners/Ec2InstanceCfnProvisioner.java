@@ -74,6 +74,7 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         // Only look one up when the property actually names a template. An Fn::If that selects
         // AWS::NoValue resolves to an empty node here, which on AWS means the property is absent
         // (launch without a template), so it must not turn into an InvalidLaunchTemplateId.NotFound.
+        LaunchTemplateData.MetadataOptions templateMetadataOptions = null;
         if (ltRef != null && ltRef.isObject() && (ltId != null || ltName != null)) {
             // A LaunchTemplate the stack references but that does not resolve is a real error, as on
             // AWS: let it fail the resource rather than silently launching with default config.
@@ -88,7 +89,12 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
             if (keyName == null || keyName.isBlank()) {
                 keyName = ltData.getKeyName();
             }
+            templateMetadataOptions = ltData.getMetadataOptions();
         }
+        // The instance's own MetadataOptions win member by member over its template's, as
+        // RunInstances merges a request over the launch template it names.
+        LaunchTemplateData.MetadataOptions metadataOptions = Ec2CfnMetadataOptions.over(templateMetadataOptions,
+                props != null ? Ec2CfnMetadataOptions.parse(engine.resolveNode(props.get("MetadataOptions"))) : null);
         if (instanceType == null || instanceType.isBlank()) {
             instanceType = "t3.micro";
         }
@@ -113,7 +119,7 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
             // A reused instance still has its mutable properties reconciled to the template rather
             // than left at their prior values; re-read it so the published attributes reflect them.
             reconcileMutableProperties(region, prior, instanceType, securityGroupIds, userData,
-                    iamInstanceProfileArn, attributesBefore.get(DECLARED_IAM_PROFILE_ATTR));
+                    iamInstanceProfileArn, attributesBefore.get(DECLARED_IAM_PROFILE_ATTR), metadataOptions);
             Instance reconciled = findInstance(region, prior.getInstanceId());
             Instance current = reconciled != null ? reconciled : prior;
             r.setPhysicalId(current.getInstanceId());
@@ -140,7 +146,7 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
 
         Reservation reservation = ec2Service.runInstances(region, imageId, instanceType, 1, 1, keyName,
                 securityGroupIds, subnetId, null, tags, userData, iamInstanceProfileArn,
-                associatePublicIp);
+                associatePublicIp, null, 0, null, metadataOptions);
         Instance instance = reservation.getInstances().get(0);
         r.setPhysicalId(instance.getInstanceId());
         r.getAttributes().put("InstanceId", instance.getInstanceId());
@@ -215,12 +221,15 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
      * ModifyInstanceAttribute requires it (the instance stopped first and started again after, the
      * "some interruptions" the property is documented with), and a changed IamInstanceProfile is
      * associated or replaced, or disassociated when the template declared one last time and drops it
-     * now. Only a declared SecurityGroupIds or UserData is reconciled, so a template that omits them
-     * does not strip what the instance already has (a launch template may have set it).
+     * now. A changed MetadataOptions is applied with ModifyInstanceMetadataOptions, which the
+     * property's "No interruption" update allows. Only a declared SecurityGroupIds, UserData or
+     * MetadataOptions is reconciled, so a template that omits them does not strip what the instance
+     * already has (a launch template may have set it).
      */
     private void reconcileMutableProperties(String region, Instance prior, String instanceType,
                                             List<String> securityGroupIds, String userData,
-                                            String iamInstanceProfileArn, String priorDeclaredProfileArn) {
+                                            String iamInstanceProfileArn, String priorDeclaredProfileArn,
+                                            LaunchTemplateData.MetadataOptions metadataOptions) {
         if (instanceType != null && !instanceType.isBlank()
                 && !instanceType.equals(prior.getInstanceType())) {
             ec2Service.modifyInstanceAttribute(region, prior.getInstanceId(), "instanceType", instanceType);
@@ -232,6 +241,10 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
             rewriteUserData(region, prior, userData);
         }
         reconcileIamInstanceProfile(region, prior, iamInstanceProfileArn, priorDeclaredProfileArn);
+        if (metadataOptions != null
+                && Ec2CfnMetadataOptions.changes(prior.effectiveMetadataOptions(), metadataOptions)) {
+            ec2Service.modifyInstanceMetadataOptions(region, prior.getInstanceId(), metadataOptions);
+        }
     }
 
     /**

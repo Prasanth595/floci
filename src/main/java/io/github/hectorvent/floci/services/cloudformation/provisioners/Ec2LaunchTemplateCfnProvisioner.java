@@ -64,6 +64,7 @@ public class Ec2LaunchTemplateCfnProvisioner implements CfnResourceProvisioner {
             data.setEncodedUserData(encodedUserData);
             data.setUserData(Ec2UserDataDecoder.decode(encodedUserData));
             data.setIamInstanceProfile(iamInstanceProfile(node.path("IamInstanceProfile")));
+            data.setMetadataOptions(Ec2CfnMetadataOptions.parse(node.get("MetadataOptions")));
             if (node.has("SecurityGroupIds")) {
                 List<String> securityGroupIds = new ArrayList<>();
                 for (JsonNode securityGroup : node.get("SecurityGroupIds")) {

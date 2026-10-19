@@ -134,7 +134,7 @@ class Ec2InstanceCfnProvisionerTest {
                 """), ctx());
 
         verify(ec2).runInstances(eq("us-east-1"), eq("ami-from-template"), eq("m5.large"), eq(1), eq(1),
-                eq("template-key"), anyList(), any(), any(), anyList(), any(), any(), any());
+                eq("template-key"), anyList(), any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any());
     }
 
     @Test
@@ -165,7 +165,7 @@ class Ec2InstanceCfnProvisionerTest {
 
         assertEquals("i-nolt", r.getPhysicalId());
         verify(ec2).runInstances(eq("us-east-1"), any(), eq("t3.micro"), eq(1), eq(1), any(),
-                anyList(), any(), any(), anyList(), any(), any(), any());
+                anyList(), any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any());
     }
 
     @Test
@@ -269,7 +269,7 @@ class Ec2InstanceCfnProvisionerTest {
 
         assertEquals("i-1", r.getPhysicalId());
         verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
-                anyList(), any(), any(), anyList(), any(), any(), any());
+                anyList(), any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any());
     }
 
     @Test
@@ -378,7 +378,7 @@ class Ec2InstanceCfnProvisionerTest {
 
         ArgumentCaptor<String> profile = ArgumentCaptor.forClass(String.class);
         verify(ec2).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), profile.capture(), any());
+                any(), any(), anyList(), any(), profile.capture(), any(), any(), anyInt(), any(), any());
         assertEquals(PROFILE_A, profile.getValue());
         assertEquals(PROFILE_A, r.getAttributes().get("__FlociDeclaredIamInstanceProfile"));
     }
@@ -402,7 +402,7 @@ class Ec2InstanceCfnProvisionerTest {
         i2.setInstanceId("i-2");
         i2.setImageId("ami-2");
         when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any()))
+                any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any()))
                 .thenReturn(reservationOf(i1), reservationOf(i2));
         StackResource r = resource("Server");
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx(null));
@@ -426,7 +426,7 @@ class Ec2InstanceCfnProvisionerTest {
         i2.setInstanceId("i-2");
         i2.setImageId("ami-1");
         when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any()))
+                any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any()))
                 .thenReturn(reservationOf(i1), reservationOf(i2));
         StackResource r = resource("Server");
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"PrivateIpAddress\": \"10.0.0.5\"}"), ctx(null));
@@ -450,7 +450,7 @@ class Ec2InstanceCfnProvisionerTest {
         i2.setInstanceId("i-2");
         i2.setImageId("ami-1");
         when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any()))
+                any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any()))
                 .thenReturn(reservationOf(i1), reservationOf(i2));
         StackResource r = resource("Server");
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"AvailabilityZone\": \"us-east-1a\"}"), ctx(null));
@@ -480,7 +480,7 @@ class Ec2InstanceCfnProvisionerTest {
 
         assertEquals("i-1", r.getPhysicalId());
         verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
-                anyList(), any(), any(), anyList(), any(), any(), any());
+                anyList(), any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any());
     }
 
     @Test
@@ -500,7 +500,7 @@ class Ec2InstanceCfnProvisionerTest {
 
         assertEquals("i-1", r.getPhysicalId());
         verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
-                anyList(), any(), any(), anyList(), any(), any(), any());
+                anyList(), any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any());
     }
 
     @Test
@@ -529,6 +529,43 @@ class Ec2InstanceCfnProvisionerTest {
         verify(ec2).deleteTags(eq("us-east-1"), eq(List.of("i-1")), removed.capture());
         assertEquals(1, removed.getValue().size());
         assertEquals("old", removed.getValue().get(0).getKey());
+    }
+
+    @Test
+    void reusedInstanceModifiesOnlyAChangedMetadataOptions() throws Exception {
+        Instance i1 = new Instance();
+        i1.setInstanceId("i-1");
+        i1.setImageId("ami-1");
+        stubLaunch(i1);
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "required"}}
+                """), ctx(null));
+        ArgumentCaptor<LaunchTemplateData.MetadataOptions> launched =
+                ArgumentCaptor.forClass(LaunchTemplateData.MetadataOptions.class);
+        verify(ec2).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), launched.capture());
+        assertEquals("required", launched.getValue().getHttpTokens());
+
+        LaunchTemplateData.MetadataOptions applied = LaunchTemplateData.MetadataOptions.launchDefaults();
+        applied.setHttpTokens("required");
+        i1.setMetadataOptions(applied);
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(i1)));
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "required"}}
+                """), ctx("i-1"));
+        verify(ec2, never()).modifyInstanceMetadataOptions(any(), any(), any());
+
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "optional"}}
+                """), ctx("i-1"));
+        ArgumentCaptor<LaunchTemplateData.MetadataOptions> modified =
+                ArgumentCaptor.forClass(LaunchTemplateData.MetadataOptions.class);
+        verify(ec2).modifyInstanceMetadataOptions(eq("us-east-1"), eq("i-1"), modified.capture());
+        assertEquals("optional", modified.getValue().getHttpTokens());
+        verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any());
     }
 
     @Test
@@ -636,7 +673,7 @@ class Ec2InstanceCfnProvisionerTest {
 
         assertEquals("i-9", r.getPhysicalId());
         verify(ec2).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
-                anyList(), any(), any(), anyList(), any(), any(), any());
+                anyList(), any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any());
     }
 
     @Test
@@ -657,7 +694,7 @@ class Ec2InstanceCfnProvisionerTest {
 
         assertEquals("i-9", r.getPhysicalId());
         verify(ec2).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
-                anyList(), any(), any(), anyList(), any(), any(), any());
+                anyList(), any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any());
     }
 
     @Test
@@ -670,7 +707,7 @@ class Ec2InstanceCfnProvisionerTest {
         withoutPublicIp.setInstanceId("i-2");
         withoutPublicIp.setImageId("ami-2");
         when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any()))
+                any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any()))
                 .thenReturn(reservationOf(withPublicIp), reservationOf(withoutPublicIp));
         StackResource r = resource("Server");
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx(null));
@@ -702,7 +739,7 @@ class Ec2InstanceCfnProvisionerTest {
         Reservation reservation = new Reservation();
         reservation.getInstances().add(instance);
         when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any())).thenReturn(reservation);
+                any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any())).thenReturn(reservation);
     }
 
     private ProvisionContext ctx() {
