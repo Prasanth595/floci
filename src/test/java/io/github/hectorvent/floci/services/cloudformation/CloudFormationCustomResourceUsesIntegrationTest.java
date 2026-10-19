@@ -105,6 +105,58 @@ class CloudFormationCustomResourceUsesIntegrationTest {
         awaitStackStatus(stackId, "DELETE_COMPLETE");
     }
 
+    /**
+     * An update that changes only a custom resource's {@code DependsOn} does not re-provision it,
+     * yet once the update commits it keeps the resource it now depends on.
+     */
+    @Test
+    void aCommittedUpdateKeepsADependsOnAddedAlone() throws InterruptedException {
+        String stack = "cr-uses-dependson-" + Long.toString(System.nanoTime(), 36);
+        String stackId = createStack(stack, template(stack, "Data", ""));
+        awaitStackStatus(stackId, "CREATE_COMPLETE");
+
+        updateStack(stack, dependsOnArchive(template(stack, "Data", extraQueue(stack))));
+        awaitStackStatus(stackId, "UPDATE_COMPLETE");
+
+        Map<String, String> kept = attributes(stack);
+        assertEquals(stack + "-archive", kept.get(USES + "Archive"), kept::toString);
+        assertEquals(stack + "-data", kept.get(USES + "Data"), kept::toString);
+        deleteStack(stack);
+        awaitStackStatus(stackId, "DELETE_COMPLETE");
+    }
+
+    /** The same change in an update that rolls back leaves what the custom resource kept before. */
+    @Test
+    void aRolledBackUpdateKeepsNoDependsOnAddedAlone() throws InterruptedException {
+        String stack = "cr-uses-dependson-rollback-" + Long.toString(System.nanoTime(), 36);
+        String stackId = createStack(stack, template(stack, "Data", ""));
+        awaitStackStatus(stackId, "CREATE_COMPLETE");
+
+        String failingBucket = """
+                ,
+                "Bad": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "bad/name"}}""";
+        updateStack(stack, dependsOnArchive(template(stack, "Data", failingBucket)));
+        awaitStackStatus(stackId, "UPDATE_ROLLBACK_COMPLETE");
+
+        Map<String, String> kept = attributes(stack);
+        assertNull(kept.get(USES + "Archive"), kept::toString);
+        assertEquals(stack + "-data", kept.get(USES + "Data"), kept::toString);
+        deleteStack(stack);
+        awaitStackStatus(stackId, "DELETE_COMPLETE");
+    }
+
+    /** The template with the custom resource depending on the Archive bucket as well as the queue. */
+    private static String dependsOnArchive(String template) {
+        return template.replace("\"DependsOn\": \"Queue\"", "\"DependsOn\": [\"Queue\", \"Archive\"]");
+    }
+
+    /** An unrelated queue an update adds, so the update has something to do besides the DependsOn. */
+    private static String extraQueue(String stack) {
+        return """
+                ,
+                "Extra": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "%s-extra"}}""".formatted(stack);
+    }
+
     /** Two buckets and a queue, and a custom resource that uses the queue and the bucket named {@code target}. */
     private static String template(String stack, String target, String extraResources) {
         return """

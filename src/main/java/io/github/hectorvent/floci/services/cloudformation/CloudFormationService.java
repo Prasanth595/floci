@@ -2262,6 +2262,7 @@ public class CloudFormationService implements ResourceProvider {
 
             if (!isCreate) {
                 updateCommitted = true;
+                refreshTemplateUses(stack, resources, conditions, physicalIds);
                 if (tags != null) {
                     stack.replaceTags(tags);
                 }
@@ -4206,6 +4207,31 @@ public class CloudFormationService implements ResourceProvider {
             String physicalId = physicalIds.get(dependency);
             if (physicalId != null && !dependency.equals(resource.getLogicalId())) {
                 resource.getAttributes().put(TEMPLATE_USES_PREFIX + dependency, physicalId);
+            }
+        }
+    }
+
+    /**
+     * Keeps again, as an update commits, what each custom resource and nested stack the template
+     * names now names: one whose only change is its {@code DependsOn} is not re-provisioned, so
+     * {@link #recordTemplateUses} did not run for it. An update that rolls back never gets here,
+     * so the keys from before stay.
+     */
+    private void refreshTemplateUses(Stack stack, JsonNode resources, Map<String, Boolean> conditions,
+                                     Map<String, String> physicalIds) {
+        if (!resources.isObject()) {
+            return;
+        }
+        Set<String> templateIds = new LinkedHashSet<>();
+        resources.fieldNames().forEachRemaining(templateIds::add);
+        for (String logicalId : templateIds) {
+            JsonNode definition = resources.get(logicalId);
+            String type = definition.path("Type").asText();
+            StackResource resource = stack.getResources().get(logicalId);
+            if (resource != null
+                    && ("AWS::CloudFormation::Stack".equals(type) || dispatcher.isCustomResourceType(type))) {
+                recordTemplateUses(resource, collectResourceDependencies(definition, templateIds, conditions),
+                        physicalIds);
             }
         }
     }
