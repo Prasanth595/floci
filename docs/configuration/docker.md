@@ -324,10 +324,10 @@ A request is only replayed when doing so cannot change semantics: requests carry
 
 Archive uploads that use the shared tar-copy helper retry above the transport layer, rebuilding
 the upload stream for each attempt with the same six-attempt backoff. This includes user-data
-scripts, the container CA bundle, and EKS audit policies, IRSA signing keys, the containerd
-certificate-directory link and the Pod Identity manifest. Only the upload is retried, not
-script execution. Daemon rejections still stop immediately, and each caller keeps its existing
-failure handling after retries are exhausted.
+scripts, the container CA bundle, Verdaccio's configuration, and EKS audit policies, IRSA
+signing keys, the containerd certificate-directory link and the Pod Identity manifest. Only the
+upload is retried, not script execution. Daemon rejections still stop immediately, and each
+caller keeps its existing failure handling after retries are exhausted.
 
 ## Full Reference
 
