@@ -1071,8 +1071,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * Moves tags stored before tags were regional, keyed by the bare resource id, to
      * {@code region::id}, taking the region from where the resource itself is stored (both sides'
-     * regions for a peering attachment or connection). A tag whose resource no regional store
-     * holds is dropped: AWS has no tag without its resource. Runs once at startup; an entry
+     * regions for a peering attachment or connection). A catalog AMI, which every region serves
+     * under one id, takes the default region. An instance no store holds may be an EKS node, which
+     * its provider restores on its own schedule: it keeps its bare key until
+     * {@link #getTagsForAccount} first finds that node in a region. Any other tag whose resource
+     * no store holds is dropped: AWS has no tag without its resource. Runs once at startup; an entry
      * already keyed by region is left alone, so a later run finds nothing to do.
      */
     void migrateTagsToRegionKeys() {
@@ -1084,10 +1087,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         Map<String, Map<String, Set<String>>> regionsByOwner = resourceRegionsByOwner();
         int moved = 0;
+        int kept = 0;
         int dropped = 0;
         for (AccountAwareStorageBackend.AccountEntry<List<Tag>> entry : legacy) {
             Set<String> regions = regionsByOwner.getOrDefault(ownerKey(entry.accountId()), Map.of())
                     .getOrDefault(entry.key(), Set.of());
+            if (regions.isEmpty() && entry.key().startsWith("ami-")
+                    && imageCatalog != null && imageCatalog.findByIdOrAlias(entry.key()).isPresent()) {
+                regions = Set.of(config.defaultRegion());
+            }
+            if (regions.isEmpty() && entry.key().startsWith("i-")) {
+                kept++;
+                continue;
+            }
             for (String region : regions) {
                 AccountAwareStorageBackend.AccountEntry<List<Tag>> regional =
                         new AccountAwareStorageBackend.AccountEntry<>(entry.accountId(), key(region, entry.key()), entry.value());
@@ -1102,8 +1114,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 moved++;
             }
         }
-        LOG.infov("Moved {0} EC2 tag record(s) under their resource's region; dropped {1} whose resource"
-                + " no region holds", moved, dropped);
+        LOG.infov("Moved {0} EC2 tag record(s) under their resource's region; kept {1} for instances not yet"
+                + " restored; dropped {2} whose resource no region holds", moved, kept, dropped);
     }
 
     /** Resource id to the regions it is stored in, per owning account ("" for a store without accounts). */
@@ -4195,6 +4207,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             volumeBlockDeviceManager.deleteVolume(inst.getRootVolumeId());
                         }
                         volumes.delete(key(region, inst.getRootVolumeId()));
+                        removeTags(region, inst.getRootVolumeId());
                     }
                 }
             }
@@ -4362,6 +4375,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     && inst.getTerminatedAt() > 0
                     && inst.getTerminatedAt() < cutoff) {
                 instances.delete(storeKey);
+                if (inst.getRegion() != null) {
+                    removeTags(inst.getRegion(), inst.getInstanceId());
+                }
             }
         }
     }
@@ -4736,7 +4752,34 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private List<Tag> getTagsForAccount(String accountId, String region, String resourceId, List<Tag> fallback) {
         String safeAccount = accountId != null ? accountId : callerAccountId();
-        return tagsOf(safeAccount, region, resourceId).orElse(fallback);
+        Optional<List<Tag>> regional = tagsOf(safeAccount, region, resourceId);
+        if (regional.isPresent()) {
+            return regional.get();
+        }
+        return claimLegacyInstanceTags(safeAccount, region, resourceId).orElse(fallback);
+    }
+
+    /**
+     * Moves an external instance's tags, stored by bare id before tags were regional and kept by
+     * {@link #migrateTagsToRegionKeys}, under the region the instance is now found in.
+     */
+    private Optional<List<Tag>> claimLegacyInstanceTags(String accountId, String region, String instanceId) {
+        synchronized (lockFor(key(region, instanceId))) {
+            if (tags instanceof AccountAwareStorageBackend<List<Tag>> aware) {
+                Optional<List<Tag>> legacy = aware.getForAccount(accountId, instanceId);
+                legacy.ifPresent(value -> {
+                    aware.putForAccount(accountId, key(region, instanceId), value);
+                    aware.deleteForAccount(accountId, instanceId);
+                });
+                return legacy;
+            }
+            Optional<List<Tag>> legacy = tags.get(instanceId);
+            legacy.ifPresent(value -> {
+                tags.put(key(region, instanceId), value);
+                tags.delete(instanceId);
+            });
+            return legacy;
+        }
     }
 
     private Instance copyExternalInstance(String accountId, String region, Instance source) {
@@ -7475,6 +7518,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 continue;
             }
             snapshots.delete(key(region, snapshotId));
+            removeTags(region, snapshotId);
             results.add(new SnapshotDeletion(snapshotId, "success"));
         }
         return results;
@@ -9775,6 +9819,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private void deleteVpcPeeringConnection(OwnedVpcPeeringConnection owned) {
+        removePeeringConnectionTags(owned.pcx());
         if (owned.storageAccountId() != null
                 && vpcPeeringConnections instanceof AccountAwareStorageBackend<?> rawAccountAware) {
             @SuppressWarnings("unchecked")
@@ -9784,6 +9829,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return;
         }
         vpcPeeringConnections.delete(owned.pcx().getVpcPeeringConnectionId());
+    }
+
+    /** Each side tags a peering connection in its own account and region; both go with it. */
+    private void removePeeringConnectionTags(VpcPeeringConnection pcx) {
+        String id = pcx.getVpcPeeringConnectionId();
+        for (VpcPeeringConnectionVpcInfo side : List.of(pcx.getRequesterVpcInfo(), pcx.getAccepterVpcInfo())) {
+            if (side == null || side.getRegion() == null) {
+                continue;
+            }
+            if (tags instanceof AccountAwareStorageBackend<?> tagsByAccount && side.getOwnerId() != null) {
+                tagsByAccount.deleteForAccount(side.getOwnerId(), key(side.getRegion(), id));
+            } else {
+                removeTags(side.getRegion(), id);
+            }
+        }
     }
 
     private static AwsException vpcPeeringConnectionNotFound(String vpcPeeringConnectionId) {
@@ -10978,6 +11038,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
             }
             volumes.delete(key(region, volumeId));
+            removeTags(region, volumeId);
         });
     }
 
@@ -11856,6 +11917,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             volumeBlockDeviceManager.deleteVolume(vol.getVolumeId());
                         }
                         volumes.delete(k);
+                        removeTags(region, vol.getVolumeId());
                         modified = false;
                         break;
                     } else {

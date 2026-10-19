@@ -308,9 +308,12 @@ carries the resource's `resourceType` (`image`, `volume`, `snapshot`, `network-a
 `vpc-peering-connection` and `spot-instances-request` included). Tags given when a volume or a
 VPC peering connection is created are listed like any other tag, and `DescribeVolumes`,
 `DescribeSnapshots` and `DescribeSpotInstanceRequests` show later `CreateTags` and `DeleteTags`
-changes. Each side of a VPC peering connection sees the tags set in its own account and region. On upgrade, tags stored by an
-older Floci version are moved under their resource's region at startup; a tag whose resource no
-longer exists is dropped.
+changes. Each side of a VPC peering connection sees the tags set in its own account and region.
+A resource's tags go with it: deleting a volume, a snapshot or a peering connection, or the
+removal of a terminated instance, removes its tags. On upgrade, tags stored by an older Floci
+version are moved under their resource's region at startup. Tags on a catalog AMI move to the
+default region, and tags on an EKS node instance move to the node's region once the node is
+restored; any other tag whose resource no longer exists is dropped.
 
 Public tag mutations reject keys beginning with `aws:` regardless of ASCII case.
 An empty `DeleteTags` tag list removes user tags and preserves AWS-managed tags.
