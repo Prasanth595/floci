@@ -106,7 +106,8 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         // The instance's own MetadataOptions win member by member over its template's, as
         // RunInstances merges a request over the launch template it names.
         LaunchTemplateData.MetadataOptions metadataOptions = Ec2CfnMetadataOptions.over(templateMetadataOptions,
-                props != null ? Ec2CfnMetadataOptions.parse(engine.resolveNode(props.get("MetadataOptions"))) : null);
+                props != null ? Ec2CfnMetadataOptions.read("MetadataOptions", props.get("MetadataOptions"),
+                        Ec2CfnMetadataOptions.INSTANCE_SHAPE, engine) : null);
         // Checked before anything changes: a reused instance gets its options last, after its
         // type, groups, user data and profile, so a bad value found there would leave it half updated.
         Ec2Service.validateMetadataOptions(metadataOptions);

@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 
 import java.util.ArrayList;
@@ -25,16 +25,28 @@ final class Ec2CfnMetadataOptions {
     private static final String HTTP_PROTOCOL_IPV6 = "HttpProtocolIpv6";
     private static final String INSTANCE_METADATA_TAGS = "InstanceMetadataTags";
 
+    /** The shape AWS::EC2::Instance's resource schema declares for MetadataOptions. */
+    static final String INSTANCE_SHAPE = CfnPropertyTypes.propertyShape("AWS::EC2::Instance", "MetadataOptions");
+    /** The shape AWS::EC2::LaunchTemplate's resource schema declares for LaunchTemplateData's MetadataOptions. */
+    static final String LAUNCH_TEMPLATE_SHAPE = CfnPropertyTypes.memberShape(
+            CfnPropertyTypes.propertyShape("AWS::EC2::LaunchTemplate", "LaunchTemplateData"), "MetadataOptions");
+
     private Ec2CfnMetadataOptions() {}
 
     /**
-     * The options a resolved block names, with absent or blank members left null, or null when
-     * there is no block. A null member takes the launch default when an instance launches; on an
-     * update, {@link #toApply} decides it. {@code HttpPutResponseHopLimit} may be a JSON number or a
-     * numeric string, as a template parameter supplies it.
+     * The options the block {@code raw}, at {@code path} in the resource's properties, names, with
+     * absent or blank members left null, or null when there is no block. It is read against the
+     * schema shape {@code shape}, as {@code AWS::AutoScaling::LaunchConfiguration}'s is: a block or
+     * member of the wrong type, such as {@code HttpTokens: [required]}, fails the resource rather
+     * than reading as absent, which would leave tokens optional. A null member takes the launch
+     * default when an instance launches; on an update, {@link #toApply} decides it.
      */
-    static LaunchTemplateData.MetadataOptions parse(JsonNode block) {
-        if (block == null || !block.isObject() || block.isEmpty()) {
+    static LaunchTemplateData.MetadataOptions read(String path, JsonNode raw, String shape,
+                                                   CloudFormationTemplateEngine engine) {
+        CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(engine);
+        JsonNode block = types.read(path, raw, shape);
+        types.finish();
+        if (block == null || block.isEmpty()) {
             return null;
         }
         LaunchTemplateData.MetadataOptions options = new LaunchTemplateData.MetadataOptions();
@@ -42,13 +54,9 @@ final class Ec2CfnMetadataOptions {
         options.setHttpEndpoint(member(block, HTTP_ENDPOINT));
         options.setHttpProtocolIpv6(member(block, HTTP_PROTOCOL_IPV6));
         options.setInstanceMetadataTags(member(block, INSTANCE_METADATA_TAGS));
-        String hopLimit = member(block, HOP_LIMIT);
-        if (hopLimit != null) {
-            try {
-                options.setHttpPutResponseHopLimit(Integer.valueOf(hopLimit));
-            } catch (NumberFormatException e) {
-                throw new AwsException("ValidationError", "HttpPutResponseHopLimit must be an integer.", 400);
-            }
+        JsonNode hopLimit = block.path(HOP_LIMIT);
+        if (hopLimit.isInt()) {
+            options.setHttpPutResponseHopLimit(hopLimit.intValue());
         }
         return options;
     }
@@ -142,7 +150,7 @@ final class Ec2CfnMetadataOptions {
 
     private static String member(JsonNode block, String name) {
         JsonNode value = block.get(name);
-        if (value == null || value.isNull() || value.isContainerNode()) {
+        if (value == null || value.isNull()) {
             return null;
         }
         String text = value.asText().trim();

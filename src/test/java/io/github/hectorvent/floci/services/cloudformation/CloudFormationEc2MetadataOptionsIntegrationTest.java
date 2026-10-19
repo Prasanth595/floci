@@ -5,6 +5,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.UUID;
 
@@ -322,54 +324,36 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
         }
     }
 
-    @Test
-    void anInstanceHopLimitThatIsNotAnIntegerFailsTheInstance() {
-        String stackName = "cfn-metadata-inst-bad-" + UUID.randomUUID().toString().substring(0, 8);
-        String template = """
-                {
-                  "Resources": {
-                    "Inst": {
-                      "Type": "AWS::EC2::Instance",
-                      "Properties": {"ImageId": "ami-12345678", "MetadataOptions": {"HttpPutResponseHopLimit": "two"}}
-                    }
-                  }
-                }
-                """;
+    /**
+     * A MetadataOptions block or member of the wrong type fails the resource with CloudFormation's
+     * template validation error, on the instance and on the launch template alike. A list or object
+     * member must not read as absent: {@code HttpTokens: [required]} would otherwise launch an
+     * instance that still serves IMDSv1.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "Instance|{\"HttpTokens\": [\"required\"]}|Property [HttpTokens] expected type: String, found: JSONArray",
+            "Instance|{\"HttpTokens\": {\"Value\": \"required\"}}|Property [HttpTokens] expected type: String, found: JSONObject",
+            "Instance|\"required\"|Property [MetadataOptions] expected type: JSONObject, found: String",
+            "Instance|{\"HttpPutResponseHopLimit\": \"two\"}|Property [HttpPutResponseHopLimit] expected type: Integer, found: String",
+            "Instance|{\"HttpPutResponseHopLimit\": 4.5}|Property [HttpPutResponseHopLimit] expected type: Integer, found: Float",
+            "LaunchTemplate|{\"HttpTokens\": [\"required\"]}|Property [HttpTokens] expected type: String, found: JSONArray",
+            "LaunchTemplate|[\"required\"]|Property [MetadataOptions] expected type: JSONObject, found: JSONArray",
+            "LaunchTemplate|{\"HttpPutResponseHopLimit\": \"two\"}|Property [HttpPutResponseHopLimit] expected type: Integer, found: String"
+    })
+    void aMetadataOptionsValueOfTheWrongTypeFailsTheResource(String resource, String block, String message) {
+        String stackName = "cfn-metadata-type-" + UUID.randomUUID().toString().substring(0, 8);
+        String properties = "Instance".equals(resource)
+                ? "{\"ImageId\": \"ami-12345678\", \"MetadataOptions\": " + block + "}"
+                : "{\"LaunchTemplateData\": {\"ImageId\": \"ami-12345678\", \"MetadataOptions\": " + block + "}}";
+        String template = "{\"Resources\": {\"R\": {\"Type\": \"AWS::EC2::" + resource + "\", \"Properties\": "
+                + properties + "}}}";
         try {
             cfn("CreateStack", stackName, template);
             describeStack(stackName, "ROLLBACK_COMPLETE");
             cfnRequest("DescribeStackEvents").formParam("StackName", stackName)
                     .post("/").then().statusCode(200)
-                    .body(containsString("HttpPutResponseHopLimit must be an integer."));
-        } finally {
-            cfn("DeleteStack", stackName, null);
-        }
-    }
-
-    @Test
-    void aHopLimitThatIsNotAnIntegerFailsTheLaunchTemplate() {
-        String stackName = "cfn-metadata-bad-" + UUID.randomUUID().toString().substring(0, 8);
-        String template = """
-                {
-                  "Resources": {
-                    "Lt": {
-                      "Type": "AWS::EC2::LaunchTemplate",
-                      "Properties": {
-                        "LaunchTemplateData": {
-                          "ImageId": "ami-12345678",
-                          "MetadataOptions": {"HttpPutResponseHopLimit": "two"}
-                        }
-                      }
-                    }
-                  }
-                }
-                """;
-        try {
-            cfn("CreateStack", stackName, template);
-            describeStack(stackName, "ROLLBACK_COMPLETE");
-            cfnRequest("DescribeStackEvents").formParam("StackName", stackName)
-                    .post("/").then().statusCode(200)
-                    .body(containsString("HttpPutResponseHopLimit must be an integer."));
+                    .body(containsString(message));
         } finally {
             cfn("DeleteStack", stackName, null);
         }
