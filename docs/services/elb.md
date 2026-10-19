@@ -45,6 +45,8 @@ Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB)
 
 ### Listeners
 
+HTTPS listeners require a default certificate. Supply one when creating a listener or changing an HTTP listener to HTTPS; an omitted certificate list on an existing HTTPS listener keeps its default.
+
 | Action | Description |
 |--------|-------------|
 | CreateListener | Creates a listener and its non-deletable default rule. |

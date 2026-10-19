@@ -506,7 +506,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
         // Fail fast, then again under the guard the listener is published inside: this one keeps
         // the error precedence, and only the one holding the lock is atomic with the write.
-        requireCertificates(region, protocol, certificates);
+        requireListenerCertificates(region, protocol, certificates);
 
         LoadBalancer lb = requireLoadBalancer(region, lbArn);
         String lbType = lb.getType() != null ? lb.getType() : "application";
@@ -530,7 +530,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         // certificate, so a delete landing in that window would take the certificate out from
         // under a listener that is about to serve it.
         whileCertificatesHeld(certificates, () -> {
-            requireCertificates(region, protocol, certificates);
+            requireListenerCertificates(region, protocol, certificates);
             regionListeners.put(listenerArn, listener);
             listeners.put(region, regionListeners);
         });
@@ -633,7 +633,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         String effectiveProtocol = protocol != null ? protocol : listener.getProtocol();
         List<String> effectiveCertificates =
                 certificates != null ? certificates : listener.getCertificates();
-        requireCertificates(region, effectiveProtocol, effectiveCertificates);
+        requireListenerCertificates(region, effectiveProtocol, effectiveCertificates);
 
         // Every setter runs inside the guard, behind the re-check, which is what makes the
         // comment above hold for that refusal too: the check made outside the guard says nothing
@@ -645,7 +645,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         // DeleteServerCertificate finds among the references and refuses to delete. The re-check
         // covers the effective list all the same, so the refusal is the same one either way.
         whileCertificatesHeld(certificates, () -> {
-            requireCertificates(region, effectiveProtocol, effectiveCertificates);
+            requireListenerCertificates(region, effectiveProtocol, effectiveCertificates);
             if (portChanges) {
                 listener.setPort(port);
             }
@@ -1013,6 +1013,14 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
      * that is no ARN at all, so letting it through would store a certificate the listener cannot
      * serve.
      */
+    private void requireListenerCertificates(String region, String protocol, List<String> certificateArns) {
+        requireCertificates(region, protocol, certificateArns);
+        if ("HTTPS".equalsIgnoreCase(protocol) && (certificateArns == null || certificateArns.isEmpty())) {
+            throw new AwsException("InvalidConfigurationRequest",
+                    "An HTTPS listener requires a default certificate.", 400);
+        }
+    }
+
     private void requireCertificates(String region, String protocol,
                                      List<String> certificateArns) {
         if (certificateResolver == null || certificateArns == null || !servesCertificates(protocol)) {

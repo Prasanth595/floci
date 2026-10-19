@@ -23,6 +23,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -88,6 +89,39 @@ class ElbV2ServiceTest {
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.ec2Service = ec2Service;
         stubAlbSubnets(ec2Service);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void httpsCreateNeedsADefaultBeforeAllocatingAListener(List<String> certificates) {
+        String lb = service.createLoadBalancer(REGION, "https-default", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        AwsException refusal = assertThrows(AwsException.class, () -> service.createListener(REGION, lb,
+                "HTTPS", 9443, null, certificates, List.of(), List.of(), Map.of("scope", "refused")));
+        assertEquals("InvalidConfigurationRequest", refusal.getErrorCode());
+        assertTrue(service.describeListeners(REGION, lb, List.of()).isEmpty());
+        assertTrue(service.describeRules(REGION, null, List.of()).isEmpty());
+        Listener retry = service.createListener(REGION, lb, "HTTPS", 9443, null,
+                List.of(HELD_CERTIFICATE), List.of(), List.of(), Map.of());
+        assertEquals(List.of(HELD_CERTIFICATE), retry.getCertificates());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void httpsModifyNeedsAnEffectiveDefaultBeforeChangingTheListener(List<String> certificates) {
+        String lb = service.createLoadBalancer(REGION, "https-change", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        Listener listener = service.createListener(REGION, lb, "HTTP", 9080, null, List.of(), List.of(), List.of(), Map.of());
+        AwsException refusal = assertThrows(AwsException.class, () -> service.modifyListener(REGION,
+                listener.getListenerArn(), "HTTPS", 9443, "ELBSecurityPolicy-2016-08", certificates, null, null));
+        assertEquals("InvalidConfigurationRequest", refusal.getErrorCode());
+        assertEquals("HTTP", listener.getProtocol());
+        assertEquals(9080, listener.getPort());
+        assertEquals(List.of(), listener.getCertificates());
+        service.modifyListener(REGION, listener.getListenerArn(), "HTTPS", 9443, null,
+                List.of(HELD_CERTIFICATE), null, null);
+        assertEquals("HTTPS", listener.getProtocol());
+        assertEquals(List.of(HELD_CERTIFICATE), listener.getCertificates());
     }
 
     @ParameterizedTest
