@@ -3397,7 +3397,7 @@ public class CloudFormationService implements ResourceProvider {
                 }
             }
         }
-        for (String prefix : idPrefixes(own)) {
+        for (String prefix : ownIdNamesItsParent(resource) ? idPrefixes(own) : List.<String>of()) {
             for (StackResource holder : holdersByPhysicalId.getOrDefault(prefix, List.of())) {
                 if (!declares(holder, resource, references)) {
                     uses.add(holder);
@@ -3440,6 +3440,20 @@ public class CloudFormationService implements ResourceProvider {
     private static boolean takesParentId(StackResource resource) {
         String type = resource.getResourceType();
         return type != null && SAME_ID_DEPENDENT_TYPES.contains(type);
+    }
+
+    /**
+     * Types whose physical id joins parts of their own identity, not a parent's id and their own: a
+     * WAF web ACL or IP set is {@code name|id|scope}, a CodePipeline custom action type
+     * {@code category|Custom|provider|version}. A prefix of such an id names no parent.
+     */
+    private static final Set<String> SELF_COMPOUND_ID_TYPES = Set.of("AWS::WAFv2::WebACL", "AWS::WAFv2::IPSet",
+            "AWS::CodePipeline::CustomActionType");
+
+    /** Whether a prefix of a resource's physical id can name its parent; see {@link #SELF_COMPOUND_ID_TYPES}. */
+    private static boolean ownIdNamesItsParent(StackResource resource) {
+        String type = resource.getResourceType();
+        return type == null || !SELF_COMPOUND_ID_TYPES.contains(type);
     }
 
     /** The characters after which a physical id may continue as a child's: {@code /}, {@code :} and {@code |}. */

@@ -1476,6 +1476,27 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
+     * A WAF web ACL's id is its own name, id and scope joined by {@code |}, so its first part names
+     * no parent: a leftover ACL is not ordered after a leftover bucket of that name, and the two keep
+     * their reverse creation order.
+     */
+    @Test
+    void deleteStack_infersNoLeftoverOrderFromTheNameAWebAclsIdStartsWith() {
+        Stack stack = leftoverStack("delete-leftover-web-acl", "{\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}");
+        StackResource queue = resource("Queue", "queue-1", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource acl = resource("Acl", "shared|a1b2c3|REGIONAL", "AWS::WAFv2::WebACL", "UPDATE_COMPLETE");
+        acl.getAttributes().put("Id", "a1b2c3");
+        StackResource bucket = resource("Bucket", "shared", "AWS::S3::Bucket", "UPDATE_COMPLETE");
+        hold(stack, queue, acl, bucket);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(bucket, REGION);
+        deletes.verify(provisioner).delete(acl, REGION);
+    }
+
+    /**
      * A leftover whose physical id extends another's, such as {@code parent-1/child-1}, belongs to
      * that resource and goes before it, whatever order the two were recorded in.
      */
