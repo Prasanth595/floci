@@ -2,12 +2,12 @@ package io.github.hectorvent.floci.services.ssm;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
 import io.restassured.response.ValidatableResponse;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -23,13 +23,13 @@ import java.util.List;
 import java.util.UUID;
 import java.util.stream.Stream;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -2374,12 +2374,7 @@ class SsmIntegrationTest {
         cfn("CreateStack", stack).formParam("TemplateBody", "{\"Resources\":{\"P\":{\"Type\":\"AWS::SSM::Parameter\","
                 + "\"Properties\":{\"Name\":\"" + base + "/cfn\",\"Type\":\"String\",\"Value\":\"v\"}}}}")
             .when().post("/").then().statusCode(200);
-        long deadline = System.currentTimeMillis() + 10_000;
-        while (!"CREATE_COMPLETE".equals(cfn("DescribeStacks", stack).when().post("/").xmlPath()
-                .getString("DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus"))) {
-            assertTrue(System.currentTimeMillis() < deadline, "stack " + stack + " did not reach CREATE_COMPLETE");
-            Thread.sleep(100);
-        }
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE");
         cfn("DeleteStack", stack).when().post("/").then().statusCode(200);
 
         List<JsonNode> received = receiveEvents(queueUrl, 9);
@@ -2436,14 +2431,6 @@ class SsmIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-    }
-
-    private static RequestSpecification cfn(String action, String stackName) {
-        return given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request")
-            .formParam("Action", action)
-            .formParam("StackName", stackName);
     }
 
     private static List<JsonNode> receiveEvents(String queueUrl, int expected) throws Exception {

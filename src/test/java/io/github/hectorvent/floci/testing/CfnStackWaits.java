@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.cloudformation;
+package io.github.hectorvent.floci.testing;
 
 import io.restassured.path.xml.XmlPath;
 import io.restassured.path.xml.element.Node;
@@ -18,13 +18,13 @@ import static org.junit.jupiter.api.Assertions.fail;
  * DeleteStack answers before the stack is gone. The deletion runs on an executor, so a test
  * that looks at the stack's resources right after the answer races it.
  */
-final class CfnStackWaits {
+public final class CfnStackWaits {
 
     private CfnStackWaits() {
     }
 
     /** What DescribeStacks reported: the status and, when present, the StackStatusReason. */
-    record StackState(String status, String reason) {
+    public record StackState(String status, String reason) {
     }
 
     private static final Set<String> TERMINAL = Set.of(
@@ -40,11 +40,11 @@ final class CfnStackWaits {
      * stack does not exist) fails at once with the error body rather than polling the clock out;
      * ten seconds without a terminal status fails too.
      */
-    static StackState awaitTerminal(String stackName) {
+    public static StackState awaitTerminal(String stackName) {
         return awaitTerminal(stackName, null);
     }
 
-    static StackState awaitTerminal(String stackName, String authorization) {
+    public static StackState awaitTerminal(String stackName, String authorization) {
         long deadline = System.currentTimeMillis() + 10_000;
         StackState last = new StackState(null, "");
         while (System.currentTimeMillis() < deadline) {
@@ -82,7 +82,7 @@ final class CfnStackWaits {
      * terminal status fails at once with its reason, as do a DescribeStacks that is not 200 and ten
      * seconds without the expected status.
      */
-    static StackState awaitStatus(String stackName, String expectedStatus) {
+    public static StackState awaitStatus(String stackName, String expectedStatus) {
         long deadline = System.currentTimeMillis() + 10_000;
         StackState last = new StackState(null, "");
         while (System.currentTimeMillis() < deadline) {
@@ -122,11 +122,11 @@ final class CfnStackWaits {
      * stack's own reason only names the failed resource, as on AWS, so the failure's message is read
      * here. Fails when DescribeStackEvents is not 200 or no resource failed in that operation.
      */
-    static String failedResourceReason(String stackName) {
+    public static String failedResourceReason(String stackName) {
         return failedResourceReason(stackName, null);
     }
 
-    static String failedResourceReason(String stackName, String authorization) {
+    public static String failedResourceReason(String stackName, String authorization) {
         RequestSpecification request = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackEvents")
@@ -166,11 +166,11 @@ final class CfnStackWaits {
      * Waits until DescribeStacks answers 400, which is how a missing stack is reported. Fails on
      * DELETE_FAILED or after ten seconds.
      */
-    static void awaitStackDeleted(String stackName) {
+    public static void awaitStackDeleted(String stackName) {
         awaitStackDeleted(stackName, null);
     }
 
-    static void awaitStackDeleted(String stackName, String authorization) {
+    public static void awaitStackDeleted(String stackName, String authorization) {
         long deadline = System.currentTimeMillis() + 10_000;
         String body = "";
         while (System.currentTimeMillis() < deadline) {

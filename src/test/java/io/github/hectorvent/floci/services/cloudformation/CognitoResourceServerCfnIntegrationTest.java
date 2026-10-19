@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
