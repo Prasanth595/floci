@@ -110,6 +110,9 @@ class AutoScalingLaunchConfigurationMetadataIntegrationTest {
                     + " 'metadataOptions.httpPutResponseHopLimit' failed to satisfy constraint: Member must have"
                     + " value less than or equal to 64",
             "MetadataOptions.HttpPutResponseHopLimit=not-an-integer|MalformedInput"
+                    + "|HttpPutResponseHopLimit must be an integer.",
+            // The awsQuery protocol binds the value to a 32-bit integer before model validation runs.
+            "MetadataOptions.HttpPutResponseHopLimit=2147483648|MalformedInput"
                     + "|HttpPutResponseHopLimit must be an integer."})
     void invalidMetadataRefusesWithoutCreatingLaunchConfiguration(String parameter, String code, String message) {
         String name = "invalid-metadata-" + UUID.randomUUID();
