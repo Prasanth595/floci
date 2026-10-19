@@ -36,11 +36,21 @@ class Ec2ResourceLifecycleTest {
                         .isInstanceOfSatisfying(Ec2Exception.class, e ->
                                 assertThat(e.awsErrorDetails().errorCode()).isEqualTo("DependencyViolation"));
             } finally {
+                // Cleaned up even when an assertion fails, so nothing leaks into the rest of the run.
+                // A refusal that did not happen has already deleted the subnet, hence quietly.
                 elb.deleteLoadBalancer(r -> r.loadBalancerArn(loadBalancerArn));
+                quietly(() -> ec2.deleteSubnet(r -> r.subnetId(first)));
+                quietly(() -> ec2.deleteSubnet(r -> r.subnetId(second)));
+                quietly(() -> ec2.deleteVpc(r -> r.vpcId(vpcId)));
             }
-            ec2.deleteSubnet(r -> r.subnetId(first));
-            ec2.deleteSubnet(r -> r.subnetId(second));
-            ec2.deleteVpc(r -> r.vpcId(vpcId));
+        }
+    }
+
+    private static void quietly(Runnable cleanup) {
+        try {
+            cleanup.run();
+        } catch (Ec2Exception ignored) {
+            // already gone
         }
     }
 }
