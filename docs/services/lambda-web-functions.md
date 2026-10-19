@@ -128,7 +128,7 @@ Floci publishes the [Web Function metrics](https://docs.aws.amazon.com/lambda/la
 | `AWS/Lambda/Web/Usage` | `ExecutedRequests`, `EndpointActiveEnvironments` | `FunctionName`, `EndpointName`, `ExecutionRegion` | One for each request that reached an environment. `EndpointActiveEnvironments` is the number of environments of the endpoint, those that are starting included |
 | `AWS/Lambda/Web/Usage` | `EndpointRequestThrottles`, `EndpointActiveEnvironmentThrottles` | `FunctionName`, `EndpointName`, `ExecutionRegion` | 1 for each `429` of the `rateLimit` or of `maxEnvironments` |
 
-The account quotas are not applied, so `AccountRequestThrottles` and `AccountActiveVCPUArm64Throttles` never appear. CPU time and memory have the gaps of the platform events.
+The account quotas are not applied, so `AccountRequestThrottles` and `AccountActiveVCPUArm64Throttles` never appear. CPU time and memory have the gaps of the platform events. The datapoints are stored on their own thread, and when 10,000 writes are waiting new ones are dropped with a warning in Floci's log.
 
 ## CloudFormation
 

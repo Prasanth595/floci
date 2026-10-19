@@ -13,14 +13,21 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 @ExtendWith(MockitoExtension.class)
@@ -101,6 +108,31 @@ class LambdaWebMetricsTest {
                 "AWS/Lambda/Web EnvironmentMaxMemoryUsage FunctionName=web 142.0 Megabytes",
                 "AWS/Lambda/Web ResponseBytes FunctionName=web 37.0 Bytes"),
                 published(5));
+    }
+
+    @Test
+    void writesPastTheQueueLimitAreDroppedAndTheRestAreStoredBeforeTheWaitEnds() throws InterruptedException {
+        metrics.shutdown();
+        metrics = new LambdaWebMetrics(cloudWatch, 2);
+        CountDownLatch writing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            writing.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return null;
+        }).doNothing().when(cloudWatch).publishMetricForAccount(eq(ACCOUNT), anyString(), any(MetricDatum.class),
+                eq(REGION), anyString());
+
+        metrics.answered(target, 500);
+        assertTrue(writing.await(5, TimeUnit.SECONDS));
+        for (int i = 0; i < 4; i++) {
+            metrics.answered(target, 500);
+        }
+        release.countDown();
+        metrics.awaitPublished(Duration.ofSeconds(5));
+
+        verify(cloudWatch, times(3)).publishMetricForAccount(eq(ACCOUNT), anyString(), any(MetricDatum.class),
+                eq(REGION), anyString());
     }
 
     private List<String> published(int count) {

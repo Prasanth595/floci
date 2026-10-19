@@ -107,6 +107,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private static final int INIT_ERROR_MAX_BYTES = 64;
     /** Longer than the data plane waits to see an exit, so a request the exit failed is counted. */
     private static final Duration EXCHANGES_WAIT = Duration.ofSeconds(2);
+    private static final Duration METRICS_WAIT = Duration.ofSeconds(5);
 
     /**
      * One container of an endpoint's pool. It joins the pool before it starts, so requests that
@@ -489,6 +490,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     @Override
     public void stopManagedContainers() {
         allEnvironments().forEach(this::discard);
+        metrics.awaitPublished(METRICS_WAIT);
     }
 
     /** The live environment that writes {@code logStream}, the one a response names. */

@@ -9,12 +9,18 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * The CloudWatch metrics of Web Functions: one datapoint per request when it is answered, and one
@@ -28,6 +34,7 @@ public class LambdaWebMetrics {
     static final String USAGE_NAMESPACE = "AWS/Lambda/Web/Usage";
     static final String REQUEST_THROTTLES = "EndpointRequestThrottles";
     static final String ACTIVE_ENVIRONMENT_THROTTLES = "EndpointActiveEnvironmentThrottles";
+    static final int MAX_QUEUED = 10_000;
     private static final Logger LOG = Logger.getLogger(LambdaWebMetrics.class);
 
     /** One datapoint of each environment metric, for the time since the previous one. */
@@ -35,17 +42,31 @@ public class LambdaWebMetrics {
         void publish(long activeMillis, long cpuMillis, long maxMemoryMb, int concurrentRequests, long responseBytes);
     }
 
+    private record Datapoint(String namespace, MetricDatum datum) {
+    }
+
     private final CloudWatchMetricsService cloudWatch;
-    /** A persistent store writes to disk on each datapoint, which must not happen on the event loop. */
-    private final ExecutorService publisher = Executors.newSingleThreadExecutor(task -> {
-        Thread thread = new Thread(task, "lambda-web-metrics");
-        thread.setDaemon(true);
-        return thread;
-    });
+    /**
+     * A persistent store writes to disk on each datapoint, which must not happen on the event loop.
+     * The datapoints of one request or one window are one write. Once {@code maxQueued} writes wait,
+     * new ones are dropped.
+     */
+    private final ThreadPoolExecutor publisher;
+    private final AtomicBoolean dropping = new AtomicBoolean();
 
     @Inject
     public LambdaWebMetrics(CloudWatchMetricsService cloudWatch) {
+        this(cloudWatch, MAX_QUEUED);
+    }
+
+    LambdaWebMetrics(CloudWatchMetricsService cloudWatch, int maxQueued) {
         this.cloudWatch = cloudWatch;
+        this.publisher = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(maxQueued),
+                task -> {
+                    Thread thread = new Thread(task, "lambda-web-metrics");
+                    thread.setDaemon(true);
+                    return thread;
+                });
     }
 
     /** A request that reached an environment, with the status the caller got. */
@@ -53,38 +74,55 @@ public class LambdaWebMetrics {
         long now = Instant.now().getEpochSecond();
         List<Dimension> request = requestDimensions(target);
         List<Dimension> usage = usageDimensions(target);
-        publish(target, NAMESPACE, datum("ExecutedRequests", "Count", 1, request, now));
-        publish(target, USAGE_NAMESPACE, datum("ExecutedRequests", "Count", 1, usage, now));
-        publish(target, USAGE_NAMESPACE, datum("EndpointActiveEnvironments", "Count", activeEnvironments, usage, now));
-        statusClass(target, status, request, now);
+        List<Datapoint> datapoints = new ArrayList<>();
+        datapoints.add(new Datapoint(NAMESPACE, datum("ExecutedRequests", "Count", 1, request, now)));
+        datapoints.add(new Datapoint(USAGE_NAMESPACE, datum("ExecutedRequests", "Count", 1, usage, now)));
+        datapoints.add(new Datapoint(USAGE_NAMESPACE,
+                datum("EndpointActiveEnvironments", "Count", activeEnvironments, usage, now)));
+        statusClass(datapoints, status, request, now);
+        publish(target.accountId(), target.region(), datapoints);
     }
 
     /** A request the platform answered without an environment. */
     void answered(WebFunctionTarget target, int status) {
-        statusClass(target, status, requestDimensions(target), Instant.now().getEpochSecond());
+        List<Datapoint> datapoints = new ArrayList<>();
+        statusClass(datapoints, status, requestDimensions(target), Instant.now().getEpochSecond());
+        publish(target.accountId(), target.region(), datapoints);
     }
 
     /** A request refused with 429. {@code metric} names the limit it hit. */
     void throttled(WebFunctionTarget target, String metric) {
         long now = Instant.now().getEpochSecond();
-        publish(target, USAGE_NAMESPACE, datum(metric, "Count", 1, usageDimensions(target), now));
-        statusClass(target, 429, requestDimensions(target), now);
+        List<Datapoint> datapoints = new ArrayList<>();
+        datapoints.add(new Datapoint(USAGE_NAMESPACE, datum(metric, "Count", 1, usageDimensions(target), now)));
+        statusClass(datapoints, 429, requestDimensions(target), now);
+        publish(target.accountId(), target.region(), datapoints);
     }
 
     EnvironmentMetrics environment(String accountId, String region, String functionName) {
         List<Dimension> dimensions = List.of(new Dimension("FunctionName", functionName));
         return (activeMillis, cpuMillis, maxMemoryMb, concurrentRequests, responseBytes) -> {
             long now = Instant.now().getEpochSecond();
-            publish(accountId, region, NAMESPACE,
-                    datum("EnvironmentActiveTime", "Milliseconds", activeMillis, dimensions, now));
-            publish(accountId, region, NAMESPACE,
-                    datum("EnvironmentCPUTime", "Milliseconds", cpuMillis, dimensions, now));
-            publish(accountId, region, NAMESPACE,
-                    datum("EnvironmentMaxMemoryUsage", "Megabytes", maxMemoryMb, dimensions, now));
-            publish(accountId, region, NAMESPACE,
-                    datum("EnvironmentConcurrentRequests", "Count", concurrentRequests, dimensions, now));
-            publish(accountId, region, NAMESPACE, datum("ResponseBytes", "Bytes", responseBytes, dimensions, now));
+            publish(accountId, region, List.of(
+                    new Datapoint(NAMESPACE, datum("EnvironmentActiveTime", "Milliseconds", activeMillis, dimensions, now)),
+                    new Datapoint(NAMESPACE, datum("EnvironmentCPUTime", "Milliseconds", cpuMillis, dimensions, now)),
+                    new Datapoint(NAMESPACE,
+                            datum("EnvironmentMaxMemoryUsage", "Megabytes", maxMemoryMb, dimensions, now)),
+                    new Datapoint(NAMESPACE,
+                            datum("EnvironmentConcurrentRequests", "Count", concurrentRequests, dimensions, now)),
+                    new Datapoint(NAMESPACE, datum("ResponseBytes", "Bytes", responseBytes, dimensions, now))));
         };
+    }
+
+    /** Waits until what is queued is stored, so the last flush of the store at shutdown has it. */
+    void awaitPublished(Duration limit) {
+        try {
+            publisher.submit(() -> { }).get(limit.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException | TimeoutException | RejectedExecutionException e) {
+            LOG.warnv(e, "Lambda Web metrics still waiting to be stored may be lost");
+        }
     }
 
     @PreDestroy
@@ -93,11 +131,11 @@ public class LambdaWebMetrics {
     }
 
     /** The status classes have no datapoint of 0. */
-    private void statusClass(WebFunctionTarget target, int status, List<Dimension> dimensions, long now) {
+    private static void statusClass(List<Datapoint> datapoints, int status, List<Dimension> dimensions, long now) {
         if (400 <= status && status <= 499) {
-            publish(target, NAMESPACE, datum("HTTPResponseStatusClass4XX", "Count", 1, dimensions, now));
+            datapoints.add(new Datapoint(NAMESPACE, datum("HTTPResponseStatusClass4XX", "Count", 1, dimensions, now)));
         } else if (500 <= status && status <= 599) {
-            publish(target, NAMESPACE, datum("HTTPResponseStatusClass5XX", "Count", 1, dimensions, now));
+            datapoints.add(new Datapoint(NAMESPACE, datum("HTTPResponseStatusClass5XX", "Count", 1, dimensions, now)));
         }
     }
 
@@ -122,21 +160,31 @@ public class LambdaWebMetrics {
         return datum;
     }
 
-    private void publish(WebFunctionTarget target, String namespace, MetricDatum datum) {
-        publish(target.accountId(), target.region(), namespace, datum);
-    }
-
-    private void publish(String accountId, String region, String namespace, MetricDatum datum) {
+    private void publish(String accountId, String region, List<Datapoint> datapoints) {
+        if (datapoints.isEmpty()) {
+            return;
+        }
         try {
             publisher.execute(() -> {
-                try {
-                    cloudWatch.publishMetricForAccount(accountId, namespace, datum, region, UUID.randomUUID().toString());
-                } catch (RuntimeException e) {
-                    LOG.warnv(e, "Could not publish {0} {1} in {2}", namespace, datum.getMetricName(), region);
+                for (Datapoint datapoint : datapoints) {
+                    store(accountId, region, datapoint);
                 }
             });
-        } catch (RejectedExecutionException expected) {
-            // Floci is shutting down. The environments it stops then have no last datapoint.
+            dropping.set(false);
+        } catch (RejectedExecutionException rejected) {
+            if (!publisher.isShutdown() && dropping.compareAndSet(false, true)) {
+                LOG.warnv("Dropping Lambda Web metrics while {0} writes wait", publisher.getQueue().size());
+            }
+        }
+    }
+
+    private void store(String accountId, String region, Datapoint datapoint) {
+        try {
+            cloudWatch.publishMetricForAccount(accountId, datapoint.namespace(), datapoint.datum(), region,
+                    UUID.randomUUID().toString());
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not publish {0} {1} in {2}", datapoint.namespace(), datapoint.datum().getMetricName(),
+                    region);
         }
     }
 }
