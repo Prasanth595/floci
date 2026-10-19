@@ -302,6 +302,16 @@ that publish those images.
 | DeleteTags | Removes tags from supported EC2 resources. |
 | DescribeTags | Lists tags stored for EC2 resources. |
 
+Tags are regional, like the resources they label: `DescribeTags` lists only the tags of resources
+in the request's region, and a tag set in one region is not visible from another. Each result
+carries the resource's `resourceType` (`image`, `volume`, `snapshot`, `network-acl`,
+`vpc-peering-connection` and `spot-instances-request` included). Tags given when a volume or a
+VPC peering connection is created are listed like any other tag, and `DescribeVolumes`,
+`DescribeSnapshots` and `DescribeSpotInstanceRequests` show later `CreateTags` and `DeleteTags`
+changes. Each side of a VPC peering connection sees the tags set in its own account and region. On upgrade, tags stored by an
+older Floci version are moved under their resource's region at startup; a tag whose resource no
+longer exists is dropped.
+
 Public tag mutations reject keys beginning with `aws:` regardless of ASCII case.
 An empty `DeleteTags` tag list removes user tags and preserves AWS-managed tags.
 CloudFormation tag updates and rollbacks likewise leave AWS-managed tags intact.

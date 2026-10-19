@@ -672,7 +672,7 @@ class IamConditionContextResolverTest {
 
     @Test
     void createTagsResolvesBothTheRequestedTagsAndTheResourcesCurrentTags() {
-        when(ec2Service.resourceTags("i-0123456789")).thenReturn(List.of(new Tag("Owner", "alice")));
+        when(ec2Service.resourceTags("us-east-1", "i-0123456789")).thenReturn(List.of(new Tag("Owner", "alice")));
         ContainerRequestContext containerRequest = formRequest(
                 "Action=CreateTags&ResourceId.1=i-0123456789&Tag.1.Key=Env&Tag.1.Value=prod");
 
@@ -685,7 +685,7 @@ class IamConditionContextResolverTest {
 
     @Test
     void instanceActionsResolveResourceTagsFromTheFirstNamedInstance() {
-        when(ec2Service.resourceTags("i-0123456789")).thenReturn(List.of(new Tag("Team", "payments")));
+        when(ec2Service.resourceTags("us-east-1", "i-0123456789")).thenReturn(List.of(new Tag("Team", "payments")));
 
         for (String action : List.of("ec2:TerminateInstances", "ec2:DescribeInstances")) {
             Map<String, List<String>> conditions = resolver.resolve("ec2", action,
@@ -699,6 +699,16 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void resourceTagsAreReadInTheRequestRegion() {
+        requestContext.setRegion("eu-west-1");
+        when(ec2Service.resourceTags("eu-west-1", "i-0123456789")).thenReturn(List.of(new Tag("Team", "payments")));
+        when(ec2Service.resourceTags("us-east-1", "i-0123456789")).thenReturn(List.of(new Tag("Team", "other")));
+
+        assertEquals(List.of("payments"), resolver.resolve("ec2", "ec2:TerminateInstances",
+                formRequest("Action=TerminateInstances&InstanceId.1=i-0123456789")).get("aws:ResourceTag/Team"));
+    }
+
+    @Test
     void ec2ContextIsAbsentWhenNoResourceIsNamedOrTheActionIsNotCovered() {
         assertNull(resolver.resolve("ec2", "ec2:DescribeInstances", formRequest("Action=DescribeInstances")));
         assertNull(resolver.resolve("ec2", "ec2:DescribeVpcs", formRequest("Action=DescribeVpcs")));
@@ -709,7 +719,7 @@ class IamConditionContextResolverTest {
     @Test
     void formParametersAreBufferedOncePerRequest() {
         ContainerRequestContext containerRequest = formRequest("Action=TerminateInstances&InstanceId.1=i-1");
-        when(ec2Service.resourceTags("i-1")).thenReturn(List.of(new Tag("Team", "payments")));
+        when(ec2Service.resourceTags("us-east-1", "i-1")).thenReturn(List.of(new Tag("Team", "payments")));
 
         resolver.resolve("ec2", "ec2:TerminateInstances", containerRequest);
 
@@ -730,12 +740,12 @@ class IamConditionContextResolverTest {
                 ]}""";
         String body = "Action=TerminateInstances&InstanceId.1=i-0123456789";
 
-        when(ec2Service.resourceTags("i-0123456789")).thenReturn(List.of(new Tag("Team", "payments")));
+        when(ec2Service.resourceTags("us-east-1", "i-0123456789")).thenReturn(List.of(new Tag("Team", "payments")));
         assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(policy),
                 "ec2:TerminateInstances", "*",
                 resolver.resolve("ec2", "ec2:TerminateInstances", formRequest(body))));
 
-        when(ec2Service.resourceTags("i-0123456789")).thenReturn(List.of(new Tag("Team", "engineering")));
+        when(ec2Service.resourceTags("us-east-1", "i-0123456789")).thenReturn(List.of(new Tag("Team", "engineering")));
         assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy),
                 "ec2:TerminateInstances", "*",
                 resolver.resolve("ec2", "ec2:TerminateInstances", formRequest(body))));
@@ -778,9 +788,9 @@ class IamConditionContextResolverTest {
 
     @Test
     void remainingTargetsCarryEachLaterResourcesOwnTags() {
-        when(ec2Service.resourceTags("i-1")).thenReturn(List.of(new Tag("Team", "payments")));
-        when(ec2Service.resourceTags("i-2")).thenReturn(List.of(new Tag("Team", "engineering")));
-        when(ec2Service.resourceTags("i-3")).thenReturn(List.of());
+        when(ec2Service.resourceTags("us-east-1", "i-1")).thenReturn(List.of(new Tag("Team", "payments")));
+        when(ec2Service.resourceTags("us-east-1", "i-2")).thenReturn(List.of(new Tag("Team", "engineering")));
+        when(ec2Service.resourceTags("us-east-1", "i-3")).thenReturn(List.of());
         ContainerRequestContext containerRequest = formRequest(
                 "Action=TerminateInstances&InstanceId.1=i-1&InstanceId.2=i-2&InstanceId.3=i-3");
 
@@ -795,7 +805,7 @@ class IamConditionContextResolverTest {
 
     @Test
     void remainingTargetsOfCreateTagsRepeatTheRequestedTagsPerResource() {
-        when(ec2Service.resourceTags("vpc-2")).thenReturn(List.of(new Tag("Owner", "bob")));
+        when(ec2Service.resourceTags("us-east-1", "vpc-2")).thenReturn(List.of(new Tag("Owner", "bob")));
         ContainerRequestContext containerRequest = formRequest(
                 "Action=CreateTags&ResourceId.1=vpc-1&ResourceId.2=vpc-2&Tag.1.Key=Env&Tag.1.Value=prod");
 
@@ -825,19 +835,19 @@ class IamConditionContextResolverTest {
                    "Condition":{"StringEquals":{"aws:ResourceTag/Team":"payments"}}}
                 ]}""";
         String body = "Action=TerminateInstances&InstanceId.1=i-1&InstanceId.2=i-2";
-        when(ec2Service.resourceTags("i-1")).thenReturn(List.of(new Tag("Team", "payments")));
+        when(ec2Service.resourceTags("us-east-1", "i-1")).thenReturn(List.of(new Tag("Team", "payments")));
 
-        when(ec2Service.resourceTags("i-2")).thenReturn(List.of(new Tag("Team", "engineering")));
+        when(ec2Service.resourceTags("us-east-1", "i-2")).thenReturn(List.of(new Tag("Team", "engineering")));
         assertEquals(Decision.DENY, decisionForEveryTarget(policy, "ec2:TerminateInstances", formRequest(body)));
 
-        when(ec2Service.resourceTags("i-2")).thenReturn(List.of(new Tag("Team", "payments")));
+        when(ec2Service.resourceTags("us-east-1", "i-2")).thenReturn(List.of(new Tag("Team", "payments")));
         assertEquals(Decision.ALLOW, decisionForEveryTarget(policy, "ec2:TerminateInstances", formRequest(body)));
     }
 
     @Test
     void aRepeatedNumberedParameterKeepsItsFirstValueLikeTheHandlers() {
-        when(ec2Service.resourceTags("i-first")).thenReturn(List.of(new Tag("Team", "engineering")));
-        when(ec2Service.resourceTags("i-second")).thenReturn(List.of(new Tag("Team", "payments")));
+        when(ec2Service.resourceTags("us-east-1", "i-first")).thenReturn(List.of(new Tag("Team", "engineering")));
+        when(ec2Service.resourceTags("us-east-1", "i-second")).thenReturn(List.of(new Tag("Team", "payments")));
 
         Map<String, List<String>> conditions = resolver.resolve("ec2", "ec2:TerminateInstances",
                 formRequest("Action=TerminateInstances&InstanceId.1=i-first&InstanceId.1=i-second"));
@@ -847,7 +857,7 @@ class IamConditionContextResolverTest {
 
     @Test
     void remainingTargetsStopAtTheFirstNumberingGapLikeTheHandlers() {
-        when(ec2Service.resourceTags("i-2")).thenReturn(List.of(new Tag("Team", "payments")));
+        when(ec2Service.resourceTags("us-east-1", "i-2")).thenReturn(List.of(new Tag("Team", "payments")));
 
         assertEquals(List.of(), resolver.resolveRemainingTargets("ec2", "ec2:TerminateInstances",
                 formRequest("Action=TerminateInstances&InstanceId.2=i-2")));
@@ -862,8 +872,8 @@ class IamConditionContextResolverTest {
                   {"Effect":"Allow","Action":"ec2:TerminateInstances","Resource":"*",
                    "Condition":{"StringEquals":{"aws:ResourceTag/Team":"payments"}}}
                 ]}""";
-        when(ec2Service.resourceTags("i-denied")).thenReturn(List.of(new Tag("Team", "engineering")));
-        when(ec2Service.resourceTags("i-allowed")).thenReturn(List.of(new Tag("Team", "payments")));
+        when(ec2Service.resourceTags("us-east-1", "i-denied")).thenReturn(List.of(new Tag("Team", "engineering")));
+        when(ec2Service.resourceTags("us-east-1", "i-allowed")).thenReturn(List.of(new Tag("Team", "payments")));
 
         // The handler terminates i-denied, the first value, so that is what must be authorized.
         assertEquals(Decision.DENY, decisionForEveryTarget(policy, "ec2:TerminateInstances",
