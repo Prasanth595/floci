@@ -127,6 +127,7 @@ class Ec2PublicIpOnLaunchTest {
         when(config.services()).thenReturn(services);
         when(services.ec2()).thenReturn(ec2Cfg);
         when(ec2Cfg.mock()).thenReturn(true);
+        when(ec2Cfg.mockPublicAddresses()).thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.NONE);
         Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
         // A mock container manager makes launch() a no-op — the associatePublicIp
         // flag is set on the instance BEFORE launch, so no Docker is needed here.

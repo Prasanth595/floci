@@ -5,7 +5,7 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 /**
  * Whether an instance has an automatic public IPv4 address, decided the same way with and without
  * containers; only the address itself depends on the mode: the container's reachable address, or
- * an invented one where there is no container.
+ * where there is no container the one {@code mock-public-addresses} chooses, by default none.
  *
  * <p>As on AWS, an instance takes one when its launch asked for it (the subnet's
  * MapPublicIpOnLaunch, or AssociatePublicIpAddress, which wins either way) on an interface the

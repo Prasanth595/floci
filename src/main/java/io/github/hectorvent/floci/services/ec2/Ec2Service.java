@@ -4091,7 +4091,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         EmulatorConfig.Ec2ServiceConfig ec2 = config.services().ec2();
         return switch (ec2.mockPublicAddresses()) {
             case NONE -> null;
-            case FIXED -> ec2.mockPublicAddress().filter(address -> !address.isBlank()).orElse("127.0.0.1");
+            case FIXED -> ec2.mockPublicAddress().map(String::strip).filter(address -> !address.isEmpty())
+                    .orElse("127.0.0.1");
             case DOCUMENTATION -> documentationPublicAddress();
         };
     }

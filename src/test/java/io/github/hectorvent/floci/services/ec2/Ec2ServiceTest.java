@@ -1296,7 +1296,8 @@ class Ec2ServiceTest {
     }
 
     @ParameterizedTest
-    @CsvSource(value = {"192.168.65.2,192.168.65.2,192.168.65.2", "NULL,127.0.0.1,localhost"}, nullValues = "NULL")
+    @CsvSource(value = {"192.168.65.2,192.168.65.2,192.168.65.2", "' 192.168.65.3 ',192.168.65.3,192.168.65.3",
+            "'  ',127.0.0.1,localhost", "NULL,127.0.0.1,localhost"}, nullValues = "NULL")
     void fixedMockAddressesUseTheConfiguredAddress(String configured, String expected, String dnsName) {
         EmulatorConfig config = mockConfig(true);
         when(config.services().ec2().mockPublicAddresses())

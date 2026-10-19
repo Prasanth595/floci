@@ -182,6 +182,7 @@ class EksServiceTest {
         when(ec2Config.services()).thenReturn(services);
         when(services.ec2()).thenReturn(ec2ServiceConfig);
         when(ec2ServiceConfig.mock()).thenReturn(true);
+        when(ec2ServiceConfig.mockPublicAddresses()).thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.NONE);
 
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override

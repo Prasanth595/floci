@@ -280,6 +280,7 @@ class Ec2ServiceConcurrencyTest {
         when(config.services()).thenReturn(services);
         when(services.ec2()).thenReturn(ec2);
         when(ec2.mock()).thenReturn(true);
+        when(ec2.mockPublicAddresses()).thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.NONE);
         return config;
     }
 

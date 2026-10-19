@@ -1158,8 +1158,8 @@ For an address that reaches the instance itself, run it with a container (`FLOCI
   specifies, only an interface the launch creates gets an automatic address. An instance launched
   on an existing network interface has none.
 - The address appears when the instance reaches `running` and remains stable while it runs. A
-  stop or termination releases it, and a restart assigns a new one; the private address does not
-  change. As the
+  stop or termination releases it, and a restart assigns a new one (the same one again under
+  `fixed`); the private address does not change. As the
   [EC2 User Guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-instance-addressing.html#concepts-public-addresses)
   describes, a released address is not replaced while a second network interface is attached.
 - An Elastic IP associated with the instance's primary private address takes the place of the
@@ -1169,6 +1169,7 @@ For an address that reaches the instance itself, run it with a container (`FLOCI
   launched on that interface, although DescribeAddresses does not report that instance as its
   `InstanceId`.
 
-In mock mode, the address appears whether DescribeInstances or DescribeInstanceStatus observes the
-launch first. A terminated mock instance has no public address, and stopping it does not bring it
+Under `none` the rule still runs, but a mock instance has only the Elastic IP, if any, to show.
+Otherwise a mock instance's address appears whether DescribeInstances or DescribeInstanceStatus
+observes the launch first. A terminated mock instance has no public address, and stopping it does not bring it
 back.
