@@ -120,7 +120,8 @@ public class IotMqttWebSocketBridge {
 
     /**
      * The upgrade as AWS hands it to a custom authorizer; the server name only over TLS, from SNI or
-     * else the Host header. The client's address rides along for the broker's policy evaluation.
+     * else the Host header. The client's address and port ride along for the broker's policy
+     * evaluation and GetConnection.
      */
     private static IotCustomAuthorizer.WebSocketUpgrade upgradeOf(ServerWebSocket ws) {
         Map<String, String> headers = new LinkedHashMap<>();
@@ -135,7 +136,7 @@ public class IotMqttWebSocketBridge {
         }
         SocketAddress client = ws.remoteAddress();
         return new IotCustomAuthorizer.WebSocketUpgrade(headers, ws.query() == null ? "" : ws.query(), serverName,
-                client == null ? null : client.host());
+                client == null ? null : client.host(), client == null ? -1 : client.port());
     }
 
     static final class BridgeSession {

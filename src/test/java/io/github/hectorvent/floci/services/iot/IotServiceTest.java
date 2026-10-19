@@ -206,9 +206,9 @@ class IotServiceTest {
         verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
     }
 
-    /** MQTT 3.1.1 section 4.7.2, which AWS applies to rule topic filters too: a wildcard first level does not match {@code $}. */
+    /** As AWS IoT does for rule topic filters: a wildcard first level does not match a lifecycle topic. */
     @Test
-    void aRuleWhoseTopicFilterStartsWithAWildcardDoesNotFireForADollarTopic() throws Exception {
+    void aRuleWhoseTopicFilterStartsWithAWildcardDoesNotFireForALifecycleTopic() throws Exception {
         String everything = "http://localhost:4566/000000000000/everything";
         String anyPresence = "http://localhost:4566/000000000000/any-presence";
         String presence = "http://localhost:4566/000000000000/presence";

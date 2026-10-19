@@ -20,7 +20,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -670,6 +673,51 @@ class IotMqttEnabledIntegrationTest {
         }
     }
 
+    @Test
+    void tklocalDisconnectedRuleReceivesKeepAliveTimeoutWhenTheClientFallsSilent() throws Exception {
+        long suffix = System.nanoTime();
+        String queueUrl = createQueue("presence-silent-" + suffix);
+        String disconnectedRule = "presenceSilent" + suffix;
+        createSqsRule(disconnectedRule, TKLOCAL_DISCONNECTED_SQL, queueUrl);
+        try (Socket socket = rawConnect("tklocal-silent-" + suffix, 1)) {
+            List<JsonNode> messages = awaitMessages(queueUrl, 1);
+
+            assertEquals(1, messages.size(), messages.toString());
+            JsonNode disconnected = messages.get(0);
+            assertEquals("tklocal-silent-" + suffix, disconnected.path("clientId").asText());
+            assertEquals("MQTT_KEEP_ALIVE_TIMEOUT", disconnected.path("disconnectReason").asText());
+            assertTrue(disconnected.path("clientInitiatedDisconnect").isBoolean(), disconnected.toString());
+            assertFalse(disconnected.path("clientInitiatedDisconnect").asBoolean());
+        } finally {
+            deleteRule(disconnectedRule);
+        }
+    }
+
+    @Test
+    void tklocalDisconnectedRuleReceivesConnectionLostWhenAPingingClientDrops() throws Exception {
+        long suffix = System.nanoTime();
+        String queueUrl = createQueue("presence-pinging-" + suffix);
+        String disconnectedRule = "presencePinging" + suffix;
+        createSqsRule(disconnectedRule, TKLOCAL_DISCONNECTED_SQL, queueUrl);
+        try {
+            try (Socket socket = rawConnect("tklocal-pinging-" + suffix, 1)) {
+                Instant pingUntil = Instant.now().plusMillis(2_500);
+                while (Instant.now().isBefore(pingUntil)) {
+                    socket.getOutputStream().write(new byte[] {(byte) 0xc0, 0x00});
+                    assertArrayEquals(new byte[] {(byte) 0xd0, 0x00}, socket.getInputStream().readNBytes(2), "PINGRESP");
+                    Thread.sleep(400);
+                }
+            }
+
+            List<JsonNode> messages = awaitMessages(queueUrl, 1);
+            assertEquals(1, messages.size(), messages.toString());
+            assertEquals("CONNECTION_LOST", messages.get(0).path("disconnectReason").asText());
+            assertFalse(messages.get(0).path("clientInitiatedDisconnect").asBoolean());
+        } finally {
+            deleteRule(disconnectedRule);
+        }
+    }
+
     private String createQueue(String queueName) {
         return given()
             .contentType("application/x-www-form-urlencoded")
@@ -813,6 +861,34 @@ class IotMqttEnabledIntegrationTest {
             Thread.sleep(25);
         }
         throw new AssertionError("MQTT publish event was not recorded");
+    }
+
+    /** An MQTT 3.1.1 CONNECT over a plain socket, so the test decides exactly which packets follow it. */
+    private static Socket rawConnect(String clientId, int keepAliveSeconds) throws IOException {
+        Socket socket = new Socket();
+        socket.connect(new InetSocketAddress("127.0.0.1", IotMqttTlsProfile.PLAIN_PORT), 5_000);
+        socket.setSoTimeout(5_000);
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        writeUtf8(body, "MQTT");
+        body.write(0x04);
+        body.write(0x02);
+        body.write(keepAliveSeconds >>> 8);
+        body.write(keepAliveSeconds & 0xff);
+        writeUtf8(body, clientId);
+        ByteArrayOutputStream connect = new ByteArrayOutputStream();
+        connect.write(0x10);
+        connect.write(body.size());
+        connect.writeBytes(body.toByteArray());
+        socket.getOutputStream().write(connect.toByteArray());
+        assertArrayEquals(new byte[] {0x20, 0x02, 0x00, 0x00}, socket.getInputStream().readNBytes(4), "CONNACK accepted");
+        return socket;
+    }
+
+    private static void writeUtf8(ByteArrayOutputStream out, String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        out.write(bytes.length >>> 8);
+        out.write(bytes.length & 0xff);
+        out.writeBytes(bytes);
     }
 
     private record MqttPublish(String topic, byte[] payload) {

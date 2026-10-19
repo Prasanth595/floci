@@ -263,7 +263,7 @@ in AWS's order:
 - `timestamp` is epoch milliseconds.
 - `sessionIdentifier` is a random UUID, the same on the connected and the disconnected event of one session.
 - `principalIdentifier` is the device certificate ID on 8883. It is omitted on 1883, on `/mqtt` (Floci does not verify SigV4) and for a connection admitted by a custom authorizer.
-- `ipAddress`, on the connected event only, is the client's address. A WebSocket client reports its own address, not the bridge's loopback socket; `GetConnection` returns the same address.
+- `ipAddress`, on the connected event only, is the client's address. A WebSocket client reports its own address, not the bridge's loopback socket; `GetConnection` returns the same address, with the WebSocket client's own port as `sourcePort`.
 - `versionNumber` counts per client id: `0` for a new client id, `+2` when the client id reconnects after its session ended (`0`, `2`, `4`), and `+1` for a session that takes over the client id from a connected one. AWS starts again from `0` after about an hour without a connection; Floci keeps counting, across state resets, until the process restarts.
 
 `clientInitiatedDisconnect` is `true` only for `CLIENT_INITIATED_DISCONNECT`:
@@ -271,23 +271,22 @@ in AWS's order:
 | Cause | `disconnectReason` |
 |---|---|
 | The client sent `DISCONNECT` (MQTT 3.1.1 or 5) | `CLIENT_INITIATED_DISCONNECT` |
-| The connection closed without `DISCONNECT`, or the keep-alive timed out | `CONNECTION_LOST` |
+| The connection closed without `DISCONNECT` | `CONNECTION_LOST` |
+| No packet from the client for 1.5 times its keep-alive | `MQTT_KEEP_ALIVE_TIMEOUT` |
 | A new connection took over the client id; published for the old session, before the new session's connected event | `DUPLICATE_CLIENTID` |
 | IoT Data `DeleteConnection` | `API_INITIATED_DISCONNECT` |
 | A PUBLISH above 128 KB, or a QoS 2 PUBLISH | `CLIENT_ERROR` |
 
 An event goes the way a client publish goes: it is evaluated by the topic rules of every region,
 where `clientid()` returns the client id the event is about and `topic(3)` is `presence`, and
-delivered to matching MQTT subscribers. As MQTT 3.1.1 section 4.7.2 requires and AWS does, a topic
-filter whose first level is `#` or `+` does not match a topic starting with `$`, both for
-subscriptions (including retained messages) and for a rule's `FROM`: `#` and
+delivered to matching MQTT subscribers. As on AWS, a topic filter whose first level is `#` or `+`
+does not match the lifecycle topics, both for subscriptions and for a rule's `FROM`: `#` and
 `+/events/presence/+/+` receive no lifecycle events, `$aws/events/presence/connected/+` does.
 
 As on AWS, events can arrive out of order across connections; `versionNumber` orders them.
 
 Differences from AWS and limits:
 
-- A keep-alive timeout is reported as `CONNECTION_LOST`; AWS reports `MQTT_KEEP_ALIVE_TIMEOUT`. The broker closes such a connection the way an abrupt close ends, so Floci cannot tell the two apart.
 - A client id containing `#` or `+` gets no lifecycle events, as on AWS.
 - A broker shutdown publishes no disconnected events.
 - `connect_failed`, `subscribed` and `unsubscribed` events are not emitted.

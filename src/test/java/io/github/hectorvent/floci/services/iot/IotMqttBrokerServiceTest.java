@@ -37,7 +37,9 @@ import io.vertx.core.net.PemKeyCertOptions;
 import io.vertx.core.net.SocketAddress;
 import io.vertx.mqtt.MqttEndpoint;
 import io.vertx.mqtt.MqttTopicSubscription;
+import io.vertx.mqtt.messages.MqttPublishMessage;
 import io.vertx.mqtt.messages.MqttSubscribeMessage;
+import io.vertx.mqtt.messages.MqttUnsubscribeMessage;
 import jakarta.enterprise.inject.Instance;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.MqttCallback;
@@ -52,6 +54,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.AdditionalAnswers;
+import org.mockito.ArgumentCaptor;
 
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
@@ -514,7 +518,7 @@ class IotMqttBrokerServiceTest {
                 .thenReturn(List.of("{}"));
         SocketAddress bridge = SocketAddress.inetSocketAddress(50123, "127.0.0.1");
         broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(
-                Map.of(), IotCustomAuthorizer.NAME_PARAM + "=ws-auth", null, "203.0.113.7"));
+                Map.of(), IotCustomAuthorizer.NAME_PARAM + "=ws-auth", null, "203.0.113.7", 41233));
         MqttEndpoint endpoint = mock(MqttEndpoint.class);
         when(endpoint.clientIdentifier()).thenReturn("ws-client");
         when(endpoint.remoteAddress()).thenReturn(bridge);
@@ -528,7 +532,7 @@ class IotMqttBrokerServiceTest {
     void aWebSocketClientsConnectedEventCarriesTheWebSocketClientsAddress() throws Exception {
         startBrokerRecordingPublishes();
         SocketAddress bridge = SocketAddress.inetSocketAddress(50124, "127.0.0.1");
-        broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(Map.of(), "", null, "203.0.113.7"));
+        broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(Map.of(), "", null, "203.0.113.7", 41234));
         MqttEndpoint endpoint = mock(MqttEndpoint.class);
         when(endpoint.clientIdentifier()).thenReturn("ws-client");
         when(endpoint.remoteAddress()).thenReturn(bridge);
@@ -538,7 +542,8 @@ class IotMqttBrokerServiceTest {
 
         assertEquals("203.0.113.7", awaitPresence("connected", "ws-client", 1).get(0).get("ipAddress").asText(),
                 "the WebSocket client's address, not the bridge's loopback socket");
-        assertEquals("203.0.113.7", broker.getConnection("ws-client").orElseThrow().address());
+        assertEquals(new IotMqttBrokerService.ConnectionInfo("ws-client", "203.0.113.7", 41234),
+                broker.getConnection("ws-client").orElseThrow(), "the WebSocket client's address and port");
     }
 
     @Test
@@ -714,6 +719,150 @@ class IotMqttBrokerServiceTest {
         assertEquals("API_INITIATED_DISCONNECT", disconnected.get(0).get("disconnectReason").asText());
     }
 
+    /** A takeover can find the previous endpoint already closed by its own client, and still admits the new one. */
+    @Test
+    void aTakeoverOfAnEndpointAlreadyClosedStillAcceptsTheNewConnection() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttEndpoint previous = mock(MqttEndpoint.class);
+        when(previous.clientIdentifier()).thenReturn("closed-takeover");
+        doThrow(new IllegalStateException("MQTT endpoint is closed")).when(previous).close();
+        broker.handleEndpoint(previous, false);
+        MqttEndpoint replacement = mock(MqttEndpoint.class);
+        when(replacement.clientIdentifier()).thenReturn("closed-takeover");
+
+        assertDoesNotThrow(() -> broker.handleEndpoint(replacement, false));
+
+        verify(replacement).accept();
+        awaitPresence("connected", "closed-takeover", 2);
+        List<JsonNode> events = presenceOf("closed-takeover");
+        assertEquals(List.of("connected", "disconnected", "connected"), eventTypes(events), events.toString());
+        assertEquals("DUPLICATE_CLIENTID", events.get(1).get("disconnectReason").asText());
+    }
+
+    /**
+     * Two CONNECTs for one client id admitted at once on two event loops: the first is held after it
+     * took its versionNumber while the second completes. The session left current is the one with
+     * the highest versionNumber, so DeleteConnection ends that one. The first finds its endpoint
+     * closed by the takeover, as Vert.x refuses to configure a closed endpoint, and its connected
+     * and DUPLICATE_CLIENTID disconnected events still pair up.
+     */
+    @Test
+    void overlappingConnectsForOneClientIdLeaveTheNewestVersionCurrent() throws Exception {
+        startBrokerRecordingPublishes();
+        CountDownLatch admitting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean firstClosed = new AtomicBoolean();
+        MqttEndpoint first = mock(MqttEndpoint.class);
+        when(first.clientIdentifier()).thenReturn("overlap");
+        doAnswer(invocation -> {
+            firstClosed.set(true);
+            return null;
+        }).when(first).close();
+        doAnswer(invocation -> {
+            admitting.countDown();
+            release.await(10, TimeUnit.SECONDS);
+            if (firstClosed.get()) {
+                throw new IllegalStateException("MQTT endpoint is closed");
+            }
+            return null;
+        }).when(first).subscriptionAutoAck(false);
+        MqttEndpoint second = mock(MqttEndpoint.class);
+        when(second.clientIdentifier()).thenReturn("overlap");
+        ExecutorService firstEventLoop = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> firstAdmit = firstEventLoop.submit(() -> broker.handleEndpoint(first, false));
+            assertTrue(admitting.await(10, TimeUnit.SECONDS), "the first CONNECT is being admitted");
+            broker.handleEndpoint(second, false);
+            release.countDown();
+            firstAdmit.get(10, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            firstEventLoop.shutdown();
+        }
+
+        List<JsonNode> connected = awaitPresence("connected", "overlap", 2);
+        assertTrue(broker.disconnectClient("overlap", false));
+
+        long newest = Math.max(connected.get(0).get("versionNumber").asLong(), connected.get(1).get("versionNumber").asLong());
+        assertNotEquals(connected.get(0).get("versionNumber"), connected.get(1).get("versionNumber"), connected.toString());
+        JsonNode deleted = awaitPresence("disconnected", "overlap", 2).stream()
+                .filter(event -> "API_INITIATED_DISCONNECT".equals(event.get("disconnectReason").asText()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(newest, deleted.get("versionNumber").asLong(), "the session left current: " + presenceOf("overlap"));
+        long overlapped = newest == connected.get(0).get("versionNumber").asLong()
+                ? connected.get(1).get("versionNumber").asLong()
+                : connected.get(0).get("versionNumber").asLong();
+        assertEquals(List.of("connected", "disconnected"), eventTypes(presenceOf("overlap").stream()
+                .filter(event -> event.get("versionNumber").asLong() == overlapped)
+                .toList()).stream().sorted().toList(), presenceOf("overlap").toString());
+    }
+
+    /**
+     * A DeleteConnection with cleanSession racing a reconnect of the client id it ends: the reconnect
+     * waits until DeleteConnection is done with the old session, so the subscriptions the new
+     * session makes stay. The DeleteConnection is held where it schedules the disconnected event.
+     */
+    @Test
+    void deleteConnectionLeavesTheSubscriptionsOfAReconnectRacingIt() throws Exception {
+        IotService service = mock(IotService.class);
+        when(iotService.get()).thenReturn(service);
+        when(service.listRetainedMessages(null, null)).thenReturn(new IotService.Page<>(List.of(), null));
+        CountDownLatch ending = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicReference<Thread> deletingThread = new AtomicReference<>();
+        Vertx heldVertx = mock(Vertx.class, AdditionalAnswers.delegatesTo(vertx));
+        doAnswer(invocation -> {
+            if (Thread.currentThread() == deletingThread.get()) {
+                ending.countDown();
+                release.await(10, TimeUnit.SECONDS);
+            }
+            vertx.runOnContext(invocation.getArgument(0));
+            return null;
+        }).when(heldVertx).runOnContext(any());
+        IotMqttBrokerService racing = new IotMqttBrokerService(config, heldVertx, iotService, customAuthorizer, registry);
+        MqttEndpoint old = mock(MqttEndpoint.class);
+        when(old.clientIdentifier()).thenReturn("reconnecting");
+        racing.handleEndpoint(old, false);
+        MqttEndpoint reconnect = mock(MqttEndpoint.class);
+        when(reconnect.clientIdentifier()).thenReturn("reconnecting");
+        AtomicReference<Handler<MqttSubscribeMessage>> subscribeHandler = new AtomicReference<>();
+        when(reconnect.subscribeHandler(any())).thenAnswer(invocation -> {
+            subscribeHandler.set(invocation.getArgument(0));
+            return reconnect;
+        });
+        MqttTopicSubscription requested = mock(MqttTopicSubscription.class);
+        when(requested.topicName()).thenReturn("devices/reconnecting/commands");
+        when(requested.qualityOfService()).thenReturn(MqttQoS.AT_MOST_ONCE);
+        MqttSubscribeMessage subscribe = mock(MqttSubscribeMessage.class);
+        when(subscribe.topicSubscriptions()).thenReturn(List.of(requested));
+        AtomicReference<Thread> reconnectingThread = new AtomicReference<>();
+        ExecutorService deleting = Executors.newSingleThreadExecutor();
+        ExecutorService reconnecting = Executors.newSingleThreadExecutor();
+        try {
+            Future<Boolean> delete = deleting.submit(() -> {
+                deletingThread.set(Thread.currentThread());
+                return racing.disconnectClient("reconnecting", true);
+            });
+            assertTrue(ending.await(10, TimeUnit.SECONDS), "DeleteConnection is ending the old session");
+            Future<?> reconnected = reconnecting.submit(() -> {
+                reconnectingThread.set(Thread.currentThread());
+                racing.handleEndpoint(reconnect, false);
+                subscribeHandler.get().handle(subscribe);
+            });
+            awaitDoneOrBlocked(reconnected, reconnectingThread);
+            release.countDown();
+
+            assertTrue(delete.get(10, TimeUnit.SECONDS));
+            reconnected.get(10, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            deleting.shutdown();
+            reconnecting.shutdown();
+        }
+        assertEquals(List.of("devices/reconnecting/commands"), racing.listSubscriptions("reconnecting"));
+    }
+
     @Test
     void aPayloadAboveTheAwsLimitEndsTheSessionWithAClientError() throws Exception {
         startBrokerRecordingPublishes();
@@ -778,9 +927,9 @@ class IotMqttBrokerServiceTest {
     }
 
     /**
-     * MQTT 3.1.1 section 4.7.2: a filter whose first level is a wildcard does not match a topic
-     * beginning with {@code $}. A later ordinary publish both wildcard subscribers match shows they
-     * got nothing before it.
+     * As AWS IoT does for lifecycle topics: a filter whose first level is a wildcard does not
+     * match them. A later ordinary publish both wildcard subscribers match shows they got nothing
+     * before it.
      */
     @Test
     void onlyASubscriptionWithALiteralFirstLevelReceivesLifecycleEvents() throws Exception {
@@ -808,6 +957,21 @@ class IotMqttBrokerServiceTest {
             disconnect(catchAllSubscriber);
             disconnect(wildcardSubscriber);
             disconnect(literalSubscriber);
+        }
+    }
+
+    /** As measured on AWS IoT, a {@code #} subscriber receives the shadow response topics, unlike the lifecycle ones. */
+    @Test
+    void aSubscriptionOnHashReceivesShadowResponseTopics() throws Exception {
+        startBrokerRecordingPublishes();
+        BlockingQueue<String> topics = new LinkedBlockingQueue<>();
+        MqttClient subscriber = subscribedPlain("shadow-watcher", "#", topics);
+        try {
+            broker.publish("$aws/things/thermostat/shadow/update/accepted", "{}".getBytes(StandardCharsets.UTF_8));
+
+            assertEquals("$aws/things/thermostat/shadow/update/accepted", topics.poll(10, TimeUnit.SECONDS));
+        } finally {
+            disconnect(subscriber);
         }
     }
 
@@ -887,6 +1051,51 @@ class IotMqttBrokerServiceTest {
         }
         verify(subscriber, timeout(10_000))
                 .publish(eq("$aws/events/presence/disconnected/departing"), any(), any(), anyBoolean(), anyBoolean());
+    }
+
+    /** A PUBLISH, SUBSCRIBE, UNSUBSCRIBE or PUBACK counts as traffic for the keep-alive, as a PINGREQ does. */
+    @Test
+    void anAbruptCloseAfterAPublishSubscribeUnsubscribeOrPubackIsAConnectionLossNotAKeepAliveTimeout() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttEndpoint publishing = keepAliveEndpoint("publishing");
+        MqttEndpoint subscribing = keepAliveEndpoint("subscribing");
+        MqttEndpoint unsubscribing = keepAliveEndpoint("unsubscribing");
+        MqttEndpoint acknowledging = keepAliveEndpoint("acknowledging");
+        Thread.sleep(1_100);
+
+        ArgumentCaptor<Handler<MqttPublishMessage>> publish = handlerCaptor();
+        verify(publishing).publishHandler(publish.capture());
+        MqttPublishMessage message = mock(MqttPublishMessage.class);
+        when(message.payload()).thenReturn(Buffer.buffer("{}"));
+        when(message.qosLevel()).thenReturn(MqttQoS.AT_MOST_ONCE);
+        when(message.topicName()).thenReturn("keepalive/publishing");
+        publish.getValue().handle(message);
+        ArgumentCaptor<Handler<MqttSubscribeMessage>> subscribe = handlerCaptor();
+        verify(subscribing).subscribeHandler(subscribe.capture());
+        MqttTopicSubscription requested = mock(MqttTopicSubscription.class);
+        when(requested.topicName()).thenReturn("keepalive/subscribing");
+        when(requested.qualityOfService()).thenReturn(MqttQoS.AT_MOST_ONCE);
+        MqttSubscribeMessage subscription = mock(MqttSubscribeMessage.class);
+        when(subscription.topicSubscriptions()).thenReturn(List.of(requested));
+        subscribe.getValue().handle(subscription);
+        ArgumentCaptor<Handler<MqttUnsubscribeMessage>> unsubscribe = handlerCaptor();
+        verify(unsubscribing).unsubscribeHandler(unsubscribe.capture());
+        MqttUnsubscribeMessage unsubscription = mock(MqttUnsubscribeMessage.class);
+        when(unsubscription.topics()).thenReturn(List.of("keepalive/unsubscribing"));
+        unsubscribe.getValue().handle(unsubscription);
+        ArgumentCaptor<Handler<Integer>> puback = handlerCaptor();
+        verify(acknowledging).publishAcknowledgeHandler(puback.capture());
+        puback.getValue().handle(1);
+        for (MqttEndpoint endpoint : List.of(publishing, subscribing, unsubscribing, acknowledging)) {
+            ArgumentCaptor<Handler<Void>> close = handlerCaptor();
+            verify(endpoint).closeHandler(close.capture());
+            close.getValue().handle(null);
+        }
+
+        for (String clientId : List.of("publishing", "subscribing", "unsubscribing", "acknowledging")) {
+            assertEquals("CONNECTION_LOST",
+                    awaitPresence("disconnected", clientId, 1).get(0).get("disconnectReason").asText(), clientId);
+        }
     }
 
     /**
@@ -1254,6 +1463,31 @@ class IotMqttBrokerServiceTest {
                 throw new AssertionError("client " + client.getClientId() + " is still connected");
             }
             Thread.sleep(10);
+        }
+    }
+
+    /** A connected client with a one-second keep-alive. */
+    private MqttEndpoint keepAliveEndpoint(String clientId) {
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn(clientId);
+        when(endpoint.keepAliveTimeSeconds()).thenReturn(1);
+        broker.handleEndpoint(endpoint, false);
+        return endpoint;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> ArgumentCaptor<Handler<T>> handlerCaptor() {
+        return ArgumentCaptor.forClass(Handler.class);
+    }
+
+    /** Waits until the task finished or its thread is blocked on a monitor. */
+    private static void awaitDoneOrBlocked(Future<?> task, AtomicReference<Thread> thread) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (!task.isDone() && (thread.get() == null || thread.get().getState() != Thread.State.BLOCKED)) {
+            if (System.currentTimeMillis() > deadline) {
+                throw new AssertionError("the task neither finished nor blocked");
+            }
+            Thread.sleep(5);
         }
     }
 
