@@ -400,6 +400,7 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
             "Instance|{\"HttpPutResponseHopLimit\": 4.5}|Property [HttpPutResponseHopLimit] expected type: Integer, found: Float",
             "LaunchTemplate|{\"HttpTokens\": [\"required\"]}|Property [HttpTokens] expected type: String, found: JSONArray",
             "LaunchTemplate|[\"required\"]|Property [MetadataOptions] expected type: JSONObject, found: JSONArray",
+            "LaunchTemplate|\"required\"|Property [MetadataOptions] expected type: JSONObject, found: String",
             "LaunchTemplate|{\"HttpTokens\": {\"Value\": \"required\"}}|Property [HttpTokens] expected type: String, found: JSONObject",
             "LaunchTemplate|{\"HttpPutResponseHopLimit\": \"two\"}|Property [HttpPutResponseHopLimit] expected type: Integer, found: String",
             "LaunchTemplate|{\"HttpPutResponseHopLimit\": 4.5}|Property [HttpPutResponseHopLimit] expected type: Integer, found: Float"

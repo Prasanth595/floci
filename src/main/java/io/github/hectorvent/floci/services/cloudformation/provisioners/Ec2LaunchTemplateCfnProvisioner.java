@@ -66,10 +66,11 @@ public class Ec2LaunchTemplateCfnProvisioner implements CfnResourceProvisioner {
             data.setUserData(Ec2UserDataDecoder.decode(encodedUserData));
             data.setIamInstanceProfile(iamInstanceProfile(node.path("IamInstanceProfile")));
             // MetadataOptions is read as the template writes it: resolving turns AWS::NoValue into ""
-            // first, which the typed read would refuse for the block or the hop limit.
+            // first, which the typed read would refuse for the block or the hop limit. A
+            // LaunchTemplateData that is absent or an intrinsic call carries no MetadataOptions member.
             JsonNode written = ctx.engine().omitNoValue(props.get("LaunchTemplateData"));
             JsonNode metadataOptions = written.isObject() && !CloudFormationTemplateEngine.callsIntrinsic(written)
-                    ? written.get("MetadataOptions") : node.get("MetadataOptions");
+                    ? written.get("MetadataOptions") : null;
             data.setMetadataOptions(Ec2CfnMetadataOptions.read("LaunchTemplateData/MetadataOptions",
                     metadataOptions, Ec2CfnMetadataOptions.LAUNCH_TEMPLATE_SHAPE, ctx.engine()));
             if (node.has("SecurityGroupIds")) {
