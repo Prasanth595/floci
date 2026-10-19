@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.guardduty.model.MemberAccount;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationAdditionalConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationFeature;
+import io.github.hectorvent.floci.services.guardduty.model.PublishingDestination;
 import io.github.hectorvent.floci.services.iam.ServiceLinkedRoles;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -96,6 +97,7 @@ public class GuardDutyService {
     private final StorageBackend<String, AdminAccount> adminAccountStore;
     private final StorageBackend<String, MemberAccount> memberStore;
     private final StorageBackend<String, MalwareProtectionPlan> malwareProtectionPlanStore;
+    private final StorageBackend<String, PublishingDestination> destinationStore;
 
     @Inject
     public GuardDutyService(StorageFactory storageFactory) {
@@ -118,6 +120,11 @@ public class GuardDutyService {
                         "guardduty",
                         "guardduty-malware-protection-plans.json",
                         new TypeReference<Map<String, MalwareProtectionPlan>>() {
+                        }),
+                storageFactory.create(
+                        "guardduty",
+                        "guardduty-publishing-destinations.json",
+                        new TypeReference<Map<String, PublishingDestination>>() {
                         }));
     }
 
@@ -134,10 +141,20 @@ public class GuardDutyService {
             StorageBackend<String, AdminAccount> adminAccountStore,
             StorageBackend<String, MemberAccount> memberStore,
             StorageBackend<String, MalwareProtectionPlan> malwareProtectionPlanStore) {
+        this(detectorStore, adminAccountStore, memberStore, malwareProtectionPlanStore, new InMemoryStorage<>());
+    }
+
+    GuardDutyService(
+            StorageBackend<String, Detector> detectorStore,
+            StorageBackend<String, AdminAccount> adminAccountStore,
+            StorageBackend<String, MemberAccount> memberStore,
+            StorageBackend<String, MalwareProtectionPlan> malwareProtectionPlanStore,
+            StorageBackend<String, PublishingDestination> destinationStore) {
         this.detectorStore = detectorStore;
         this.adminAccountStore = adminAccountStore;
         this.memberStore = memberStore;
         this.malwareProtectionPlanStore = malwareProtectionPlanStore;
+        this.destinationStore = destinationStore;
     }
 
     public synchronized Detector createDetector(String region, String accountId, JsonNode request) {
@@ -194,6 +211,9 @@ public class GuardDutyService {
             throw detectorNotFound();
         }
         detectorStore.delete(key);
+        String prefix = destinationKey(region, detectorId, "");
+        destinationStore.scan(k -> k.startsWith(prefix)).forEach(d ->
+                destinationStore.delete(destinationKey(region, detectorId, d.destinationId())));
     }
 
     public Page<String> listDetectorIds(String region, String accountId, String maxResultsValue, String nextToken) {
@@ -335,6 +355,100 @@ public class GuardDutyService {
 
     public List<MemberAccount> listMembers(String region, String detectorId) {
         return listMembers(region, detectorId, null, null, null).items();
+    }
+
+    public synchronized PublishingDestination createPublishingDestination(
+            String region, String detectorId, JsonNode request) {
+        getDetector(region, detectorId);
+        if (!"S3".equals(requireText(request, "destinationType"))) {
+            throw badRequest("destinationType must be S3.");
+        }
+        JsonNode properties = request.get("destinationProperties");
+        requireObject(properties, "destinationProperties");
+        String clientToken = optionalText(request, "clientToken");
+        if (clientToken != null && clientToken.codePointCount(0, clientToken.length()) > 64) {
+            // botocore's ClientToken shape: string, min 0, max 64.
+            throw badRequest("clientToken must be at most 64 characters.");
+        }
+        if (clientToken != null) {
+            // Idempotent replay: a retried create returns the destination the token already made.
+            String prefix = destinationKey(region, detectorId, "");
+            for (PublishingDestination existing : destinationStore.scan(k -> k.startsWith(prefix))) {
+                if (clientToken.equals(existing.clientToken())) {
+                    return existing;
+                }
+            }
+        }
+        PublishingDestination destination = new PublishingDestination(
+                UUID.randomUUID().toString().replace("-", ""),
+                "S3",
+                optionalText(properties, "destinationArn"),
+                optionalText(properties, "kmsKeyArn"),
+                "PUBLISHING",
+                clientToken);
+        destinationStore.put(destinationKey(region, detectorId, destination.destinationId()), destination);
+        return destination;
+    }
+
+    public PublishingDestination describePublishingDestination(
+            String region, String detectorId, String destinationId) {
+        getDetector(region, detectorId);
+        return destinationStore.get(destinationKey(region, detectorId, destinationId))
+                .orElseThrow(GuardDutyService::destinationNotFound);
+    }
+
+    public synchronized void updatePublishingDestination(
+            String region, String detectorId, String destinationId, JsonNode request) {
+        PublishingDestination current = describePublishingDestination(region, detectorId, destinationId);
+        JsonNode properties = request.get("destinationProperties");
+        if (properties == null) {
+            return;
+        }
+        requireObject(properties, "destinationProperties");
+        destinationStore.put(destinationKey(region, detectorId, destinationId), new PublishingDestination(
+                destinationId,
+                current.destinationType(),
+                properties.has("destinationArn") ? optionalText(properties, "destinationArn") : current.destinationArn(),
+                properties.has("kmsKeyArn") ? optionalText(properties, "kmsKeyArn") : current.kmsKeyArn(),
+                current.status(),
+                current.clientToken()));
+    }
+
+    public synchronized void deletePublishingDestination(String region, String detectorId, String destinationId) {
+        describePublishingDestination(region, detectorId, destinationId);
+        destinationStore.delete(destinationKey(region, detectorId, destinationId));
+    }
+
+    public Page<PublishingDestination> listPublishingDestinations(
+            String region, String detectorId, String maxResults, String nextToken) {
+        getDetector(region, detectorId);
+        int limit = parseMaxResults(maxResults);
+        String prefix = destinationKey(region, detectorId, "");
+        List<PublishingDestination> destinations = destinationStore.scan(key -> key.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(PublishingDestination::destinationId)).toList();
+        int offset = decodeOffset(nextToken, destinations.size());
+        int end = Math.min(destinations.size(), offset + limit);
+        return new Page<>(destinations.subList(offset, end), end < destinations.size() ? encodeOffset(end) : null);
+    }
+
+    private static String destinationKey(String region, String detectorId, String destinationId) {
+        return region + "::" + detectorId + "::" + destinationId;
+    }
+
+    private static String optionalText(JsonNode parent, String field) {
+        JsonNode value = parent.get(field);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw badRequest(field + " must be a string.");
+        }
+        return value.textValue();
+    }
+
+    /** Matched verbatim by the Terraform AWS provider to detect a deleted publishing destination. */
+    private static AwsException destinationNotFound() {
+        return badRequest("The request is rejected because the one or more input parameters have invalid values.");
     }
 
     private static boolean isAssociatedRelationship(String status) {

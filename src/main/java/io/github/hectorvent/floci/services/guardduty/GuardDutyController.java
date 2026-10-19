@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.guardduty.model.MalwareProtectionPlan
 import io.github.hectorvent.floci.services.guardduty.model.MemberAccount;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationFeature;
+import io.github.hectorvent.floci.services.guardduty.model.PublishingDestination;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -179,6 +180,80 @@ public class GuardDutyController {
         ObjectNode response = objectMapper.createObjectNode();
         response.putArray("unprocessedAccounts");
         return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/detector/{detectorId}/publishingDestination")
+    public Response createPublishingDestination(
+            @Context HttpHeaders headers, @PathParam("detectorId") String detectorId, String body) {
+        PublishingDestination destination = service.createPublishingDestination(
+                regionResolver.resolveRegion(headers), detectorId, parse(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("destinationId", destination.destinationId());
+        return Response.ok(response).build();
+    }
+
+    @GET
+    @Path("/detector/{detectorId}/publishingDestination")
+    public Response listPublishingDestinations(
+            @Context HttpHeaders headers, @PathParam("detectorId") String detectorId,
+            @QueryParam("maxResults") String maxResults,
+            @QueryParam("nextToken") String nextToken) {
+        GuardDutyService.Page<PublishingDestination> page = service.listPublishingDestinations(
+                regionResolver.resolveRegion(headers), detectorId, maxResults, nextToken);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode destinations = response.putArray("destinations");
+        for (PublishingDestination destination : page.items()) {
+            ObjectNode node = destinations.addObject();
+            node.put("destinationId", destination.destinationId());
+            node.put("destinationType", destination.destinationType());
+            node.put("status", destination.status());
+        }
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    @GET
+    @Path("/detector/{detectorId}/publishingDestination/{destinationId}")
+    public Response describePublishingDestination(
+            @Context HttpHeaders headers, @PathParam("detectorId") String detectorId,
+            @PathParam("destinationId") String destinationId) {
+        PublishingDestination destination = service.describePublishingDestination(
+                regionResolver.resolveRegion(headers), detectorId, destinationId);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("destinationId", destination.destinationId());
+        response.put("destinationType", destination.destinationType());
+        response.put("status", destination.status());
+        response.put("publishingFailureStartTimestamp", 0L);
+        ObjectNode properties = response.putObject("destinationProperties");
+        if (destination.destinationArn() != null) {
+            properties.put("destinationArn", destination.destinationArn());
+        }
+        if (destination.kmsKeyArn() != null) {
+            properties.put("kmsKeyArn", destination.kmsKeyArn());
+        }
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/detector/{detectorId}/publishingDestination/{destinationId}")
+    public Response updatePublishingDestination(
+            @Context HttpHeaders headers, @PathParam("detectorId") String detectorId,
+            @PathParam("destinationId") String destinationId, String body) {
+        service.updatePublishingDestination(
+                regionResolver.resolveRegion(headers), detectorId, destinationId, parse(body));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @DELETE
+    @Path("/detector/{detectorId}/publishingDestination/{destinationId}")
+    public Response deletePublishingDestination(
+            @Context HttpHeaders headers, @PathParam("detectorId") String detectorId,
+            @PathParam("destinationId") String destinationId) {
+        service.deletePublishingDestination(regionResolver.resolveRegion(headers), detectorId, destinationId);
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     @GET
