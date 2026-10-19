@@ -70,6 +70,12 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         return Set.of(BUCKET, BUCKET_POLICY);
     }
 
+    /** A bucket policy is named by its bucket. */
+    @Override
+    public boolean takesParentPhysicalId(String resourceType) {
+        return BUCKET_POLICY.equals(resourceType);
+    }
+
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         switch (r.getResourceType()) {

@@ -59,6 +59,15 @@ public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
         return Set.of(PERMISSION, URL);
     }
 
+    /**
+     * A function URL is named by the ARN of what it serves: an alias's ARN, which is the alias's
+     * own id, or its function's, which matches nothing since a function's id is its name.
+     */
+    @Override
+    public boolean takesParentPhysicalId(String resourceType) {
+        return URL.equals(resourceType);
+    }
+
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         switch (r.getResourceType()) {

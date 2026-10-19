@@ -3317,9 +3317,10 @@ public class CloudFormationService implements ResourceProvider {
      * make the leftover use a dependent that takes the same id, such as its bucket policy. It still
      * names any other resource that shares the id, such as the event bus of a rule with the bus's
      * name. A leftover also uses the resource whose id its own extends, {@code parent-1} for
-     * {@code parent-1/child-1}, and a type that takes its parent's id (see
-     * {@link #SAME_ID_DEPENDENT_TYPES}) uses whatever else holds that id. None of these three counts
-     * a resource whose own definition named the leftover: that one depends on it.
+     * {@code parent-1/child-1}, unless its provisioner says its id names no parent, and a type whose
+     * provisioner says it takes its parent's id, such as a bucket policy, uses whatever else holds
+     * that id. None of these three counts a resource whose own definition named the leftover: that
+     * one depends on it.
      */
     private static double leftoverPosition(StackResource resource, Map<String, Integer> rank,
                                            Map<String, List<StackResource>> holdersByPhysicalId,
@@ -3393,22 +3394,24 @@ public class CloudFormationService implements ResourceProvider {
             for (StackResource holder : holdersByPhysicalId.getOrDefault(value, List.of())) {
                 // Its own id names the leftover, not a dependent that takes the same id.
                 if (holder != resource && !extendsId(holder.getPhysicalId(), own)
-                        && !(ownId && takesParentId(holder)) && !declares(holder, resource, references)) {
+                        && !(ownId && takesParentId(holder, references))
+                        && !declares(holder, resource, references)) {
                     uses.add(holder);
                 }
             }
         }
-        for (String prefix : ownIdNamesItsParent(resource) ? idPrefixes(own) : List.<String>of()) {
+        for (String prefix : named.idPrefixNamesParent() ? idPrefixes(own) : List.<String>of()) {
             for (StackResource holder : holdersByPhysicalId.getOrDefault(prefix, List.of())) {
                 if (!declares(holder, resource, references)) {
                     uses.add(holder);
                 }
             }
         }
-        if (takesParentId(resource)) {
+        if (named.takesParentId()) {
             // A type that takes its parent's id as its own uses whatever else holds that id.
             for (StackResource holder : holdersByPhysicalId.getOrDefault(own, List.of())) {
-                if (holder != resource && !takesParentId(holder) && !declares(holder, resource, references)) {
+                if (holder != resource && !takesParentId(holder, references)
+                        && !declares(holder, resource, references)) {
                     uses.add(holder);
                 }
             }
@@ -3422,39 +3425,20 @@ public class CloudFormationService implements ResourceProvider {
         return references.apply(holder).declared().contains(resource);
     }
 
-    /** What a resource's record says it uses; see {@link #leftoverReferences}. */
-    private record LeftoverReferences(List<String> values, List<StackResource> declared) {
+    /**
+     * What a resource's record says it uses; see {@link #leftoverReferences}. {@code takesParentId}
+     * and {@code idPrefixNamesParent} are what its type's provisioner says of its physical id, per
+     * {@link CfnResourceDispatcher#takesParentPhysicalId} and
+     * {@link CfnResourceDispatcher#idPrefixCanNameParent}.
+     */
+    private record LeftoverReferences(List<String> values, List<StackResource> declared,
+                                      boolean takesParentId, boolean idPrefixNamesParent) {
     }
 
-    /**
-     * Types whose physical id is the id of the resource they depend on: a bucket policy is named by
-     * its bucket, a secret target attachment by its secret's ARN, a function URL on an alias by the
-     * alias's ARN, and a cluster's capacity provider associations, given the cluster by name, by the
-     * cluster. (A function URL without a qualifier takes its function's ARN, which matches nothing:
-     * the function's own id is its name.)
-     */
-    private static final Set<String> SAME_ID_DEPENDENT_TYPES = Set.of("AWS::S3::BucketPolicy",
-            "AWS::SecretsManager::SecretTargetAttachment", "AWS::Lambda::Url",
-            "AWS::ECS::ClusterCapacityProviderAssociations");
-
-    /** Whether a resource's type is one of {@link #SAME_ID_DEPENDENT_TYPES}. */
-    private static boolean takesParentId(StackResource resource) {
-        String type = resource.getResourceType();
-        return type != null && SAME_ID_DEPENDENT_TYPES.contains(type);
-    }
-
-    /**
-     * Types whose physical id joins parts of their own identity, not a parent's id and their own: a
-     * WAF web ACL or IP set is {@code name|id|scope}, a CodePipeline custom action type
-     * {@code category|Custom|provider|version}. A prefix of such an id names no parent.
-     */
-    private static final Set<String> SELF_COMPOUND_ID_TYPES = Set.of("AWS::WAFv2::WebACL", "AWS::WAFv2::IPSet",
-            "AWS::CodePipeline::CustomActionType");
-
-    /** Whether a prefix of a resource's physical id can name its parent; see {@link #SELF_COMPOUND_ID_TYPES}. */
-    private static boolean ownIdNamesItsParent(StackResource resource) {
-        String type = resource.getResourceType();
-        return type == null || !SELF_COMPOUND_ID_TYPES.contains(type);
+    /** Whether a resource's type takes the physical id of the resource it depends on as its own. */
+    private static boolean takesParentId(StackResource resource,
+                                         Function<StackResource, LeftoverReferences> references) {
+        return references.apply(resource).takesParentId();
     }
 
     /** The characters after which a physical id may continue as a child's: {@code /}, {@code :} and {@code |}. */
@@ -3526,7 +3510,9 @@ public class CloudFormationService implements ResourceProvider {
                 }
             }
         }
-        return new LeftoverReferences(values, declared);
+        String type = resource.getResourceType();
+        return new LeftoverReferences(values, declared, dispatcher.takesParentPhysicalId(type),
+                dispatcher.idPrefixCanNameParent(type));
     }
 
     /** The name of the Lambda function {@code value} gives by ARN, qualified or not, or else null. */

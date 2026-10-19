@@ -298,6 +298,20 @@ public class CfnResourceDispatcher {
                 .orElse(false);
     }
 
+    /** Whether the owner of a type says it takes its parent's physical id; see the provisioner hook. */
+    public boolean takesParentPhysicalId(String resourceType) {
+        return registry.forType(resourceType)
+                .map(owner -> owner.takesParentPhysicalId(resourceType))
+                .orElse(false);
+    }
+
+    /** Whether the owner of a type says a prefix of its id can name its parent; see the provisioner hook. */
+    public boolean idPrefixCanNameParent(String resourceType) {
+        return registry.forType(resourceType)
+                .map(owner -> owner.idPrefixCanNameParent(resourceType))
+                .orElse(true);
+    }
+
     /** Drops the cleanup bookkeeping this update left on the resource. */
     public void clearUpdate(StackResource resource) {
         registry.forType(resource.getResourceType())

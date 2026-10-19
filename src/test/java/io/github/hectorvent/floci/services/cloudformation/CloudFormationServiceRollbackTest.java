@@ -18,7 +18,13 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResour
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CodePipelineCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCapacityCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaAddressingCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretTargetAttachmentCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.WafV2CfnProvisioner;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
@@ -49,6 +55,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.RETURNS_DEFAULTS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -80,12 +87,22 @@ class CloudFormationServiceRollbackTest {
     @BeforeEach
     void setUp() {
         provisioner = mock(CfnResourceDispatcher.class);
-        // Which types the generic custom-resource handler serves, as the registry routes them: an
-        // unregistered Custom:: type goes to it, and Custom::DynamoDBReplica has its own provisioner.
-        CloudFormationResourceRegistry registry = new CloudFormationResourceRegistry(List.of(
-                serving("AWS::CloudFormation::CustomResource"), serving("Custom::DynamoDBReplica")));
+        // What the registry and the real provisioners say of a type: an unregistered Custom:: type
+        // goes to the generic custom-resource handler, Custom::DynamoDBReplica has its own, and the
+        // provisioners of the types whose ids relate to a parent's say how.
+        CfnResourceDispatcher routing = new CfnResourceDispatcher(new ObjectMapper(),
+                new CloudFormationResourceRegistry(List.of(
+                        serving("AWS::CloudFormation::CustomResource"), serving("Custom::DynamoDBReplica"),
+                        real(S3CfnProvisioner.class), real(SecretTargetAttachmentCfnProvisioner.class),
+                        real(LambdaAddressingCfnProvisioner.class), real(EcsCapacityCfnProvisioner.class),
+                        real(WafV2CfnProvisioner.class), real(CodePipelineCfnProvisioner.class))),
+                null, null);
         when(provisioner.isCustomResourceType(any()))
-                .thenAnswer(invocation -> registry.isCustomResourceType(invocation.getArgument(0)));
+                .thenAnswer(invocation -> routing.isCustomResourceType(invocation.getArgument(0)));
+        when(provisioner.takesParentPhysicalId(any()))
+                .thenAnswer(invocation -> routing.takesParentPhysicalId(invocation.getArgument(0)));
+        when(provisioner.idPrefixCanNameParent(any()))
+                .thenAnswer(invocation -> routing.idPrefixCanNameParent(invocation.getArgument(0)));
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.defaultAccountId()).thenReturn(ACCOUNT);
 
@@ -1820,6 +1837,14 @@ class CloudFormationServiceRollbackTest {
         resource.setResourceType(resourceType);
         resource.setStatus(status);
         return resource;
+    }
+
+    /**
+     * A provisioner of {@code type} built without its dependencies: only what it says of its types,
+     * its resource types and the id hooks, is called on it.
+     */
+    private static <T extends CfnResourceProvisioner> T real(Class<T> type) {
+        return mock(type, CALLS_REAL_METHODS);
     }
 
     /** A provisioner that serves {@code type}, for routing through a real registry. */

@@ -37,6 +37,15 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
         return Set.of(WEB_ACL, WEB_ACL_ASSOCIATION, IP_SET);
     }
 
+    /**
+     * A web ACL or IP set id is its own {@code name|id|scope}, which names no parent. An
+     * association's, {@code resourceArn|webAclArn}, starts with the resource it is attached to.
+     */
+    @Override
+    public boolean idPrefixCanNameParent(String resourceType) {
+        return WEB_ACL_ASSOCIATION.equals(resourceType);
+    }
+
     @Override
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
         if (WEB_ACL_ASSOCIATION.equals(resource.getResourceType())) {

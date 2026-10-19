@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -17,6 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -57,6 +59,41 @@ class CfnResourceDispatcherTest {
         assertFalse(routed.isCustomResourceType(TYPE));
         assertFalse(routed.isCustomResourceType(null));
         assertFalse(withoutHandler.isCustomResourceType("Custom::Namer"));
+    }
+
+    /**
+     * Each provisioner says how its own types' physical ids relate to a parent's: a bucket policy,
+     * secret target attachment, function URL and capacity provider associations take their
+     * parent's id; a web ACL, IP set and custom action type id names no parent. Every other type,
+     * a missing type and a type nothing serves keep the defaults.
+     */
+    @Test
+    void provisionersSayHowTheirIdsRelateToAParent() {
+        CfnResourceDispatcher routed = new CfnResourceDispatcher(mapper, new CloudFormationResourceRegistry(
+                List.of(real(S3CfnProvisioner.class), real(SecretTargetAttachmentCfnProvisioner.class),
+                        real(LambdaAddressingCfnProvisioner.class), real(EcsCapacityCfnProvisioner.class),
+                        real(WafV2CfnProvisioner.class), real(CodePipelineCfnProvisioner.class))),
+                dynamicReferences, null);
+
+        for (String type : List.of("AWS::S3::BucketPolicy", "AWS::SecretsManager::SecretTargetAttachment",
+                "AWS::Lambda::Url", "AWS::ECS::ClusterCapacityProviderAssociations")) {
+            assertTrue(routed.takesParentPhysicalId(type), type);
+            assertTrue(routed.idPrefixCanNameParent(type), type);
+        }
+        for (String type : List.of("AWS::WAFv2::WebACL", "AWS::WAFv2::IPSet", "AWS::CodePipeline::CustomActionType")) {
+            assertFalse(routed.takesParentPhysicalId(type), type);
+            assertFalse(routed.idPrefixCanNameParent(type), type);
+        }
+        for (String type : Arrays.asList("AWS::S3::Bucket", "AWS::Lambda::Permission", "AWS::ECS::CapacityProvider",
+                "AWS::WAFv2::WebACLAssociation", "AWS::CodePipeline::Pipeline", TYPE, null)) {
+            assertFalse(routed.takesParentPhysicalId(type), String.valueOf(type));
+            assertTrue(routed.idPrefixCanNameParent(type), String.valueOf(type));
+        }
+    }
+
+    /** A provisioner built without its dependencies: only what it says of its types is called on it. */
+    private static <T extends CfnResourceProvisioner> T real(Class<T> type) {
+        return mock(type, CALLS_REAL_METHODS);
     }
 
     @Test
