@@ -236,6 +236,6 @@ final class LambdaWebPlatformLog {
 
     /** AWS writes these durations in whole milliseconds with three decimals. */
     private static BigDecimal wholeMillis(long nanos) {
-        return BigDecimal.valueOf(Math.round(nanos / 1_000_000.0)).setScale(3);
+        return BigDecimal.valueOf(millis(nanos)).setScale(3);
     }
 }

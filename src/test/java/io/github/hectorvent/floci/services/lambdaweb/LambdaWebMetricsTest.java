@@ -16,6 +16,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -127,7 +128,8 @@ class LambdaWebMetricsTest {
         for (int i = 0; i < 4; i++) {
             metrics.answered(target, 500);
         }
-        release.countDown();
+        // The wait starts while the queue is still full.
+        CompletableFuture.delayedExecutor(200, TimeUnit.MILLISECONDS).execute(release::countDown);
         metrics.awaitPublished(Duration.ofSeconds(5));
 
         verify(cloudWatch, times(3)).publishMetricForAccount(eq(ACCOUNT), anyString(), any(MetricDatum.class),

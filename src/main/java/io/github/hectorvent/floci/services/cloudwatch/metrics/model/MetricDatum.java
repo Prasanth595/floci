@@ -23,7 +23,10 @@ public class MetricDatum {
 
     public MetricDatum() {}
 
-    /** One value as a service publishes it. A {@code timestamp} of 0 is the time it is stored. */
+    /**
+     * One value as a service publishes it. Only {@code putMetricData} turns a {@code timestamp} of 0
+     * into the time it is stored.
+     */
     public static MetricDatum of(String metricName, String unit, double value, List<Dimension> dimensions,
                                  long timestamp) {
         MetricDatum datum = new MetricDatum();

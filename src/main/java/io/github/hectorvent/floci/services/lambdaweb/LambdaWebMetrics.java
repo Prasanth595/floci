@@ -15,12 +15,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
 
 /**
@@ -53,7 +54,9 @@ public class LambdaWebMetrics {
      * new ones are dropped.
      */
     private final ThreadPoolExecutor publisher;
-    private final AtomicBoolean dropping = new AtomicBoolean();
+    /** The writes run one at a time in order, so once the last one is done all are. */
+    private Future<?> lastWrite = CompletableFuture.completedFuture(null);
+    private boolean dropping;
 
     @Inject
     public LambdaWebMetrics(CloudWatchMetricsService cloudWatch) {
@@ -117,11 +120,15 @@ public class LambdaWebMetrics {
 
     /** Waits until what is queued is stored, so the last flush of the store at shutdown has it. */
     void awaitPublished(Duration limit) {
+        Future<?> last;
+        synchronized (this) {
+            last = lastWrite;
+        }
         try {
-            publisher.submit(() -> { }).get(limit.toMillis(), TimeUnit.MILLISECONDS);
+            last.get(limit.toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-        } catch (ExecutionException | TimeoutException | RejectedExecutionException e) {
+        } catch (ExecutionException | TimeoutException e) {
             LOG.warnv(e, "Lambda Web metrics still waiting to be stored may be lost");
         }
     }
@@ -153,19 +160,20 @@ public class LambdaWebMetrics {
                 new Dimension("ExecutionRegion", target.region()));
     }
 
-    private void publish(String accountId, String region, List<Datapoint> datapoints) {
+    private synchronized void publish(String accountId, String region, List<Datapoint> datapoints) {
         if (datapoints.isEmpty()) {
             return;
         }
         try {
-            publisher.execute(() -> {
+            lastWrite = publisher.submit(() -> {
                 for (Datapoint datapoint : datapoints) {
                     store(accountId, region, datapoint);
                 }
             });
-            dropping.set(false);
+            dropping = false;
         } catch (RejectedExecutionException rejected) {
-            if (!publisher.isShutdown() && dropping.compareAndSet(false, true)) {
+            if (!publisher.isShutdown() && !dropping) {
+                dropping = true;
                 LOG.warnv("Dropping Lambda Web metrics while {0} writes wait", publisher.getQueue().size());
             }
         }
