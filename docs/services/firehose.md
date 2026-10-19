@@ -123,6 +123,53 @@ Delivered objects are named `<evaluated prefix><streamName>-<versionId>-<yyyy-MM
 
 Known deviations from AWS: timestamps are evaluated at flush time instead of the oldest buffered record's arrival time; expressions AWS would reject at create time (unknown namespaces, `!{partitionKeyFromQuery:...}`/`!{partitionKeyFromLambda:...}` dynamic partitioning keys, invalid patterns) are kept literally in the key; `FileExtension` is accepted on the legacy `S3DestinationConfiguration` shape too, where AWS only defines it on the extended one.
 
+## Redshift destination
+
+`CreateDeliveryStream` accepts `RedshiftDestinationConfiguration` and `UpdateDestination` accepts
+`RedshiftDestinationUpdate`. A stream has either an S3 destination or a Redshift destination, never both.
+`DescribeDeliveryStream` returns `RedshiftDestinationDescription`, which never includes `Password`.
+
+Supported members: `RoleARN`, `ClusterJDBCURL`, `Username`, `Password`, `CopyCommand`
+(`DataTableName`, `CopyOptions`, `DataTableColumns`), `S3Configuration` (the intermediate S3 location),
+`RetryOptions`, `S3BackupMode` with `S3BackupConfiguration`, `SecretsManagerConfiguration`,
+`ProcessingConfiguration` and `CloudWatchLoggingOptions`. Members are validated against the Firehose API
+model: required members, length and pattern limits, and the rule that `SNAPPY` and `ZIP` are refused on the
+intermediate S3 location. `S3BackupMode` can be switched on after creation but not off again.
+
+### Delivery
+
+A flush writes the batch to the intermediate S3 location, then runs
+`COPY <DataTableName> [(<DataTableColumns>)] FROM 's3://<bucket>/<key>' IAM_ROLE '<RoleARN>' <CopyOptions>` against
+the cluster. The `COPY` goes through the cluster's wire proxy, so it behaves like a `COPY` sent by any other client
+(see [Redshift COPY from S3](redshift.md#copy-from-s3)). Credentials come from `Username` and `Password`, or from
+the secret in `SecretsManagerConfiguration` when `Enabled` is true (the secret JSON needs `username` and `password`).
+An empty `DataTableColumns` omits the column list, so the proxy discovers the table columns.
+
+`DataTableName` and `DataTableColumns` are passed to the `COPY` as written, so Redshift's identifier rules apply
+(an unquoted name is lowercased, a quoted one is kept). They must be identifiers the proxy recognises: a table name
+with an optional schema, and a comma-separated list of column names. `CopyOptions` must not contain a `;` outside a
+quoted value. Create and update reject anything else.
+
+A batch is staged in S3 once. If its `COPY` fails (missing table or cluster, bad data), the staged object stays in S3
+and the `COPY` is retried against that same object on every flush tick until `RetryOptions.DurationInSeconds` has
+elapsed since the first failure (default 3600, `0` means a single attempt). Batches are loaded in order, so a newer
+batch waits behind an older failing one. After the window the batch is given up with an error log and the staged
+object is kept. Pending copies are held in memory and are lost on restart. With `S3BackupMode` set to `Enabled`, each
+batch is also written once to the `S3BackupConfiguration` bucket.
+
+Floci does not write the `redshift_failed` manifest objects that AWS creates after a failed `COPY`.
+
+### Known deviations from AWS
+
+- `ClusterJDBCURL` must match the AWS pattern, so it needs a host such as
+  `mycluster.abc123.us-east-1.redshift.amazonaws.com`. Floci treats the URL as a logical address: the first
+  host label is the cluster identifier, and the host suffix and port are ignored. The database name is ignored
+  too, because the emulated database is always `dev`. The cluster is looked up at delivery time, so a stream can
+  be created before its cluster.
+- `ProcessingConfiguration` on a Redshift destination is accepted and returned but not executed.
+- A `ClusterJDBCURL` with a `redshift-serverless` host is accepted, but delivery looks the name up as a provisioned
+  cluster, so a serverless workgroup is not a delivery target yet.
+
 ## Configuration
 
 | Variable | Default | Description |

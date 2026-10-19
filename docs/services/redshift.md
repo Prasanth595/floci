@@ -440,6 +440,9 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   bind parameters. Zero-parameter JDBC `PreparedStatement` calls therefore work with pgjdbc's
   default extended mode. Statements containing bind parameters are forwarded unchanged.
 
+Firehose delivery streams with a Redshift destination use this same path: Firehose stages each batch in S3 and
+runs the `COPY` over a connection to the cluster proxy. See [Firehose](firehose.md#redshift-destination).
+
 ### Limitations
 
 - DDL rewriting works in both Simple Query (`'Q'`) and Extended Query (`Parse`) flows. COPY and
