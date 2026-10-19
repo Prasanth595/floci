@@ -3312,13 +3312,13 @@ public class CloudFormationService implements ResourceProvider {
      * leftovers stays below the next template rank, and a cycle among them is cut where it closes.
      * A leftover uses what its definition named, and a held resource whose physical id one of its
      * values names (both per {@link #leftoverReferences}), unless that resource's id extends the
-     * leftover's or that resource's own definition named the leftover. A value equal to the
-     * leftover's own id names the leftover itself, so it does not make the leftover use a dependent
-     * that takes the same id, such as its bucket policy. It still names any other resource that
-     * shares the id, such as the event bus of a rule with the bus's name. A leftover also uses the
-     * resource whose id its own extends, {@code parent-1} for {@code parent-1/child-1}, and a type
-     * that takes its parent's id (see {@link #SAME_ID_DEPENDENT_TYPES}) uses whatever else holds
-     * that id.
+     * leftover's. A value equal to the leftover's own id names the leftover itself, so it does not
+     * make the leftover use a dependent that takes the same id, such as its bucket policy. It still
+     * names any other resource that shares the id, such as the event bus of a rule with the bus's
+     * name. A leftover also uses the resource whose id its own extends, {@code parent-1} for
+     * {@code parent-1/child-1}, and a type that takes its parent's id (see
+     * {@link #SAME_ID_DEPENDENT_TYPES}) uses whatever else holds that id. None of these three counts
+     * a resource whose own definition named the leftover: that one depends on it.
      */
     private static double leftoverPosition(StackResource resource, Map<String, Integer> rank,
                                            Map<String, List<StackResource>> holdersByPhysicalId,
@@ -3478,8 +3478,9 @@ public class CloudFormationService implements ResourceProvider {
      * function one gives by ARN, a function's physical id being its name. What the definition of
      * either kind named, kept by {@link #recordTemplateUses}, is {@code declared}: the resources
      * {@code held} under those logical ids now, as a later update may have replaced one without
-     * touching a resource that only {@code DependsOn} it. A nested stack saved before those were
-     * kept still counts its outputs, as Floci did then.
+     * touching a resource that only {@code DependsOn} it. A nested stack that kept none, because it
+     * was saved before they were kept or its definition names no resource, counts its outputs, as
+     * Floci did before.
      */
     private LeftoverReferences leftoverReferences(StackResource resource, Map<String, StackResource> held) {
         List<String> values = new ArrayList<>();
@@ -3495,11 +3496,11 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
         boolean custom = dispatcher.isCustomResourceType(resource.getResourceType());
-        boolean nestedOutputs = recorded && "AWS::CloudFormation::Stack".equals(resource.getResourceType());
+        boolean skipOutputs = recorded && "AWS::CloudFormation::Stack".equals(resource.getResourceType());
         for (Map.Entry<String, String> attribute : resource.getAttributes().entrySet()) {
             String key = attribute.getKey();
             if (key.startsWith(TEMPLATE_USES_PREFIX)
-                    || (custom ? !key.startsWith("__Floci") : nestedOutputs && key.startsWith("Outputs."))) {
+                    || (custom ? !key.startsWith("__Floci") : skipOutputs && key.startsWith("Outputs."))) {
                 continue;
             }
             values.add(attribute.getValue());
@@ -4175,13 +4176,14 @@ public class CloudFormationService implements ResourceProvider {
     private static final String TEMPLATE_USES_PREFIX = CfnRollback.USES_ATTR_PREFIX + "Resource.";
 
     /**
-     * Keeps, under {@link CfnRollback#USES_ATTR_PREFIX} keys, the physical id of each resource a
-     * definition names through {@code Ref}, {@code Fn::GetAtt}, {@code Fn::Sub} or {@code DependsOn},
-     * in place of what an earlier operation kept. A custom resource's or nested stack's attributes are
-     * outputs, so these are what orders it before the resources it uses once the template no longer
-     * names it; a literal value it was given names nothing, even if another resource has that name.
-     * One provisioned before these keys were kept has none until it next changes, so as a leftover
-     * a custom resource orders by its ServiceToken alone, and a nested stack by its outputs.
+     * Keeps, under {@link CfnRollback#USES_ATTR_PREFIX} keys, one key per resource a definition
+     * names through {@code Ref}, {@code Fn::GetAtt}, {@code Fn::Sub} or {@code DependsOn}, in place of
+     * what an earlier operation kept. A custom resource's or nested stack's attributes are outputs, so
+     * these are what orders it before the resources it uses once the template no longer names it; a
+     * literal value it was given names nothing, even if another resource has that name. The key's
+     * logical id decides, and its value, that resource's physical id then, is kept as a record. One
+     * provisioned before these keys were kept has none until it next changes, so as a leftover a
+     * custom resource orders by its ServiceToken alone, and a nested stack by its outputs.
      */
     private static void recordTemplateUses(StackResource resource, Set<String> dependencies,
                                            Map<String, String> physicalIds) {
