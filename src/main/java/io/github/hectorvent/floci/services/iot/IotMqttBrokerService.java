@@ -226,7 +226,9 @@ public class IotMqttBrokerService implements Resettable {
      */
     @Override
     public void clear() {
-        lastDisconnects.clear();
+        synchronized (sessionLock) {
+            lastDisconnects.clear();
+        }
     }
 
     synchronized void startIfEnabled() {
@@ -412,15 +414,19 @@ public class IotMqttBrokerService implements Resettable {
      * A client id's connection as fleet indexing reports it in an account and region: its live
      * session, else how its last one ended. Empty when it has not connected there since the last
      * reset. A plaintext session counts in the default account and region, as the broker's shadow
-     * topics do; a TLS session in its certificate's.
+     * topics do; a TLS session in its certificate's. Read under the session lock, so a session
+     * being ended is never reported connected after its disconnect is recorded; the lock is never
+     * held across endpoint calls, so liveness is the session's own ended flag.
      */
     Optional<Connectivity> connectivity(String accountId, String region, String clientId) {
-        ClientSession session = sessionsByClient.get(clientId);
-        if (session != null && session.endpoint().isConnected()
-                && accountId.equals(session.accountId()) && region.equals(session.region())) {
-            return Optional.of(session.connected());
+        synchronized (sessionLock) {
+            ClientSession session = sessionsByClient.get(clientId);
+            if (session != null && !session.ended().get()
+                    && accountId.equals(session.accountId()) && region.equals(session.region())) {
+                return Optional.of(session.connected());
+            }
+            return Optional.ofNullable(lastDisconnects.get(new HistoryKey(accountId, region, clientId)));
         }
-        return Optional.ofNullable(lastDisconnects.get(new HistoryKey(accountId, region, clientId)));
     }
 
     List<String> listSubscriptions(String clientId) {
