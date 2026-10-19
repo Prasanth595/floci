@@ -10,7 +10,7 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 - `arn:aws:autoscaling:<region>:<account>:launchConfiguration:<uuid>:launchConfigurationName/<name>`
 - `arn:aws:autoscaling:<region>:<account>:scalingPolicy:<uuid>:autoScalingGroupName/<group>/policyName/<name>`
 
-## Supported Operations (47 total)
+## Supported Operations (53 total)
 
 ### Launch Configurations
 
@@ -29,6 +29,8 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 | `UpdateAutoScalingGroup` | Updates capacity bounds, cooldown, launch source, AZs |
 | `DeleteAutoScalingGroup` | `ForceDelete=true` terminates all instances before deletion |
 | `DescribeTags` | Group tags; filters `auto-scaling-group`, `key`, `value`, `propagate-at-launch` (values ORed, filters ANDed); `MaxRecords`/`NextToken` paging |
+| `CreateOrUpdateTags` | Creates or updates group tags and their propagate-at-launch setting |
+| `DeleteTags` | Removes named group tags |
 | `EnableMetricsCollection` | Records the named group metrics, or all 20 when none are named, as `EnabledMetrics` on `DescribeAutoScalingGroups`. `Granularity` is required and must be `1Minute`; an unknown metric name raises `ValidationError`. No metrics are published to CloudWatch |
 | `DisableMetricsCollection` | Removes the named metrics from `EnabledMetrics`, or all of them when none are named |
 
@@ -67,12 +69,21 @@ EC2 instance can use a default subnet in a different zone.
 | Operation | Notes |
 |---|---|
 | `DescribeAutoScalingInstances` | Returns all ASG-tracked instances with lifecycle state and health status |
+| `SetInstanceHealth` | Updates an instance's health status, optionally respecting its grace period |
+| `SetInstanceProtection` | Enables or disables scale-in protection for named instances in a group |
 | `SetDesiredCapacity` | Updates desired count; reconciler handles scale-out / scale-in within 10 s |
 | `AttachInstances` | Attaches existing EC2 instances to a group; sets lifecycle state to `InService` |
 | `DetachInstances` | Detaches instances from a group; optionally decrements desired capacity |
 | `TerminateInstanceInAutoScalingGroup` | Terminates a specific instance; optionally decrements desired capacity |
 | `SuspendProcesses` | Records suspended scaling processes (empty list suspends all); reported back by `DescribeAutoScalingGroups` |
 | `ResumeProcesses` | Clears suspended processes (empty list resumes all) |
+
+### Instance Refresh
+
+| Operation | Notes |
+|---|---|
+| `StartInstanceRefresh` | Starts replacement of group instances and returns a refresh ID |
+| `DescribeInstanceRefreshes` | Returns refresh status and progress, with `MaxRecords`/`NextToken` paging |
 
 ### Instance Refresh Recovery
 

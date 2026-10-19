@@ -11,7 +11,7 @@ Floci implements the CodeDeploy API — stored-state management for applications
 - `arn:aws:codedeploy:<region>:<account>:deploymentconfig:<name>`
 - `arn:aws:codedeploy:<region>:<account>:deployment:<id>`
 
-## Supported Operations (30 total)
+## Supported Operations (35 total)
 
 ### Applications
 
@@ -66,10 +66,15 @@ Floci implements the CodeDeploy API — stored-state management for applications
 | `UntagResource` | Removes specific tag keys |
 | `ListTagsForResource` | Returns tags for a resource ARN |
 
-### On-Premises (no-op)
+### On-Premises Instances
 
 | Operation | Notes |
 |---|---|
+| `RegisterOnPremisesInstance` | Registers an instance name with an IAM session or user ARN |
+| `DeregisterOnPremisesInstance` | Removes a registered instance |
+| `GetOnPremisesInstance` | Returns registration information for one instance |
+| `BatchGetOnPremisesInstances` | Returns registration information for named instances |
+| `ListOnPremisesInstances` | Lists registered names, optionally filtered by status or tags |
 | `AddTagsToOnPremisesInstances` | Accepted, no-op |
 | `RemoveTagsFromOnPremisesInstances` | Accepted, no-op |
 
