@@ -529,8 +529,9 @@ public class Ec2ContainerManager {
                 }
 
                 // Set public-facing addresses only for instances due one, by the rule mock instances
-                // follow too. Private-subnet instances have no public IP/DNS, matching real EC2.
-                if (AutomaticPublicAddress.isDue(instance, false)) {
+                // follow too, or holding an Elastic IP their interface carries, which RunInstances
+                // recorded. Private-subnet instances have no public IP/DNS, matching real EC2.
+                if (instance.getPublicIpAddress() != null || AutomaticPublicAddress.isDue(instance, false)) {
                     exposeReachablePublicAddress(instance);
                 }
 

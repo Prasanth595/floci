@@ -1229,10 +1229,36 @@ class Ec2ServiceTest {
         String automatic = second.getPublicIpAddress();
         assertNotNull(automatic);
         service.attachNetworkInterface(region, retained.getNetworkInterfaceId(), second.getInstanceId(), 1);
+        String association = carried.getAssociationId();
+        assertNotNull(association, "the retained interface keeps the address associated");
 
-        service.disassociateAddress(region, carried.getAssociationId());
+        service.disassociateAddress(region, association);
 
+        assertNull(carried.getAssociationId());
         assertEquals(automatic, second.getPublicIpAddress());
+    }
+
+    @Test
+    void containerModeLaunchOnARetainedInterfaceRecordsTheElasticIpItCarries() {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.249.0.0/24");
+        NetworkInterface retained = service.createNetworkInterface(region, subnetId, null, null, List.of(), List.of(),
+                List.of());
+        Instance first = runningContainerInstance(service, region, subnetId, retained.getNetworkInterfaceId());
+        Address carried = service.allocateAddress(region);
+        service.associateAddress(region, carried.getAllocationId(), first.getInstanceId());
+        service.terminateInstances(region, List.of(first.getInstanceId()));
+        assertNotNull(carried.getAssociationId());
+
+        Instance second = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null,
+                null, retained.getNetworkInterfaceId(), 0).getInstances().getFirst();
+
+        // Not due an automatic address on an existing interface, but the container manager
+        // re-points the Elastic IP recorded here once the container runs.
+        assertFalse(second.isAssociatePublicIp());
+        assertEquals(carried.getPublicIp(), second.getPublicIpAddress());
     }
 
     @Test

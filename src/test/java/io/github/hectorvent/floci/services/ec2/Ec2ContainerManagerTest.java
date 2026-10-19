@@ -1131,6 +1131,25 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void launchPublishesTheReachableAddressForAnElasticIpTheInterfaceCarries() throws Exception {
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.11");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        // Launched on an existing interface, so not due an automatic address, but the interface
+        // carries an Elastic IP, which RunInstances records on the instance.
+        Instance instance = instance("i-carried");
+        instance.setAssociatePublicIp(false);
+        instance.setPublicIpAddress("54.9.9.9");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "127.0.0.1".equals(instance.getPublicIpAddress()), Duration.ofSeconds(2));
+    }
+
+    @Test
     void launchWaitsForContainerBridgeIpBeforeRegisteringImds() throws Exception {
         Ec2ContainerManager.containerBridgeIpAttempts = 3;
         Ec2ContainerManager.containerBridgeIpPollMillis = 1;

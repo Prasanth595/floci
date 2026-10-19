@@ -1151,9 +1151,10 @@ invented `54.x.x.x` address.
 - An Elastic IP associated with the instance's primary private address takes the place of the
   automatic address and is kept across a stop. Disassociating it from a running instance assigns
   a new automatic address when the rule above allows one.
+- An Elastic IP that a retained interface carries becomes the public address of the next instance
+  launched on that interface, although DescribeAddresses does not report that instance as its
+  `InstanceId`.
 
 In mock mode, the address appears whether DescribeInstances or DescribeInstanceStatus observes the
-launch first. An Elastic IP that a retained interface carries becomes the public address of the
-next mock instance launched on that interface, although DescribeAddresses does not report that
-instance as its `InstanceId`. A terminated mock instance has no public address, and stopping it
-does not bring it back.
+launch first. A terminated mock instance has no public address, and stopping it does not bring it
+back.

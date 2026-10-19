@@ -3572,6 +3572,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             suppliedEni.setAttachment(launchAttachment);
                             suppliedEni.setStatus("in-use");
                             networkInterfaces.put(key(region, suppliedEni.getNetworkInterfaceId()), suppliedEni);
+                            // An Elastic IP the interface kept from an earlier instance is this one's
+                            // public address; with a container, the launch re-points it once it runs.
+                            Address carried = primaryElasticAddress(region, inst);
+                            if (carried != null) {
+                                setPublicAddress(inst, carried.getPublicIp());
+                            }
                         }
 
                         // Root EBS volume
@@ -4185,8 +4191,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 // daemon and, without this, nothing would try again.
                 containerManager.terminate(inst, () ->
                         RequestScopes.runAs(owner, () -> reclaimCapturesPinnedBy(region, inst, terminating)));
-                // Termination releases the public address with a container too.
-                writePublicAddress(inst, () -> clearPublicAddress(inst));
+                // Termination releases the public address with a container too, under the lock a
+                // DescribeAddresses re-point holds, so one already under way cannot write it back.
+                synchronized (privateIpAllocationLock) {
+                    writePublicAddress(inst, () -> clearPublicAddress(inst));
+                }
             }
             // Delete root volume if deleteOnTermination (matches real AWS behavior)
             if (inst.getRootVolumeId() != null) {
