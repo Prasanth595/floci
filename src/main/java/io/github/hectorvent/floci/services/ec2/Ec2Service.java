@@ -162,6 +162,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private static final long ENDPOINT_ADDRESS_WINDOW = 50;
     private static final String SYNTHETIC_FALLBACK_CIDR = "172.31.0.0/24";
     private static final String DEFAULT_ROOT_VOLUME_TYPE = "gp3";
+    private static final String DOCUMENTATION_PREFIX = "203.0.113.";
     private static final Set<String> VALID_VOLUME_TYPES =
             Set.of("standard", "io1", "io2", "gp2", "sc1", "st1", "gp3");
     /** The accounts behind the two non-self owner aliases DescribeImages accepts. */
@@ -291,6 +292,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // a concurrent allocation, which reads persisted resources to see what is taken, cannot pick
     // the same address in between. Taken after imageRegistryLock where a caller holds both.
     private final Object privateIpAllocationLock = new Object();
+    /** Host part (1-254) of the last 203.0.113.0/24 address handed out; guarded by the allocation lock. */
+    private int documentationHost;
 
     /**
      * Null in the hermetic unit tests, which reach the constructors that do not take it; CDI always
@@ -4054,13 +4057,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * Gives an instance the automatic public address {@link AutomaticPublicAddress} says it is due:
-     * the container's reachable address, or an invented one where there is no container.
+     * the container's reachable address, or where there is no container the one
+     * {@code mock-public-addresses} chooses, which by default is none.
      */
     private void assignAutomaticAddress(Instance instance, boolean replacement) {
         if (instance.getPublicIpAddress() != null || !AutomaticPublicAddress.isDue(instance, replacement)) {
             return;
         }
-        String address = config.services().ec2().mock() ? randomPublicIpv4()
+        String address = config.services().ec2().mock() ? mockPublicAddress()
                 : containerManager.reachablePublicAddress(instance);
         if (address != null) {
             setPublicAddress(instance, address);
@@ -4080,6 +4084,41 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private static void clearPublicAddress(Instance instance) {
         setPublicAddress(instance, null);
+    }
+
+    /** The automatic public address of a mock instance under {@code mock-public-addresses}, or null for none. */
+    private String mockPublicAddress() {
+        EmulatorConfig.Ec2ServiceConfig ec2 = config.services().ec2();
+        return switch (ec2.mockPublicAddresses()) {
+            case NONE -> null;
+            case FIXED -> ec2.mockPublicAddress().filter(address -> !address.isBlank()).orElse("127.0.0.1");
+            case DOCUMENTATION -> documentationPublicAddress();
+        };
+    }
+
+    /**
+     * The next address from 203.0.113.0/24 (TEST-NET-3, reserved for documentation and routed
+     * nowhere) after the last one handed out, skipping any a live instance already shows, so a
+     * restarted instance gets a different address as on AWS. Callers hold the allocation lock, so
+     * two launches do not pick the same one; once all 254 are taken, addresses repeat.
+     */
+    private String documentationPublicAddress() {
+        Set<String> taken = new HashSet<>();
+        for (Instance other : instances.scan(k -> true)) {
+            String address = other.getPublicIpAddress();
+            if (address != null && address.startsWith(DOCUMENTATION_PREFIX)) {
+                taken.add(address);
+            }
+        }
+        for (int i = 0; i < 254; i++) {
+            documentationHost = documentationHost % 254 + 1;
+            String candidate = DOCUMENTATION_PREFIX + documentationHost;
+            if (!taken.contains(candidate)) {
+                return candidate;
+            }
+        }
+        documentationHost = documentationHost % 254 + 1;
+        return DOCUMENTATION_PREFIX + documentationHost;
     }
 
     private static String randomPublicIpv4() {

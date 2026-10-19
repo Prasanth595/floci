@@ -5,6 +5,8 @@ import io.github.hectorvent.floci.services.autoscaling.AutoScalingReconciler;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.QuarkusTestProfile;
+import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
@@ -14,6 +16,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static io.restassured.RestAssured.given;
@@ -23,8 +26,10 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
+@TestProfile(Ec2MockPublicAddressIntegrationTest.DocumentationAddresses.class)
 class Ec2MockPublicAddressIntegrationTest {
     private static final AtomicLong ACCOUNTS = new AtomicLong(722000000000L);
+    private static final String DOCUMENTATION_ADDRESS = "203\\.0\\.113\\.([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])";
     private static final String REGION = "us-east-1";
     private static final String INSTANCE = "DescribeInstancesResponse.reservationSet.item.instancesSet.item.";
     private static final String ADDRESS = "DescribeAddressesResponse.addressesSet.item.";
@@ -129,7 +134,7 @@ class Ec2MockPublicAddressIntegrationTest {
         String publicIp = first.extract().xmlPath().getString(INSTANCE + "ipAddress");
         assertEquals(publicExpected, !publicIp.isEmpty());
         if (publicExpected) {
-            assertTrue(publicIp.matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"));
+            assertTrue(publicIp.matches(DOCUMENTATION_ADDRESS));
         }
         assertEquals(publicIp, describe(owner, instance).extract().xmlPath().getString(INSTANCE + "ipAddress"));
         if (!"asg".equals(source)) {
@@ -209,7 +214,7 @@ class Ec2MockPublicAddressIntegrationTest {
                 .body("DescribeInstanceStatusResponse.instanceStatusSet.item.instanceState.name", equalTo("running"));
 
         String publicIp = describe(owner, instance).extract().xmlPath().getString(INSTANCE + "ipAddress");
-        assertTrue(publicIp.matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"), publicIp);
+        assertTrue(publicIp.matches(DOCUMENTATION_ADDRESS), publicIp);
         request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
     }
 
@@ -220,7 +225,7 @@ class Ec2MockPublicAddressIntegrationTest {
                 .formParam("InstanceType", "t3.micro").formParam("MinCount", 1).formParam("MaxCount", 1)
                 .post("/").then().statusCode(200)
                 .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
-        assertTrue(publicIp(owner, instance).matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"));
+        assertTrue(publicIp(owner, instance).matches(DOCUMENTATION_ADDRESS));
         request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
 
         // Whatever StopInstances answers, it must not bring the instance back to be started again.
@@ -543,7 +548,7 @@ class Ec2MockPublicAddressIntegrationTest {
                 .formParam("InstanceType", "t3.micro").formParam("MinCount", 1).formParam("MaxCount", 1)
                 .formParam("SubnetId", subnet).post("/").then().statusCode(200)
                 .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
-        assertTrue(publicIp(owner, instance).matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"));
+        assertTrue(publicIp(owner, instance).matches(DOCUMENTATION_ADDRESS));
         // AssociateAddress by InstanceId needs exactly one interface, so the address goes on first.
         ValidatableResponse allocated = allocateAddress(owner);
         String allocation = allocated.extract().path("AllocateAddressResponse.allocationId");
@@ -575,7 +580,7 @@ class Ec2MockPublicAddressIntegrationTest {
         assertEquals("", publicIp(owner, instance));
         request("StopInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
         request("StartInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
-        assertTrue(publicIp(owner, instance).matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"));
+        assertTrue(publicIp(owner, instance).matches(DOCUMENTATION_ADDRESS));
 
         request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
         request("ReleaseAddress", owner).formParam("AllocationId", allocation).post("/").then().statusCode(200);
@@ -633,7 +638,7 @@ class Ec2MockPublicAddressIntegrationTest {
 
         describe(owner, instance).body(INSTANCE + "subnetId", equalTo(primary))
                 .body(INSTANCE + "placement.availabilityZone", equalTo(REGION + "a"));
-        assertTrue(publicIp(owner, instance).matches("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"));
+        assertTrue(publicIp(owner, instance).matches(DOCUMENTATION_ADDRESS));
         request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
         request("DeleteLaunchTemplate", owner).formParam("LaunchTemplateId", template).post("/").then().statusCode(200);
         request("DeleteSubnet", owner).formParam("SubnetId", primary).post("/").then().statusCode(200);
@@ -653,5 +658,13 @@ class Ec2MockPublicAddressIntegrationTest {
     private RequestSpecification request(String action, String owner) {
         String service = action.contains("AutoScaling") ? "autoscaling" : "ec2";
         return given().formParam("Action", action).header("Authorization", EnforcementFixtures.auth(owner, service));
+    }
+
+    /** Mock instances due an automatic address take one from 203.0.113.0/24. */
+    public static class DocumentationAddresses implements QuarkusTestProfile {
+        @Override
+        public Map<String, String> getConfigOverrides() {
+            return Map.of("floci.services.ec2.mock-public-addresses", "documentation");
+        }
     }
 }

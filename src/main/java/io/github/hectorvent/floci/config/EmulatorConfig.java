@@ -3206,6 +3206,38 @@ public interface EmulatorConfig {
         boolean mock();
 
         /**
+         * The automatic public IPv4 address a mock instance gets when its launch asks for one.
+         * Mock instances have no container to reach, so the default gives them none: an address
+         * from a real AWS range would send a client that connects to it to someone else's host.
+         * {@code documentation} draws addresses from 203.0.113.0/24, a range reserved for
+         * documentation that routes nowhere; {@code fixed} gives every instance
+         * {@link #mockPublicAddress()}. Instances with containers always report the container's
+         * reachable address, whatever this says.
+         *
+         * Env var: FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES
+         */
+        @WithDefault("none")
+        MockPublicAddresses mockPublicAddresses();
+
+        /**
+         * The public IPv4 address of every mock instance due an automatic one when
+         * {@link #mockPublicAddresses()} is {@code fixed}: an address the caller can reach, such
+         * as this host's own. Unset means 127.0.0.1.
+         *
+         * Env var: FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESS
+         */
+        Optional<String> mockPublicAddress();
+
+        enum MockPublicAddresses {
+            /** No automatic public address. */
+            NONE,
+            /** An address from 203.0.113.0/24, distinct from other live instances while one is free. */
+            DOCUMENTATION,
+            /** The configured {@code mock-public-address}. */
+            FIXED
+        }
+
+        /**
          * When true, instance containers are bounded to the CPU and memory limits defined for
          * their instance type in the instance type catalog. When false, containers are launched
          * without CPU or memory limits.

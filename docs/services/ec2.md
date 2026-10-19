@@ -956,6 +956,8 @@ State is reported settled rather than transitional, as elsewhere in this service
 | `FLOCI_SERVICES_EC2_MAX_PUBLISHED_PORTS_PER_INSTANCE` | `20` | Max published ports per instance; also the widest single-rule span published |
 | `FLOCI_SERVICES_EC2_SOCAT_IMAGE` | `alpine/socat` | Image used for the port-forwarding sidecar |
 | `FLOCI_SERVICES_EC2_MOCK` | `false` | Skip Docker; instances jump directly to final state (useful for tests) |
+| `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES` | `none` | Automatic public IPv4 address of a mock instance: `none`, `documentation` (from `203.0.113.0/24`, which routes nowhere) or `fixed` (see below). Instances with containers always report their reachable address (see [Public IPv4 addresses](#public-ipv4-addresses)) |
+| `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESS` | `127.0.0.1` | The address every mock instance due one gets when `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES` is `fixed`, for example this host's own address |
 | `FLOCI_SERVICES_EC2_AWS_FAITHFUL_PRIVATE_IP` | `false` | Report the CFN/subnet-allocated private IP instead of the container bridge IP; routing and IMDS are unaffected |
 | `FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE` | auto-detect | Whether an instance's container IP is reachable from the machines consuming Floci's API (Terraform, Terratest, your shell). When it is, DescribeInstances and DescribeAddresses report the container IP, so port 22 really is port 22; when it is not, they report `127.0.0.1` and reachability goes through the published high host ports. Detected by a throwaway TCP connect; set explicitly when Floci itself runs as a container |
 | `FLOCI_SERVICES_EC2_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | On startup, remove instance containers this Floci left on the daemon whose record did not survive the restart or came back terminated; stopped instances are never swept |
@@ -1133,8 +1135,20 @@ Floci needs the file mounted at the configured container path.
 Whether an instance has an automatic public IPv4 address is decided by the same rule with and
 without containers. Only the address itself depends on the mode. With a container, it is the
 container's reachable address: its own IP when Floci's clients can route to it, otherwise
-`127.0.0.1` with the DNS name `localhost`. In mock mode, where there is no container, it is an
-invented `54.x.x.x` address.
+`127.0.0.1` with the DNS name `localhost`. In mock mode there is no container to reach, so
+`FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES` chooses:
+
+- `none` (the default): no automatic address. DescribeInstances shows no `ipAddress` or `dnsName`
+  unless an Elastic IP is associated. The launch still records whether it asked for one, so
+  switching the setting takes effect at the instance's next start.
+- `documentation`: an address from `203.0.113.0/24`, a range reserved for documentation that no
+  host answers on, as Lightsail and EMR use. Live instances get distinct addresses while any are
+  free, and a restart gets a different one.
+- `fixed`: `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESS` (default `127.0.0.1`, DNS name `localhost`)
+  for every instance, so a tool that connects to the public address reaches a host you choose.
+
+For an address that reaches the instance itself, run it with a container (`FLOCI_SERVICES_EC2_MOCK`
+`false`). Elastic IPs (AllocateAddress) are still drawn from `54.x.x.x` in both modes.
 
 - An instance applies `MapPublicIpOnLaunch` unless the primary launch interface explicitly sets
   `AssociatePublicIpAddress`. Direct launches, EC2 Fleet launches and Auto Scaling launch

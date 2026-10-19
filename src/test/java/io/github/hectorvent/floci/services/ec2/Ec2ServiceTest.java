@@ -1240,6 +1240,85 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void mockInstancesGetNoAutomaticAddressUnlessConfiguredButStillRecordTheLaunchIntent() {
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().mockPublicAddresses())
+                .thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.NONE);
+        Ec2Service service = mockModeService(config);
+        String region = "us-east-1";
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), publicSubnet(service, region, "10.243.0.0/24"), null, List.of(), null, null,
+                null).getInstances().getFirst();
+        service.describeInstances(region, List.of(instance.getInstanceId()), Map.of());
+        assertEquals("running", instance.getState().getName());
+        assertNull(instance.getPublicIpAddress());
+        assertNull(instance.getPublicDnsName());
+        assertTrue(instance.isAssociatePublicIp(), "the launch still records that it asked for an address");
+
+        // An Elastic IP still takes the primary private address, and leaves nothing behind.
+        Address elastic = service.allocateAddress(region);
+        service.associateAddress(region, elastic.getAllocationId(), instance.getInstanceId());
+        assertEquals(elastic.getPublicIp(), instance.getPublicIpAddress());
+        service.disassociateAddress(region, elastic.getAssociationId());
+        assertNull(instance.getPublicIpAddress());
+
+        // The recorded intent is what a later start decides from.
+        when(config.services().ec2().mockPublicAddresses())
+                .thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.DOCUMENTATION);
+        service.stopInstances(region, List.of(instance.getInstanceId()));
+        service.startInstances(region, List.of(instance.getInstanceId()));
+        assertTrue(instance.getPublicIpAddress().startsWith("203.0.113."), instance.getPublicIpAddress());
+    }
+
+    @Test
+    void documentationAddressesAreDistinctAndChangeOnRestart() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.242.0.0/24");
+        List<Instance> launched = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                3, 3, null, List.of(), subnetId, null, List.of(), null, null, null).getInstances();
+        service.describeInstances(region, launched.stream().map(Instance::getInstanceId).toList(), Map.of());
+        Set<String> addresses = new HashSet<>();
+        for (Instance instance : launched) {
+            assertTrue(instance.getPublicIpAddress().matches("203\\.0\\.113\\.[0-9]+"), instance.getPublicIpAddress());
+            assertEquals(instance.getPublicIpAddress(), instance.getPublicDnsName());
+            addresses.add(instance.getPublicIpAddress());
+        }
+        assertEquals(3, addresses.size());
+
+        Instance first = launched.getFirst();
+        String before = first.getPublicIpAddress();
+        service.stopInstances(region, List.of(first.getInstanceId()));
+        service.startInstances(region, List.of(first.getInstanceId()));
+        assertNotEquals(before, first.getPublicIpAddress());
+        assertFalse(launched.subList(1, 3).stream()
+                .anyMatch(other -> other.getPublicIpAddress().equals(first.getPublicIpAddress())));
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {"192.168.65.2,192.168.65.2,192.168.65.2", "NULL,127.0.0.1,localhost"}, nullValues = "NULL")
+    void fixedMockAddressesUseTheConfiguredAddress(String configured, String expected, String dnsName) {
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().mockPublicAddresses())
+                .thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.FIXED);
+        when(config.services().ec2().mockPublicAddress()).thenReturn(Optional.ofNullable(configured));
+        Ec2Service service = mockModeService(config);
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.241.0.0/24");
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null, null).getInstances().getFirst();
+        service.describeInstances(region, List.of(instance.getInstanceId()), Map.of());
+        assertEquals(expected, instance.getPublicIpAddress());
+        assertEquals(dnsName, instance.getPublicDnsName());
+
+        // The rule still decides: released on stop, back on start.
+        service.stopInstances(region, List.of(instance.getInstanceId()));
+        assertNull(instance.getPublicIpAddress());
+        service.startInstances(region, List.of(instance.getInstanceId()));
+        assertEquals(expected, instance.getPublicIpAddress());
+    }
+
+    @Test
     void containerModeLaunchOnARetainedInterfaceRecordsTheElasticIpItCarries() {
         Ec2Service service = containerModeService();
         String region = "us-east-1";
@@ -6579,7 +6658,11 @@ class Ec2ServiceTest {
     }
 
     private static Ec2Service mockModeService() {
-        return new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+        return mockModeService(mockConfig(true));
+    }
+
+    private static Ec2Service mockModeService(EmulatorConfig config) {
+        return new Ec2Service(config, mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
@@ -6593,6 +6676,8 @@ class Ec2ServiceTest {
         when(config.services()).thenReturn(services);
         when(services.ec2()).thenReturn(ec2);
         when(ec2.mock()).thenReturn(ec2Mock);
+        when(ec2.mockPublicAddresses()).thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.DOCUMENTATION);
+        when(ec2.mockPublicAddress()).thenReturn(Optional.empty());
         return config;
     }
 
