@@ -142,12 +142,8 @@ public class OpenSearchService implements ResourceProvider {
         // A configured data volume overwrites both when startDomain mounts operator storage.
         domain.setVolumeOwnership(VolumeOwnership.FLOCI_MANAGED);
 
-        if (clusterConfig != null) {
-            domain.setClusterConfig(clusterConfig);
-        }
-        if (ebsOptions != null) {
-            domain.setEbsOptions(ebsOptions);
-        }
+        applyClusterConfig(domain.getClusterConfig(), clusterConfig);
+        applyEbsOptions(domain.getEbsOptions(), ebsOptions);
         if (tags != null) {
             domain.setTags(tags);
         }
@@ -228,31 +224,47 @@ public class OpenSearchService implements ResourceProvider {
         if (accessPolicies != null) {
             domain.setAccessPolicies(accessPolicies);
         }
-        if (clusterConfig != null) {
-            ClusterConfig existing = domain.getClusterConfig();
-            if (clusterConfig.getInstanceType() != null) {
-                existing.setInstanceType(clusterConfig.getInstanceType());
-            }
-            if (clusterConfig.getInstanceCount() > 0) {
-                existing.setInstanceCount(clusterConfig.getInstanceCount());
-            }
-            existing.setDedicatedMasterEnabled(clusterConfig.isDedicatedMasterEnabled());
-            existing.setZoneAwarenessEnabled(clusterConfig.isZoneAwarenessEnabled());
-        }
-        if (ebsOptions != null) {
-            EbsOptions existing = domain.getEbsOptions();
-            existing.setEbsEnabled(ebsOptions.isEbsEnabled());
-            if (ebsOptions.getVolumeType() != null) {
-                existing.setVolumeType(ebsOptions.getVolumeType());
-            }
-            if (ebsOptions.getVolumeSize() > 0) {
-                existing.setVolumeSize(ebsOptions.getVolumeSize());
-            }
-        }
+        applyClusterConfig(domain.getClusterConfig(), clusterConfig);
+        applyEbsOptions(domain.getEbsOptions(), ebsOptions);
         applyDomainOptions(domain, options);
 
         domainStore.put(domainName, domain);
         return domain;
+    }
+
+    /** Copies only the fields the request supplied (non-null) onto {@code existing}. */
+    private static void applyClusterConfig(ClusterConfig existing, ClusterConfig supplied) {
+        if (supplied == null) {
+            return;
+        }
+        if (supplied.getInstanceType() != null) {
+            existing.setInstanceType(supplied.getInstanceType());
+        }
+        if (supplied.getInstanceCount() != null && supplied.getInstanceCount() > 0) {
+            existing.setInstanceCount(supplied.getInstanceCount());
+        }
+        if (supplied.isDedicatedMasterEnabled() != null) {
+            existing.setDedicatedMasterEnabled(supplied.isDedicatedMasterEnabled());
+        }
+        if (supplied.isZoneAwarenessEnabled() != null) {
+            existing.setZoneAwarenessEnabled(supplied.isZoneAwarenessEnabled());
+        }
+    }
+
+    /** Copies only the fields the request supplied (non-null) onto {@code existing}. */
+    private static void applyEbsOptions(EbsOptions existing, EbsOptions supplied) {
+        if (supplied == null) {
+            return;
+        }
+        if (supplied.isEbsEnabled() != null) {
+            existing.setEbsEnabled(supplied.isEbsEnabled());
+        }
+        if (supplied.getVolumeType() != null) {
+            existing.setVolumeType(supplied.getVolumeType());
+        }
+        if (supplied.getVolumeSize() != null && supplied.getVolumeSize() > 0) {
+            existing.setVolumeSize(supplied.getVolumeSize());
+        }
     }
 
     public Domain deleteDomain(String domainName) {
