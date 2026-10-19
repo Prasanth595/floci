@@ -1714,7 +1714,7 @@ public class RedshiftService {
         // CreateTags/DeleteTags/DescribeTags all model; resolving by id alone would tag the
         // local resource of the same name.
         if (AwsArnUtils.isForeignPartition(arn, regionResolver.getPartition())
-                || !regionResolver.getAccountId().equals(arn.accountId())
+                || AwsArnUtils.isForeignAccount(arn, regionResolver.getAccountId())
                 || !regionResolver.getRegion().equals(arn.region())) {
             throw new AwsException("ResourceNotFoundFault", "Resource " + resourceName + " not found", 404);
         }
