@@ -36,9 +36,11 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -59,6 +61,10 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
 
     private static final Logger LOG = Logger.getLogger(RdsContainerManager.class);
     private static final Pattern SAFE_STORAGE_COMPONENT = Pattern.compile("[A-Za-z0-9._-]+");
+    private static final Pattern MYSQL_PARAMETER_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_.-]*");
+    /** Where the server listens and keeps its data: the proxy and the volume depend on these. */
+    private static final Set<String> FLOCI_CONTROLLED_MYSQL_PARAMETERS =
+            Set.of("bind_address", "datadir", "port", "skip_networking", "socket");
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -157,17 +163,20 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
      * start that failed before Docker created anything, and is dropped when the daemon is
      * unreachable so the runtime can retry.
      *
+     * @param engineParameters the overrides of the parameter group the engine runs with
      * @return the container handle, or {@code null} when no Docker daemon is reachable
      */
     public RdsContainerHandle tryStart(
             String runtimeId, String instanceId, String containerStorageResourceId,
             String dockerVolumeName, DatabaseEngine engine, String image,
-            String masterUsername, String masterPassword, String dbName) {
+            String masterUsername, String masterPassword, String dbName,
+            Map<String, String> engineParameters) {
         String effectiveRuntimeId = runtimeId == null || runtimeId.isBlank() ? instanceId : runtimeId;
         try {
             retryRetainedCleanup(effectiveRuntimeId);
             RdsContainerHandle handle = start(runtimeId, instanceId, containerStorageResourceId,
-                    dockerVolumeName, engine, image, masterUsername, masterPassword, dbName);
+                    dockerVolumeName, engine, image, masterUsername, masterPassword, dbName,
+                    engineParameters);
             dockerUnavailableLogged = false;
             return handle;
         } catch (RuntimeException e) {
@@ -231,6 +240,15 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             String runtimeId, String instanceId, String containerStorageResourceId,
             String dockerVolumeName, DatabaseEngine engine, String image,
             String masterUsername, String masterPassword, String dbName) {
+        return start(runtimeId, instanceId, containerStorageResourceId, dockerVolumeName,
+                engine, image, masterUsername, masterPassword, dbName, Map.of());
+    }
+
+    public RdsContainerHandle start(
+            String runtimeId, String instanceId, String containerStorageResourceId,
+            String dockerVolumeName, DatabaseEngine engine, String image,
+            String masterUsername, String masterPassword, String dbName,
+            Map<String, String> engineParameters) {
         LOG.infov("Starting RDS backend container for instance: {0} engine={1}", instanceId, engine);
 
         String effectiveRuntimeId = runtimeId == null || runtimeId.isBlank()
@@ -304,7 +322,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     specBuilder, storageResourceId, exactVolumeName, engine, image);
 
         // Add engine-specific command
-        List<String> cmd = buildContainerCmd(engine, image);
+        List<String> cmd = buildContainerCmd(engine, image, engineParameters);
         if (!cmd.isEmpty()) {
             specBuilder.withCmd(cmd);
         }
@@ -1192,6 +1210,50 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     }
 
     static List<String> buildContainerCmd(DatabaseEngine engine, String image) {
+        return buildContainerCmd(engine, image, Map.of());
+    }
+
+    /**
+     * The server options for an engine, with a parameter group's overrides ahead of the options
+     * Floci needs, so a group cannot take away the authentication plugin the proxy relies on.
+     */
+    static List<String> buildContainerCmd(
+            DatabaseEngine engine, String image, Map<String, String> engineParameters) {
+        List<String> cmd = new ArrayList<>(engineParameterOptions(engine, engineParameters));
+        cmd.addAll(authenticationOptions(engine, image));
+        return cmd;
+    }
+
+    /**
+     * A parameter group's overrides as MySQL or MariaDB server options. Each takes the
+     * {@code --loose-} prefix, so a parameter only Aurora or RDS knows (or one an older server
+     * does not have) is skipped with a warning instead of stopping the server. A value that is a
+     * formula, such as {@code {DBInstanceClassMemory*3/4}}, is worked out by AWS from the
+     * instance class and is left to the server's default, as are the parameters that decide
+     * where the server listens and keeps its data, which Floci controls.
+     */
+    static List<String> engineParameterOptions(
+            DatabaseEngine engine, Map<String, String> engineParameters) {
+        if (engineParameters == null || engineParameters.isEmpty()
+                || (engine != DatabaseEngine.MYSQL && engine != DatabaseEngine.MARIADB)) {
+            return List.of();
+        }
+        List<String> options = new ArrayList<>();
+        for (Map.Entry<String, String> parameter : new TreeMap<>(engineParameters).entrySet()) {
+            String name = parameter.getKey();
+            String value = parameter.getValue();
+            if (name == null || value == null || !MYSQL_PARAMETER_NAME.matcher(name).matches()
+                    || value.contains("{")
+                    || FLOCI_CONTROLLED_MYSQL_PARAMETERS.contains(
+                            name.replace('-', '_').toLowerCase(Locale.ROOT))) {
+                continue;
+            }
+            options.add("--loose-" + name + "=" + value);
+        }
+        return options;
+    }
+
+    private static List<String> authenticationOptions(DatabaseEngine engine, String image) {
         // Keep the backend handshake on mysql_native_password so the transparent proxy can
         // validate the client scramble. MySQL 8.4 removed default-authentication-plugin and
         // requires the native plugin to be enabled separately before selecting it as the default.

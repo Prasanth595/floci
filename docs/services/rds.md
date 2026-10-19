@@ -554,6 +554,19 @@ mysql -h 127.0.0.1 -P 7002 -u root -psecret123
 Override the image per-instance with the `--engine-version` flag or globally via environment variables.
 Aurora MySQL versions such as `8.0.mysql_aurora.3.08.0` use the MySQL version in front, so that example runs `mysql:8.0`.
 
+## Parameter groups
+
+A MySQL or MariaDB database runs with its parameter group: an Aurora MySQL cluster with its DB
+cluster parameter group, a standalone instance with its DB parameter group. Floci passes each
+override to the server when it starts the database container, so a value set in the group is the
+engine's value. A later change to the group takes effect the next time the container starts:
+`RebootDBCluster` for a cluster, `RebootDBInstance` for a standalone instance, a stop and start,
+or a Floci restart. A parameter the server does not know, such as one only Aurora has, is skipped
+with a warning in the database log. A formula value such as `{DBInstanceClassMemory*3/4}` keeps
+the server's default, and so do `port`, `bind_address`, `socket`, `datadir` and
+`skip_networking`, which Floci needs to reach the database. PostgreSQL and SQL Server databases do
+not take parameter group values yet.
+
 ## Option Groups
 
 Option groups are metadata: Floci stores the options you add, returns them on the wire, and

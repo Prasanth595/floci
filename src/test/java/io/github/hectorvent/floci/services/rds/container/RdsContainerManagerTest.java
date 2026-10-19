@@ -35,6 +35,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -99,6 +100,73 @@ class RdsContainerManagerTest {
                 DatabaseEngine.MARIADB, "mariadb:11").isEmpty());
         assertTrue(RdsContainerManager.buildContainerCmd(
                 DatabaseEngine.SQLSERVER, "mcr.microsoft.com/mssql/server:2022-latest").isEmpty());
+    }
+
+    @Test
+    void parameterGroupOverridesBecomeLooseServerOptionsAheadOfTheAuthenticationOptions() {
+        Map<String, String> overrides = new LinkedHashMap<>();
+        overrides.put("slow_query_log", "1");
+        overrides.put("max_connections", "500");
+        overrides.put("aurora_binlog_replication_max_yield_seconds", "0");
+        overrides.put("innodb_buffer_pool_size", "{DBInstanceClassMemory*3/4}");
+        overrides.put("port", "3307");
+        overrides.put("bind-address", "127.0.0.1");
+        overrides.put("default_authentication_plugin", "caching_sha2_password");
+        overrides.put("max_connections --skip-grant-tables", "1");
+
+        assertEquals(
+                List.of(
+                        "--loose-aurora_binlog_replication_max_yield_seconds=0",
+                        "--loose-default_authentication_plugin=caching_sha2_password",
+                        "--loose-max_connections=500",
+                        "--loose-slow_query_log=1",
+                        "--default-authentication-plugin=mysql_native_password"),
+                RdsContainerManager.buildContainerCmd(DatabaseEngine.MYSQL, "mysql:8.0.36", overrides));
+        assertEquals(
+                List.of(
+                        "--loose-max_connections=500",
+                        "--mysql-native-password=ON",
+                        "--authentication-policy=mysql_native_password"),
+                RdsContainerManager.buildContainerCmd(
+                        DatabaseEngine.MYSQL, "mysql:8.4", Map.of("max_connections", "500")));
+        assertEquals(List.of("--loose-max_connections=500"),
+                RdsContainerManager.buildContainerCmd(
+                        DatabaseEngine.MARIADB, "mariadb:11", Map.of("max_connections", "500")));
+    }
+
+    @Test
+    void parameterGroupOverridesAreNotPassedToOtherEngines() {
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.POSTGRES, "postgres:18", Map.of("max_connections", "500")).isEmpty());
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.SQLSERVER, "mcr.microsoft.com/mssql/server:2022-latest",
+                Map.of("max_connections", "500")).isEmpty());
+    }
+
+    @Test
+    void mysqlContainerIsCreatedWithItsParameterGroupOverrides() {
+        EmulatorConfig config = config(tempDir.resolve("mysql-params-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "mysql-container", Map.of(3306,
+                new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        ContainerDetector detector = mock(ContainerDetector.class);
+        when(detector.isRunningInContainer()).thenReturn(false);
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, logStreamer, detector, config,
+                new RegionResolver("us-east-1", "000000000000"), mock(ServiceConfigAccess.class));
+
+        manager.start("db1", "db1", "db1", "floci-rds-db1", DatabaseEngine.MYSQL, "mysql:8.0.36",
+                "root", "password", "db", Map.of("max_connections", "500"));
+
+        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(spec.capture());
+        assertEquals(
+                List.of("--loose-max_connections=500", "--default-authentication-plugin=mysql_native_password"),
+                spec.getValue().cmd());
     }
 
     @Test
@@ -656,7 +724,7 @@ class RdsContainerManagerTest {
 
         for (int attempt = 0; attempt < 3; attempt++) {
             assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                    DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"),
+                    DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of()),
                     "attempt " + attempt + " should report unavailable");
         }
         assertFalse(manager.isDockerReachable());
@@ -677,7 +745,7 @@ class RdsContainerManagerTest {
 
         IllegalStateException failure = assertThrows(IllegalStateException.class,
                 () -> manager.tryStart("arn:aws:rds:us-east-1:000000000000:db:db1", "db1", "db1",
-                        "floci-rds-db1", DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
+                        "floci-rds-db1", DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of()));
 
         assertEquals("no such image: mysql:8.0", failure.getMessage());
         assertTrue(manager.isDockerReachable());
@@ -696,7 +764,7 @@ class RdsContainerManagerTest {
         String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
 
         assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of()));
 
         // A Docker daemon appears.
         org.mockito.Mockito.reset(lifecycleManager);
@@ -706,7 +774,7 @@ class RdsContainerManagerTest {
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
         RdsContainerHandle handle = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of());
 
         assertEquals("late-container", handle.getContainerId());
         assertEquals(3306, handle.getPort());
@@ -729,12 +797,12 @@ class RdsContainerManagerTest {
         String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
 
         assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of()));
         assertEquals("created-container", manager.getActiveHandle(runtimeId).getContainerId());
 
         // Still no daemon: the retry keeps the identity rather than dropping it.
         assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of()));
         assertEquals("created-container", manager.getActiveHandle(runtimeId).getContainerId());
 
         // The daemon is back: the leftover is removed first, then the start goes through.
@@ -745,7 +813,7 @@ class RdsContainerManagerTest {
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
         RdsContainerHandle handle = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of());
 
         assertEquals("late-container", handle.getContainerId());
         verify(lifecycleManager).stopAndRemoveStrict(
@@ -778,7 +846,7 @@ class RdsContainerManagerTest {
         assertEquals(first, manager.getActiveHandle(runtimeId));
 
         RdsContainerHandle retried = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of());
 
         assertEquals("second-container", retried.getContainerId());
         assertEquals(retried, manager.getActiveHandle(runtimeId));

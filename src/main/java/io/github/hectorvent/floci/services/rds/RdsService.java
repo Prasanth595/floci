@@ -817,7 +817,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 RdsContainerHandle handle = containerManager.tryStart(
                         dbInstanceArn, id, instanceStorageResourceId,
                         instanceDockerVolumeName, engine, image,
-                        masterUsername, masterPassword, dbName);
+                        masterUsername, masterPassword, dbName,
+                        instanceEngineParameters(currentAccountId(), effectiveRegion, paramGroupName));
                 if (handle != null) {
                     backendHost = handle.getHost();
                     backendPort = handle.getPort();
@@ -3557,7 +3558,8 @@ public class RdsService implements Resettable, ResourceProvider {
             handle = containerManager.tryStart(
                     instance.getDbInstanceArn(), id, storageResourceId,
                     dockerVolumeName, instance.getEngine(), image, instance.getMasterUsername(),
-                    instance.getMasterPassword(), instance.getDbName());
+                    instance.getMasterPassword(), instance.getDbName(),
+                    instanceEngineParameters(instance));
         } catch (RuntimeException | Error e) {
             instance.setStatus(DbInstanceStatus.FAILED);
             putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
@@ -3740,7 +3742,7 @@ public class RdsService implements Resettable, ResourceProvider {
             handle = containerManager.tryStart(
                     cluster.getDbClusterArn(), id, storageResourceId, dockerVolumeName,
                     cluster.getEngine(), image, cluster.getMasterUsername(), cluster.getMasterPassword(),
-                    cluster.getDatabaseName());
+                    cluster.getDatabaseName(), clusterEngineParameters(cluster));
         } catch (RuntimeException | Error e) {
             cluster.setStatus(DbInstanceStatus.FAILED);
             putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
@@ -3806,7 +3808,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 RdsContainerHandle handle = containerManager.tryStart(
                         instance.getDbInstanceArn(), id, storageResourceId,
                         dockerVolumeName, instance.getEngine(), image, instance.getMasterUsername(),
-                        instance.getMasterPassword(), instance.getDbName());
+                        instance.getMasterPassword(), instance.getDbName(),
+                        instanceEngineParameters(instance));
                 instance.setContainerStorageResourceId(storageResourceId);
                 instance.setDockerVolumeName(dockerVolumeName);
                 instance.setContainerId(handle != null ? handle.getContainerId() : null);
@@ -3940,7 +3943,8 @@ public class RdsService implements Resettable, ResourceProvider {
             started = containerManager.tryStart(
                     instance.getDbInstanceArn(), id, resolvedInstanceStorageResourceId(instance),
                     resolvedInstanceDockerVolumeName(instance), instance.getEngine(), image,
-                    instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName());
+                    instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName(),
+                    instanceEngineParameters(instance));
             if (started == null) {
                 return instance;
             }
@@ -4045,7 +4049,8 @@ public class RdsService implements Resettable, ResourceProvider {
         RdsContainerHandle started = containerManager.tryStart(
                 cluster.getDbClusterArn(), id, storageResourceId, dockerVolumeName,
                 cluster.getEngine(), image, cluster.getMasterUsername(),
-                cluster.getMasterPassword(), cluster.getDatabaseName());
+                cluster.getMasterPassword(), cluster.getDatabaseName(),
+                clusterEngineParameters(cluster));
         if (started == null) {
             return cluster;
         }
@@ -4469,7 +4474,8 @@ public class RdsService implements Resettable, ResourceProvider {
             RdsContainerHandle handle = containerManager.tryStart(
                     clusterArn, id, clusterResourceId, clusterDockerVolumeName,
                     engine, image,
-                    masterUsername, masterPassword, databaseName);
+                    masterUsername, masterPassword, databaseName,
+                    clusterEngineParameters(currentAccountId(), effectiveRegion, paramGroupName));
             if (handle != null) {
                 cluster.setContainerId(handle.getContainerId());
                 cluster.setContainerHost(handle.getHost());
@@ -8372,7 +8378,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 restoredHandle = containerManager.tryStart(
                         cluster.getDbClusterArn(), cluster.getDbClusterIdentifier(),
                         storageResourceId, dockerVolumeName, cluster.getEngine(), image,
-                        cluster.getMasterUsername(), cluster.getMasterPassword(), cluster.getDatabaseName());
+                        cluster.getMasterUsername(), cluster.getMasterPassword(), cluster.getDatabaseName(),
+                        clusterEngineParameters(cluster));
                 cluster.setContainerId(restoredHandle != null ? restoredHandle.getContainerId() : null);
                 cluster.setContainerHost(restoredHandle != null ? restoredHandle.getHost() : null);
                 cluster.setContainerPort(restoredHandle != null ? restoredHandle.getPort() : 0);
@@ -8514,7 +8521,8 @@ public class RdsService implements Resettable, ResourceProvider {
                             instance.getDbInstanceArn(), instance.getDbInstanceIdentifier(),
                             instance.getContainerStorageResourceId(),
                             instance.getDockerVolumeName(), instance.getEngine(), image,
-                            instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName());
+                            instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName(),
+                            instanceEngineParameters(instance));
                     backendHost = restoredHandle != null ? restoredHandle.getHost() : null;
                     backendPort = restoredHandle != null ? restoredHandle.getPort() : 0;
                     instance.setContainerId(restoredHandle != null ? restoredHandle.getContainerId() : null);
@@ -9088,6 +9096,67 @@ public class RdsService implements Resettable, ResourceProvider {
             subnetGroups.delete(groupName);
         }
         return legacy.orElse(null);
+    }
+
+    /** The overrides of a standalone instance's DB parameter group, which its engine runs with. */
+    private Map<String, String> instanceEngineParameters(DbInstance instance) {
+        return instanceEngineParameters(accountIdFromArn(instance.getDbInstanceArn()),
+                regionFromArn(instance.getDbInstanceArn()), instance.getParameterGroupName());
+    }
+
+    /**
+     * The overrides a DB parameter group sets, read in the account and region of the resource
+     * that uses it. A managed default group has none, and neither has a missing group.
+     */
+    private Map<String, String> instanceEngineParameters(
+            String accountId, String region, String groupName) {
+        if (groupName == null || groupName.isBlank()) {
+            return Map.of();
+        }
+        String effectiveRegion = effectiveRegion(region);
+        DbParameterGroup group;
+        if (parameterGroups instanceof AccountAwareStorageBackend<DbParameterGroup> aware) {
+            group = aware.getForAccountMigratingLegacyKeys(
+                    accountId, dbResourceKey(effectiveRegion, groupName), List.of(groupName),
+                    candidate -> Objects.equals(groupName, candidate.getDbParameterGroupName())
+                            && parameterGroupBelongsToRegion(candidate, effectiveRegion),
+                    Objects.equals(accountId, defaultAccountId())).orElse(null);
+        } else {
+            group = findParameterGroupForRegion(groupName, effectiveRegion);
+        }
+        return group == null || group.getParameters() == null
+                ? Map.of() : new HashMap<>(group.getParameters());
+    }
+
+    /** The overrides of a cluster's DB cluster parameter group, which its engine runs with. */
+    private Map<String, String> clusterEngineParameters(DbCluster cluster) {
+        return clusterEngineParameters(accountIdFromArn(cluster.getDbClusterArn()),
+                regionFromArn(cluster.getDbClusterArn()), cluster.getParameterGroupName());
+    }
+
+    /**
+     * The overrides a DB cluster parameter group sets, read in the account and region of the
+     * cluster that uses it. A managed default group has none, and neither has a missing group.
+     */
+    private Map<String, String> clusterEngineParameters(
+            String accountId, String region, String groupName) {
+        if (groupName == null || groupName.isBlank()) {
+            return Map.of();
+        }
+        String effectiveRegion = effectiveRegion(region);
+        DbClusterParameterGroup group;
+        if (clusterParameterGroups
+                instanceof AccountAwareStorageBackend<DbClusterParameterGroup> aware) {
+            group = aware.getForAccountMigratingLegacyKeys(
+                    accountId, dbResourceKey(effectiveRegion, groupName), List.of(groupName),
+                    candidate -> Objects.equals(groupName, candidate.getDbClusterParameterGroupName())
+                            && clusterParameterGroupBelongsToRegion(candidate, effectiveRegion),
+                    Objects.equals(accountId, defaultAccountId())).orElse(null);
+        } else {
+            group = findClusterParameterGroupForRegion(groupName, effectiveRegion);
+        }
+        return group == null || group.getParameters() == null
+                ? Map.of() : new HashMap<>(group.getParameters());
     }
 
     private synchronized DbParameterGroup findParameterGroupForRegion(
