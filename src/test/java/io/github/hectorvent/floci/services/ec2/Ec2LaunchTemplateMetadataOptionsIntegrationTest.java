@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingReconciler;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
@@ -15,8 +16,14 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.mock;
 
-/** A launch template's MetadataOptions reach instances launched by EC2 Fleet and Auto Scaling. */
+/**
+ * A launch template's MetadataOptions reach instances launched by EC2 Fleet and Auto Scaling, and
+ * IMDS enforces them there.
+ */
 @QuarkusTest
 class Ec2LaunchTemplateMetadataOptionsIntegrationTest {
     private static final String OWNER = "212121212121";
@@ -28,9 +35,12 @@ class Ec2LaunchTemplateMetadataOptionsIntegrationTest {
     @Inject
     AutoScalingService groups;
 
+    @Inject
+    Ec2Service ec2;
+
     @ParameterizedTest
     @ValueSource(strings = {"fleet", "asg"})
-    void templateMetadataOptionsReachTheLaunchedInstance(String source) {
+    void templateMetadataOptionsReachTheLaunchedInstance(String source) throws Exception {
         String name = "template-metadata-" + UUID.randomUUID().toString().substring(0, 8);
         String template = request("ec2", "CreateLaunchTemplate").formParam("LaunchTemplateName", name)
                 .formParam("LaunchTemplateData.ImageId", "ami-amazonlinux2023")
@@ -64,6 +74,13 @@ class Ec2LaunchTemplateMetadataOptionsIntegrationTest {
             request("ec2", "DescribeInstances").formParam("InstanceId.1", instance).post("/").then().statusCode(200)
                     .body(INSTANCE + "metadataOptions.httpTokens", equalTo("required"))
                     .body(INSTANCE + "metadataOptions.httpPutResponseHopLimit", equalTo("2"));
+            // IMDS then refuses the launched instance a tokenless read, as AWS does.
+            try (Ec2MetadataTestFixture imds = new Ec2MetadataTestFixture()) {
+                imds.start(null, mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
+                        ec2.findInstanceForAccount(OWNER, "us-east-1", instance).orElseThrow());
+                assertEquals(401, imds.get("/latest/meta-data/instance-id", null).statusCode());
+                assertEquals(200, imds.get("/latest/meta-data/instance-id", imds.putToken("60").body()).statusCode());
+            }
         } finally {
             // Cleanup ignores the status, so a test that failed before launching keeps its own failure.
             if ("asg".equals(source)) {
