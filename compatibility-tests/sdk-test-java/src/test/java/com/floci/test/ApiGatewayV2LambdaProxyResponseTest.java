@@ -12,6 +12,7 @@ import software.amazon.awssdk.services.apigatewayv2.model.IntegrationType;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.Runtime;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -70,6 +71,17 @@ class ApiGatewayV2LambdaProxyResponseTest {
                     .target("integrations/" + integrationId));
         }
         apiGatewayV2.createStage(request -> request.apiId(apiId).stageName(STAGE).autoDeploy(true));
+
+        // As ApiGatewayV2ExecuteTest does: a result the gateway can read must come back through the
+        // API before the cases run, or this environment cannot dispatch from API Gateway to Lambda.
+        boolean dispatches;
+        try {
+            HttpResponse<String> warmup = get("2.0", "ok");
+            dispatches = warmup.statusCode() == 200 && "ok".equals(warmup.body());
+        } catch (IOException e) {
+            dispatches = false;
+        }
+        Assumptions.assumeTrue(dispatches, "API Gateway does not dispatch to Lambda here");
     }
 
     @AfterAll
@@ -100,15 +112,24 @@ class ApiGatewayV2LambdaProxyResponseTest {
         "2.0|nostatus|200|{\"body\":\"x\",\"headers\":{\"x-probe\":\"1\"}}"
     })
     void aResultIsAnsweredAsAwsReadsIt(String format, String mode, int status, String body) throws Exception {
-        HttpResponse<String> response = http.send(HttpRequest.newBuilder()
-                        .uri(URI.create(TestFixtures.endpoint() + "/execute-api/" + apiId + "/" + STAGE + "/v"
-                                + format.charAt(0) + "/" + mode))
-                        .timeout(Duration.ofSeconds(30))
-                        .GET()
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = get(format, mode);
 
         assertThat(response.statusCode()).isEqualTo(status);
         assertThat(response.body()).isEqualTo(body);
+    }
+
+    private static HttpResponse<String> get(String format, String mode) throws IOException {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(TestFixtures.endpoint() + "/execute-api/" + apiId + "/" + STAGE + "/v"
+                        + format.charAt(0) + "/" + mode))
+                .timeout(Duration.ofSeconds(30))
+                .GET()
+                .build();
+        try {
+            return http.send(request, HttpResponse.BodyHandlers.ofString());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("interrupted waiting for " + request.uri(), e);
+        }
     }
 }
