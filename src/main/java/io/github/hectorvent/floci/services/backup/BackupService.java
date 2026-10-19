@@ -784,9 +784,31 @@ public class BackupService {
     }
 
     private void completeJob(String jobId, String vaultName, String region, String notificationKey) {
+        // Under the vault-name monitor, so the vault cannot be deleted or recreated between the
+        // incarnation check and the recovery point landing in it.
+        synchronized (lockFor(vaultKey(region, vaultName))) {
+            completeJobLocked(jobId, vaultName, region, notificationKey);
+        }
+    }
+
+    private void completeJobLocked(String jobId, String vaultName, String region, String notificationKey) {
         jobStore.get(jobId).ifPresent(job -> {
             if ("RUNNING".equals(job.getState())) {
                 long now = Instant.now().getEpochSecond();
+                // The recovery point belongs to the vault the job started in, not to whatever
+                // vault holds the name now. A vault deleted mid-job (allowed: it held no recovery
+                // point yet) and recreated unlocked would otherwise receive a recovery point its
+                // creator's lock was meant to protect, deletable inside that lock's retention.
+                boolean sameVault = vaultStore.get(vaultKey(region, vaultName))
+                        .map(v -> subResourceKey(region, v).equals(notificationKey))
+                        .orElse(false);
+                if (!sameVault) {
+                    job.setState("FAILED");
+                    job.setStatusMessage("Backup vault was deleted before the job completed: " + vaultName);
+                    job.setCompletionDate(now);
+                    jobStore.put(jobId, job);
+                    return;
+                }
                 String rpArn = regionResolver.buildArn("backup", region,
                         "recovery-point:" + UUID.randomUUID());
 

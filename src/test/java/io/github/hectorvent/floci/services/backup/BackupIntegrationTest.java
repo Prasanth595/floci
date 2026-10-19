@@ -1689,7 +1689,8 @@ class BackupIntegrationTest {
 
         await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100))
             .until(() -> { String b = receiveBody(sentinelQueue); return b != null && !b.isEmpty(); });
-        awaitJobCompleted(oldJob);
+        // Its vault is gone, so the old job fails rather than completing into the replacement.
+        awaitJobState(AUTH, oldJob, "FAILED");
 
         // The replacement's own job does publish; the old job must not have published too.
         String first = receiveBody(replacementQueue);
@@ -1881,6 +1882,44 @@ class BackupIntegrationTest {
         given().header("Authorization", AUTH)
         .when().get("/backup-vaults/" + vault)
         .then().statusCode(200).body("NumberOfRecoveryPoints", equalTo(1));
+    }
+
+    @Test
+    @Order(200)
+    void aJobWhoseAirGappedVaultWasReplacedDoesNotLandInTheReplacement() {
+        // Delete is allowed mid-job (the vault holds no recovery point yet). If the job then
+        // completed by NAME, its recovery point would land in an unlocked vault recreated under
+        // that name and could be deleted inside the original vault's minimum retention.
+        String vault = "air-gapped-replaced-vault";
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30}")
+        .when().put("/logically-air-gapped-backup-vaults/" + vault).then().statusCode(200);
+        String oldJob = given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {"BackupVaultName": "%s", "ResourceArn": "%s", "IamRoleArn": "%s", "Lifecycle": {"DeleteAfterDays": 14}}
+                """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + vault).then().statusCode(204);
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(25))
+            .until(() -> {
+                String state = given().header("Authorization", AUTH)
+                .when().get("/backup-jobs/" + oldJob).then().statusCode(200).extract().path("State");
+                return "FAILED".equals(state) || "COMPLETED".equals(state);
+            });
+        given().header("Authorization", AUTH)
+        .when().get("/backup-jobs/" + oldJob).then().statusCode(200)
+            .body("State", equalTo("FAILED"))
+            .body("$", not(hasKey("RecoveryPointArn")));
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault + "/recovery-points/").then().statusCode(200)
+            .body("RecoveryPoints", empty());
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault).then().statusCode(200)
+            .body("NumberOfRecoveryPoints", equalTo(0));
     }
 
 }
