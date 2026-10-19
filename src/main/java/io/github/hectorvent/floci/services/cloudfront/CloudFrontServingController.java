@@ -825,7 +825,8 @@ public class CloudFrontServingController {
                 CloudFrontOriginTimeouts.MAX_ORIGIN_READ_TIMEOUT_SECONDS,
                 CloudFrontOriginTimeouts.DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS);
         int attempts = clampToDefault(origin.getConnectionAttempts(),
-                1, CloudFrontOriginTimeouts.MAX_CONNECTION_ATTEMPTS,
+                CloudFrontOriginTimeouts.MIN_CONNECTION_ATTEMPTS,
+                CloudFrontOriginTimeouts.MAX_CONNECTION_ATTEMPTS,
                 CloudFrontOriginTimeouts.DEFAULT_CONNECTION_ATTEMPTS);
         return new CloudFrontOriginHttpClient.OriginTimeouts(
                 Duration.ofSeconds(connectSeconds), Duration.ofSeconds(readSeconds), attempts);

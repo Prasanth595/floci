@@ -2784,20 +2784,18 @@ public class CloudFrontController {
                         }
                         case "ConnectionAttempts" -> {
                             if (inOrigin && !inS3OriginConfig && !inCustomOriginConfig && current != null) {
-                                try {
-                                    current.setConnectionAttempts(Integer.parseInt(r.getElementText()));
-                                } catch (NumberFormatException e) {
-                                    LOG.debugv("Ignoring malformed ConnectionAttempts during parse: {0}", e.getMessage());
-                                }
+                                current.setConnectionAttempts(parseBoundedCount("InvalidArgument",
+                                        "ConnectionAttempts", r.getElementText(),
+                                        CloudFrontOriginTimeouts.MIN_CONNECTION_ATTEMPTS,
+                                        CloudFrontOriginTimeouts.MAX_CONNECTION_ATTEMPTS));
                             }
                         }
                         case "ConnectionTimeout" -> {
                             if (inOrigin && !inS3OriginConfig && !inCustomOriginConfig && current != null) {
-                                try {
-                                    current.setConnectionTimeout(Integer.parseInt(r.getElementText()));
-                                } catch (NumberFormatException e) {
-                                    LOG.debugv("Ignoring malformed ConnectionTimeout during parse: {0}", e.getMessage());
-                                }
+                                current.setConnectionTimeout(parseBoundedTimeout("InvalidArgument",
+                                        "ConnectionTimeout", r.getElementText(),
+                                        CloudFrontOriginTimeouts.MIN_CONNECTION_TIMEOUT_SECONDS,
+                                        CloudFrontOriginTimeouts.MAX_CONNECTION_TIMEOUT_SECONDS));
                             }
                         }
                         case "ResponseCompletionTimeout" -> {
@@ -3003,11 +3001,20 @@ public class CloudFrontController {
     }
 
     private static int parseBoundedTimeout(String errorCode, String field, String rawValue, int min, int max) {
+        return parseBounded(errorCode, field, rawValue, min, max, " seconds");
+    }
+
+    private static int parseBoundedCount(String errorCode, String field, String rawValue, int min, int max) {
+        return parseBounded(errorCode, field, rawValue, min, max, "");
+    }
+
+    private static int parseBounded(String errorCode, String field, String rawValue, int min, int max,
+            String unit) {
         int value = parseNonNegativeTimeout(errorCode, field, rawValue);
         if (value < min || value > max) {
             throw new AwsException(
                     errorCode,
-                    "The parameter " + field + " must be between " + min + " and " + max + " seconds.",
+                    "The parameter " + field + " must be between " + min + " and " + max + unit + ".",
                     400);
         }
         return value;

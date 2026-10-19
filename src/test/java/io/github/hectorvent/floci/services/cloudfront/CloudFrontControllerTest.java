@@ -493,6 +493,73 @@ class CloudFrontControllerTest {
     }
 
     @Test
+    void connectionTimeoutAboveTheAwsMaximumIsRejected() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("").replace(
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>"
+                        + "<ConnectionTimeout>11</ConnectionTimeout>");
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(400, created.getStatus());
+            assertTrue(((String) created.getEntity()).contains("InvalidArgument"));
+            assertTrue(((String) created.getEntity())
+                    .contains("The parameter ConnectionTimeout must be between 1 and 10 seconds."));
+        }
+    }
+
+    @Test
+    void connectionTimeoutOfZeroIsRejected() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("").replace(
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>"
+                        + "<ConnectionTimeout>0</ConnectionTimeout>");
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(400, created.getStatus());
+            assertTrue(((String) created.getEntity()).contains("InvalidArgument"));
+        }
+    }
+
+    @Test
+    void connectionAttemptsAboveTheAwsMaximumIsRejected() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("").replace(
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>"
+                        + "<ConnectionAttempts>4</ConnectionAttempts>");
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(400, created.getStatus());
+            assertTrue(((String) created.getEntity())
+                    .contains("The parameter ConnectionAttempts must be between 1 and 3."));
+        }
+    }
+
+    @Test
+    void nonNumericConnectionTimeoutIsRejected() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("").replace(
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>"
+                        + "<ConnectionTimeout>fast</ConnectionTimeout>");
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(400, created.getStatus());
+            assertTrue(((String) created.getEntity()).contains("InvalidArgument"));
+        }
+    }
+
+    @Test
     void responseCompletionTimeoutBelowOriginReadTimeoutIsRejected() {
         CloudFrontService service = mock(CloudFrontService.class);
         CloudFrontController controller = new CloudFrontController(service);

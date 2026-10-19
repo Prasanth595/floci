@@ -18,6 +18,7 @@ final class CloudFrontOriginTimeouts {
     static final int MIN_CONNECTION_TIMEOUT_SECONDS = 1;
     static final int MAX_CONNECTION_TIMEOUT_SECONDS = 10;
     static final int DEFAULT_CONNECTION_ATTEMPTS = 3;
+    static final int MIN_CONNECTION_ATTEMPTS = 1;
     static final int MAX_CONNECTION_ATTEMPTS = 3;
 
     static final Duration DEFAULT_ORIGIN_READ_TIMEOUT =
