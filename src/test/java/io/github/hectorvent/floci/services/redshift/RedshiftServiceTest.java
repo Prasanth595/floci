@@ -1787,13 +1787,15 @@ class RedshiftServiceTest {
     @ParameterizedTest
     @ValueSource(strings = {"cluster:res", "snapshot:res-cluster/res", "parametergroup:res",
             "subnetgroup:res", "snapshotcopygrant:res", "snapshotschedule:res"})
-    void tagOperationsRejectForeignAccountOrRegionArn(String resource) {
+    void tagOperationsRejectForeignPartitionAccountOrRegionArn(String resource) {
         stubLocalTaggableResources();
         String local = "arn:aws:redshift:us-east-1:111111111111:" + resource;
         String foreignAccount = "arn:aws:redshift:us-east-1:222222222222:" + resource;
         String foreignRegion = "arn:aws:redshift:eu-west-1:111111111111:" + resource;
+        // Local region and account, wrong partition: only the partition check rejects it.
+        String foreignPartition = "arn:aws-cn:redshift:us-east-1:111111111111:" + resource;
 
-        for (String foreign : List.of(foreignAccount, foreignRegion)) {
+        for (String foreign : List.of(foreignAccount, foreignRegion, foreignPartition)) {
             AwsException create = assertThrows(AwsException.class,
                     () -> service.createTags(foreign, Map.of("env", "prod")), foreign);
             assertEquals("ResourceNotFoundFault", create.getErrorCode());
