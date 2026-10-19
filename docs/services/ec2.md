@@ -86,6 +86,8 @@ If `KeyName` is specified at launch, Floci looks up the stored key pair's public
 
 Key pairs created with `CreateKeyPair` return real RSA private key material, and the matching public key is injected at launch, so either a created or an imported key pair works for SSH.
 
+When the image lacks `sshd` or `scp`, Floci first installs OpenSSH with the image's package manager, from a shell that clears `LD_LIBRARY_PATH`, `PYTHONPATH` and `PYTHONHOME` as the IMDS proxy's helper shells do.
+
 ## Security Group Port Publishing
 
 With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, Floci prepares a separate Linux network namespace and an nftables default-deny policy before starting each Docker-backed instance. It checks new managed connections against both the sender's egress rules and the receiver's ingress rules, using emulated ENI addresses and security-group membership before translating to Docker addresses. Established replies use connection tracking. This filters packets but does not emulate VPC routing, NACLs, NAT gateways, or peering. Rootless Docker and Windows containers are unsupported.
@@ -120,12 +122,13 @@ Floci runs an IMDS-compatible HTTP server on port `9169` of the host. Each launc
 
 Inside each launched container, the link-local address `169.254.169.254` is a proxy to this
 server. The helper shells that install and start the proxy clear `LD_LIBRARY_PATH`,
-`PYTHONPATH` and `PYTHONHOME` before running system tools, so an application's bundled libraries
-or Python installation cannot replace the system libraries that the package manager, `socat` and
-`curl` load. The container's configured environment and the application's processes keep these
-variables. The proxy is ready once an IMDSv2 token request with a 60-second TTL succeeds and that
-token reads the instance ID. A failed or empty token response does not fall back to a tokenless
-request, and the check passes on an instance that requires tokens.
+`PYTHONPATH` and `PYTHONHOME` before running system tools, so an application's library search
+path and Python installation do not reach the package manager, `socat` and `curl`. The
+container's configured environment and the application's processes keep these variables. The
+proxy is ready once an IMDSv2 token request with a 60-second TTL succeeds and that token reads the
+instance ID. The check bypasses any HTTP proxy the image configures, a failed or empty token
+response does not fall back to a tokenless request, and the check passes on an instance that
+requires tokens.
 
 `iam/info` returns the ARN and ID that IAM holds for the attached profile, and 404 when that
 profile is missing, has no role or does not match the attached ARN. An EKS cluster node, whose
@@ -144,7 +147,7 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
   http://169.254.169.254/latest/meta-data/instance-id
 ```
 
-As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A token is valid only on the instance that requested it: presenting it from another instance returns `401`. A request without a token header uses IMDSv1 unless the instance's `HttpTokens` is `required`, set at launch or later with `ModifyInstanceMetadataOptions`; then, as on AWS, it returns `401` and no metadata.
+As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A token is valid only on the instance that requested it: presenting it from another instance returns `401`. A request without a token header uses IMDSv1 unless the instance's `HttpTokens` is `required`; then, as on AWS, a `GET` or `HEAD` returns `401` and no metadata, for every path. `HttpTokens` comes from `RunInstances` (directly or through its launch template), from an EC2 Fleet's launch template, from Auto Scaling (a launch configuration's `MetadataOptions`, or a launch template given directly or through a mixed instances policy), or later from `ModifyInstanceMetadataOptions`. EKS cluster nodes always accept IMDSv1: `ModifyInstanceMetadataOptions` refuses them with `OperationNotPermitted`, as their stop, start, reboot and terminate actions are refused.
 
 User data is returned as the original base64-decoded bytes, without decompressing gzip content or converting binary data to text. Older records without the original encoding, or records with malformed saved encoding, use their saved UTF-8 text. The response uses `application/octet-stream`, matching the [AWS user-data retrieval contract](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html). Missing or empty data returns `404`; whitespace is preserved. Script execution retains its separate bounded gzip decoding.
 
@@ -194,7 +197,7 @@ When an EKS cluster is running, its synthesized node instance is registered and 
 
 - **Visibility**: Exposed via `DescribeInstances` and `DescribeInstanceStatus` with its synthesized instance ID (`i-...`), type (`m5.large`), running state, VPC, subnet, launch time, and cluster tags (`Name`, `kubernetes.io/cluster/<cluster-name>=owned`, `eks:cluster-name=<cluster-name>`). It can be queried by ID, filtered, or listed with other instances.
 - **Operations**: Supports volume attachments (`AttachVolume`, `DetachVolume`), instance attribute inspection and modification, and resource tagging (`CreateTags`, `DeleteTags`, `DescribeTags`).
-- **Lifecycle protection**: Lifecycle actions that would mutate or delete the node through EC2 (`TerminateInstances`, `StopInstances`, `StartInstances`, `RebootInstances`) are rejected with `OperationNotPermitted` (HTTP 400) as a Floci emulation limitation because the instance directly represents the underlying k3s cluster container. In real AWS, cluster node instances in an Auto Scaling group can be terminated or stopped and are subsequently replaced by the ASG. In Floci, the node instance lifecycle is managed solely through the EKS cluster lifecycle.
+- **Lifecycle protection**: Lifecycle actions that would mutate or delete the node through EC2 (`TerminateInstances`, `StopInstances`, `StartInstances`, `RebootInstances`), and `ModifyInstanceMetadataOptions`, which the node's IMDS would not see, are rejected with `OperationNotPermitted` (HTTP 400) as a Floci emulation limitation because the instance directly represents the underlying k3s cluster container. In real AWS, cluster node instances in an Auto Scaling group can be terminated or stopped and are subsequently replaced by the ASG. In Floci, the node instance lifecycle is managed solely through the EKS cluster lifecycle.
 
 ## Default Resources
 
@@ -228,7 +231,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | DescribeInstanceCreditSpecifications | Returns the CPU credit option of burstable performance instances. A named instance id reports the option the instance acquired at launch, either the explicit `CreditSpecification.CpuCredits` or the family default, `standard` for t2 and `unlimited` for t3, t3a and t4g. An id that is not a burstable performance instance reports `standard`, and only an unknown id is an error. Naming no id returns the instances on the unlimited option, including one that kept `unlimited` after a resize onto a non-burstable type. `Filter.N` supports the modeled `instance-id` and narrows whichever set the request selected. `MaxResults` accepts 5 through 1000 and cannot be combined with instance ids. `DryRun=true` returns `DryRunOperation`. |
 | DescribeInstanceAttribute | Returns a supported attribute for an instance. |
 | ModifyInstanceAttribute | Updates supported mutable attributes for an instance. `UserData.Value` (base64) needs the instance stopped, as on AWS, and answers `IncorrectInstanceState` otherwise. |
-| ModifyInstanceMetadataOptions | Updates an instance's IMDS options, changing only the fields the request names. |
+| ModifyInstanceMetadataOptions | Updates an instance's IMDS options, changing only the fields the request names. An EKS cluster node is refused with `OperationNotPermitted`. |
 
 ### VPCs
 
