@@ -352,6 +352,12 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             def.setSecrets(parseSecrets(item.path("Secrets")));
             def.setLogConfiguration(parseLogConfiguration(item.path("LogConfiguration")));
             def.setFirelensConfiguration(parseFirelensConfiguration(item.path("FirelensConfiguration")));
+            Map<String, Object> linuxParameters = parseLinuxParameters(item.path("LinuxParameters"));
+            if (linuxParameters != null) {
+                Map<String, Object> unparsed = new LinkedHashMap<>();
+                unparsed.put("linuxParameters", linuxParameters);
+                def.setUnparsed(unparsed);
+            }
             if (item.path("Command").isArray()) {
                 def.setCommand(toStringList(item.path("Command")));
             }
@@ -370,6 +376,68 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         return new LogConfiguration(node.path("LogDriver").asText(),
                 parseOptions(node.path("Options")),
                 node.has("SecretOptions") ? parseSecrets(node.path("SecretOptions")) : null);
+    }
+
+    /**
+     * A container's {@code LinuxParameters}, read as the ECS handler reads them, in the shape
+     * RegisterTaskDefinition takes them, and kept where that path keeps them: among the
+     * definition's unparsed members, under {@code linuxParameters}. So DescribeTaskDefinition shows
+     * them and the Fargate rules on them apply, as for a definition registered through the API.
+     * The devices and tmpfs lists are always sent, empty when the template has none, as
+     * CloudFormation's handler sends them (measured).
+     */
+    private static Map<String, Object> parseLinuxParameters(JsonNode node) {
+        if (!node.isObject()) {
+            return null;
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        JsonNode capabilities = node.path("Capabilities");
+        if (capabilities.isObject()) {
+            Map<String, Object> kernelCapabilities = new LinkedHashMap<>();
+            putStringList(kernelCapabilities, "add", capabilities.path("Add"));
+            putStringList(kernelCapabilities, "drop", capabilities.path("Drop"));
+            result.put("capabilities", kernelCapabilities);
+        }
+        List<Map<String, Object>> devices = new ArrayList<>();
+        for (JsonNode item : node.path("Devices")) {
+            Map<String, Object> device = new LinkedHashMap<>();
+            putValue(device, "hostPath", item.path("HostPath"));
+            putValue(device, "containerPath", item.path("ContainerPath"));
+            putStringList(device, "permissions", item.path("Permissions"));
+            devices.add(device);
+        }
+        result.put("devices", devices);
+        putValue(result, "initProcessEnabled", node.path("InitProcessEnabled"));
+        putValue(result, "maxSwap", node.path("MaxSwap"));
+        putValue(result, "sharedMemorySize", node.path("SharedMemorySize"));
+        putValue(result, "swappiness", node.path("Swappiness"));
+        List<Map<String, Object>> mounts = new ArrayList<>();
+        for (JsonNode item : node.path("Tmpfs")) {
+            Map<String, Object> mount = new LinkedHashMap<>();
+            putValue(mount, "containerPath", item.path("ContainerPath"));
+            putStringList(mount, "mountOptions", item.path("MountOptions"));
+            putValue(mount, "size", item.path("Size"));
+            mounts.add(mount);
+        }
+        result.put("tmpfs", mounts);
+        return result;
+    }
+
+    /** A member the template sets, as the text, integer or boolean the handler converted it to. */
+    private static void putValue(Map<String, Object> target, String key, JsonNode value) {
+        if (value.isTextual()) {
+            target.put(key, value.textValue());
+        } else if (value.isInt()) {
+            target.put(key, value.intValue());
+        } else if (value.isBoolean()) {
+            target.put(key, value.booleanValue());
+        }
+    }
+
+    private static void putStringList(Map<String, Object> target, String key, JsonNode value) {
+        if (value.isArray()) {
+            target.put(key, toStringList(value));
+        }
     }
 
     private static FirelensConfiguration parseFirelensConfiguration(JsonNode node) {
