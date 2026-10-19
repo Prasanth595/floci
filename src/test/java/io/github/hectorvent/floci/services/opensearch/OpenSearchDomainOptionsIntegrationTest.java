@@ -260,7 +260,7 @@ class OpenSearchDomainOptionsIntegrationTest {
             .body("DomainStatus.AccessPolicies", equalTo(""));
     }
 
-    // ── Partial UpdateDomainConfig (floci-3gnd) ─────────────────────────────
+    // ── Partial UpdateDomainConfig ──────────────────────────────────────
     // AWS applies only the fields an update supplies; an omitted field keeps its value.
 
     private static final String PARTIAL_CREATE = "{\"DomainName\":\"opts-partial\","
