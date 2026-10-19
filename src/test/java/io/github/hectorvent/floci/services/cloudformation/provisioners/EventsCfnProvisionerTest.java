@@ -276,9 +276,9 @@ class EventsCfnProvisionerTest {
     }
 
     /**
-     * Measured on CloudFormation (eu-west-1, 2026-10-18): a member the resource schema types fails
-     * template validation, naming the member or the list index, or the handler's model validation,
-     * naming the whole path, before the rule exists.
+     * Measured on CloudFormation (eu-west-1, 2026-10-18 and 2026-10-19): a member the resource schema
+     * types fails template validation, naming the member, the list index or the map key, or the
+     * handler's model validation, naming the whole path, before the rule exists.
      */
     @ParameterizedTest(name = "{0}")
     @MethodSource("mistypedMembers")
@@ -348,6 +348,21 @@ class EventsCfnProvisionerTest {
                         "Property [Group] expected type: String, found: JSONObject"),
                 Arguments.of("{\"EcsParameters\": {\"Group\": [\"a\"]}}", template,
                         "Property [Group] expected type: String, found: JSONArray"),
+                Arguments.of("{\"Input\": {\"a\": 1}}", template,
+                        "Property [Input] expected type: String, found: JSONObject"),
+                Arguments.of("{\"InputPath\": [\"$.a\"]}", template,
+                        "Property [InputPath] expected type: String, found: JSONArray"),
+                Arguments.of("{\"InputTransformer\": {\"InputTemplate\": \"x\", \"InputPathsMap\": \"x\"}}", template,
+                        "Property [InputPathsMap] expected type: JSONObject, found: String"),
+                Arguments.of("{\"InputTransformer\": {\"InputTemplate\": \"x\", \"InputPathsMap\": {\"a\": {\"b\": 1}}}}",
+                        template, "Property [a] expected type: String, found: JSONObject"),
+                Arguments.of("{\"BatchParameters\": {\"JobDefinition\": \"d\", \"JobName\": \"n\","
+                        + " \"ArrayProperties\": {\"Size\": \"abc\"}}}", template,
+                        "Property [Size] expected type: Integer, found: String"),
+                Arguments.of("{\"HttpParameters\": {\"HeaderParameters\": {\"h\": {\"x\": 1}}}}", template,
+                        "Property [h] expected type: String, found: JSONObject"),
+                Arguments.of("{\"SqsParameters\": \"x\"}", template,
+                        "Property [SqsParameters] expected type: JSONObject, found: String"),
                 Arguments.of("{\"RetryPolicy\": {\"MaximumRetryAttempts\": 3000000000}}", model,
                         "Model validation failed (#/Targets/0/RetryPolicy/MaximumRetryAttempts:"
                                 + " expected type: Integer, found: String" + range + ")"),

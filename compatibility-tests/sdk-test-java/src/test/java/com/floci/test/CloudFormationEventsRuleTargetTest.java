@@ -36,6 +36,7 @@ class CloudFormationEventsRuleTargetTest {
     private static final String STRING_SUBNETS_STACK = TestFixtures.uniqueName("compat-cfn-rule-subnets");
     private static final String FLOAT_STACK = TestFixtures.uniqueName("compat-cfn-rule-float");
     private static final String BOOLEAN_STACK = TestFixtures.uniqueName("compat-cfn-rule-boolean");
+    private static final String INPUT_STACK = TestFixtures.uniqueName("compat-cfn-rule-input");
     private static final String CLUSTER =
             "{\"Fn::Sub\": \"arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/compat-absent\"}";
     private static final String ROLE =
@@ -56,7 +57,7 @@ class CloudFormationEventsRuleTargetTest {
     static void cleanup() {
         if (cfn != null) {
             // DeleteStack answers for a stack that is gone too, so a failure here is a real one.
-            for (String stack : List.of(KEPT_STACK, STRING_SUBNETS_STACK, FLOAT_STACK, BOOLEAN_STACK)) {
+            for (String stack : List.of(KEPT_STACK, STRING_SUBNETS_STACK, FLOAT_STACK, BOOLEAN_STACK, INPUT_STACK)) {
                 cfn.deleteStack(request -> request.stackName(stack));
             }
             cfn.close();
@@ -151,6 +152,20 @@ class CloudFormationEventsRuleTargetTest {
         assertThat(reasons(BOOLEAN_STACK)).anyMatch(reason -> reason.contains(
                 "Model validation failed (#/Targets/0/EcsParameters/EnableECSManagedTags:"
                         + " expected type: Boolean, found: String)"));
+    }
+
+    /** Measured on AWS (eu-west-1, 2026-10-19): every target member is typed, Input among them. */
+    @Test
+    @DisplayName("an Input that is an object fails template validation")
+    void anInputThatIsAnObjectFailsTheStack() throws InterruptedException {
+        cfn.createStack(request -> request.stackName(INPUT_STACK).templateBody("""
+                {"Resources": {"Rule": {"Type": "AWS::Events::Rule", "Properties": {
+                  "EventPattern": {"source": ["compat.rule.targets"]},
+                  "Targets": [{"Id": "T", "Arn": %s, "RoleArn": %s, "Input": {"a": 1}}]}}}}
+                """.formatted(CLUSTER, ROLE)));
+        assertThat(TestFixtures.awaitStackTerminal(cfn, INPUT_STACK, DEPLOY_TIMEOUT)).isEqualTo("ROLLBACK_COMPLETE");
+        assertThat(reasons(INPUT_STACK)).anyMatch(reason ->
+                reason.contains("Property [Input] expected type: String, found: JSONObject"));
     }
 
     private static String ecsRule(String parameters, String ecsMembers) {

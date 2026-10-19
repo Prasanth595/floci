@@ -1,0 +1,542 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_cfn_property_types.py",
+    "schemas": "https://schema.cloudformation.us-east-1.amazonaws.com/CloudformationSchema.zip",
+    "retrieved": "2026-10-19",
+    "note": "make cfn-property-types-verify checks the file against AWS."
+  },
+  "operations": {
+    "AWS::Events::Rule": "AWS::Events::Rule",
+    "AWS::Lambda::Function": "AWS::Lambda::Function",
+    "AWS::Lambda::LayerVersion": "AWS::Lambda::LayerVersion"
+  },
+  "shapes": {
+    "AWS::Events::Rule": {
+      "type": "structure",
+      "members": {
+        "EventBusName": "String",
+        "EventPattern": "Json",
+        "ScheduleExpression": "String",
+        "Description": "String",
+        "State": "String",
+        "Targets": "AWS::Events::Rule.Targets",
+        "Arn": "String",
+        "RoleArn": "String",
+        "RuleName": "String",
+        "Tags": "AWS::Events::Rule.Tags",
+        "Name": "String"
+      }
+    },
+    "AWS::Events::Rule.Tags": {
+      "type": "list",
+      "member": "AWS::Events::Rule/Tag"
+    },
+    "AWS::Events::Rule.Targets": {
+      "type": "list",
+      "member": "AWS::Events::Rule/Target"
+    },
+    "AWS::Events::Rule/AppSyncParameters": {
+      "type": "structure",
+      "members": {
+        "GraphQLOperation": "String"
+      }
+    },
+    "AWS::Events::Rule/AwsVpcConfiguration": {
+      "type": "structure",
+      "members": {
+        "SecurityGroups": "AWS::Events::Rule/AwsVpcConfiguration.SecurityGroups",
+        "Subnets": "AWS::Events::Rule/AwsVpcConfiguration.Subnets",
+        "AssignPublicIp": "String"
+      }
+    },
+    "AWS::Events::Rule/AwsVpcConfiguration.SecurityGroups": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::Events::Rule/AwsVpcConfiguration.Subnets": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::Events::Rule/BatchArrayProperties": {
+      "type": "structure",
+      "members": {
+        "Size": "Integer"
+      }
+    },
+    "AWS::Events::Rule/BatchParameters": {
+      "type": "structure",
+      "members": {
+        "ArrayProperties": "AWS::Events::Rule/BatchArrayProperties",
+        "JobName": "String",
+        "RetryStrategy": "AWS::Events::Rule/BatchRetryStrategy",
+        "JobDefinition": "String"
+      }
+    },
+    "AWS::Events::Rule/BatchRetryStrategy": {
+      "type": "structure",
+      "members": {
+        "Attempts": "Integer"
+      }
+    },
+    "AWS::Events::Rule/CapacityProviderStrategyItem": {
+      "type": "structure",
+      "members": {
+        "CapacityProvider": "String",
+        "Base": "Integer",
+        "Weight": "Integer"
+      }
+    },
+    "AWS::Events::Rule/DeadLetterConfig": {
+      "type": "structure",
+      "members": {
+        "Arn": "String"
+      }
+    },
+    "AWS::Events::Rule/EcsParameters": {
+      "type": "structure",
+      "members": {
+        "PlatformVersion": "String",
+        "Group": "String",
+        "EnableECSManagedTags": "Boolean",
+        "EnableExecuteCommand": "Boolean",
+        "PlacementConstraints": "AWS::Events::Rule/EcsParameters.PlacementConstraints",
+        "PropagateTags": "String",
+        "TaskCount": "Integer",
+        "PlacementStrategies": "AWS::Events::Rule/EcsParameters.PlacementStrategies",
+        "CapacityProviderStrategy": "AWS::Events::Rule/EcsParameters.CapacityProviderStrategy",
+        "LaunchType": "String",
+        "ReferenceId": "String",
+        "TagList": "AWS::Events::Rule/EcsParameters.TagList",
+        "NetworkConfiguration": "AWS::Events::Rule/NetworkConfiguration",
+        "TaskDefinitionArn": "String"
+      }
+    },
+    "AWS::Events::Rule/EcsParameters.CapacityProviderStrategy": {
+      "type": "list",
+      "member": "AWS::Events::Rule/CapacityProviderStrategyItem"
+    },
+    "AWS::Events::Rule/EcsParameters.PlacementConstraints": {
+      "type": "list",
+      "member": "AWS::Events::Rule/PlacementConstraint"
+    },
+    "AWS::Events::Rule/EcsParameters.PlacementStrategies": {
+      "type": "list",
+      "member": "AWS::Events::Rule/PlacementStrategy"
+    },
+    "AWS::Events::Rule/EcsParameters.TagList": {
+      "type": "list",
+      "member": "AWS::Events::Rule/Tag"
+    },
+    "AWS::Events::Rule/HttpParameters": {
+      "type": "structure",
+      "members": {
+        "PathParameterValues": "AWS::Events::Rule/HttpParameters.PathParameterValues",
+        "HeaderParameters": "AWS::Events::Rule/HttpParameters.HeaderParameters",
+        "QueryStringParameters": "AWS::Events::Rule/HttpParameters.QueryStringParameters"
+      }
+    },
+    "AWS::Events::Rule/HttpParameters.HeaderParameters": {
+      "type": "map",
+      "value": "String"
+    },
+    "AWS::Events::Rule/HttpParameters.PathParameterValues": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::Events::Rule/HttpParameters.QueryStringParameters": {
+      "type": "map",
+      "value": "String"
+    },
+    "AWS::Events::Rule/InputTransformer": {
+      "type": "structure",
+      "members": {
+        "InputPathsMap": "AWS::Events::Rule/InputTransformer.InputPathsMap",
+        "InputTemplate": "String"
+      }
+    },
+    "AWS::Events::Rule/InputTransformer.InputPathsMap": {
+      "type": "map",
+      "value": "String"
+    },
+    "AWS::Events::Rule/KinesisParameters": {
+      "type": "structure",
+      "members": {
+        "PartitionKeyPath": "String"
+      }
+    },
+    "AWS::Events::Rule/NetworkConfiguration": {
+      "type": "structure",
+      "members": {
+        "AwsVpcConfiguration": "AWS::Events::Rule/AwsVpcConfiguration"
+      }
+    },
+    "AWS::Events::Rule/PlacementConstraint": {
+      "type": "structure",
+      "members": {
+        "Type": "String",
+        "Expression": "String"
+      }
+    },
+    "AWS::Events::Rule/PlacementStrategy": {
+      "type": "structure",
+      "members": {
+        "Field": "String",
+        "Type": "String"
+      }
+    },
+    "AWS::Events::Rule/RedshiftDataParameters": {
+      "type": "structure",
+      "members": {
+        "StatementName": "String",
+        "Sqls": "AWS::Events::Rule/RedshiftDataParameters.Sqls",
+        "Database": "String",
+        "SecretManagerArn": "String",
+        "DbUser": "String",
+        "Sql": "String",
+        "WithEvent": "Boolean"
+      }
+    },
+    "AWS::Events::Rule/RedshiftDataParameters.Sqls": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::Events::Rule/RetryPolicy": {
+      "type": "structure",
+      "members": {
+        "MaximumRetryAttempts": "Integer",
+        "MaximumEventAgeInSeconds": "Integer"
+      }
+    },
+    "AWS::Events::Rule/RunCommandParameters": {
+      "type": "structure",
+      "members": {
+        "RunCommandTargets": "AWS::Events::Rule/RunCommandParameters.RunCommandTargets"
+      }
+    },
+    "AWS::Events::Rule/RunCommandParameters.RunCommandTargets": {
+      "type": "list",
+      "member": "AWS::Events::Rule/RunCommandTarget"
+    },
+    "AWS::Events::Rule/RunCommandTarget": {
+      "type": "structure",
+      "members": {
+        "Values": "AWS::Events::Rule/RunCommandTarget.Values",
+        "Key": "String"
+      }
+    },
+    "AWS::Events::Rule/RunCommandTarget.Values": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::Events::Rule/SageMakerPipelineParameter": {
+      "type": "structure",
+      "members": {
+        "Value": "String",
+        "Name": "String"
+      }
+    },
+    "AWS::Events::Rule/SageMakerPipelineParameters": {
+      "type": "structure",
+      "members": {
+        "PipelineParameterList": "AWS::Events::Rule/SageMakerPipelineParameters.PipelineParameterList"
+      }
+    },
+    "AWS::Events::Rule/SageMakerPipelineParameters.PipelineParameterList": {
+      "type": "list",
+      "member": "AWS::Events::Rule/SageMakerPipelineParameter"
+    },
+    "AWS::Events::Rule/SqsParameters": {
+      "type": "structure",
+      "members": {
+        "MessageGroupId": "String"
+      }
+    },
+    "AWS::Events::Rule/Tag": {
+      "type": "structure",
+      "members": {
+        "Value": "String",
+        "Key": "String"
+      }
+    },
+    "AWS::Events::Rule/Target": {
+      "type": "structure",
+      "members": {
+        "InputPath": "String",
+        "HttpParameters": "AWS::Events::Rule/HttpParameters",
+        "DeadLetterConfig": "AWS::Events::Rule/DeadLetterConfig",
+        "RunCommandParameters": "AWS::Events::Rule/RunCommandParameters",
+        "InputTransformer": "AWS::Events::Rule/InputTransformer",
+        "KinesisParameters": "AWS::Events::Rule/KinesisParameters",
+        "RoleArn": "String",
+        "RedshiftDataParameters": "AWS::Events::Rule/RedshiftDataParameters",
+        "AppSyncParameters": "AWS::Events::Rule/AppSyncParameters",
+        "Input": "String",
+        "SqsParameters": "AWS::Events::Rule/SqsParameters",
+        "EcsParameters": "AWS::Events::Rule/EcsParameters",
+        "BatchParameters": "AWS::Events::Rule/BatchParameters",
+        "Id": "String",
+        "Arn": "String",
+        "SageMakerPipelineParameters": "AWS::Events::Rule/SageMakerPipelineParameters",
+        "RetryPolicy": "AWS::Events::Rule/RetryPolicy"
+      }
+    },
+    "AWS::Lambda::Function": {
+      "type": "structure",
+      "members": {
+        "FunctionScalingConfig": "AWS::Lambda::Function/FunctionScalingConfig",
+        "Description": "String",
+        "TracingConfig": "AWS::Lambda::Function/TracingConfig",
+        "VpcConfig": "AWS::Lambda::Function/VpcConfig",
+        "RuntimeManagementConfig": "AWS::Lambda::Function/RuntimeManagementConfig",
+        "DurableConfig": "AWS::Lambda::Function/DurableConfig",
+        "ReservedConcurrentExecutions": "Integer",
+        "SnapStart": "AWS::Lambda::Function/SnapStart",
+        "FileSystemConfigs": "AWS::Lambda::Function.FileSystemConfigs",
+        "FunctionName": "String",
+        "Runtime": "String",
+        "KmsKeyArn": "String",
+        "PublishToLatestPublished": "Boolean",
+        "PackageType": "String",
+        "CodeSigningConfigArn": "String",
+        "Layers": "AWS::Lambda::Function.Layers",
+        "TenancyConfig": "AWS::Lambda::Function/TenancyConfig",
+        "Tags": "AWS::Lambda::Function.Tags",
+        "ImageConfig": "AWS::Lambda::Function/ImageConfig",
+        "MemorySize": "Integer",
+        "DeadLetterConfig": "AWS::Lambda::Function/DeadLetterConfig",
+        "Timeout": "Integer",
+        "CapacityProviderConfig": "AWS::Lambda::Function/CapacityProviderConfig",
+        "Handler": "String",
+        "SnapStartResponse": "AWS::Lambda::Function/SnapStartResponse",
+        "Code": "AWS::Lambda::Function/Code",
+        "Role": "String",
+        "LoggingConfig": "AWS::Lambda::Function/LoggingConfig",
+        "RecursiveLoop": "AWS::Lambda::Function/RecursiveLoop",
+        "Environment": "AWS::Lambda::Function/Environment",
+        "Arn": "String",
+        "EphemeralStorage": "AWS::Lambda::Function/EphemeralStorage",
+        "Architectures": "AWS::Lambda::Function.Architectures"
+      }
+    },
+    "AWS::Lambda::Function.Architectures": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::Lambda::Function.FileSystemConfigs": {
+      "type": "list",
+      "member": "AWS::Lambda::Function/FileSystemConfig"
+    },
+    "AWS::Lambda::Function.Layers": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::Lambda::Function.Tags": {
+      "type": "list",
+      "member": "AWS::Lambda::Function/Tag"
+    },
+    "AWS::Lambda::Function/CapacityProviderConfig": {
+      "type": "structure",
+      "members": {
+        "LambdaManagedInstancesCapacityProviderConfig": "AWS::Lambda::Function/LambdaManagedInstancesCapacityProviderConfig"
+      }
+    },
+    "AWS::Lambda::Function/Code": {
+      "type": "structure",
+      "members": {
+        "SourceKMSKeyArn": "String",
+        "S3ObjectVersion": "String",
+        "S3Bucket": "String",
+        "ZipFile": "String",
+        "S3Key": "String",
+        "S3ObjectStorageMode": "String",
+        "ImageUri": "String"
+      }
+    },
+    "AWS::Lambda::Function/DeadLetterConfig": {
+      "type": "structure",
+      "members": {
+        "TargetArn": "String"
+      }
+    },
+    "AWS::Lambda::Function/DurableConfig": {
+      "type": "structure",
+      "members": {
+        "KMSKeyArn": "String",
+        "ExecutionTimeout": "Integer",
+        "RetentionPeriodInDays": "Integer"
+      }
+    },
+    "AWS::Lambda::Function/Environment": {
+      "type": "structure",
+      "members": {
+        "Variables": "AWS::Lambda::Function/Environment.Variables"
+      }
+    },
+    "AWS::Lambda::Function/Environment.Variables": {
+      "type": "map",
+      "value": "String"
+    },
+    "AWS::Lambda::Function/EphemeralStorage": {
+      "type": "structure",
+      "members": {
+        "Size": "Integer"
+      }
+    },
+    "AWS::Lambda::Function/FileSystemConfig": {
+      "type": "structure",
+      "members": {
+        "S3FilesConfig": "AWS::Lambda::Function/S3FilesConfig",
+        "Arn": "String",
+        "LocalMountPath": "String"
+      }
+    },
+    "AWS::Lambda::Function/FunctionScalingConfig": {
+      "type": "structure",
+      "members": {
+        "MinExecutionEnvironments": "Integer",
+        "MaxExecutionEnvironments": "Integer"
+      }
+    },
+    "AWS::Lambda::Function/ImageConfig": {
+      "type": "structure",
+      "members": {
+        "WorkingDirectory": "String",
+        "Command": "AWS::Lambda::Function/ImageConfig.Command",
+        "EntryPoint": "AWS::Lambda::Function/ImageConfig.EntryPoint"
+      }
+    },
+    "AWS::Lambda::Function/ImageConfig.Command": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::Lambda::Function/ImageConfig.EntryPoint": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::Lambda::Function/LambdaManagedInstancesCapacityProviderConfig": {
+      "type": "structure",
+      "members": {
+        "ExecutionEnvironmentMemoryGiBPerVCpu": "Double",
+        "CapacityProviderArn": "String",
+        "PerExecutionEnvironmentMaxConcurrency": "Integer"
+      }
+    },
+    "AWS::Lambda::Function/LoggingConfig": {
+      "type": "structure",
+      "members": {
+        "LogFormat": "String",
+        "ApplicationLogLevel": "String",
+        "LogGroup": "String",
+        "SystemLogLevel": "String"
+      }
+    },
+    "AWS::Lambda::Function/RecursiveLoop": {
+      "type": "string"
+    },
+    "AWS::Lambda::Function/RuntimeManagementConfig": {
+      "type": "structure",
+      "members": {
+        "UpdateRuntimeOn": "String",
+        "RuntimeVersionArn": "String"
+      }
+    },
+    "AWS::Lambda::Function/S3FilesConfig": {
+      "type": "structure",
+      "members": {
+        "DirectS3Read": "String"
+      }
+    },
+    "AWS::Lambda::Function/SnapStart": {
+      "type": "structure",
+      "members": {
+        "ApplyOn": "String"
+      }
+    },
+    "AWS::Lambda::Function/SnapStartResponse": {
+      "type": "structure",
+      "members": {
+        "OptimizationStatus": "String",
+        "ApplyOn": "String"
+      }
+    },
+    "AWS::Lambda::Function/Tag": {
+      "type": "structure",
+      "members": {
+        "Value": "String",
+        "Key": "String"
+      }
+    },
+    "AWS::Lambda::Function/TenancyConfig": {
+      "type": "structure",
+      "members": {
+        "TenantIsolationMode": "String"
+      }
+    },
+    "AWS::Lambda::Function/TracingConfig": {
+      "type": "structure",
+      "members": {
+        "Mode": "String"
+      }
+    },
+    "AWS::Lambda::Function/VpcConfig": {
+      "type": "structure",
+      "members": {
+        "Ipv6AllowedForDualStack": "Boolean",
+        "SecurityGroupIds": "AWS::Lambda::Function/VpcConfig.SecurityGroupIds",
+        "SubnetIds": "AWS::Lambda::Function/VpcConfig.SubnetIds"
+      }
+    },
+    "AWS::Lambda::Function/VpcConfig.SecurityGroupIds": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::Lambda::Function/VpcConfig.SubnetIds": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::Lambda::LayerVersion": {
+      "type": "structure",
+      "members": {
+        "CompatibleRuntimes": "AWS::Lambda::LayerVersion.CompatibleRuntimes",
+        "LicenseInfo": "String",
+        "Description": "String",
+        "LayerName": "String",
+        "Content": "AWS::Lambda::LayerVersion/Content",
+        "LayerVersionArn": "String",
+        "CompatibleArchitectures": "AWS::Lambda::LayerVersion.CompatibleArchitectures"
+      }
+    },
+    "AWS::Lambda::LayerVersion.CompatibleArchitectures": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::Lambda::LayerVersion.CompatibleRuntimes": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::Lambda::LayerVersion/Content": {
+      "type": "structure",
+      "members": {
+        "S3ObjectVersion": "String",
+        "S3Bucket": "String",
+        "S3Key": "String",
+        "S3ObjectStorageMode": "String"
+      }
+    },
+    "Boolean": {
+      "type": "boolean"
+    },
+    "Double": {
+      "type": "double"
+    },
+    "Integer": {
+      "type": "integer"
+    },
+    "Json": {
+      "type": "json"
+    },
+    "String": {
+      "type": "string"
+    }
+  }
+}

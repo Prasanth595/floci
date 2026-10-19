@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.JsonNodeType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -161,6 +160,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     private LambdaDesiredState buildLambdaDesiredState(StackResource r, JsonNode props, ProvisionContext ctx,
                                                        LambdaFunction existing) {
         CloudFormationTemplateEngine engine = ctx.engine();
+        CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(engine);
         String stackName = ctx.stackName();
         String explicitName = ctx.resolveOptional(props, "FunctionName");
         boolean hasExplicitName = explicitName != null && !explicitName.isBlank();
@@ -252,22 +252,21 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
                 LAMBDA_DEFAULT_MEMORY_MB));
         configRequest.put("Description", ctx.resolveOptional(props, "Description"));
         configRequest.put("KMSKeyArn", ctx.resolveOptional(props, "KMSKeyArn"));
-        configRequest.put("Environment", Map.of("Variables", resolveLambdaEnvironment(props, engine)));
-        putStringListIfPresent(configRequest, props, "Architectures", "Architectures", engine);
-        configRequest.put("Layers", resolveStringListOrEmpty(props, "Layers", engine));
-        configRequest.put("EphemeralStorage", resolveMapOrDefault(props, "EphemeralStorage", engine,
+        configRequest.put("Environment", Map.of("Variables", resolveLambdaEnvironment(types, props)));
+        putStringListIfPresent(configRequest, types, props, "Architectures");
+        configRequest.put("Layers", resolveStringListOrEmpty(types, FUNCTION, props, "Layers"));
+        configRequest.put("EphemeralStorage", resolveMapOrDefault(types, props, "EphemeralStorage",
                 Map.of("Size", LAMBDA_DEFAULT_EPHEMERAL_STORAGE_MB)));
-        configRequest.put("TracingConfig", resolveMapOrDefault(props, "TracingConfig", engine,
+        configRequest.put("TracingConfig", resolveMapOrDefault(types, props, "TracingConfig",
                 Map.of("Mode", LAMBDA_DEFAULT_TRACING_MODE)));
-        configRequest.put("DeadLetterConfig", resolveMapOrDefault(props, "DeadLetterConfig", engine,
+        configRequest.put("DeadLetterConfig", resolveMapOrDefault(types, props, "DeadLetterConfig",
                 mapWithNullValue("TargetArn")));
-        configRequest.put("VpcConfig", resolveMapOrDefault(props, "VpcConfig", engine, Map.of()));
+        configRequest.put("VpcConfig", resolveMapOrDefault(types, props, "VpcConfig", Map.of()));
         // Empty when the template has none, so that removing it puts the function back on its
         // defaults (Text, or JSON for a durable function, and /aws/lambda/<name>), as on AWS.
-        configRequest.put("LoggingConfig", resolveMapOrDefault(props, "LoggingConfig", engine, Map.of()));
-        configRequest.put("FileSystemConfigs",
-                resolveObjectListOrEmpty(props, "FileSystemConfigs", engine));
-        putResolvedMapIfPresent(configRequest, props, "ImageConfig", "ImageConfig", engine);
+        configRequest.put("LoggingConfig", resolveMapOrDefault(types, props, "LoggingConfig", Map.of()));
+        configRequest.put("FileSystemConfigs", resolveObjectListOrEmpty(types, props, "FileSystemConfigs"));
+        putResolvedMapIfPresent(configRequest, types, props, "ImageConfig");
         if (durableConfig != null) {
             configRequest.put("DurableConfig", durableConfig);
         }
@@ -293,6 +292,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
+        types.finish();
         return new LambdaDesiredState(functionName, hasExplicitName, packageType, durableReplacement,
                 createRequest, code, configRequest, tags, props != null && props.has("ReservedConcurrentExecutions"),
                 reservedConcurrentExecutions);
@@ -774,40 +774,31 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         return jsonNodeToValue(value);
     }
 
-    private Map<String, String> resolveLambdaEnvironment(JsonNode props, CloudFormationTemplateEngine engine) {
-        JsonNode envNode = resolveTyped(props, "Environment", JsonNodeType.OBJECT, engine);
+    private Map<String, String> resolveLambdaEnvironment(CfnPropertyTypes.Reader types, JsonNode props) {
+        JsonNode envNode = readTyped(types, FUNCTION, props, "Environment");
         JsonNode variables = envNode == null ? null : envNode.get("Variables");
-        if (variables == null || variables.isNull() || variables.isMissingNode()) {
+        if (variables == null) {
             return Map.of();
         }
-        CfnPropertyTypes.requireType("Variables", variables, JsonNodeType.OBJECT);
         Map<String, String> vars = new HashMap<>();
         variables.fields().forEachRemaining(e -> vars.put(e.getKey(), e.getValue().asText()));
         return vars;
     }
 
-    private List<String> resolveStringListOrEmpty(JsonNode props, String source,
-                                                  CloudFormationTemplateEngine engine) {
-        List<String> values = resolveStringList(props, source, engine);
-        return values == null ? List.of() : values;
+    private static List<String> resolveStringListOrEmpty(CfnPropertyTypes.Reader types, String resourceType,
+                                                         JsonNode props, String source) {
+        JsonNode values = readTyped(types, resourceType, props, source);
+        return values == null ? List.of() : texts(values);
     }
 
-    /**
-     * The list-of-strings property {@code source}, or null when the template leaves it out,
-     * {@code Ref: AWS::NoValue} directly or through {@code Fn::If} included; see
-     * {@link CfnPropertyTypes#readStringList}.
-     */
-    private static List<String> resolveStringList(JsonNode props, String source,
-                                                  CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has(source) || props.get(source).isNull()) {
-            return null;
-        }
-        return CfnPropertyTypes.readStringList(source, props.get(source), engine);
+    private static List<String> texts(JsonNode values) {
+        List<String> out = new ArrayList<>();
+        values.forEach(value -> out.add(value.asText()));
+        return out;
     }
 
-    private List<Object> resolveObjectListOrEmpty(JsonNode props, String source,
-                                                  CloudFormationTemplateEngine engine) {
-        JsonNode resolved = resolveTyped(props, source, JsonNodeType.ARRAY, engine);
+    private List<Object> resolveObjectListOrEmpty(CfnPropertyTypes.Reader types, JsonNode props, String source) {
+        JsonNode resolved = readTyped(types, FUNCTION, props, source);
         if (resolved == null) {
             return List.of();
         }
@@ -817,29 +808,24 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /** The object property {@code source}, or {@code defaultValue} when the template leaves it out. */
-    private Map<String, Object> resolveMapOrDefault(JsonNode props, String source,
-                                                    CloudFormationTemplateEngine engine,
+    private Map<String, Object> resolveMapOrDefault(CfnPropertyTypes.Reader types, JsonNode props, String source,
                                                     Map<String, Object> defaultValue) {
-        JsonNode resolved = resolveTyped(props, source, JsonNodeType.OBJECT, engine);
+        JsonNode resolved = readTyped(types, FUNCTION, props, source);
         return resolved == null ? defaultValue : jsonObjectToMap(resolved);
     }
 
     /**
-     * The property {@code source}, or null when the template leaves it out, {@code Ref: AWS::NoValue}
-     * directly or through {@code Fn::If} included. A value of another type than {@code expected} is
-     * refused before the function is touched; see {@link CfnPropertyTypes#requireType}.
+     * The property {@code source} of {@code resourceType} read against the type its resource schema
+     * declares, or null when the template leaves it out, {@code Ref: AWS::NoValue} directly or
+     * through {@code Fn::If} included. A value of another type is refused before the function is
+     * touched; see {@link CfnPropertyTypes}.
      */
-    private static JsonNode resolveTyped(JsonNode props, String source, JsonNodeType expected,
-                                         CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has(source) || props.get(source).isNull()) {
+    private static JsonNode readTyped(CfnPropertyTypes.Reader types, String resourceType, JsonNode props,
+                                      String source) {
+        if (props == null || !props.has(source)) {
             return null;
         }
-        JsonNode resolved = engine.resolveNodeOmittingNoValue(props.get(source));
-        if (resolved == null || resolved.isNull() || resolved.isMissingNode()) {
-            return null;
-        }
-        CfnPropertyTypes.requireType(source, resolved, expected);
-        return resolved;
+        return types.read(source, props.get(source), CfnPropertyTypes.propertyShape(resourceType, source));
     }
 
     private static Map<String, Object> mapWithNullValue(String key) {
@@ -848,19 +834,19 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         return map;
     }
 
-    private void putStringListIfPresent(Map<String, Object> request, JsonNode props, String source,
-                                        String target, CloudFormationTemplateEngine engine) {
-        List<String> values = resolveStringList(props, source, engine);
+    private void putStringListIfPresent(Map<String, Object> request, CfnPropertyTypes.Reader types,
+                                        JsonNode props, String source) {
+        JsonNode values = readTyped(types, FUNCTION, props, source);
         if (values != null) {
-            request.put(target, values);
+            request.put(source, texts(values));
         }
     }
 
-    private void putResolvedMapIfPresent(Map<String, Object> request, JsonNode props, String source,
-                                         String target, CloudFormationTemplateEngine engine) {
-        JsonNode resolved = resolveTyped(props, source, JsonNodeType.OBJECT, engine);
+    private void putResolvedMapIfPresent(Map<String, Object> request, CfnPropertyTypes.Reader types,
+                                         JsonNode props, String source) {
+        JsonNode resolved = readTyped(types, FUNCTION, props, source);
         if (resolved != null) {
-            request.put(target, jsonObjectToMap(resolved));
+            request.put(source, jsonObjectToMap(resolved));
         }
     }
 
@@ -916,11 +902,13 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         if (licenseInfo != null) {
             request.put("LicenseInfo", licenseInfo);
         }
-        List<String> runtimes = resolveStringListOrEmpty(props, "CompatibleRuntimes", engine);
+        CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(engine);
+        List<String> runtimes = resolveStringListOrEmpty(types, LAYER_VERSION, props, "CompatibleRuntimes");
         if (!runtimes.isEmpty()) {
             request.put("CompatibleRuntimes", runtimes);
         }
-        List<String> architectures = resolveStringListOrEmpty(props, "CompatibleArchitectures", engine);
+        List<String> architectures = resolveStringListOrEmpty(types, LAYER_VERSION, props, "CompatibleArchitectures");
+        types.finish();
         if (!architectures.isEmpty()) {
             request.put("CompatibleArchitectures", architectures);
         }

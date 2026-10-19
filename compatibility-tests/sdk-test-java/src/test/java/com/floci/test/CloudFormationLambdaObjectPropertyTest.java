@@ -33,6 +33,7 @@ class CloudFormationLambdaObjectPropertyTest {
     private static final String LAYERS_STACK = TestFixtures.uniqueName("compat-cfn-layers-object");
     private static final String DELIMITED_STACK = TestFixtures.uniqueName("compat-cfn-comma-delimited");
     private static final String STRING_PARAMETER_STACK = TestFixtures.uniqueName("compat-cfn-string-parameter");
+    private static final String NESTED_STACK = TestFixtures.uniqueName("compat-cfn-nested-member");
 
     private static CloudFormationClient cfn;
 
@@ -50,6 +51,7 @@ class CloudFormationLambdaObjectPropertyTest {
             cfn.deleteStack(request -> request.stackName(LAYERS_STACK));
             cfn.deleteStack(request -> request.stackName(DELIMITED_STACK));
             cfn.deleteStack(request -> request.stackName(STRING_PARAMETER_STACK));
+            cfn.deleteStack(request -> request.stackName(NESTED_STACK));
             cfn.close();
         }
     }
@@ -142,6 +144,17 @@ class CloudFormationLambdaObjectPropertyTest {
                 .isEqualTo("ROLLBACK_COMPLETE");
         assertThat(reasons(STRING_PARAMETER_STACK)).anyMatch(reason ->
                 reason.contains("Property [Architectures] expected type: JSONArray, found: String"));
+    }
+
+    /** Measured on AWS (eu-west-1, 2026-10-19): a member nested in a property is typed too. */
+    @Test
+    @DisplayName("a VpcConfig whose SubnetIds is a string fails the stack")
+    void aNestedMemberOfTheWrongTypeFailsTheStack() throws InterruptedException {
+        cfn.createStack(request -> request.stackName(NESTED_STACK).templateBody(
+                template("\"VpcConfig\": {\"SubnetIds\": \"subnet-0123456789abcdef0\", \"SecurityGroupIds\": []}")));
+        assertThat(TestFixtures.awaitStackTerminal(cfn, NESTED_STACK, DEPLOY_TIMEOUT)).isEqualTo("ROLLBACK_COMPLETE");
+        assertThat(reasons(NESTED_STACK)).anyMatch(reason ->
+                reason.contains("Property [SubnetIds] expected type: JSONArray, found: String"));
     }
 
     private static List<String> reasons(String stackName) {

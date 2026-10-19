@@ -207,7 +207,8 @@ class CloudFormationLambdaObjectPropertyIntegrationTest {
 
     /**
      * The other readers of the function and of its layers refuse a value of the wrong type the same
-     * way, each with the message measured for it on AWS (eu-west-1, 2026-10-18).
+     * way, nested members included, each with the message measured for it on AWS (eu-west-1,
+     * 2026-10-18 and 2026-10-19).
      */
     @Test
     void everyOtherPropertyOfTheWrongTypeFailsTheCreate() {
@@ -226,6 +227,18 @@ class CloudFormationLambdaObjectPropertyIntegrationTest {
                 "Property [Architectures] expected type: JSONArray, found: String");
         functionProperties.put(",\"FileSystemConfigs\": \"x\"",
                 "Property [FileSystemConfigs] expected type: JSONArray, found: String");
+        functionProperties.put(",\"VpcConfig\": {\"SubnetIds\": \"subnet-0123456789abcdef0\", \"SecurityGroupIds\": []}",
+                "Property [SubnetIds] expected type: JSONArray, found: String");
+        functionProperties.put(",\"EphemeralStorage\": {\"Size\": \"abc\"}",
+                "Property [Size] expected type: Integer, found: String");
+        functionProperties.put(",\"ImageConfig\": {\"Command\": \"x\"}",
+                "Property [Command] expected type: JSONArray, found: String");
+        functionProperties.put(",\"TracingConfig\": {\"Mode\": {\"a\": 1}}",
+                "Property [Mode] expected type: String, found: JSONObject");
+        functionProperties.put(",\"Environment\": {\"Variables\": {\"AB\": {\"b\": 1}}}",
+                "Property [AB] expected type: String, found: JSONObject");
+        functionProperties.put(",\"Environment\": {\"Variables\": {\"AB\": [\"x\"]}}",
+                "Property [AB] expected type: String, found: JSONArray");
         functionProperties.forEach((property, reason) -> {
             String stack = stackName("type");
             submit("CreateStack", stack, template(property));

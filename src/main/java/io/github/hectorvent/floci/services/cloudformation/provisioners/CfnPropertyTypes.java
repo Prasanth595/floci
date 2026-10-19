@@ -9,6 +9,8 @@ import com.fasterxml.jackson.databind.node.JsonNodeType;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestShapeModel;
+import io.github.hectorvent.floci.core.common.RequestShapeModel.Shape;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 
 import java.math.BigDecimal;
@@ -18,16 +20,19 @@ import java.util.regex.Pattern;
 
 /**
  * CloudFormation's checks of a property value against the type the resource schema declares, with
- * the messages they give (measured in eu-west-1, 2026-10-18).
+ * the messages they give (measured in eu-west-1, 2026-10-18). The types come from the vendored
+ * {@code aws/cfn-property-types.json}, generated from the published resource schemas by
+ * {@code tools/aws/regen_cfn_property_types.py}.
  *
  * <p>Template validation runs over the whole template before any resource is touched and names the
  * property, or the list index, alone: "Property [Layers] expected type: JSONArray, found: String".
- * Where an object or a list is expected, a number or a boolean reads as a String. Where text is
- * expected, any scalar is taken as its text. Where an integer is expected, a whole number or text
+ * Where an object, a map or a list is expected, a number or a boolean reads as a String. Where text
+ * is expected, any scalar is taken as its text. Where an integer is expected, a whole number or text
  * that spells one is taken, and anything else is named by what it is: Float (4.5 or "4.5"),
  * Boolean, String, JSONObject, JSONArray. Where a boolean is expected, only an object or a list is
  * refused there. A list of strings also takes every intrinsic that yields a list, as
- * {@link #readStringList} says.
+ * {@link #readStringList} says. A number, and a value the schema leaves free (a free-form object,
+ * several types at once), are taken as they are.
  *
  * <p>The resource handler's model validation runs after it, on the values CloudFormation converted,
  * and names the whole path: a boolean that is not true or false in any case, and an integer beyond
@@ -36,37 +41,28 @@ import java.util.regex.Pattern;
  */
 final class CfnPropertyTypes {
 
-    /** A type a resource schema declares for a property. */
-    enum Kind {
-        STRING("String"), INTEGER("Integer"), BOOLEAN("Boolean"), OBJECT("JSONObject"), LIST("JSONArray");
-
-        private final String schemaName;
-
-        Kind(String schemaName) {
-            this.schemaName = schemaName;
-        }
-    }
-
-    /** A property's type: a scalar, an object with the members it declares, or a list of {@code items}. */
-    record Type(Kind kind, Map<String, Type> members, Type items) {
-        static final Type STRING = new Type(Kind.STRING, null, null);
-        static final Type INTEGER = new Type(Kind.INTEGER, null, null);
-        static final Type BOOLEAN = new Type(Kind.BOOLEAN, null, null);
-
-        static Type object(Map<String, Type> members) {
-            return new Type(Kind.OBJECT, members, null);
-        }
-
-        static Type list(Type items) {
-            return new Type(Kind.LIST, null, items);
-        }
-    }
+    static final String RESOURCE_NAME = "aws/cfn-property-types.json";
 
     private static final Pattern WHOLE_NUMBER = Pattern.compile("-?\\d+");
     private static final String INTEGER_RANGE_HINT = ". This may occur when a numeric value exceeds 32-bit"
             + " integer max (2147483647). Consider using 'number' type or ensure value fits in integer range.";
 
+    private static final class Holder {
+        static final RequestShapeModel MODEL = RequestShapeModel.load(RESOURCE_NAME, "CloudFormation property types");
+    }
+
     private CfnPropertyTypes() {
+    }
+
+    /** The shape the resource schema of {@code resourceType} declares for its property {@code property}. */
+    static String propertyShape(String resourceType, String property) {
+        String properties = Holder.MODEL.operations().get(resourceType);
+        String shape = properties == null ? null : Holder.MODEL.shapes().get(properties).members().get(property);
+        if (shape == null) {
+            throw new IllegalStateException(resourceType + "." + property + " is not in " + RESOURCE_NAME
+                    + "; add the type to tools/aws/regen_cfn_property_types.py");
+        }
+        return shape;
     }
 
     /**
@@ -75,7 +71,7 @@ final class CfnPropertyTypes {
      */
     static void requireType(String property, JsonNode value, JsonNodeType expected) {
         if (value.getNodeType() != expected) {
-            throw templateMismatch(property, expected == JsonNodeType.OBJECT ? Kind.OBJECT : Kind.LIST,
+            throw templateMismatch(property, expected == JsonNodeType.OBJECT ? "JSONObject" : "JSONArray",
                     containerName(value));
         }
     }
@@ -106,28 +102,35 @@ final class CfnPropertyTypes {
     }
 
     /**
-     * Reads template values against their declared types and resolves them, converting them as
-     * CloudFormation does before the handler sees them: an integer or a boolean given as text
-     * becomes one, and a number or a boolean where text is expected becomes text. Members a type
-     * does not declare are resolved as they are. What {@code AWS::NoValue} stands for is left out.
-     * Template validation failures are thrown at once; the first model validation failure waits for
-     * {@link #finish}, so every value read has passed template validation first, as on AWS.
+     * Reads template values against the shapes the resource schemas declare and resolves them,
+     * converting them as CloudFormation does before the handler sees them: an integer or a boolean
+     * given as text becomes one, and a number or a boolean where text is expected becomes text.
+     * Members a shape does not declare are resolved as they are. What {@code AWS::NoValue} stands for
+     * is left out. Template validation failures are thrown at once; the first model validation
+     * failure waits for {@link #finish}, so every value read has passed template validation first,
+     * as on AWS.
      */
     static final class Reader {
 
         private final CloudFormationTemplateEngine engine;
+        private final RequestShapeModel model;
         private AwsException modelFailure;
 
         Reader(CloudFormationTemplateEngine engine) {
+            this(engine, Holder.MODEL);
+        }
+
+        Reader(CloudFormationTemplateEngine engine, RequestShapeModel model) {
             this.engine = engine;
+            this.model = model;
         }
 
         /**
-         * The template value {@code raw}, at {@code path} in the resource's properties, read as
-         * {@code type}; null when it is absent or {@code AWS::NoValue}.
+         * The template value {@code raw}, at {@code path} in the resource's properties, read as the
+         * shape {@code shapeName}; null when it is absent or {@code AWS::NoValue}.
          */
-        JsonNode read(String path, JsonNode raw, Type type) {
-            return read(path, path.substring(path.lastIndexOf('/') + 1), engine.omitNoValue(raw), type);
+        JsonNode read(String path, JsonNode raw, String shapeName) {
+            return read(path, path.substring(path.lastIndexOf('/') + 1), engine.omitNoValue(raw), shapeName);
         }
 
         /** Throws the first model validation failure found by {@link #read}, if any. */
@@ -137,11 +140,12 @@ final class CfnPropertyTypes {
             }
         }
 
-        private JsonNode read(String path, String property, JsonNode raw, Type type) {
+        private JsonNode read(String path, String property, JsonNode raw, String shapeName) {
             if (raw == null || raw.isNull() || raw.isMissingNode()) {
                 return null;
             }
-            if (type.kind() == Kind.LIST && type.items().kind() == Kind.STRING) {
+            Shape shape = model.shapes().get(shapeName);
+            if ("list".equals(shape.type()) && "string".equals(model.shapes().get(shape.element()).type())) {
                 return readStringList(property, raw);
             }
             JsonNode value = raw.isContainerNode() && !CloudFormationTemplateEngine.callsIntrinsic(raw)
@@ -149,22 +153,24 @@ final class CfnPropertyTypes {
             if (value == null || value.isNull() || value.isMissingNode()) {
                 return null;
             }
-            return switch (type.kind()) {
-                case OBJECT -> readObject(path, property, value, type.members());
-                case LIST -> readList(path, property, value, type.items());
-                case STRING -> readString(property, value);
-                case INTEGER -> readInteger(path, property, value);
-                case BOOLEAN -> readBoolean(path, property, value);
+            return switch (shape.type()) {
+                case "structure" -> readObject(path, property, value, shape.members());
+                case "map" -> readMap(path, property, value, shape.element());
+                case "list" -> readList(path, property, value, shape.element());
+                case "string" -> readString(property, value);
+                case "integer" -> readInteger(path, property, value);
+                case "boolean" -> readBoolean(path, property, value);
+                default -> value == raw ? engine.resolveNode(raw) : value;
             };
         }
 
-        private JsonNode readObject(String path, String property, JsonNode value, Map<String, Type> members) {
+        private JsonNode readObject(String path, String property, JsonNode value, Map<String, String> members) {
             requireType(property, value, JsonNodeType.OBJECT);
             ObjectNode out = JsonNodeFactory.instance.objectNode();
             for (Map.Entry<String, JsonNode> member : value.properties()) {
-                Type memberType = members.get(member.getKey());
-                JsonNode read = memberType == null ? engine.resolveNode(member.getValue())
-                        : read(path + "/" + member.getKey(), member.getKey(), member.getValue(), memberType);
+                String memberShape = members.get(member.getKey());
+                JsonNode read = memberShape == null ? engine.resolveNode(member.getValue())
+                        : read(path + "/" + member.getKey(), member.getKey(), member.getValue(), memberShape);
                 if (read != null) {
                     out.set(member.getKey(), read);
                 }
@@ -172,11 +178,23 @@ final class CfnPropertyTypes {
             return out;
         }
 
-        private JsonNode readList(String path, String property, JsonNode value, Type items) {
+        private JsonNode readMap(String path, String property, JsonNode value, String valueShape) {
+            requireType(property, value, JsonNodeType.OBJECT);
+            ObjectNode out = JsonNodeFactory.instance.objectNode();
+            for (Map.Entry<String, JsonNode> entry : value.properties()) {
+                JsonNode read = read(path + "/" + entry.getKey(), entry.getKey(), entry.getValue(), valueShape);
+                if (read != null) {
+                    out.set(entry.getKey(), read);
+                }
+            }
+            return out;
+        }
+
+        private JsonNode readList(String path, String property, JsonNode value, String itemShape) {
             requireType(property, value, JsonNodeType.ARRAY);
             ArrayNode out = JsonNodeFactory.instance.arrayNode();
             for (int i = 0; i < value.size(); i++) {
-                JsonNode read = read(path + "/" + i, String.valueOf(i), value.get(i), items);
+                JsonNode read = read(path + "/" + i, String.valueOf(i), value.get(i), itemShape);
                 if (read != null) {
                     out.add(read);
                 }
@@ -190,7 +208,7 @@ final class CfnPropertyTypes {
                 for (int i = 0; i < raw.size(); i++) {
                     JsonNode item = raw.get(i);
                     if (item.isContainerNode() && !CloudFormationTemplateEngine.callsIntrinsic(item)) {
-                        throw templateMismatch(String.valueOf(i), Kind.STRING, containerName(item));
+                        throw templateMismatch(String.valueOf(i), "String", containerName(item));
                     }
                 }
             }
@@ -205,7 +223,7 @@ final class CfnPropertyTypes {
 
         private static JsonNode readString(String property, JsonNode value) {
             if (value.isContainerNode()) {
-                throw templateMismatch(property, Kind.STRING, containerName(value));
+                throw templateMismatch(property, "String", containerName(value));
             }
             return value.isTextual() ? value : TextNode.valueOf(value.asText());
         }
@@ -213,12 +231,12 @@ final class CfnPropertyTypes {
         private JsonNode readInteger(String path, String property, JsonNode value) {
             String text = value.isIntegralNumber() ? value.bigIntegerValue().toString() : value.asText();
             if (value.isContainerNode() || value.isBoolean() || !WHOLE_NUMBER.matcher(text).matches()) {
-                throw templateMismatch(property, Kind.INTEGER, scalarName(value));
+                throw templateMismatch(property, "Integer", scalarName(value));
             }
             BigDecimal number = new BigDecimal(text);
             if (number.compareTo(BigDecimal.valueOf(Integer.MIN_VALUE)) < 0
                     || number.compareTo(BigDecimal.valueOf(Integer.MAX_VALUE)) > 0) {
-                recordModelFailure(path, Kind.INTEGER, INTEGER_RANGE_HINT);
+                recordModelFailure(path, "Integer", INTEGER_RANGE_HINT);
                 return value;
             }
             return IntNode.valueOf(number.intValue());
@@ -226,27 +244,27 @@ final class CfnPropertyTypes {
 
         private JsonNode readBoolean(String path, String property, JsonNode value) {
             if (value.isContainerNode()) {
-                throw templateMismatch(property, Kind.BOOLEAN, containerName(value));
+                throw templateMismatch(property, "Boolean", containerName(value));
             }
             String text = value.asText();
             if ("true".equalsIgnoreCase(text) || "false".equalsIgnoreCase(text)) {
                 return BooleanNode.valueOf(Boolean.parseBoolean(text));
             }
-            recordModelFailure(path, Kind.BOOLEAN, "");
+            recordModelFailure(path, "Boolean", "");
             return value;
         }
 
-        private void recordModelFailure(String path, Kind expected, String hint) {
+        private void recordModelFailure(String path, String expected, String hint) {
             if (modelFailure == null) {
                 modelFailure = new AwsException("InvalidRequest", "Model validation failed (#/" + path
-                        + ": expected type: " + expected.schemaName + ", found: String" + hint + ")", 400);
+                        + ": expected type: " + expected + ", found: String" + hint + ")", 400);
             }
         }
     }
 
-    private static AwsException templateMismatch(String property, Kind expected, String found) {
+    private static AwsException templateMismatch(String property, String expected, String found) {
         return new AwsException("ValidationError", "Property [" + property + "] expected type: "
-                + expected.schemaName + ", found: " + found, 400);
+                + expected + ", found: " + found, 400);
     }
 
     private static String containerName(JsonNode value) {

@@ -56,6 +56,7 @@ PREFIX ?= $(HOME)/.local
         iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test \
         iam-action-resources-sync iam-action-resources-check iam-action-resources-verify \
         iam-action-resources-test iam-authorized-actions-sync iam-authorized-actions-check \
+        cfn-property-types-sync cfn-property-types-check cfn-property-types-verify cfn-property-types-test \
         iam-authorized-actions-verify iam-authorized-actions-test iam-data-verify
 
 help: ## List the targets below
@@ -379,3 +380,30 @@ iam-authorized-actions-verify: ## CI gate (online): every vendored operation mus
 
 iam-authorized-actions-test: ## Run the IAM authorized-action generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_iam_authorized_actions.py -q
+
+cfn-property-types-sync: ## Regenerate src/main/resources/aws/cfn-property-types.json from AWS's resource schemas (commit the result)
+	$(PYTHON) tools/aws/regen_cfn_property_types.py
+
+cfn-property-types-check: ## CI gate (offline): the vendored CloudFormation property types must be well-formed
+	@$(PYTHON) tools/aws/regen_cfn_property_types.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/cfn-property-types.json is malformed."; \
+		echo "       Run 'make cfn-property-types-sync' and commit the result."; \
+		exit 1; \
+	}
+
+cfn-property-types-verify: ## CI gate (online): the vendored CloudFormation property types must still match AWS's schemas
+	@$(PYTHON) tools/aws/regen_cfn_property_types.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not read AWS's CloudFormation resource schemas, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: AWS has changed a resource schema the vendored property types come from."; \
+		echo "       Run 'make cfn-property-types-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+cfn-property-types-test: ## Run the CloudFormation property type generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_cfn_property_types.py -q

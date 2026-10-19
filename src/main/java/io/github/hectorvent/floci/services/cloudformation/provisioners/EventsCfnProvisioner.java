@@ -9,7 +9,6 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnPropertyTypes.Type;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
@@ -53,37 +52,8 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     private static final Logger LOG = Logger.getLogger(EventsCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    /**
-     * The types AWS::Events::Rule's resource schema gives the target members this provisioner reads
-     * as typed values (describe-type, eu-west-1, 2026-10-18), in the template's spelling.
-     */
-    private static final Type ECS_PARAMETERS = Type.object(Map.ofEntries(
-            Map.entry("CapacityProviderStrategy", Type.list(Type.object(Map.of(
-                    "CapacityProvider", Type.STRING, "Base", Type.INTEGER, "Weight", Type.INTEGER)))),
-            Map.entry("EnableECSManagedTags", Type.BOOLEAN),
-            Map.entry("EnableExecuteCommand", Type.BOOLEAN),
-            Map.entry("Group", Type.STRING),
-            Map.entry("LaunchType", Type.STRING),
-            Map.entry("NetworkConfiguration", Type.object(Map.of("AwsVpcConfiguration", Type.object(Map.of(
-                    "AssignPublicIp", Type.STRING,
-                    "SecurityGroups", Type.list(Type.STRING),
-                    "Subnets", Type.list(Type.STRING)))))),
-            Map.entry("PlacementConstraints", Type.list(Type.object(Map.of(
-                    "Expression", Type.STRING, "Type", Type.STRING)))),
-            Map.entry("PlacementStrategies", Type.list(Type.object(Map.of(
-                    "Field", Type.STRING, "Type", Type.STRING)))),
-            Map.entry("PlatformVersion", Type.STRING),
-            Map.entry("PropagateTags", Type.STRING),
-            Map.entry("ReferenceId", Type.STRING),
-            Map.entry("TagList", Type.list(Type.object(Map.of("Key", Type.STRING, "Value", Type.STRING)))),
-            Map.entry("TaskCount", Type.INTEGER),
-            Map.entry("TaskDefinitionArn", Type.STRING)));
-    private static final Type TARGETS = Type.list(Type.object(Map.of(
-            "RoleArn", Type.STRING,
-            "RetryPolicy", Type.object(Map.of(
-                    "MaximumRetryAttempts", Type.INTEGER, "MaximumEventAgeInSeconds", Type.INTEGER)),
-            "DeadLetterConfig", Type.object(Map.of("Arn", Type.STRING)),
-            "EcsParameters", ECS_PARAMETERS)));
+    /** The shape AWS::Events::Rule's resource schema declares for its targets. */
+    private static final String TARGETS = CfnPropertyTypes.propertyShape("AWS::Events::Rule", "Targets");
 
     private static final String EVENT_BUS_CREATED_TIME_ATTR = "FlociEventBusCreatedTime";
     private static final String EVENT_BUS_MANAGED_TAG_KEYS_ATTR = "FlociEventBusManagedTagKeys";
@@ -210,8 +180,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
      * The rule's {@code Targets}, each carrying what PutTargets would set. An Fn::If that chooses the
      * whole list works, and AWS::NoValue is left out wherever it stands for a member, a list item or
      * an Fn::If branch, as CloudFormation leaves them out of the PutTargets call, while a literal ""
-     * stays. The members typed in {@link #TARGETS} are read against the resource schema's types; the
-     * others are resolved as they come.
+     * stays. Every member is read against the type the resource schema declares for it.
      */
     private List<Target> declaredTargets(JsonNode props, ProvisionContext ctx) {
         List<Target> targets = new ArrayList<>();
