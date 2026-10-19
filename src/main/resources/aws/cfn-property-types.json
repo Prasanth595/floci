@@ -6,11 +6,77 @@
     "note": "make cfn-property-types-verify checks the file against AWS."
   },
   "operations": {
+    "AWS::AutoScaling::LaunchConfiguration": "AWS::AutoScaling::LaunchConfiguration",
     "AWS::Events::Rule": "AWS::Events::Rule",
     "AWS::Lambda::Function": "AWS::Lambda::Function",
     "AWS::Lambda::LayerVersion": "AWS::Lambda::LayerVersion"
   },
   "shapes": {
+    "AWS::AutoScaling::LaunchConfiguration": {
+      "type": "structure",
+      "members": {
+        "PlacementTenancy": "String",
+        "SecurityGroups": "AWS::AutoScaling::LaunchConfiguration.SecurityGroups",
+        "LaunchConfigurationName": "String",
+        "MetadataOptions": "AWS::AutoScaling::LaunchConfiguration/MetadataOptions",
+        "InstanceId": "String",
+        "UserData": "String",
+        "ClassicLinkVPCSecurityGroups": "AWS::AutoScaling::LaunchConfiguration.ClassicLinkVPCSecurityGroups",
+        "BlockDeviceMappings": "AWS::AutoScaling::LaunchConfiguration.BlockDeviceMappings",
+        "IamInstanceProfile": "String",
+        "KernelId": "String",
+        "AssociatePublicIpAddress": "Boolean",
+        "ClassicLinkVPCId": "String",
+        "EbsOptimized": "Boolean",
+        "KeyName": "String",
+        "SpotPrice": "String",
+        "ImageId": "String",
+        "InstanceType": "String",
+        "RamDiskId": "String",
+        "InstanceMonitoring": "Boolean"
+      }
+    },
+    "AWS::AutoScaling::LaunchConfiguration.BlockDeviceMappings": {
+      "type": "list",
+      "member": "AWS::AutoScaling::LaunchConfiguration/BlockDeviceMapping"
+    },
+    "AWS::AutoScaling::LaunchConfiguration.ClassicLinkVPCSecurityGroups": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::AutoScaling::LaunchConfiguration.SecurityGroups": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::AutoScaling::LaunchConfiguration/BlockDevice": {
+      "type": "structure",
+      "members": {
+        "SnapshotId": "String",
+        "VolumeType": "String",
+        "Encrypted": "Boolean",
+        "Throughput": "Integer",
+        "Iops": "Integer",
+        "VolumeSize": "Integer",
+        "DeleteOnTermination": "Boolean"
+      }
+    },
+    "AWS::AutoScaling::LaunchConfiguration/BlockDeviceMapping": {
+      "type": "structure",
+      "members": {
+        "Ebs": "AWS::AutoScaling::LaunchConfiguration/BlockDevice",
+        "NoDevice": "Boolean",
+        "VirtualName": "String",
+        "DeviceName": "String"
+      }
+    },
+    "AWS::AutoScaling::LaunchConfiguration/MetadataOptions": {
+      "type": "structure",
+      "members": {
+        "HttpPutResponseHopLimit": "Integer",
+        "HttpTokens": "String",
+        "HttpEndpoint": "String"
+      }
+    },
     "AWS::Events::Rule": {
       "type": "structure",
       "members": {

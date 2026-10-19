@@ -14,7 +14,6 @@ import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnPropertyTypes.Type;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -50,11 +49,9 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(AutoScalingGroupCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    /** The launch configuration's MetadataOptions as its resource schema types them. */
-    private static final Type METADATA_OPTIONS = Type.object(Map.of(
-            "HttpTokens", Type.STRING,
-            "HttpEndpoint", Type.STRING,
-            "HttpPutResponseHopLimit", Type.INTEGER));
+    /** The shape AWS::AutoScaling::LaunchConfiguration's resource schema declares for MetadataOptions. */
+    private static final String METADATA_OPTIONS =
+            CfnPropertyTypes.propertyShape(LAUNCH_CONFIGURATION, "MetadataOptions");
 
     private final AutoScalingService autoScalingService;
 

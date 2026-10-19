@@ -48,6 +48,8 @@ class CfnPropertyTypesTest {
                 CfnPropertyTypes.propertyShape("AWS::Lambda::Function", "Environment"));
         assertEquals("AWS::Lambda::LayerVersion.CompatibleRuntimes",
                 CfnPropertyTypes.propertyShape("AWS::Lambda::LayerVersion", "CompatibleRuntimes"));
+        assertEquals("AWS::AutoScaling::LaunchConfiguration/MetadataOptions",
+                CfnPropertyTypes.propertyShape("AWS::AutoScaling::LaunchConfiguration", "MetadataOptions"));
     }
 
     @Test

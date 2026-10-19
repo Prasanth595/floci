@@ -49,7 +49,8 @@ ARCHIVE_URL = "https://schema.cloudformation.us-east-1.amazonaws.com/Cloudformat
 FETCH_TIMEOUT_SECONDS = 60
 
 # The resource types whose provisioners read their properties through CfnPropertyTypes.
-RESOURCE_TYPES = ["AWS::Events::Rule", "AWS::Lambda::Function", "AWS::Lambda::LayerVersion"]
+RESOURCE_TYPES = ["AWS::AutoScaling::LaunchConfiguration", "AWS::Events::Rule", "AWS::Lambda::Function",
+                  "AWS::Lambda::LayerVersion"]
 
 # The shared shape each scalar body is written as, inline; a definition keeps its own name.
 SCALAR_SHAPES = {"string": "String", "integer": "Integer", "boolean": "Boolean", "double": "Double", "json": "Json"}
@@ -64,6 +65,7 @@ ANCHORS = {
     ("AWS::Events::Rule/AwsVpcConfiguration", "Subnets"): ["String"],
     ("AWS::Lambda::Function/Environment", "Variables"): {"String"},
     ("AWS::Lambda::Function/EphemeralStorage", "Size"): "Integer",
+    ("AWS::AutoScaling::LaunchConfiguration/MetadataOptions", "HttpPutResponseHopLimit"): "Integer",
 }
 
 
