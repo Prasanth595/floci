@@ -39,39 +39,40 @@ class Ec2LaunchTemplateMetadataOptionsIntegrationTest {
                 .formParam("LaunchTemplateData.MetadataOptions.HttpPutResponseHopLimit", "2")
                 .post("/").then().statusCode(200)
                 .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
-        String instance;
-        if ("fleet".equals(source)) {
-            instance = request("ec2", "CreateFleet").formParam("Type", "instant")
-                    .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", template)
-                    .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
-                    .formParam("TargetCapacitySpecification.TotalTargetCapacity", 1)
-                    .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
-                    .post("/").then().statusCode(200)
-                    .extract().path("CreateFleetResponse.fleetInstanceSet.item.instanceIds.item");
-        } else {
-            request("autoscaling", "CreateAutoScalingGroup").formParam("AutoScalingGroupName", name)
-                    .formParam("LaunchTemplate.LaunchTemplateId", template).formParam("LaunchTemplate.Version", "1")
-                    .formParam("MinSize", 0).formParam("MaxSize", 1).formParam("DesiredCapacity", 1)
-                    .formParam("AvailabilityZones.member.1", "us-east-1a").post("/").then().statusCode(200);
-            RequestScopes.runAs(OWNER, () -> reconciler.reconcile(
-                    groups.describeAutoScalingGroups("us-east-1", List.of(name)).getFirst()));
-            instance = request("autoscaling", "DescribeAutoScalingGroups")
-                    .formParam("AutoScalingGroupNames.member.1", name).post("/").then().statusCode(200)
-                    .extract().path("DescribeAutoScalingGroupsResponse.DescribeAutoScalingGroupsResult"
-                            + ".AutoScalingGroups.member.Instances.member.InstanceId");
-        }
+        String instance = null;
         try {
+            if ("fleet".equals(source)) {
+                instance = request("ec2", "CreateFleet").formParam("Type", "instant")
+                        .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", template)
+                        .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
+                        .formParam("TargetCapacitySpecification.TotalTargetCapacity", 1)
+                        .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
+                        .post("/").then().statusCode(200)
+                        .extract().path("CreateFleetResponse.fleetInstanceSet.item.instanceIds.item");
+            } else {
+                request("autoscaling", "CreateAutoScalingGroup").formParam("AutoScalingGroupName", name)
+                        .formParam("LaunchTemplate.LaunchTemplateId", template).formParam("LaunchTemplate.Version", "1")
+                        .formParam("MinSize", 0).formParam("MaxSize", 1).formParam("DesiredCapacity", 1)
+                        .formParam("AvailabilityZones.member.1", "us-east-1a").post("/").then().statusCode(200);
+                RequestScopes.runAs(OWNER, () -> reconciler.reconcile(
+                        groups.describeAutoScalingGroups("us-east-1", List.of(name)).getFirst()));
+                instance = request("autoscaling", "DescribeAutoScalingGroups")
+                        .formParam("AutoScalingGroupNames.member.1", name).post("/").then().statusCode(200)
+                        .extract().path("DescribeAutoScalingGroupsResponse.DescribeAutoScalingGroupsResult"
+                                + ".AutoScalingGroups.member.Instances.member.InstanceId");
+            }
             request("ec2", "DescribeInstances").formParam("InstanceId.1", instance).post("/").then().statusCode(200)
                     .body(INSTANCE + "metadataOptions.httpTokens", equalTo("required"))
                     .body(INSTANCE + "metadataOptions.httpPutResponseHopLimit", equalTo("2"));
         } finally {
+            // Cleanup ignores the status, so a test that failed before launching keeps its own failure.
             if ("asg".equals(source)) {
                 request("autoscaling", "DeleteAutoScalingGroup").formParam("AutoScalingGroupName", name)
-                        .formParam("ForceDelete", "true").post("/").then().statusCode(200);
-            } else {
-                request("ec2", "TerminateInstances").formParam("InstanceId.1", instance)
-                        .post("/").then().statusCode(200);
+                        .formParam("ForceDelete", "true").post("/");
+            } else if (instance != null) {
+                request("ec2", "TerminateInstances").formParam("InstanceId.1", instance).post("/");
             }
+            request("ec2", "DeleteLaunchTemplate").formParam("LaunchTemplateId", template).post("/");
         }
     }
 
