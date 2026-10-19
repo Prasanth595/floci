@@ -40,17 +40,14 @@ final class ElbV2StickyCookie {
         key = new SecretKeySpec(secret, "AES");
     }
 
-    static long durationSeconds(TargetGroup group, String loadBalancerCrossZone) {
+    static long durationSeconds(TargetGroup group) {
         Map<String, String> attributes = group.getAttributes();
-        String crossZone = attributes.getOrDefault("load_balancing.cross_zone.enabled", "use_load_balancer_configuration");
-        if ("use_load_balancer_configuration".equals(crossZone)) {
-            crossZone = loadBalancerCrossZone;
-        }
+        // ALB-level cross-zone balancing is always on; only the target group can disable it.
         if (!Boolean.parseBoolean(attributes.get("stickiness.enabled"))
                 || !"lb_cookie".equals(attributes.getOrDefault("stickiness.type", "lb_cookie"))
                 || !("HTTP".equals(group.getProtocol()) || "HTTPS".equals(group.getProtocol()))
                 || !("instance".equals(group.getTargetType()) || "ip".equals(group.getTargetType()))
-                || "false".equals(crossZone)
+                || "false".equals(attributes.get("load_balancing.cross_zone.enabled"))
                 || "weighted_random".equals(attributes.get("load_balancing.algorithm.type"))) {
             return 0;
         }

@@ -102,37 +102,35 @@ class ElbV2StickyCookieTest {
 
     @Test
     void enablesOnlySupportedDurationBasedConfigurations() {
-        assertEquals(86400, ElbV2StickyCookie.durationSeconds(group, null));
+        assertEquals(86400, ElbV2StickyCookie.durationSeconds(group));
         for (String duration : List.of("0", "604801", "-1", "oops")) {
             group.getAttributes().put("stickiness.lb_cookie.duration_seconds", duration);
-            assertEquals(0, ElbV2StickyCookie.durationSeconds(group, null));
+            assertEquals(0, ElbV2StickyCookie.durationSeconds(group));
         }
         group.getAttributes().put("stickiness.lb_cookie.duration_seconds", "604800");
-        assertEquals(604800, ElbV2StickyCookie.durationSeconds(group, null));
+        assertEquals(604800, ElbV2StickyCookie.durationSeconds(group));
         group.getAttributes().put("stickiness.type", "app_cookie");
-        assertEquals(0, ElbV2StickyCookie.durationSeconds(group, null));
+        assertEquals(0, ElbV2StickyCookie.durationSeconds(group));
         group.getAttributes().put("stickiness.type", "lb_cookie");
         group.getAttributes().put("load_balancing.algorithm.type", "weighted_random");
-        assertEquals(0, ElbV2StickyCookie.durationSeconds(group, null));
+        assertEquals(0, ElbV2StickyCookie.durationSeconds(group));
         group.getAttributes().remove("load_balancing.algorithm.type");
         group.getAttributes().put("load_balancing.cross_zone.enabled", "false");
-        assertEquals(0, ElbV2StickyCookie.durationSeconds(group, null));
+        assertEquals(0, ElbV2StickyCookie.durationSeconds(group));
         group.getAttributes().remove("load_balancing.cross_zone.enabled");
         group.setProtocol("TCP");
-        assertEquals(0, ElbV2StickyCookie.durationSeconds(group, null));
+        assertEquals(0, ElbV2StickyCookie.durationSeconds(group));
     }
 
     @Test
-    void resolvesInheritedCrossZoneSettingsWithoutOverridingExplicitValues() {
-        assertEquals(0, ElbV2StickyCookie.durationSeconds(group, "false"));
-        group.getAttributes().put("load_balancing.cross_zone.enabled", "use_load_balancer_configuration");
-        assertEquals(0, ElbV2StickyCookie.durationSeconds(group, "false"));
-        assertEquals(86400, ElbV2StickyCookie.durationSeconds(group, "true"));
-        assertEquals(86400, ElbV2StickyCookie.durationSeconds(group, null));
-        group.getAttributes().put("load_balancing.cross_zone.enabled", "true");
-        assertEquals(86400, ElbV2StickyCookie.durationSeconds(group, "false"));
+    void crossZoneOnlyUsesTheTargetGroupSetting() {
+        assertEquals(86400, ElbV2StickyCookie.durationSeconds(group));
+        for (String enabled : List.of("true", "use_load_balancer_configuration")) {
+            group.getAttributes().put("load_balancing.cross_zone.enabled", enabled);
+            assertEquals(86400, ElbV2StickyCookie.durationSeconds(group));
+        }
         group.getAttributes().put("load_balancing.cross_zone.enabled", "false");
-        assertEquals(0, ElbV2StickyCookie.durationSeconds(group, "true"));
+        assertEquals(0, ElbV2StickyCookie.durationSeconds(group));
     }
 
     private String value(TargetDescription target) {

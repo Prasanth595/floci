@@ -151,12 +151,12 @@ class ElbV2StickinessIntegrationTest {
     }
 
     @Test
-    void inheritedCrossZoneSettingControlsExistingCookies() {
+    void targetGroupCrossZoneSettingControlsExistingCookies() {
         enableStickiness(true);
         Response initial = request(null);
         String cookie = initial.getCookie("AWSALB");
         assertNotNull(cookie);
-        query("ModifyLoadBalancerAttributes", "LoadBalancerArn", loadBalancerArn,
+        query("ModifyTargetGroupAttributes", "TargetGroupArn", targetGroupArn,
                 "Attributes.member.1.Key", "load_balancing.cross_zone.enabled", "Attributes.member.1.Value", false);
         Response next = request("AWSALB=" + cookie);
         assertNotEquals(initial.asString(), next.asString());
@@ -164,10 +164,11 @@ class ElbV2StickinessIntegrationTest {
         assertEquals(null, next.getCookie("AWSALBCORS"));
 
         query("ModifyTargetGroupAttributes", "TargetGroupArn", targetGroupArn,
-                "Attributes.member.1.Key", "load_balancing.cross_zone.enabled", "Attributes.member.1.Value", true);
-        Response overridden = request("AWSALB=" + cookie);
-        assertEquals(initial.asString(), overridden.asString());
-        assertNotNull(overridden.getCookie("AWSALB"));
+                "Attributes.member.1.Key", "load_balancing.cross_zone.enabled",
+                "Attributes.member.1.Value", "use_load_balancer_configuration");
+        Response restored = request("AWSALB=" + cookie);
+        assertEquals(initial.asString(), restored.asString());
+        assertNotNull(restored.getCookie("AWSALB"));
     }
 
     private void enableStickiness(boolean enabled) {

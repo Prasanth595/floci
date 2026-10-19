@@ -466,11 +466,7 @@ public class ElbV2DataPlane {
             return;
         }
         ListenerBinding binding = listenerBindings.get(listenerArn);
-        LoadBalancer loadBalancer = binding != null
-                ? elbV2Service.getLoadBalancer(region, binding.loadBalancerArn()) : null;
-        long duration = loadBalancer != null && "application".equals(loadBalancer.getType())
-                ? ElbV2StickyCookie.durationSeconds(tg,
-                        loadBalancer.getAttributes().get("load_balancing.cross_zone.enabled")) : 0;
+        long duration = ElbV2StickyCookie.durationSeconds(tg);
         String scope = binding != null ? binding.loadBalancerArn() + "\n" + tgArn : "";
         TargetDescription target = stickyCookie.target(req.headers().getAll("Cookie"), scope, tg, candidates, duration);
         if (target == null) {
