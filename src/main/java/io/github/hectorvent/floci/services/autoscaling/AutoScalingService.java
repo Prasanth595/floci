@@ -20,7 +20,6 @@ import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -256,33 +255,26 @@ public class AutoScalingService {
         return lc;
     }
 
+    /**
+     * Refuses metadata options outside the Auto Scaling model, every violation in one
+     * {@code ValidationError} with AWS's texts.
+     */
     private static void validateMetadataOptions(LaunchTemplateData.MetadataOptions options) {
         if (options == null) {
             return;
         }
-        Integer hopLimit = options.getHttpPutResponseHopLimit();
-        AwsException invalid = metadataOptionsError(options, hopLimit == null ? null : BigInteger.valueOf(hopLimit));
-        if (invalid != null) {
-            throw invalid;
-        }
-    }
-
-    /**
-     * Auto Scaling's {@code ValidationError} for metadata options outside its model, every violation
-     * in one error with AWS's texts, or null when they are valid. The hop limit is passed apart from
-     * the options so that CloudFormation can report a whole number too large for an int the same way.
-     */
-    public static AwsException metadataOptionsError(LaunchTemplateData.MetadataOptions options,
-                                                    BigInteger hopLimit) {
         List<String> violations = new ArrayList<>();
         requireMetadataEnum(violations, "httpTokens", options.getHttpTokens(), "optional", "required");
-        if (hopLimit != null && (hopLimit.signum() < 1 || hopLimit.compareTo(BigInteger.valueOf(64)) > 0)) {
+        Integer hopLimit = options.getHttpPutResponseHopLimit();
+        if (hopLimit != null && (hopLimit < 1 || hopLimit > 64)) {
             violations.add("Value '" + hopLimit + "' at 'metadataOptions.httpPutResponseHopLimit' failed to satisfy"
                     + " constraint: Member must have value "
-                    + (hopLimit.signum() < 1 ? "greater than or equal to 1" : "less than or equal to 64"));
+                    + (hopLimit < 1 ? "greater than or equal to 1" : "less than or equal to 64"));
         }
         requireMetadataEnum(violations, "httpEndpoint", options.getHttpEndpoint(), "disabled", "enabled");
-        return violations.isEmpty() ? null : SmithyValidationErrors.validationError(violations);
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationError(violations);
+        }
     }
 
     private static void requireMetadataEnum(List<String> violations, String member, String value,
