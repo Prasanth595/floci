@@ -1264,6 +1264,84 @@ class CloudFormationServiceRollbackTest {
         deletes.verify(provisioner).delete(secret, REGION);
     }
 
+    /**
+     * A value equal to a leftover's own id can still name another kind of resource that shares the
+     * id: a leftover rule named like the event bus it is on goes before that bus, which cannot be
+     * deleted while it has rules.
+     */
+    @Test
+    void deleteStack_deletesALeftoverRuleBeforeTheSameNamedBusItIsOn() {
+        Stack stack = leftoverStack("delete-leftover-rule", "{\"Bus\": {\"Type\": \"AWS::Events::EventBus\"}}");
+        StackResource rule = resource("Rule", "orders", "AWS::Events::Rule", "UPDATE_COMPLETE");
+        rule.getAttributes().put("RuleName", "orders");
+        rule.getAttributes().put("EventBusName", "orders");
+        StackResource bus = resource("Bus", "orders", "AWS::Events::EventBus", "CREATE_COMPLETE");
+        bus.getAttributes().put("Name", "orders");
+        hold(stack, rule, bus);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(rule, REGION);
+        deletes.verify(provisioner).delete(bus, REGION);
+    }
+
+    /**
+     * A function URL on an alias takes the alias's ARN as its id, so a leftover one goes before the
+     * alias, and a leftover alias does not count its own ARN as using the URL.
+     */
+    @Test
+    void deleteStack_deletesALeftoverAliasUrlBeforeItsAlias() {
+        String aliasArn = "arn:aws:lambda:us-east-1:000000000000:function:fn:live";
+        Stack stack = leftoverStack("delete-leftover-url", "{\"Fn\": {\"Type\": \"AWS::Lambda::Function\"}}");
+        StackResource url = resource("Url", aliasArn, "AWS::Lambda::Url", "UPDATE_COMPLETE");
+        url.getAttributes().put("FunctionArn", aliasArn);
+        StackResource alias = resource("Live", aliasArn, "AWS::Lambda::Alias", "UPDATE_COMPLETE");
+        alias.getAttributes().put("AliasArn", aliasArn);
+        StackResource fn = resource("Fn", "fn", "AWS::Lambda::Function", "CREATE_COMPLETE");
+        hold(stack, url, alias, fn);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(url, REGION);
+        deletes.verify(provisioner).delete(alias, REGION);
+    }
+
+    /** A cluster's capacity provider associations take the cluster's name as their id and go first. */
+    @Test
+    void deleteStack_deletesLeftoverCapacityProviderAssociationsBeforeTheirCluster() {
+        Stack stack = leftoverStack("delete-leftover-associations", "{\"Cluster\": {\"Type\": \"AWS::ECS::Cluster\"}}");
+        StackResource associations = resource("Associations", "cluster-1",
+                "AWS::ECS::ClusterCapacityProviderAssociations", "UPDATE_COMPLETE");
+        StackResource cluster = resource("Cluster", "cluster-1", "AWS::ECS::Cluster", "CREATE_COMPLETE");
+        cluster.getAttributes().put("Arn", "arn:aws:ecs:us-east-1:000000000000:cluster/cluster-1");
+        hold(stack, associations, cluster);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(associations, REGION);
+        deletes.verify(provisioner).delete(cluster, REGION);
+    }
+
+    /** A leftover recorded without a type, as old state may be, costs the other leftovers nothing. */
+    @Test
+    void deleteStack_aLeftoverWithNoTypeKeepsTheOthersOrdered() {
+        Stack stack = leftoverStack("delete-leftover-untyped", "{\"Vpc\": {\"Type\": \"AWS::EC2::VPC\"}}");
+        StackResource subnet = resource("Subnet", "subnet-1", "AWS::EC2::Subnet", "UPDATE_COMPLETE");
+        subnet.getAttributes().put("VpcId", "vpc-1");
+        StackResource vpc = resource("Vpc", "vpc-1", "AWS::EC2::VPC", "CREATE_COMPLETE");
+        StackResource untyped = resource("Legacy", "legacy-1", null, "UPDATE_COMPLETE");
+        hold(stack, subnet, vpc, untyped);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(subnet, REGION);
+        deletes.verify(provisioner).delete(vpc, REGION);
+    }
+
     /** A leftover bucket policy recorded before its leftover bucket still goes first. */
     @Test
     void deleteStack_deletesALeftoverBucketPolicyRecordedFirstBeforeItsBucket() {

@@ -3300,14 +3300,16 @@ public class CloudFormationService implements ResourceProvider {
 
     /**
      * A resource's place in {@link #resourcesInCreationOrder}: its template rank, or for a leftover
-     * one step after the latest held resource its attributes name, leftovers included, or else -1.
-     * A chain of leftovers stays below the next template rank, and a cycle among them is cut where
-     * it closes. Only the values {@code references} gives count; see {@link #referenceValues}. A value
-     * equal to the leftover's own physical id is not a reference, as a dependent such as a bucket
-     * policy or a secret attachment may take the same id, and neither is a resource whose id extends
-     * the leftover's. A leftover whose id extends another's, {@code parent-1/child-1} of
-     * {@code parent-1}, belongs to it and goes first, as does a bucket policy or secret target
-     * attachment, which takes the id of the bucket or secret it belongs to.
+     * one step after the latest held resource it uses, leftovers included, or else -1. A chain of
+     * leftovers stays below the next template rank, and a cycle among them is cut where it closes.
+     * A leftover uses a held resource whose physical id one of the values {@code references} gives
+     * names (see {@link #referenceValues}), unless that resource's id extends the leftover's. A value
+     * equal to the leftover's own id names the leftover itself, so it does not make the leftover use
+     * a dependent that takes the same id, such as its bucket policy. It still names any other
+     * resource that shares the id, such as the event bus of a rule with the bus's name. A leftover
+     * also uses the resource whose id its own extends, {@code parent-1} for {@code parent-1/child-1},
+     * and a type that takes its parent's id (see {@link #SAME_ID_DEPENDENT_TYPES}) uses whatever else
+     * holds that id.
      */
     private static double leftoverPosition(StackResource resource, Map<String, Integer> rank,
                                            Map<String, List<StackResource>> holdersByPhysicalId,
@@ -3373,12 +3375,14 @@ public class CloudFormationService implements ResourceProvider {
         String own = resource.getPhysicalId();
         List<StackResource> uses = new ArrayList<>();
         for (String value : references.apply(resource)) {
-            if (value == null || value.equals(own)) {
-                // Its own id, which a dependent such as a bucket policy may share: not a reference.
+            if (value == null) {
                 continue;
             }
+            boolean ownId = value.equals(own);
             for (StackResource holder : holdersByPhysicalId.getOrDefault(value, List.of())) {
-                if (!extendsId(holder.getPhysicalId(), own)) {
+                // Its own id names the leftover, not a dependent that takes the same id.
+                if (holder != resource && !extendsId(holder.getPhysicalId(), own)
+                        && !(ownId && takesParentId(holder))) {
                     uses.add(holder);
                 }
             }
@@ -3386,10 +3390,10 @@ public class CloudFormationService implements ResourceProvider {
         for (String prefix : idPrefixes(own)) {
             uses.addAll(holdersByPhysicalId.getOrDefault(prefix, List.of()));
         }
-        if (SAME_ID_DEPENDENT_TYPES.contains(resource.getResourceType())) {
+        if (takesParentId(resource)) {
             // A type that takes its parent's id as its own uses whatever else holds that id.
             for (StackResource holder : holdersByPhysicalId.getOrDefault(own, List.of())) {
-                if (holder != resource && !SAME_ID_DEPENDENT_TYPES.contains(holder.getResourceType())) {
+                if (holder != resource && !takesParentId(holder)) {
                     uses.add(holder);
                 }
             }
@@ -3399,10 +3403,18 @@ public class CloudFormationService implements ResourceProvider {
 
     /**
      * Types whose physical id is the id of the resource they depend on: a bucket policy is named by
-     * its bucket, a secret target attachment by its secret's ARN.
+     * its bucket, a secret target attachment by its secret's ARN, a function URL by the ARN of the
+     * function or alias it serves, and a cluster's capacity provider associations by the cluster.
      */
-    private static final Set<String> SAME_ID_DEPENDENT_TYPES =
-            Set.of("AWS::S3::BucketPolicy", "AWS::SecretsManager::SecretTargetAttachment");
+    private static final Set<String> SAME_ID_DEPENDENT_TYPES = Set.of("AWS::S3::BucketPolicy",
+            "AWS::SecretsManager::SecretTargetAttachment", "AWS::Lambda::Url",
+            "AWS::ECS::ClusterCapacityProviderAssociations");
+
+    /** Whether a resource's type is one of {@link #SAME_ID_DEPENDENT_TYPES}. */
+    private static boolean takesParentId(StackResource resource) {
+        String type = resource.getResourceType();
+        return type != null && SAME_ID_DEPENDENT_TYPES.contains(type);
+    }
 
     /** The characters after which a physical id may continue as a child's: {@code /}, {@code :} and {@code |}. */
     private static final String ID_SEPARATORS = "/:|";
