@@ -4197,8 +4197,9 @@ public class CloudFormationService implements ResourceProvider {
      * these are what orders it before the resources it uses once the template no longer names it; a
      * literal value it was given names nothing, even if another resource has that name. The key's
      * logical id decides, and its value, that resource's physical id then, is kept as a record. One
-     * provisioned before these keys were kept has none until it next changes, so as a leftover a
-     * custom resource orders by its ServiceToken alone, and a nested stack by its outputs.
+     * provisioned before these keys were kept has none until it changes or an update of its stack
+     * commits ({@link #refreshTemplateUses}), so as a leftover before then a custom resource orders
+     * by its ServiceToken alone, and a nested stack by its outputs.
      */
     private static void recordTemplateUses(StackResource resource, Set<String> dependencies,
                                            Map<String, String> physicalIds) {
@@ -4215,24 +4216,32 @@ public class CloudFormationService implements ResourceProvider {
      * Keeps again, as an update commits, what each custom resource and nested stack the template
      * names now names: one whose only change is its {@code DependsOn} is not re-provisioned, so
      * {@link #recordTemplateUses} did not run for it. An update that rolls back never gets here,
-     * so the keys from before stay.
+     * so the keys from before stay. One whose condition is now false keeps what it was provisioned
+     * with: the cleanup about to delete it may fail and leave it held. The update has committed, so
+     * a failure here is logged and costs only these keys, not the cleanup that follows.
      */
     private void refreshTemplateUses(Stack stack, JsonNode resources, Map<String, Boolean> conditions,
                                      Map<String, String> physicalIds) {
         if (!resources.isObject()) {
             return;
         }
-        Set<String> templateIds = new LinkedHashSet<>();
-        resources.fieldNames().forEachRemaining(templateIds::add);
-        for (String logicalId : templateIds) {
-            JsonNode definition = resources.get(logicalId);
-            String type = definition.path("Type").asText();
-            StackResource resource = stack.getResources().get(logicalId);
-            if (resource != null
-                    && ("AWS::CloudFormation::Stack".equals(type) || dispatcher.isCustomResourceType(type))) {
-                recordTemplateUses(resource, collectResourceDependencies(definition, templateIds, conditions),
-                        physicalIds);
+        try {
+            Set<String> templateIds = new LinkedHashSet<>();
+            resources.fieldNames().forEachRemaining(templateIds::add);
+            for (String logicalId : templateIds) {
+                JsonNode definition = resources.get(logicalId);
+                String type = definition.path("Type").asText();
+                String condition = definition.path("Condition").asText(null);
+                StackResource resource = stack.getResources().get(logicalId);
+                if (resource != null && (condition == null || conditions.getOrDefault(condition, false))
+                        && ("AWS::CloudFormation::Stack".equals(type) || dispatcher.isCustomResourceType(type))) {
+                    recordTemplateUses(resource, collectResourceDependencies(definition, templateIds, conditions),
+                            physicalIds);
+                }
             }
+        } catch (RuntimeException e) {
+            LOG.warnv("Stack {0} keeps the uses its resources recorded before this update: {1}",
+                    stack.getStackName(), e.getMessage());
         }
     }
 
