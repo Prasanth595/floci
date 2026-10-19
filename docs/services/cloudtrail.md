@@ -61,7 +61,8 @@ sub-resource, since `CreateMultipartUpload` and `CompleteMultipartUpload` are
 both checked as `s3:PutObject` and `SelectObjectContent` as `s3:GetObject`. A request
 refused for a permission it needs besides its own, such as
 `s3:PutObjectTagging` for an upload that sets tags, is recorded as the
-operation.
+operation. A browser `POST` upload, whose credential is in its form fields, is
+recorded as `PostObject` when IAM refuses it.
 
 ## Configuration
 

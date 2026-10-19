@@ -1146,6 +1146,36 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             String resource,
             ResourcePolicyDecision resourcePolicyDecision,
             String resourceOwnerAccountId) {
+        authorizeAdditionalResource(authorizationHeader, action, resource, resourcePolicyDecision,
+                resourceOwnerAccountId, null);
+    }
+
+    /**
+     * Authorizes a browser POST upload, a PostObject, as {@code s3:PutObject} on {@code resource}.
+     * Its credential is only in the form body, so {@link #filter} never sees it, and a denial is
+     * recorded in CloudTrail here, under {@code PostObject}, as the denials {@link #filter} refuses
+     * are recorded under their operation. AWS's S3 developer guide lists PostObject among "the
+     * object-level API actions that are logged as CloudTrail events". The denial is recorded in
+     * {@code region}, the one the form's credential names, as a presigned URL's is in the one its
+     * query credential names.
+     */
+    public void authorizePostObject(String authorizationHeader, String resource, String region) {
+        authorizeAdditionalResource(authorizationHeader, "s3:PutObject", resource, null, null,
+                new DeniedEvent("PostObject", region));
+    }
+
+    /** A CloudTrail record to write when IAM refuses a request: its event name and its Region. */
+    private record DeniedEvent(String name, String region) {
+    }
+
+    /** As the public overload; a denial is also recorded in CloudTrail when {@code deniedEvent} is given. */
+    private void authorizeAdditionalResource(
+            String authorizationHeader,
+            String action,
+            String resource,
+            ResourcePolicyDecision resourcePolicyDecision,
+            String resourceOwnerAccountId,
+            DeniedEvent deniedEvent) {
         if (!config.services().iam().enforcementEnabled()) {
             return;
         }
@@ -1260,12 +1290,14 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 return;
             }
             LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
-            throw new AwsException("AccessDenied",
-                    "User: " + AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid)
-                            + " is not authorized to perform: " + action
-                            + " on resource: \"" + resource + "\""
-                            + " because no identity-based policy allows the " + action + " action",
-                    403);
+            String denyMessage = "User: " + AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid)
+                    + " is not authorized to perform: " + action
+                    + " on resource: \"" + resource + "\""
+                    + " because no identity-based policy allows the " + action + " action";
+            if (deniedEvent != null) {
+                emitS3Denial(akid, deniedEvent.name(), resource, deniedEvent.region(), denyMessage);
+            }
+            throw new AwsException("AccessDenied", denyMessage, 403);
         } finally {
             requestContext.setAccountId(previousAccountId);
         }
@@ -1304,9 +1336,18 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
             String eventName = mapS3ActionToEventName(action, ctx.getMethod(),
                     ctx.getUriInfo().getQueryParameters().keySet());
-            if (eventName == null) {
-                return;
+            if (eventName != null) {
+                emitS3Denial(akid, eventName, resource, region, denyMessage);
             }
+        } catch (RuntimeException e) {
+            // The request is refused either way; a record that could not be written is logged, not raised.
+            LOG.warnv(e, "CloudTrail denial emission failed for {0} on {1}", action, resource);
+        }
+    }
+
+    /** Records an S3 request IAM refused as a CloudTrail data event named {@code eventName}. */
+    private void emitS3Denial(String akid, String eventName, String resource, String region, String denyMessage) {
+        try {
             String[] bk = parseS3Resource(resource);
             String bucket = bk[0];
             String key = bk[1];
@@ -1329,7 +1370,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     }
                 }
             } catch (Exception e) {
-                LOG.tracev(e, "CloudTrail: could not extract request context for IAM denial {0} on {1}", action, resource);
+                LOG.tracev(e, "CloudTrail: could not extract request context for IAM denial {0} on {1}", eventName, resource);
             }
 
             cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
@@ -1345,7 +1386,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     .eventTimeMillis(System.currentTimeMillis())
                     .build());
         } catch (RuntimeException e) {
-            LOG.tracev(e, "CloudTrail denial emission failed for {0} on {1}", action, resource);
+            LOG.warnv(e, "CloudTrail denial emission failed for {0} on {1}", eventName, resource);
         }
     }
 

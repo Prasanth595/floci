@@ -3918,15 +3918,15 @@ public class S3Controller {
          * filter stage. Evaluate the signing principal's IAM identity policy here whenever a
          * credential is present, independent of whether S3's own presigned-POST signature and
          * condition checks (s3.enforce-auth) are enabled, so an IAM deny is not bypassed by
-         * running S3 without its own presigned-POST enforcement. authorizeAdditionalResource
+         * running S3 without its own presigned-POST enforcement. authorizePostObject
          * itself no-ops when IAM enforcement is disabled.
          */
         String credential = lcFields.get("x-amz-credential");
         rejectUnknownPostRegion(credential);
         if (credential != null && !credential.isEmpty()) {
-            iamEnforcementFilter.authorizeAdditionalResource(
-                    AccountResolver.SIGV4_SCHEME + " Credential=" + credential, "s3:PutObject",
-                    S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key));
+            iamEnforcementFilter.authorizePostObject(AccountResolver.SIGV4_SCHEME + " Credential=" + credential,
+                    S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key),
+                    regionResolver.resolveRegionFromPresignedCredential(credential));
         }
 
         if (s3Service.isAuthEnforced() || (config.auth().validateSignatures() && isSignedPost(lcFields))) {
