@@ -1209,6 +1209,50 @@ class Ec2ServiceTest {
         assertEquals(kept, instance.getPublicIpAddress());
     }
 
+    @Test
+    void disassociatingAnAddressOnASecondaryInterfaceLeavesThePrimaryPublicAddressAlone() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.247.0.0/24");
+        NetworkInterface retained = service.createNetworkInterface(region, subnetId, null, null, List.of(), List.of(),
+                List.of());
+        Instance first = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null,
+                null, retained.getNetworkInterfaceId(), 0).getInstances().getFirst();
+        Address carried = service.allocateAddress(region);
+        service.associateAddress(region, carried.getAllocationId(), first.getInstanceId());
+        // The interface outlives the instance and keeps the address.
+        service.terminateInstances(region, List.of(first.getInstanceId()));
+        Instance second = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null, null).getInstances().getFirst();
+        service.describeInstances(region, List.of(second.getInstanceId()), Map.of());
+        String automatic = second.getPublicIpAddress();
+        assertNotNull(automatic);
+        service.attachNetworkInterface(region, retained.getNetworkInterfaceId(), second.getInstanceId(), 1);
+
+        service.disassociateAddress(region, carried.getAssociationId());
+
+        assertEquals(automatic, second.getPublicIpAddress());
+    }
+
+    @Test
+    void containerModeDescribeAddressesWritesNothingBackOntoATerminatedInstance() {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        Instance instance = runningContainerInstance(service, region, publicSubnet(service, region, "10.248.0.0/24"),
+                null);
+        Address address = service.allocateAddress(region);
+        service.associateAddress(region, address.getAllocationId(), instance.getInstanceId());
+        // Terminated while the association stays, as for an instance whose interface did not go.
+        instance.setState(InstanceState.terminated());
+        instance.setPublicIpAddress(null);
+        instance.setPublicDnsName(null);
+
+        service.describeAddresses(region, List.of(address.getAllocationId()), Map.of());
+
+        assertNull(instance.getPublicIpAddress());
+    }
+
     /** Ec2Service in container mode, with a container manager whose containers answer on loopback. */
     private static Ec2Service containerModeService() {
         Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);

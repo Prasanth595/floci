@@ -10065,7 +10065,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             // An EIP association gives the instance a public address even in a subnet that does
             // not map one on launch, exactly as on AWS. An unchanged address is not written again.
             String dnsName = "127.0.0.1".equals(reachable) ? "localhost" : reachable;
-            if (secondary == null && (!reachable.equals(inst.getPublicIpAddress())
+            String state = inst.getState() == null ? null : inst.getState().getName();
+            boolean ended = "terminated".equals(state) || "shutting-down".equals(state);
+            if (secondary == null && !ended && (!reachable.equals(inst.getPublicIpAddress())
                     || !dnsName.equals(inst.getPublicDnsName()))) {
                 inst.setPublicIpAddress(reachable);
                 inst.setPublicDnsName(dnsName);
@@ -10159,8 +10161,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     String instanceId = addr.getInstanceId() != null ? addr.getInstanceId()
                             : instanceAttachedTo(region, addr.getNetworkInterfaceId());
                     Instance holder = instanceId == null ? null : instances.get(key(region, instanceId)).orElse(null);
-                    // Only the address on the primary private address is the instance's public one.
+                    // Only the address on the primary private address of the primary interface is the
+                    // instance's public one; a retained interface may be attached at another index.
                     boolean onPrimary = holder != null
+                            && (addr.getInstanceId() != null
+                                    || Objects.equals(addr.getNetworkInterfaceId(), primaryInterfaceId(holder)))
                             && secondaryPrivateIpOf(region, holder, addr.getPrivateIpAddress()) == null;
                     addr.setInstanceId(null);
                     addr.setAssociationId(null);
