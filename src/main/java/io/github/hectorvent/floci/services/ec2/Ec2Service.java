@@ -4091,25 +4091,40 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         EmulatorConfig.Ec2ServiceConfig ec2 = config.services().ec2();
         return switch (ec2.mockPublicAddresses()) {
             case NONE -> null;
-            case FIXED -> ec2.mockPublicAddress().map(String::strip).filter(address -> !address.isEmpty())
-                    .orElse("127.0.0.1");
+            case FIXED -> fixedMockPublicAddress();
             case DOCUMENTATION -> documentationPublicAddress();
         };
     }
 
     /**
+     * The address every mock instance shows under {@code mock-public-addresses: fixed}, for its
+     * automatic address and for an Elastic IP on its primary private address alike; null under any
+     * other setting or with containers.
+     */
+    private String fixedMockPublicAddress() {
+        EmulatorConfig.Ec2ServiceConfig ec2 = config.services().ec2();
+        if (!ec2.mock() || ec2.mockPublicAddresses() != EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.FIXED) {
+            return null;
+        }
+        return ec2.mockPublicAddress().map(String::strip).filter(address -> !address.isEmpty()).orElse("127.0.0.1");
+    }
+
+    /**
      * The next address from 203.0.113.0/24 (TEST-NET-3, reserved for documentation and routed
-     * nowhere) after the last one handed out, skipping any a live instance already shows, so a
-     * restarted instance gets a different address as on AWS. Callers hold the allocation lock, so
-     * two launches do not pick the same one; once all 254 are taken, addresses repeat.
+     * nowhere) after the last one handed out, skipping any the caller's account already holds as an
+     * instance's public address or an Elastic IP, so a restarted instance gets a different address
+     * as on AWS. Callers hold the allocation lock, so two requests do not pick the same one.
+     *
+     * @return the address, or null once all 254 are taken
      */
     private String documentationPublicAddress() {
         Set<String> taken = new HashSet<>();
         for (Instance other : instances.scan(k -> true)) {
-            String address = other.getPublicIpAddress();
-            if (address != null && address.startsWith(DOCUMENTATION_PREFIX)) {
-                taken.add(address);
-            }
+            taken.add(other.getPublicIpAddress());
+        }
+        for (Address other : addresses.scan(k -> true)) {
+            taken.add(other.getPublicIp());
+            taken.add(other.getAllocatedPublicIp());
         }
         for (int i = 0; i < 254; i++) {
             documentationHost = documentationHost % 254 + 1;
@@ -4118,13 +4133,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 return candidate;
             }
         }
-        documentationHost = documentationHost % 254 + 1;
-        return DOCUMENTATION_PREFIX + documentationHost;
-    }
-
-    private static String randomPublicIpv4() {
-        Random random = new Random();
-        return "54." + random.nextInt(256) + "." + random.nextInt(256) + "." + random.nextInt(256);
+        return null;
     }
 
     private static String primaryInterfaceId(Instance instance) {
@@ -10014,17 +10023,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return allocateAddress(region, null, null);
     }
 
+    /**
+     * Allocates an Elastic IP from 203.0.113.0/24, in every mode: an address from a real AWS range
+     * would send a client that connects to it to someone else's host. Callers name an Elastic IP by
+     * its address, so once the account holds all 254 the allocation fails rather than repeat one.
+     */
     public Address allocateAddress(String region, String publicIpv4Pool, String networkBorderGroup) {
         ensureDefaultResources(region);
         String allocId = "eipalloc-" + randomHex(17);
         Address addr = new Address();
         addr.setAllocationId(allocId);
-        addr.setPublicIp(randomPublicIpv4());
         addr.setRegion(region);
         // shortcut: pool and border group are metadata until real pool allocation is modeled.
         addr.setPublicIpv4Pool(publicIpv4Pool);
         addr.setNetworkBorderGroup(networkBorderGroup);
-        addresses.put(key(region, allocId), addr);
+        synchronized (privateIpAllocationLock) {
+            String publicIp = documentationPublicAddress();
+            if (publicIp == null) {
+                throw new AwsException("AddressLimitExceeded",
+                        "The maximum number of addresses has been reached.", 400);
+            }
+            addr.setPublicIp(publicIp);
+            addresses.put(key(region, allocId), addr);
+        }
         return addr;
     }
 
@@ -10139,17 +10160,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 instances.put(key(region, instanceId), inst);
             }
         } else if (config.services().ec2().mock() && secondary == null) {
-            // With no container to reach, the allocated address on the primary private address
-            // replaces any automatic one. A terminated instance keeps none, an unchanged address
-            // is not written again, and neither is one disassociated since the caller read it.
+            // With no container to reach, the address on the primary private address replaces any
+            // automatic one: the configured address under mock-public-addresses: fixed, re-pointed
+            // as a container's is, otherwise the allocated one. A terminated instance keeps none,
+            // an unchanged address is not written again, and neither is one disassociated since
+            // the caller read it.
+            String fixed = fixedMockPublicAddress();
             boolean changed = false;
             synchronized (inst) {
                 String state = inst.getState() == null ? null : inst.getState().getName();
                 if (!"terminated".equals(state) && !"shutting-down".equals(state)
-                        && addr.getAssociationId() != null && instanceId.equals(addr.getInstanceId())
-                        && !Objects.equals(addr.getPublicIp(), inst.getPublicIpAddress())) {
-                    setPublicAddress(inst, addr.getPublicIp());
-                    changed = true;
+                        && addr.getAssociationId() != null && instanceId.equals(addr.getInstanceId())) {
+                    if (fixed != null) {
+                        addr.setPublicIp(fixed);
+                    }
+                    if (!Objects.equals(addr.getPublicIp(), inst.getPublicIpAddress())) {
+                        setPublicAddress(inst, addr.getPublicIp());
+                        changed = true;
+                    }
                 }
             }
             if (changed) {

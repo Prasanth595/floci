@@ -1319,6 +1319,75 @@ class Ec2ServiceTest {
         assertEquals(expected, instance.getPublicIpAddress());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void elasticIpsComeFromTheDocumentationRangeApartFromEveryOtherAddress(boolean mockMode) {
+        Ec2Service service = mockMode ? mockModeService() : containerModeService();
+        String region = "us-east-1";
+        Set<String> seen = new HashSet<>();
+        if (mockMode) {
+            Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                    1, 1, null, List.of(), publicSubnet(service, region, "10.240.0.0/24"), null, List.of(), null,
+                    null, null).getInstances().getFirst();
+            service.describeInstances(region, List.of(instance.getInstanceId()), Map.of());
+            seen.add(instance.getPublicIpAddress());
+        }
+        for (int i = 0; i < 3; i++) {
+            String address = service.allocateAddress(region).getPublicIp();
+            assertTrue(address.matches("203\\.0\\.113\\.[0-9]+"), address);
+            assertTrue(seen.add(address), "a second holder of " + address);
+        }
+    }
+
+    @Test
+    void allocationFailsOnceEveryDocumentationAddressIsTaken() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        List<Address> allocated = new ArrayList<>();
+        for (int i = 0; i < 254; i++) {
+            allocated.add(service.allocateAddress(region));
+        }
+        assertEquals(254, allocated.stream().map(Address::getPublicIp).distinct().count());
+        AwsException full = assertThrows(AwsException.class, () -> service.allocateAddress(region));
+        assertEquals("AddressLimitExceeded", full.getErrorCode());
+
+        service.releaseAddress(region, allocated.getFirst().getAllocationId());
+        assertEquals(allocated.getFirst().getPublicIp(), service.allocateAddress(region).getPublicIp());
+    }
+
+    @Test
+    void underFixedAnElasticIpShowsTheConfiguredAddressUntilItIsDisassociated() {
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().mockPublicAddresses())
+                .thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.FIXED);
+        when(config.services().ec2().mockPublicAddress()).thenReturn(Optional.of("192.168.65.2"));
+        Ec2Service service = mockModeService(config);
+        String region = "us-east-1";
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), privateSubnet(service, region, "10.239.0.0/24"), null, List.of(), null, null,
+                null).getInstances().getFirst();
+        service.describeInstances(region, List.of(instance.getInstanceId()), Map.of());
+        assertNull(instance.getPublicIpAddress());
+        Address elastic = service.allocateAddress(region);
+        String allocated = elastic.getPublicIp();
+        assertTrue(allocated.startsWith("203.0.113."), allocated);
+
+        service.associateAddress(region, elastic.getAllocationId(), instance.getInstanceId());
+        assertEquals("192.168.65.2", instance.getPublicIpAddress());
+        assertEquals("192.168.65.2", service.describeAddresses(region, List.of(elastic.getAllocationId()), Map.of())
+                .getFirst().getPublicIp());
+
+        service.disassociateAddress(region, elastic.getAssociationId());
+        assertEquals(allocated, service.describeAddresses(region, List.of(elastic.getAllocationId()), Map.of())
+                .getFirst().getPublicIp());
+        assertNull(instance.getPublicIpAddress(), "the launch asked for no automatic address");
+    }
+
+    private static String privateSubnet(Ec2Service service, String region, String cidr) {
+        return service.createSubnet(region, service.createVpc(region, cidr, false).getVpcId(), cidr, region + "a")
+                .getSubnetId();
+    }
+
     @Test
     void containerModeLaunchOnARetainedInterfaceRecordsTheElasticIpItCarries() {
         Ec2Service service = containerModeService();

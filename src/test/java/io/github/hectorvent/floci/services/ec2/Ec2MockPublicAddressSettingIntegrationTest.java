@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Mock instances under the default {@code mock-public-addresses: none}: a launch that asks for an
@@ -36,6 +37,7 @@ class Ec2MockPublicAddressSettingIntegrationTest {
                 .post("/").then().statusCode(200);
         String allocation = allocated.extract().path("AllocateAddressResponse.allocationId");
         String elastic = allocated.extract().path("AllocateAddressResponse.publicIp");
+        assertTrue(elastic.matches("203\\.0\\.113\\.[0-9]+"), elastic);
         String association = request("AssociateAddress", owner).formParam("AllocationId", allocation)
                 .formParam("InstanceId", instance).post("/").then().statusCode(200)
                 .extract().path("AssociateAddressResponse.associationId");

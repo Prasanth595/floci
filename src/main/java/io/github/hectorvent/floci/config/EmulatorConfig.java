@@ -3211,8 +3211,9 @@ public interface EmulatorConfig {
          * from a real AWS range would send a client that connects to it to someone else's host.
          * {@code documentation} draws addresses from 203.0.113.0/24, a range reserved for
          * documentation that routes nowhere; {@code fixed} gives every instance
-         * {@link #mockPublicAddress()}. Instances with containers always report the container's
-         * reachable address, whatever this says.
+         * {@link #mockPublicAddress()}, which an Elastic IP on its primary private address then
+         * shows too. Elastic IPs are allocated from 203.0.113.0/24 whatever this says, and
+         * instances with containers always report the container's reachable address.
          *
          * Env var: FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES
          */

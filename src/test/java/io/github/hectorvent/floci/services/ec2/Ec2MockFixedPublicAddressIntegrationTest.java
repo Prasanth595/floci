@@ -15,6 +15,7 @@ import static io.github.hectorvent.floci.services.ec2.Ec2MockPublicAddressSettin
 import static io.github.hectorvent.floci.services.ec2.Ec2MockPublicAddressSettingIntegrationTest.publicIp;
 import static io.github.hectorvent.floci.services.ec2.Ec2MockPublicAddressSettingIntegrationTest.request;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Mock instances under {@code mock-public-addresses: fixed} all show the configured address. */
 @QuarkusTest
@@ -44,14 +45,24 @@ class Ec2MockFixedPublicAddressIntegrationTest {
         String association = request("AssociateAddress", owner).formParam("AllocationId", allocation)
                 .formParam("InstanceId", first).post("/").then().statusCode(200)
                 .extract().path("AssociateAddressResponse.associationId");
-        assertEquals(allocated.extract().path("AllocateAddressResponse.publicIp"), publicIp(owner, first));
+        String elastic = allocated.extract().path("AllocateAddressResponse.publicIp");
+        assertTrue(elastic.matches("203\\.0\\.113\\.[0-9]+"), elastic);
+        // Associated, the Elastic IP stands for the configured address too, as a container's does.
+        assertEquals(CONFIGURED, publicIp(owner, first));
+        assertEquals(CONFIGURED, address(owner, allocation));
         request("DisassociateAddress", owner).formParam("AssociationId", association).post("/").then()
                 .statusCode(200);
         assertEquals(CONFIGURED, publicIp(owner, first));
+        assertEquals(elastic, address(owner, allocation));
 
         request("TerminateInstances", owner).formParam("InstanceId.1", first).formParam("InstanceId.2", second)
                 .post("/").then().statusCode(200);
         request("ReleaseAddress", owner).formParam("AllocationId", allocation).post("/").then().statusCode(200);
+    }
+
+    private static String address(String owner, String allocation) {
+        return request("DescribeAddresses", owner).formParam("AllocationId.1", allocation).post("/").then()
+                .statusCode(200).extract().path("DescribeAddressesResponse.addressesSet.item.publicIp");
     }
 
     public static class FixedAddress implements QuarkusTestProfile {

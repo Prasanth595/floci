@@ -2276,15 +2276,15 @@ class Ec2IntegrationTest {
             .body("DescribeAddressesResponse.addressesSet.item.size()", equalTo(1))
             .body("DescribeAddressesResponse.addressesSet.item.allocationId", equalTo(targetAllocationId));
 
-        // Negative, resource-specific field filter: floci's synthesized public IPs always
-        // start with "54." (Ec2Service.allocateAddress), so an RFC 5737 TEST-NET-3 address is
+        // Negative, resource-specific field filter: floci allocates Elastic IPs only from
+        // 203.0.113.0/24 (Ec2Service.allocateAddress), so an RFC 5737 TEST-NET-2 address is
         // guaranteed not to match anything this test (or any other) could have allocated.
         given()
             .formParam("Action", "DescribeAddresses")
             .formParam("Filter.1.Name", "tag:Suite")
             .formParam("Filter.1.Value.1", suiteTag)
             .formParam("Filter.2.Name", "public-ip")
-            .formParam("Filter.2.Value.1", "203.0.113.99")
+            .formParam("Filter.2.Value.1", "198.51.100.99")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
