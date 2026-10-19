@@ -4785,7 +4785,8 @@ public class AslExecutor {
         validateConnectionArn(input);
         validateHttpHeaders(headers);
 
-        HttpRequestPayload requestPayload = requestPayload(requestBody, requestBodyEncoding);
+        HttpRequestPayload requestPayload = requestPayload(requestBody, requestBodyEncoding,
+                input.path("Transform").path("RequestEncodingOptions"));
         MultiMap requestHeaders = requestHeaders(headers, requestPayload.contentType());
         MultiMap requestQueryParameters = queryParameters(queryParameters);
 
@@ -4910,10 +4911,14 @@ public class AslExecutor {
         }
     }
 
-    private HttpRequestPayload requestPayload(JsonNode requestBody, String requestBodyEncoding) {
+    private HttpRequestPayload requestPayload(JsonNode requestBody, String requestBodyEncoding, JsonNode options) {
         if ("URL_ENCODED".equalsIgnoreCase(requestBodyEncoding)) {
-            // TODO: Implement Transform.RequestBodyEncoding URL_ENCODED with AWS-compatible array formats.
-            throw new FailStateException("States.TaskFailed", "URL-encoded request bodies are not supported yet");
+            try {
+                return new HttpRequestPayload(Buffer.buffer(HttpTaskFormEncoder.encode(requestBody, options)),
+                        null, "application/x-www-form-urlencoded");
+            } catch (IllegalArgumentException e) {
+                throw new FailStateException("States.TaskFailed", e.getMessage());
+            }
         } else if ("NONE".equalsIgnoreCase(requestBodyEncoding)) {
             try {
                 if (requestBody.isMissingNode() || requestBody.isNull()) {
