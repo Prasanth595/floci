@@ -4092,6 +4092,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 : instance.getNetworkInterfaces().get(0).getNetworkInterfaceId();
     }
 
+    /**
+     * The instance an associated Elastic IP serves: the one it was associated with, or, for one a
+     * retained interface carries, the instance that interface is now the primary interface of.
+     */
+    private String addressHolder(String region, Address address) {
+        if (address.getInstanceId() != null) {
+            return address.getInstanceId();
+        }
+        String attached = instanceAttachedTo(region, address.getNetworkInterfaceId());
+        return attached == null ? null : instances.get(key(region, attached))
+                .filter(inst -> Objects.equals(primaryInterfaceId(inst), address.getNetworkInterfaceId()))
+                .map(Instance::getInstanceId)
+                .orElse(null);
+    }
+
     /** The instance a standalone interface is attached to, or null. */
     private String instanceAttachedTo(String region, String networkInterfaceId) {
         return networkInterfaceId == null ? null : networkInterfaces.get(key(region, networkInterfaceId))
@@ -4310,7 +4325,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         }
                     }
                 }
-            } else {
+            } else if (!"terminated".equals(prev.getName()) && !"shutting-down".equals(prev.getName())) {
+                // As in mock mode, a terminated or terminating instance stays so.
                 containerManager.stop(inst);
                 // A stop releases the automatic address with a container too; the next start
                 // decides on a replacement, and re-points an Elastic IP kept here.
@@ -10322,13 +10338,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // the one persisted before the restart. This is also the call Terraform refreshes
         // public_ip from, so it is the last chance to be right. Under the lock AssociateAddress and
         // DisassociateAddress take, so a re-point never writes back an association they changed;
-        // a call with no address on an instance does not wait for it.
-        if (candidates.stream().anyMatch(addr -> addr.getInstanceId() != null && addr.getAssociationId() != null)) {
+        // a call with no associated address does not wait for it.
+        if (candidates.stream().anyMatch(addr -> addr.getAssociationId() != null)) {
             synchronized (privateIpAllocationLock) {
                 for (Address addr : candidates) {
-                    if (addr.getInstanceId() != null && addr.getAssociationId() != null) {
+                    String holder = addr.getAssociationId() == null ? null : addressHolder(region, addr);
+                    if (holder != null) {
                         String before = addr.getPublicIp();
-                        pointAddressAtInstance(addr, region, addr.getInstanceId());
+                        pointAddressAtInstance(addr, region, holder);
                         if (!Objects.equals(before, addr.getPublicIp())) {
                             addresses.put(key(region, addr.getAllocationId()), addr);
                         }

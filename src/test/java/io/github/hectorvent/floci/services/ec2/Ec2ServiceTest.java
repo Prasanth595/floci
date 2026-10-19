@@ -82,6 +82,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -1276,6 +1277,61 @@ class Ec2ServiceTest {
 
         service.describeAddresses(region, List.of(address.getAllocationId()), Map.of());
 
+        assertNull(instance.getPublicIpAddress());
+    }
+
+    @Test
+    void containerModeDescribeAddressesRepointsAnElasticIpCarriedToANewInstance() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        // Each container answers on its own address, so a stale one shows.
+        Map<String, String> reachable = new ConcurrentHashMap<>();
+        when(containerManager.reachablePublicAddress(any())).thenAnswer(invocation -> {
+            Instance instance = invocation.getArgument(0);
+            return instance.getDockerContainerId() == null ? null : reachable.computeIfAbsent(
+                    instance.getDockerContainerId(), container -> "192.0.2." + (reachable.size() + 1));
+        });
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
+                images, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.250.0.0/24");
+        NetworkInterface retained = service.createNetworkInterface(region, subnetId, null, null, List.of(), List.of(),
+                List.of());
+        Instance first = runningContainerInstance(service, region, subnetId, retained.getNetworkInterfaceId());
+        Address carried = service.allocateAddress(region);
+        service.associateAddress(region, carried.getAllocationId(), first.getInstanceId());
+        String firstAddress = carried.getPublicIp();
+        service.terminateInstances(region, List.of(first.getInstanceId()));
+        Instance second = runningContainerInstance(service, region, subnetId, retained.getNetworkInterfaceId());
+        String secondAddress = containerManager.reachablePublicAddress(second);
+        assertNotEquals(firstAddress, secondAddress);
+
+        Address described = service.describeAddresses(region, List.of(carried.getAllocationId()), Map.of()).getFirst();
+
+        assertEquals(secondAddress, described.getPublicIp());
+        assertEquals(secondAddress, second.getPublicIpAddress());
+    }
+
+    @Test
+    void containerModeStopLeavesATerminatedInstanceAlone() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.reachablePublicAddress(any())).thenReturn("127.0.0.1");
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
+                images, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        Instance instance = runningContainerInstance(service, region, publicSubnet(service, region, "10.251.0.0/24"),
+                null);
+        service.terminateInstances(region, List.of(instance.getInstanceId()));
+        // What the container manager's teardown does once the container is gone.
+        instance.setState(InstanceState.terminated());
+
+        service.stopInstances(region, List.of(instance.getInstanceId()));
+
+        // A container stop would set it stopped and so startable again.
+        verify(containerManager, never()).stop(instance);
         assertNull(instance.getPublicIpAddress());
     }
 
