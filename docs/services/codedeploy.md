@@ -75,8 +75,8 @@ Floci implements the CodeDeploy API — stored-state management for applications
 | `GetOnPremisesInstance` | Returns registration information for one instance |
 | `BatchGetOnPremisesInstances` | Returns registration information for named instances |
 | `ListOnPremisesInstances` | Lists registered names, optionally filtered by status or tags |
-| `AddTagsToOnPremisesInstances` | Accepted, no-op |
-| `RemoveTagsFromOnPremisesInstances` | Accepted, no-op |
+| `AddTagsToOnPremisesInstances` | Adds or replaces tags by key on named instances |
+| `RemoveTagsFromOnPremisesInstances` | Removes matching tag keys from named instances |
 
 ## Pre-seeded Built-in Deployment Configs
 
