@@ -26,6 +26,7 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String PROPERTIES = "__FlociS3VectorsProperties";
+    private static final String PROPERTIES_PRIOR = "__FlociS3VectorsPropertiesBeforeUpdate";
     private static final String TAG_SNAPSHOT = "__FlociS3VectorsTagsBeforeUpdate";
     private static final Pattern KMS_KEY_ARN = Pattern.compile(
             "arn:" + AwsArnUtils.PARTITION_REGEX + ":kms:[-a-z0-9]*:[0-9]{12}:key/.+");
@@ -58,6 +59,9 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
         }
         resource.getAttributes().put(PROPERTIES, immutable.toString());
         ReplacementCleanup.record(resource, ctx, before);
+        if (ctx.isUpdate() && !ctx.priorPhysicalId().equals(resource.getPhysicalId())) {
+            resource.getAttributes().put(PROPERTIES_PRIOR, before.getOrDefault(PROPERTIES, ""));
+        }
     }
 
     private void provisionBucket(StackResource resource, JsonNode props, Map<String, String> tags,
@@ -250,7 +254,16 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        if (ReplacementCleanup.rollback(resource, this::delete)) {
+        boolean replaced = ReplacementCleanup.rollback(resource, this::delete);
+        String prior = resource.getAttributes().remove(PROPERTIES_PRIOR);
+        if (prior != null) {
+            if (prior.isEmpty()) {
+                resource.getAttributes().remove(PROPERTIES);
+            } else {
+                resource.getAttributes().put(PROPERTIES, prior);
+            }
+        }
+        if (replaced) {
             return true;
         }
         String snapshot = resource.getAttributes().get(TAG_SNAPSHOT);
@@ -283,11 +296,13 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(PROPERTIES_PRIOR);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(PROPERTIES_PRIOR);
         resource.getAttributes().remove(TAG_SNAPSHOT);
         ReplacementCleanup.clear(resource);
     }

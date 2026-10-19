@@ -272,6 +272,7 @@ class S3VectorsCfnProvisionerTest {
         verify(service, never()).getVectorBucket(anyString(), anyString());
         assertTrue(provisioner.rollbackUpdate(resource));
         assertTrue(CfnResourceDispatcher.isStub(resource.getPhysicalId(), resource.getAttributes()));
+        assertFalse(resource.getAttributes().containsKey("__FlociS3VectorsProperties"));
         verify(service).deleteVectorBucket(name, REGION);
         provisioner.delete(resource, REGION);
         verifyNoMoreInteractions(service);
@@ -359,7 +360,69 @@ class S3VectorsCfnProvisionerTest {
         assertTrue(provisioner.hasReplacementUpdate(resource));
         assertEquals(oldArn, provisioner.updateCleanupPhysicalId(resource));
         assertTrue(provisioner.completeUpdate(resource).complete());
+        assertFalse(resource.getAttributes().containsKey("__FlociS3VectorsPropertiesBeforeUpdate"));
+        assertEquals(props.deepCopy().put("Dimension", 4).toString(),
+                resource.getAttributes().get("__FlociS3VectorsProperties"));
         verify(service).deleteIndex("my-bucket", oldArn.substring(oldArn.lastIndexOf('/') + 1), REGION);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"VectorBucket", "Index"})
+    void tagUpdateAfterReplacementRollbackReusesOriginalResource(String type) throws Exception {
+        stubCreates();
+        boolean index = "Index".equals(type);
+        StackResource resource = resource(type);
+        ObjectNode original = index ? indexProps() : props("{\"VectorBucketName\":\"my-bucket\"}");
+        provisioner.provision(resource, original, context(null));
+        String originalArn = resource.getPhysicalId();
+        ObjectNode replacement = original.deepCopy().put(index ? "IndexName" : "VectorBucketName", "replacement");
+        provisioner.provision(resource, replacement, context(originalArn));
+
+        assertTrue(provisioner.rollbackUpdate(resource));
+        assertEquals(originalArn, resource.getPhysicalId());
+        assertEquals(original.toString(), resource.getAttributes().get("__FlociS3VectorsProperties"));
+        assertFalse(resource.getAttributes().containsKey("__FlociS3VectorsPropertiesBeforeUpdate"));
+
+        VectorBucket bucket = new VectorBucket("my-bucket", BUCKET_ARN, null);
+        bucket.setCreationTime(CREATION_TIME);
+        when(service.getVectorBucket("my-bucket", REGION)).thenReturn(bucket);
+        VectorIndex vectorIndex = new VectorIndex("my-index", INDEX_ARN, "my-bucket", 3, "float32", "cosine");
+        vectorIndex.setCreationTime(CREATION_TIME);
+        when(service.getIndex("my-bucket", "my-index", REGION)).thenReturn(vectorIndex);
+        ObjectNode tagged = original.deepCopy();
+        tagged.set("Tags", MAPPER.readTree("[{\"Key\":\"version\",\"Value\":\"second\"}]"));
+
+        provisioner.provision(resource, tagged, context(originalArn));
+
+        assertEquals(originalArn, resource.getPhysicalId());
+        assertEquals(CREATION_TIME.toString(), resource.getAttributes().get("CreationTime"));
+        assertFalse(provisioner.hasReplacementUpdate(resource));
+        if (index) {
+            verify(service).replaceIndexTags("my-bucket", "my-index", Map.of("version", "second"), REGION);
+            verify(service, times(2)).createIndex(anyString(), anyString(), anyInt(), anyString(), anyString(),
+                    anyList(), any(), anyMap(), eq(REGION));
+        } else {
+            verify(service).replaceBucketTags("my-bucket", Map.of("version", "second"), REGION);
+            verify(service, times(2)).createVectorBucket(anyString(), any(), anyMap(), eq(REGION));
+        }
+    }
+
+    @Test
+    void replacementRollbackRetainsPropertySnapshotUntilDeletionSucceeds() throws Exception {
+        stubCreates();
+        StackResource resource = resource("Index");
+        provisioner.provision(resource, indexProps(), context(null));
+        provisioner.provision(resource, indexProps().put("IndexName", "replacement"), context(INDEX_ARN));
+        doThrow(new AwsException("ConflictException", "retry deletion", 409)).doNothing()
+                .when(service).deleteIndex("my-bucket", "replacement", REGION);
+
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(resource));
+        assertEquals(indexProps().toString(),
+                resource.getAttributes().get("__FlociS3VectorsPropertiesBeforeUpdate"));
+        assertTrue(provisioner.rollbackUpdate(resource));
+        assertEquals(indexProps().toString(), resource.getAttributes().get("__FlociS3VectorsProperties"));
+        assertFalse(resource.getAttributes().containsKey("__FlociS3VectorsPropertiesBeforeUpdate"));
+        verify(service, times(2)).deleteIndex("my-bucket", "replacement", REGION);
     }
 
     @Test

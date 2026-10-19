@@ -123,6 +123,64 @@ class CloudFormationS3VectorsTest {
     }
 
     @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void tagUpdateAfterReplacementRollbackPreservesIndexAndVectors(boolean named) throws Exception {
+        String name = TestFixtures.uniqueName("cfn-vectors-rollback");
+        ObjectNode original = (ObjectNode) MAPPER.readTree(TEMPLATE);
+        if (named) {
+            ((ObjectNode) original.path("Resources").path("Index").path("Properties"))
+                    .put("IndexName", "original-index");
+        }
+        ObjectNode replacement = original.deepCopy();
+        ObjectNode resources = (ObjectNode) replacement.path("Resources");
+        if (named) {
+            ((ObjectNode) resources.path("Index").path("Properties")).put("IndexName", "replacement-index");
+        }
+        ObjectNode invalid = resources.putObject("Broken").put("Type", "AWS::S3Vectors::Index")
+                .put("DependsOn", "Index").putObject("Properties");
+        invalid.putObject("VectorBucketArn").put("Ref", "Bucket");
+        invalid.put("Dimension", 3).put("DataType", "float64").put("DistanceMetric", "cosine");
+        try (CloudFormationClient cfn = TestFixtures.cloudFormationClient();
+                S3VectorsClient vectors = TestFixtures.s3vectorsClient()) {
+            try {
+                cfn.createStack(request -> request.stackName(name).templateBody(original.toString())
+                        .parameters(parameter("Tag", "first"), parameter("Dimension", "3")));
+                Map<String, String> before = outputs(awaitStack(cfn, name, "CREATE_COMPLETE"));
+                String bucketName = leaf(before.get("BucketArn"));
+                String indexName = leaf(before.get("IndexArn"));
+                vectors.putVectors(request -> request.vectorBucketName(bucketName).indexName(indexName)
+                        .vectors(PutInputVector.builder().key("vector")
+                                .data(VectorData.builder().float32(1.0f, 0.0f, 0.0f).build()).build()));
+
+                cfn.updateStack(request -> request.stackName(name).templateBody(replacement.toString())
+                        .parameters(parameter("Tag", "first"), parameter("Dimension", "4")));
+                assertThat(outputs(awaitStack(cfn, name, "UPDATE_ROLLBACK_COMPLETE"))).isEqualTo(before);
+                String replacementArn = cfn.describeStackEvents(request -> request.stackName(name)).stackEvents()
+                        .stream().filter(event -> "Index".equals(event.logicalResourceId())
+                                && "UPDATE_COMPLETE".equals(event.resourceStatusAsString())
+                                && !before.get("IndexArn").equals(event.physicalResourceId()))
+                        .findFirst().orElseThrow().physicalResourceId();
+                assertThatThrownBy(() -> vectors.getIndex(request -> request.vectorBucketName(bucketName)
+                        .indexName(leaf(replacementArn)))).isInstanceOf(NotFoundException.class);
+
+                cfn.updateStack(request -> request.stackName(name).templateBody(original.toString())
+                        .parameters(parameter("Tag", "second"), parameter("Dimension", "3")));
+                assertThat(outputs(awaitStack(cfn, name, "UPDATE_COMPLETE"))).isEqualTo(before);
+                assertThat(vectors.getIndex(request -> request.vectorBucketName(bucketName).indexName(indexName))
+                        .index().dimension()).isEqualTo(3);
+                assertThat(vectors.getVectors(request -> request.vectorBucketName(bucketName)
+                        .indexName(indexName).keys("vector")).vectors())
+                        .extracting(vector -> vector.key()).containsExactly("vector");
+                assertThat(vectors.listIndexes(request -> request.vectorBucketName(bucketName)).indexes())
+                        .extracting(index -> index.indexArn()).containsExactly(before.get("IndexArn"));
+            } finally {
+                cfn.deleteStack(request -> request.stackName(name));
+                awaitDeleted(cfn, name);
+            }
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"VectorBucketName", "VectorBucketArn"})
     void namedResourcesCanReferenceAnExistingBucketAndTolerateExternalDeletion(String selector) throws Exception {
         String bucketName = "cfn-existing-" + UUID.randomUUID().toString().substring(0, 8);
