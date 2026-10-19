@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -11,11 +12,13 @@ import io.github.hectorvent.floci.services.s3vectors.model.VectorBucket;
 import io.github.hectorvent.floci.services.s3vectors.model.VectorIndex;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -26,6 +29,7 @@ class S3VectorsCfnProvisionerTest {
     private static final String REGION = "us-east-1";
     private static final String BUCKET_ARN = "arn:aws:s3vectors:us-east-1:000000000000:bucket/my-bucket";
     private static final String INDEX_ARN = BUCKET_ARN + "/index/my-index";
+    private static final String KMS_KEY_ARN = "arn:aws:kms:us-east-1:000000000000:key/1234abcd-12ab-34cd-56ef-1234567890ab";
     private static final Instant CREATION_TIME = Instant.parse("2026-01-01T00:00:00Z");
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private final S3VectorsService service = mock(S3VectorsService.class);
@@ -86,15 +90,88 @@ class S3VectorsCfnProvisionerTest {
         stubCreates();
         StackResource resource = resource("VectorBucket");
         provisioner.provision(resource, props("""
-                {"VectorBucketName":"my-bucket","EncryptionConfiguration":{"SseType":"aws:kms","KmsKeyArn":"key"},
+                {"VectorBucketName":"my-bucket","EncryptionConfiguration":{"SseType":"aws:kms","KmsKeyArn":"%s"},
                  "Tags":[{"Key":"team","Value":"search"}]}
-                """), context(null));
+                """.formatted(KMS_KEY_ARN)), context(null));
 
-        verify(service).createVectorBucket("my-bucket", Map.of("sseType", "aws:kms", "kmsKeyArn", "key"),
+        verify(service).createVectorBucket("my-bucket", Map.of("sseType", "aws:kms", "kmsKeyArn", KMS_KEY_ARN),
                 Map.of("team", "search"), REGION);
         assertEquals(BUCKET_ARN, resource.getPhysicalId());
         assertEquals(BUCKET_ARN, resource.getAttributes().get("VectorBucketArn"));
         assertEquals(CREATION_TIME.toString(), resource.getAttributes().get("CreationTime"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\"AES256\"", "[]", "42", "true"})
+    void malformedEncryptionConfigurationsFailBeforeCreatingAnything(String configuration) throws Exception {
+        for (String type : List.of("VectorBucket", "Index")) {
+            ObjectNode props = encryptionProps(type, MAPPER.readTree(configuration));
+            AwsException error = assertThrows(AwsException.class,
+                    () -> provisioner.provision(resource(type), props, context(null)));
+            assertEquals("ValidationError", error.getErrorCode());
+            assertTrue(error.getMessage().contains("EncryptionConfiguration must be an object"));
+        }
+        verifyNoInteractions(service);
+    }
+
+    static Stream<String> invalidKmsKeyArns() {
+        return Stream.of("key", "1234abcd-12ab-34cd-56ef-1234567890ab", "alias/my-key", "", " ",
+                KMS_KEY_ARN.replace(":kms:", ":s3:"), KMS_KEY_ARN.replace(":key/", ":alias/"),
+                KMS_KEY_ARN.replace("000000000000", "123"), KMS_KEY_ARN.replace("000000000000", "abcdefghijkl"),
+                KMS_KEY_ARN.replace("us-east-1", "US-EAST-1"), KMS_KEY_ARN.replace("arn:aws:", "arn:invalid:"),
+                "arn:aws:kms:us-east-1:000000000000:key/", KMS_KEY_ARN + "a".repeat(2049 - KMS_KEY_ARN.length()));
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidKmsKeyArns")
+    void invalidKmsKeyArnsFailBeforeCreatingAnything(String key) throws Exception {
+        ObjectNode configuration = MAPPER.createObjectNode().put("SseType", "aws:kms").put("KmsKeyArn", key);
+        for (String type : List.of("VectorBucket", "Index")) {
+            ObjectNode props = encryptionProps(type, configuration);
+            AwsException error = assertThrows(AwsException.class,
+                    () -> provisioner.provision(resource(type), props, context(null)));
+            assertEquals("ValidationError", error.getErrorCode());
+            assertTrue(error.getMessage().contains("KmsKeyArn"));
+        }
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"us-east-1", "us-gov-west-1", "cn-north-1", "us-iso-east-1", "us-isob-east-1",
+            "eu-isoe-west-1", "us-isof-south-1", "eusc-de-east-1"})
+    void kmsKeyArnsArePreservedAcrossPartitions(String region) throws Exception {
+        stubCreates();
+        String key = AwsArnUtils.Arn.of("kms", region, "000000000000",
+                "key/1234abcd-12ab-34cd-56ef-1234567890ab").toString();
+        ObjectNode configuration = MAPPER.createObjectNode().put("SseType", "aws:kms").put("KmsKeyArn", key);
+        for (String type : List.of("VectorBucket", "Index")) {
+            provisioner.provision(resource(type), encryptionProps(type, configuration), context(null));
+        }
+        Map<String, String> expected = Map.of("sseType", "aws:kms", "kmsKeyArn", key);
+        verify(service).createVectorBucket("my-bucket", expected, Map.of(), REGION);
+        verify(service).createIndex("my-bucket", "my-index", 3, "float32", "cosine",
+                List.of(), expected, Map.of(), REGION);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"null", "{}"})
+    void optionalEncryptionConfigurationPreservesDefaults(String configuration) throws Exception {
+        stubCreates();
+        JsonNode config = MAPPER.readTree(configuration);
+        for (String type : List.of("VectorBucket", "Index")) {
+            provisioner.provision(resource(type), encryptionProps(type, config), context(null));
+        }
+        Map<String, String> expected = config.isNull() ? null : Map.of("sseType", "AES256");
+        verify(service).createVectorBucket("my-bucket", expected, Map.of(), REGION);
+        verify(service).createIndex("my-bucket", "my-index", 3, "float32", "cosine",
+                List.of(), expected, Map.of(), REGION);
+    }
+
+    private static ObjectNode encryptionProps(String type, JsonNode configuration) throws Exception {
+        ObjectNode props = "Index".equals(type) ? indexProps()
+                : MAPPER.createObjectNode().put("VectorBucketName", "my-bucket");
+        props.set("EncryptionConfiguration", configuration);
+        return props;
     }
 
     @Test

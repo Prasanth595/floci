@@ -19,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
@@ -26,6 +27,8 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String PROPERTIES = "FlociS3VectorsProperties";
     private static final String TAG_SNAPSHOT = "__FlociS3VectorsTagsBeforeUpdate";
+    private static final Pattern KMS_KEY_ARN = Pattern.compile(
+            "arn:" + AwsArnUtils.PARTITION_REGEX + ":kms:[-a-z0-9]*:[0-9]{12}:key/.+");
 
     private final S3VectorsService service;
 
@@ -174,8 +177,11 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
         if (config.isMissingNode() || config.isNull()) {
             return null;
         }
+        if (!config.isObject()) {
+            throw validation("EncryptionConfiguration must be an object.");
+        }
         String type = ctx.resolveOrDefault(config, "SseType", "AES256");
-        String key = ctx.resolveOrDefault(config, "KmsKeyArn", null);
+        String key = ctx.resolveOptional(config, "KmsKeyArn");
         if ((!"AES256".equals(type) && !"aws:kms".equals(type))
                 || (key != null && !"aws:kms".equals(type))) {
             throw validation("EncryptionConfiguration requires AES256 or aws:kms; KmsKeyArn requires aws:kms.");
@@ -183,6 +189,9 @@ public class S3VectorsCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> result = new LinkedHashMap<>();
         result.put("sseType", type);
         if (key != null) {
+            if (key.length() > 2048 || !KMS_KEY_ARN.matcher(key).matches()) {
+                throw validation("KmsKeyArn must be a KMS key ARN of at most 2048 characters.");
+            }
             result.put("kmsKeyArn", key);
         }
         return result;

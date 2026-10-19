@@ -167,6 +167,89 @@ class CloudFormationS3VectorsIntegrationTest {
                 Arguments.of("float32", "cosine", Collections.nCopies(11, "key"), "NonFilterableMetadataKeys"));
     }
 
+    static Stream<Arguments> invalidEncryptionSettings() {
+        return Stream.of("VectorBucket", "Index").flatMap(type -> Stream.of(
+                Arguments.of(type, "\"AES256\"", "EncryptionConfiguration"),
+                Arguments.of(type, "[]", "EncryptionConfiguration"),
+                Arguments.of(type, "{\"SseType\":\"aws:kms\",\"KmsKeyArn\":\"key\"}", "KmsKeyArn")));
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidEncryptionSettings")
+    void invalidEncryptionSettingsFailThroughCloudFormation(String type, String configuration,
+                                                            String errorMember) throws Exception {
+        String name = "invalid-encryption-" + UUID.randomUUID().toString().substring(0, 8);
+        boolean index = "Index".equals(type);
+        ObjectNode props = MAPPER.createObjectNode().put("VectorBucketName", name);
+        props.set("EncryptionConfiguration", MAPPER.readTree(configuration));
+        if (index) {
+            props.put("IndexName", "index").put("Dimension", 3)
+                    .put("DataType", "float32").put("DistanceMetric", "cosine");
+        }
+        String template = MAPPER.writeValueAsString(Map.of("Resources", Map.of("Vectors", Map.of(
+                "Type", "AWS::S3Vectors::" + type, "Properties", props))));
+        try (CloudFormationClient cfn = cloudFormation("us-east-1"); S3VectorsClient vectors = vectors("us-east-1")) {
+            if (index) {
+                vectors.createVectorBucket(request -> request.vectorBucketName(name));
+            }
+            try {
+                cfn.createStack(request -> request.stackName(name).templateBody(template));
+                awaitStack(cfn, name, "ROLLBACK_COMPLETE");
+                assertTrue(cfn.describeStackEvents(request -> request.stackName(name)).stackEvents().stream()
+                        .anyMatch(event -> "Vectors".equals(event.logicalResourceId())
+                                && "CREATE_FAILED".equals(event.resourceStatusAsString())
+                                && event.resourceStatusReason().contains(errorMember)));
+                if (index) {
+                    assertTrue(vectors.listIndexes(request -> request.vectorBucketName(name)).indexes().isEmpty());
+                } else {
+                    assertThrows(NotFoundException.class,
+                            () -> vectors.getVectorBucket(request -> request.vectorBucketName(name)));
+                }
+            } finally {
+                cfn.deleteStack(request -> request.stackName(name));
+                awaitDeleted(cfn, name);
+                if (index) {
+                    vectors.deleteVectorBucket(request -> request.vectorBucketName(name));
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"us-east-1", "us-gov-west-1"})
+    void kmsEncryptionResolvesIntrinsicsAndIsRetainedForBothResourceTypes(String region) throws Exception {
+        String name = "kms-vectors-" + UUID.randomUUID().toString().substring(0, 8);
+        ObjectNode template = (ObjectNode) MAPPER.readTree(TEMPLATE);
+        ObjectNode configuration = MAPPER.createObjectNode().put("SseType", "aws:kms");
+        configuration.putObject("KmsKeyArn").put("Fn::Sub",
+                "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/1234abcd-12ab-34cd-56ef-1234567890ab");
+        for (String logicalId : List.of("Bucket", "Index")) {
+            ((ObjectNode) template.path("Resources").path(logicalId).path("Properties"))
+                    .set("EncryptionConfiguration", configuration);
+        }
+        try (CloudFormationClient cfn = cloudFormation(region); S3VectorsClient vectors = vectors(region)) {
+            try {
+                cfn.createStack(request -> request.stackName(name).templateBody(template.toString())
+                        .parameters(parameter("Tag", "kms"), parameter("Dimension", "3")));
+                Map<String, String> outputs = outputs(awaitStack(cfn, name, "CREATE_COMPLETE"));
+                String bucketName = leaf(outputs.get("BucketArn"));
+                VectorBucket bucket = vectors.getVectorBucket(request -> request.vectorBucketName(bucketName))
+                        .vectorBucket();
+                Index index = vectors.getIndex(request -> request.vectorBucketName(bucketName)
+                        .indexName(leaf(outputs.get("IndexArn")))).index();
+                String key = outputs.get("BucketArn").split(":bucket/")[0].replace(":s3vectors:", ":kms:")
+                        + ":key/1234abcd-12ab-34cd-56ef-1234567890ab";
+                assertEquals("aws:kms", bucket.encryptionConfiguration().sseTypeAsString());
+                assertEquals(key, bucket.encryptionConfiguration().kmsKeyArn());
+                assertEquals("aws:kms", index.encryptionConfiguration().sseTypeAsString());
+                assertEquals(key, index.encryptionConfiguration().kmsKeyArn());
+            } finally {
+                cfn.deleteStack(request -> request.stackName(name));
+                awaitDeleted(cfn, name);
+            }
+        }
+    }
+
     @ParameterizedTest
     @MethodSource("invalidIndexSettings")
     void invalidIndexSettingsFailThroughCloudFormation(String dataType, String distanceMetric,
