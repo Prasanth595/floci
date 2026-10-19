@@ -1622,7 +1622,7 @@ public class S3Controller {
                 authorizeObjectCreation(bucket, key, httpHeaders, uriInfo, false, authorization);
                 MultipartUpload upload = s3Service.initiateMultipartUpload(bucket, key, contentType,
                         extractUserMetadata(httpHeaders, uriInfo),
-                        resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-type"),
+                        httpHeaders.getHeaderString("x-amz-checksum-type"),
                         new PutObjectOptions()
                                 .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
                                 .withContentDisposition(httpHeaders.getHeaderString("Content-Disposition"))
@@ -1691,7 +1691,7 @@ public class S3Controller {
                 if (preconditionResponse != null) {
                     return preconditionResponse;
                 }
-                String checksumType = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-type");
+                String checksumType = httpHeaders.getHeaderString("x-amz-checksum-type");
                 S3Checksum expectedChecksum = extractChecksum(httpHeaders);
                 S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers,
                         completedPartETags(completedParts), completedPartChecksums(completedParts), checksumType,

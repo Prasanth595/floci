@@ -179,12 +179,14 @@ class S3PresignedChecksumIntegrationTest {
             .header("x-amz-checksum-crc32", nullValue())
             .extract().header("ETag");
 
+        String completeUrl = presign("POST", path,
+                Map.of("uploadId", uploadId, "x-amz-checksum-type", "COMPOSITE"), Map.of());
         given()
-            .filter(LOCAL_SIGNER)
+            .urlEncodingEnabled(false)
             .body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + etag
                     + "</ETag></Part></CompleteMultipartUpload>")
         .when()
-            .post(path + "?uploadId=" + uploadId)
+            .post(completeUrl)
         .then()
             .statusCode(200);
 
@@ -195,6 +197,58 @@ class S3PresignedChecksumIntegrationTest {
         .then()
             .statusCode(200)
             .body(equalTo("part data not matching empty crc32"));
+    }
+
+    @Test
+    void presignedCreateMultipartUploadWithQueryChecksumSettingsIgnoresThem() throws Exception {
+        createBucket();
+        String path = "/" + BUCKET + "/multipart-query-settings.txt";
+        String url = presign("POST", path, Map.of("uploads", "",
+                "x-amz-checksum-algorithm", "CRC32", "x-amz-checksum-type", "FULL_OBJECT"), Map.of());
+
+        String uploadId = given()
+            .urlEncodingEnabled(false)
+        .when()
+            .post(url)
+        .then()
+            .statusCode(200)
+            .header("x-amz-checksum-algorithm", nullValue())
+            .header("x-amz-checksum-type", nullValue())
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .delete(path + "?uploadId=" + uploadId)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    void presignedCreateMultipartUploadWithChecksumHeadersPreservesThem() throws Exception {
+        createBucket();
+        String path = "/" + BUCKET + "/multipart-header-settings.txt";
+        String url = presign("POST", path, Map.of("uploads", ""),
+                Map.of("x-amz-checksum-algorithm", "CRC32", "x-amz-checksum-type", "FULL_OBJECT"));
+
+        String uploadId = given()
+            .urlEncodingEnabled(false)
+            .header("x-amz-checksum-algorithm", "CRC32")
+            .header("x-amz-checksum-type", "FULL_OBJECT")
+        .when()
+            .post(url)
+        .then()
+            .statusCode(200)
+            .header("x-amz-checksum-algorithm", equalTo("CRC32"))
+            .header("x-amz-checksum-type", equalTo("FULL_OBJECT"))
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .delete(path + "?uploadId=" + uploadId)
+        .then()
+            .statusCode(204);
     }
 
     @Test
