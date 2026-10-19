@@ -23,7 +23,8 @@ class RequestShapeModelTest {
               "_source": {"generator": "test"},
               "operations": {"Send": "SendRequest"},
               "shapes": {
-                "SendRequest": {"type": "structure", "members": {"To": "Addresses", "Tags": "TagMap", "From": "Address"}},
+                "SendRequest": {"type": "structure", "members": {"To": "Addresses", "Tags": "TagMap", "From": "Address"},
+                                "required": ["To", "From"]},
                 "Addresses": {"type": "list", "member": "Address"},
                 "TagMap": {"type": "map", "value": "Address"},
                 "Address": {"type": "string"}
@@ -35,7 +36,9 @@ class RequestShapeModelTest {
         Shape request = model.shapes().get("SendRequest");
         assertEquals("structure", request.type());
         assertEquals(List.of("To", "Tags", "From"), List.copyOf(request.members().keySet()));
+        assertEquals(List.of("To", "From"), request.required());
         assertEquals("Address", model.shapes().get("Addresses").element());
+        assertTrue(model.shapes().get("Addresses").required().isEmpty());
         assertEquals("Address", model.shapes().get("TagMap").element());
         Shape scalar = model.shapes().get("Address");
         assertEquals("string", scalar.type());
@@ -59,6 +62,7 @@ class RequestShapeModelTest {
         assertThrows(UnsupportedOperationException.class, () -> model.shapes().remove("Address"));
         assertThrows(UnsupportedOperationException.class,
                 () -> model.shapes().get("SendRequest").members().put("Cc", "Addresses"));
+        assertThrows(UnsupportedOperationException.class, () -> model.shapes().get("SendRequest").required().add("To"));
     }
 
     @Test

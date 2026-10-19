@@ -140,15 +140,17 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     /**
      * Every property of a task definition is create-only, so an update registers a fresh revision
      * under the same family, as CloudFormation does on AWS; the physical id is the new revision's
-     * ARN, and the displaced revision is deregistered once the stack update commits.
+     * ARN, and the displaced revision is deregistered once the stack update commits. CloudFormation
+     * hands the properties to the ECS handler without template validation, and they are read as it
+     * reads them, failing the resource where its model validation does.
      */
-    private void provisionTaskDefinition(StackResource r, JsonNode props, ProvisionContext ctx) {
+    private void provisionTaskDefinition(StackResource r, JsonNode template, ProvisionContext ctx) {
+        JsonNode props = new CfnPropertyTypes.HandlerReader(ctx.engine()).read(TASK_DEFINITION, template);
         String family = ctx.resolveOptional(props, "Family");
         if (family == null || family.isBlank()) {
             family = ctx.generatePhysicalName(r.getLogicalId(), 255, false);
         }
-        List<ContainerDefinition> containerDefs =
-                parseContainerDefinitions(props != null ? props.get("ContainerDefinitions") : null, ctx);
+        List<ContainerDefinition> containerDefs = parseContainerDefinitions(props.get("ContainerDefinitions"), ctx);
         NetworkMode networkMode = parseEnum(NetworkMode.class, ctx.resolveOptional(props, "NetworkMode"));
         String cpu = ctx.resolveOptional(props, "Cpu");
         String memory = ctx.resolveOptional(props, "Memory");

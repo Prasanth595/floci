@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
@@ -42,6 +43,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -71,9 +73,15 @@ class EcsCfnProvisionerTest {
             return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.omitNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
         // resolveStringList delegates to the real engine method; for the literal arrays these
         // tests use it just walks the array and calls resolve(...) per element, stubbed above.
         when(engine.resolveStringList(any())).thenCallRealMethod();
+        when(engine.resolveLiteralList(any())).thenAnswer(inv -> {
+            List<String> values = new ArrayList<>();
+            ((JsonNode) inv.getArgument(0)).forEach(value -> values.add(value.asText()));
+            return values;
+        });
         return new ProvisionContext(engine, REGION, "000000000000", "my-stack", priorPhysicalId);
     }
 
@@ -182,6 +190,45 @@ class EcsCfnProvisionerTest {
         assertEquals("s3", def.getLogConfiguration().options().get("Name"));
         assertEquals("logs", def.getLogConfiguration().options().get("bucket"));
         assertEquals("fluentbit", def.getFirelensConfiguration().type());
+    }
+
+    /**
+     * Measured (eu-west-1, 2026-10-19): the ECS handler converts text to the integers and booleans
+     * its model declares, and a value it cannot convert fails the resource with its model
+     * validation message before anything is registered.
+     */
+    @Test
+    void taskDefinitionValuesAreReadAsTheEcsHandlerConvertsThem() {
+        TaskDefinition td = new TaskDefinition();
+        td.setTaskDefinitionArn(TASK_DEF_ARN);
+        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(),
+                anyList(), eq(REGION))).thenReturn(td);
+        ObjectNode props = mapper.createObjectNode().put("Family", "web");
+        props.putArray("ContainerDefinitions").addObject()
+                .put("Name", "app").put("Image", "nginx:1").put("Cpu", " 64").put("Memory", "+128")
+                .put("Essential", "False");
+
+        provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<ContainerDefinition>> defs = ArgumentCaptor.forClass(List.class);
+        verify(ecs).registerTaskDefinition(eq("web"), defs.capture(), isNull(), isNull(), isNull(), isNull(),
+                isNull(), anyList(), eq(REGION));
+        ContainerDefinition def = defs.getValue().get(0);
+        assertEquals(64, def.getCpu());
+        assertEquals(128, def.getMemory());
+        assertFalse(def.isEssential());
+
+        ((ObjectNode) props.get("ContainerDefinitions").get(0)).put("Memory", "abc");
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx()));
+        assertEquals("Model validation failed (#/ContainerDefinitions/0/Memory: expected type: Integer, found: String."
+                + " This may occur when a numeric value exceeds 32-bit integer max (2147483647). Consider using"
+                + " 'number' type or ensure value fits in integer range.\n#/ContainerDefinitions/0/Cpu: expected"
+                + " type: Integer, found: String. This may occur when a numeric value exceeds 32-bit integer max"
+                + " (2147483647). Consider using 'number' type or ensure value fits in integer range.\n"
+                + "#/ContainerDefinitions/0/Essential: expected type: Boolean, found: String)", e.getMessage());
+        verifyNoMoreInteractions(ecs);
     }
 
     @Test

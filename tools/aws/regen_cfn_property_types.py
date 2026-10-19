@@ -4,8 +4,9 @@
 CloudFormation checks every resource property against the type the resource schema declares
 before it touches any resource. `CfnPropertyTypes` does the same for the resource types whose
 provisioners read their properties through it, and needs only the types: for each resource type
-its properties, and for every type reachable from one, whether it is an object and its members,
-a list and its items, a map and its values, or a scalar.
+its properties, and for every type reachable from one, whether it is an object, its members and
+the ones it requires, a list and its items, a map and its values, or a scalar. Members keep the
+schema's order, which a resource handler's model validation reports violations in.
 
 The schemas are the ones AWS publishes for us-east-1, the same `describe-type` returns:
 
@@ -15,8 +16,8 @@ cfn-lint ships copies of them, but widens some types (a Lambda environment varia
 any JSON type there, a string in the published schema), so they are not used.
 
 The output has the request shapes' layout, so `RequestShapeModel` reads it: `operations` names each
-resource type's properties shape, and `shapes` holds a `structure` for an object with properties,
-a `list`, a `map` for an object keyed by pattern, `string`, `integer`, `boolean` or `double`, and
+resource type's properties shape, and `shapes` holds a `structure` for an object with properties
+(with `required` when the schema requires some of them), a `list`, a `map` for an object keyed by pattern, `string`, `integer`, `boolean` or `double`, and
 `json` for anything else (a free-form object, a value of several types), which is not checked.
 
 The archive is live rather than a pinned dependency and keeps no older copy, so, as with
@@ -49,8 +50,8 @@ ARCHIVE_URL = "https://schema.cloudformation.us-east-1.amazonaws.com/Cloudformat
 FETCH_TIMEOUT_SECONDS = 60
 
 # The resource types whose provisioners read their properties through CfnPropertyTypes.
-RESOURCE_TYPES = ["AWS::AutoScaling::LaunchConfiguration", "AWS::Events::Rule", "AWS::Lambda::Function",
-                  "AWS::Lambda::LayerVersion"]
+RESOURCE_TYPES = ["AWS::AutoScaling::LaunchConfiguration", "AWS::ECS::TaskDefinition", "AWS::Events::Rule",
+                  "AWS::Lambda::Function", "AWS::Lambda::LayerVersion"]
 
 # The shared shape each scalar body is written as, inline; a definition keeps its own name.
 SCALAR_SHAPES = {"string": "String", "integer": "Integer", "boolean": "Boolean", "double": "Double", "json": "Json"}
@@ -66,6 +67,15 @@ ANCHORS = {
     ("AWS::Lambda::Function/Environment", "Variables"): {"String"},
     ("AWS::Lambda::Function/EphemeralStorage", "Size"): "Integer",
     ("AWS::AutoScaling::LaunchConfiguration/MetadataOptions", "HttpPutResponseHopLimit"): "Integer",
+    ("AWS::ECS::TaskDefinition/ContainerDefinition", "Memory"): "Integer",
+    ("AWS::ECS::TaskDefinition/ContainerDefinition", "Essential"): "Boolean",
+    ("AWS::ECS::TaskDefinition/KernelCapabilities", "Add"): ["String"],
+}
+
+# Required members the provisioners rely on, measured the same way: shape -> its required members.
+REQUIRED_ANCHORS = {
+    "AWS::ECS::TaskDefinition/ContainerDefinition": ["Name", "Image"],
+    "AWS::ECS::TaskDefinition/Tmpfs": ["Size"],
 }
 
 
@@ -95,7 +105,7 @@ def build(schemas: dict[str, dict], provenance: str) -> dict:
     operations = {}
     for resource_type in RESOURCE_TYPES:
         schema = schemas[resource_type]
-        properties = {"type": "object", "properties": schema["properties"]}
+        properties = {"type": "object", "properties": schema["properties"], "required": schema.get("required", [])}
         operations[resource_type] = shape_for(schema, resource_type, resource_type, properties, shapes)
     return {
         "_source": {
@@ -137,9 +147,12 @@ def body_of(schema: dict, resource_type: str, name: str, node: dict, shapes: dic
         kind = "object"
     if kind == "object":
         if "properties" in node:
-            return {"type": "structure", "members": {
+            structure = {"type": "structure", "members": {
                 member: shape_for(schema, resource_type, f"{name}.{member}", spec, shapes)
                 for member, spec in node["properties"].items()}}
+            if node.get("required"):
+                structure["required"] = list(node["required"])
+            return structure
         values = list(node.get("patternProperties", {}).values())
         if isinstance(node.get("additionalProperties"), dict):
             values.append(node["additionalProperties"])
@@ -174,6 +187,9 @@ def validate(document: dict) -> list[str]:
         for target in named:
             if target not in shapes:
                 problems.append(f"{name} names the missing shape {target!r}")
+        for member in shape.get("required", []):
+            if member not in shape.get("members", {}):
+                problems.append(f"{name} requires {member!r}, which it does not declare")
     for (shape, member), expected in ANCHORS.items():
         target = shapes.get(shape, {}).get("members", {}).get(member)
         actual = shapes.get(target, {}) if target else {}
@@ -185,6 +201,10 @@ def validate(document: dict) -> list[str]:
             holds = target == expected
         if not holds:
             problems.append(f"expected {shape}.{member} to be {expected}, not {target} {actual}")
+    for shape, required in REQUIRED_ANCHORS.items():
+        actual = shapes.get(shape, {}).get("required", [])
+        if actual != required:
+            problems.append(f"expected {shape} to require {required}, not {actual}")
     return problems
 
 

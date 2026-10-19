@@ -540,6 +540,34 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
   property answers `GetBucketOwnershipControls` with `OwnershipControlsNotFoundError`, where AWS
   reports its default, `BucketOwnerEnforced`.
 
+## ECS task definitions
+
+CloudFormation hands an `AWS::ECS::TaskDefinition`'s properties to the ECS resource handler
+without template validation, every value as text, and the handler converts each to the type the
+resource schema declares (measured). Floci reads them the same way, before anything is registered:
+
+- An integer is a sign and digits once trimmed, within 32 bits (`"+128"`, `" 128"` and `"0128"`
+  are 128), and a boolean is `true` or `false` in lower, upper or title case once trimmed
+  (`"True"`, `" true"`). A number where text is expected is its text.
+- A value that does not convert (`"abc"`, `4.5` or `true` for an integer, `"yes"`, `"tRuE"` or
+  `"1"` for a boolean), an object or a list where a scalar is expected, and a scalar where an object
+  or a list is expected fail the resource with every violation of the unconverted model, where
+  every scalar is text, so an integer or a boolean that converts is listed too:
+  `Model validation failed (#/ContainerDefinitions/0/Memory: expected type: Integer, found: String.
+  This may occur when a numeric value exceeds 32-bit integer max (2147483647). Consider using
+  'number' type or ensure value fits in integer range.` and, on the next line,
+  `#/ContainerDefinitions/0/LinuxParameters/Capabilities/Add: expected type: JSONArray, found:
+  String)`. At each object its missing required members come first, then its members in the
+  schema's order.
+- When every value converts, the required members the model lacks fail it:
+  `Model validation failed (#/ContainerDefinitions/0: required key [Image] not found)`. Several are
+  counted where their paths meet, `Model validation failed (#/ContainerDefinitions: 2 schema
+  violations found)`, with a line for each below it.
+- A `Ref` to a `CommaDelimitedList` parameter is a list, and a `Ref` to a `String` parameter is text.
+- The schema's other constraints (allowed values, patterns, bounds) are not checked. AWS also
+  records a warning event for a value that it does not convert itself and the handler does
+  (`" 128"`, `"0128"`, `" true"`); Floci does not.
+
 ## Account-Aware Provisioning
 
 Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's account** namespace

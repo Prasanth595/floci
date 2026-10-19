@@ -3,23 +3,29 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
  * The input shapes of a service's operations, as a {@code tools/aws/regen_*_shapes.py} generator
  * vendors them from botocore: each operation's input shape, and for every shape reachable from one
- * its type and the shapes of its structure members, list elements or map values. A service's
+ * its type, the shapes of its structure members and the ones it requires, or of its list elements or
+ * map values. A service's
  * request check walks a body against it with {@link RequestShapeCheck} and its own messages.
  */
 public record RequestShapeModel(Map<String, String> operations, Map<String, Shape> shapes) {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    /** One shape: its type, the shape of each structure member, or the list element or map value shape. */
-    public record Shape(String type, Map<String, String> members, String element) {
+    /**
+     * One shape: its type, the shape of each structure member and the members it requires, or the
+     * list element or map value shape.
+     */
+    public record Shape(String type, Map<String, String> members, String element, List<String> required) {
     }
 
     /** The vendored resource {@code name}; {@code description} names it in a failure. */
@@ -36,8 +42,10 @@ public record RequestShapeModel(Map<String, String> operations, Map<String, Shap
             Map<String, String> members = new LinkedHashMap<>();
             node.path("members").properties().forEach(m -> members.put(m.getKey(), m.getValue().asText()));
             String element = node.hasNonNull("member") ? node.get("member").asText() : node.path("value").asText(null);
+            List<String> required = new ArrayList<>();
+            node.path("required").forEach(name -> required.add(name.asText()));
             shapes.put(entry.getKey(), new Shape(node.path("type").asText(), Collections.unmodifiableMap(members),
-                    element));
+                    element, List.copyOf(required)));
         }
         return new RequestShapeModel(Map.copyOf(operations), Map.copyOf(shapes));
     }

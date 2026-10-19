@@ -7,6 +7,7 @@
   },
   "operations": {
     "AWS::AutoScaling::LaunchConfiguration": "AWS::AutoScaling::LaunchConfiguration",
+    "AWS::ECS::TaskDefinition": "AWS::ECS::TaskDefinition",
     "AWS::Events::Rule": "AWS::Events::Rule",
     "AWS::Lambda::Function": "AWS::Lambda::Function",
     "AWS::Lambda::LayerVersion": "AWS::Lambda::LayerVersion"
@@ -34,7 +35,11 @@
         "InstanceType": "String",
         "RamDiskId": "String",
         "InstanceMonitoring": "Boolean"
-      }
+      },
+      "required": [
+        "ImageId",
+        "InstanceType"
+      ]
     },
     "AWS::AutoScaling::LaunchConfiguration.BlockDeviceMappings": {
       "type": "list",
@@ -67,7 +72,10 @@
         "NoDevice": "Boolean",
         "VirtualName": "String",
         "DeviceName": "String"
-      }
+      },
+      "required": [
+        "DeviceName"
+      ]
     },
     "AWS::AutoScaling::LaunchConfiguration/MetadataOptions": {
       "type": "structure",
@@ -75,6 +83,543 @@
         "HttpPutResponseHopLimit": "Integer",
         "HttpTokens": "String",
         "HttpEndpoint": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition": {
+      "type": "structure",
+      "members": {
+        "TaskRoleArn": "String",
+        "IpcMode": "String",
+        "InferenceAccelerators": "AWS::ECS::TaskDefinition.InferenceAccelerators",
+        "Memory": "String",
+        "PlacementConstraints": "AWS::ECS::TaskDefinition.PlacementConstraints",
+        "Cpu": "String",
+        "RequiresCompatibilities": "AWS::ECS::TaskDefinition.RequiresCompatibilities",
+        "NetworkMode": "String",
+        "PidMode": "String",
+        "EnableFaultInjection": "Boolean",
+        "ExecutionRoleArn": "String",
+        "RuntimePlatform": "AWS::ECS::TaskDefinition/RuntimePlatform",
+        "ProxyConfiguration": "AWS::ECS::TaskDefinition/ProxyConfiguration",
+        "Volumes": "AWS::ECS::TaskDefinition.Volumes",
+        "ContainerDefinitions": "AWS::ECS::TaskDefinition.ContainerDefinitions",
+        "Family": "String",
+        "EphemeralStorage": "AWS::ECS::TaskDefinition/EphemeralStorage",
+        "Tags": "AWS::ECS::TaskDefinition.Tags",
+        "TaskDefinitionArn": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition.ContainerDefinitions": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/ContainerDefinition"
+    },
+    "AWS::ECS::TaskDefinition.InferenceAccelerators": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/InferenceAccelerator"
+    },
+    "AWS::ECS::TaskDefinition.PlacementConstraints": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/TaskDefinitionPlacementConstraint"
+    },
+    "AWS::ECS::TaskDefinition.RequiresCompatibilities": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::ECS::TaskDefinition.Tags": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/Tag"
+    },
+    "AWS::ECS::TaskDefinition.Volumes": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/Volume"
+    },
+    "AWS::ECS::TaskDefinition/AuthorizationConfig": {
+      "type": "structure",
+      "members": {
+        "IAM": "String",
+        "AccessPointId": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition": {
+      "type": "structure",
+      "members": {
+        "User": "String",
+        "Secrets": "AWS::ECS::TaskDefinition/ContainerDefinition.Secrets",
+        "Memory": "Integer",
+        "Privileged": "Boolean",
+        "HealthCheck": "AWS::ECS::TaskDefinition/HealthCheck",
+        "StartTimeout": "Integer",
+        "VolumesFrom": "AWS::ECS::TaskDefinition/ContainerDefinition.VolumesFrom",
+        "Cpu": "Integer",
+        "EntryPoint": "AWS::ECS::TaskDefinition/ContainerDefinition.EntryPoint",
+        "DnsServers": "AWS::ECS::TaskDefinition/ContainerDefinition.DnsServers",
+        "ReadonlyRootFilesystem": "Boolean",
+        "Image": "String",
+        "Essential": "Boolean",
+        "LogConfiguration": "AWS::ECS::TaskDefinition/LogConfiguration",
+        "ResourceRequirements": "AWS::ECS::TaskDefinition/ContainerDefinition.ResourceRequirements",
+        "EnvironmentFiles": "AWS::ECS::TaskDefinition/ContainerDefinition.EnvironmentFiles",
+        "Name": "String",
+        "FirelensConfiguration": "AWS::ECS::TaskDefinition/FirelensConfiguration",
+        "DockerSecurityOptions": "AWS::ECS::TaskDefinition/ContainerDefinition.DockerSecurityOptions",
+        "SystemControls": "AWS::ECS::TaskDefinition/ContainerDefinition.SystemControls",
+        "Interactive": "Boolean",
+        "DnsSearchDomains": "AWS::ECS::TaskDefinition/ContainerDefinition.DnsSearchDomains",
+        "CredentialSpecs": "AWS::ECS::TaskDefinition/ContainerDefinition.CredentialSpecs",
+        "Ulimits": "AWS::ECS::TaskDefinition/ContainerDefinition.Ulimits",
+        "StopTimeout": "Integer",
+        "WorkingDirectory": "String",
+        "MemoryReservation": "Integer",
+        "RepositoryCredentials": "AWS::ECS::TaskDefinition/RepositoryCredentials",
+        "ExtraHosts": "AWS::ECS::TaskDefinition/ContainerDefinition.ExtraHosts",
+        "Hostname": "String",
+        "LinuxParameters": "AWS::ECS::TaskDefinition/LinuxParameters",
+        "VersionConsistency": "String",
+        "RestartPolicy": "AWS::ECS::TaskDefinition/RestartPolicy",
+        "DisableNetworking": "Boolean",
+        "PseudoTerminal": "Boolean",
+        "MountPoints": "AWS::ECS::TaskDefinition/ContainerDefinition.MountPoints",
+        "DependsOn": "AWS::ECS::TaskDefinition/ContainerDefinition.DependsOn",
+        "DockerLabels": "AWS::ECS::TaskDefinition/ContainerDefinition.DockerLabels",
+        "PortMappings": "AWS::ECS::TaskDefinition/ContainerDefinition.PortMappings",
+        "Command": "AWS::ECS::TaskDefinition/ContainerDefinition.Command",
+        "Environment": "AWS::ECS::TaskDefinition/ContainerDefinition.Environment",
+        "Links": "AWS::ECS::TaskDefinition/ContainerDefinition.Links"
+      },
+      "required": [
+        "Name",
+        "Image"
+      ]
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.Command": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.CredentialSpecs": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.DependsOn": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/ContainerDependency"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.DnsSearchDomains": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.DnsServers": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.DockerLabels": {
+      "type": "map",
+      "value": "String"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.DockerSecurityOptions": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.EntryPoint": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.Environment": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/KeyValuePair"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.EnvironmentFiles": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/EnvironmentFile"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.ExtraHosts": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/HostEntry"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.Links": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.MountPoints": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/MountPoint"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.PortMappings": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/PortMapping"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.ResourceRequirements": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/ResourceRequirement"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.Secrets": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/Secret"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.SystemControls": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/SystemControl"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.Ulimits": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/Ulimit"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDefinition.VolumesFrom": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/VolumeFrom"
+    },
+    "AWS::ECS::TaskDefinition/ContainerDependency": {
+      "type": "structure",
+      "members": {
+        "Condition": "String",
+        "ContainerName": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/Device": {
+      "type": "structure",
+      "members": {
+        "HostPath": "String",
+        "Permissions": "AWS::ECS::TaskDefinition/Device.Permissions",
+        "ContainerPath": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/Device.Permissions": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::ECS::TaskDefinition/DockerVolumeConfiguration": {
+      "type": "structure",
+      "members": {
+        "DriverOpts": "AWS::ECS::TaskDefinition/DockerVolumeConfiguration.DriverOpts",
+        "Scope": "String",
+        "Autoprovision": "Boolean",
+        "Driver": "String",
+        "Labels": "AWS::ECS::TaskDefinition/DockerVolumeConfiguration.Labels"
+      }
+    },
+    "AWS::ECS::TaskDefinition/DockerVolumeConfiguration.DriverOpts": {
+      "type": "map",
+      "value": "String"
+    },
+    "AWS::ECS::TaskDefinition/DockerVolumeConfiguration.Labels": {
+      "type": "map",
+      "value": "String"
+    },
+    "AWS::ECS::TaskDefinition/EFSVolumeConfiguration": {
+      "type": "structure",
+      "members": {
+        "FilesystemId": "String",
+        "TransitEncryption": "String",
+        "AuthorizationConfig": "AWS::ECS::TaskDefinition/AuthorizationConfig",
+        "RootDirectory": "String",
+        "TransitEncryptionPort": "Integer"
+      },
+      "required": [
+        "FilesystemId"
+      ]
+    },
+    "AWS::ECS::TaskDefinition/EnvironmentFile": {
+      "type": "structure",
+      "members": {
+        "Type": "String",
+        "Value": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/EphemeralStorage": {
+      "type": "structure",
+      "members": {
+        "SizeInGiB": "Integer"
+      }
+    },
+    "AWS::ECS::TaskDefinition/FSxAuthorizationConfig": {
+      "type": "structure",
+      "members": {
+        "CredentialsParameter": "String",
+        "Domain": "String"
+      },
+      "required": [
+        "CredentialsParameter",
+        "Domain"
+      ]
+    },
+    "AWS::ECS::TaskDefinition/FSxWindowsFileServerVolumeConfiguration": {
+      "type": "structure",
+      "members": {
+        "AuthorizationConfig": "AWS::ECS::TaskDefinition/FSxAuthorizationConfig",
+        "FileSystemId": "String",
+        "RootDirectory": "String"
+      },
+      "required": [
+        "FileSystemId",
+        "RootDirectory"
+      ]
+    },
+    "AWS::ECS::TaskDefinition/FirelensConfiguration": {
+      "type": "structure",
+      "members": {
+        "Options": "AWS::ECS::TaskDefinition/FirelensConfiguration.Options",
+        "Type": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/FirelensConfiguration.Options": {
+      "type": "map",
+      "value": "String"
+    },
+    "AWS::ECS::TaskDefinition/HealthCheck": {
+      "type": "structure",
+      "members": {
+        "Command": "AWS::ECS::TaskDefinition/HealthCheck.Command",
+        "Timeout": "Integer",
+        "Retries": "Integer",
+        "Interval": "Integer",
+        "StartPeriod": "Integer"
+      }
+    },
+    "AWS::ECS::TaskDefinition/HealthCheck.Command": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::ECS::TaskDefinition/HostEntry": {
+      "type": "structure",
+      "members": {
+        "Hostname": "String",
+        "IpAddress": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/HostVolumeProperties": {
+      "type": "structure",
+      "members": {
+        "SourcePath": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/InferenceAccelerator": {
+      "type": "structure",
+      "members": {
+        "DeviceType": "String",
+        "DeviceName": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/KernelCapabilities": {
+      "type": "structure",
+      "members": {
+        "Add": "AWS::ECS::TaskDefinition/KernelCapabilities.Add",
+        "Drop": "AWS::ECS::TaskDefinition/KernelCapabilities.Drop"
+      }
+    },
+    "AWS::ECS::TaskDefinition/KernelCapabilities.Add": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::ECS::TaskDefinition/KernelCapabilities.Drop": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::ECS::TaskDefinition/KeyValuePair": {
+      "type": "structure",
+      "members": {
+        "Value": "String",
+        "Name": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/LinuxParameters": {
+      "type": "structure",
+      "members": {
+        "Capabilities": "AWS::ECS::TaskDefinition/KernelCapabilities",
+        "Swappiness": "Integer",
+        "Tmpfs": "AWS::ECS::TaskDefinition/LinuxParameters.Tmpfs",
+        "SharedMemorySize": "Integer",
+        "Devices": "AWS::ECS::TaskDefinition/LinuxParameters.Devices",
+        "InitProcessEnabled": "Boolean",
+        "MaxSwap": "Integer"
+      }
+    },
+    "AWS::ECS::TaskDefinition/LinuxParameters.Devices": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/Device"
+    },
+    "AWS::ECS::TaskDefinition/LinuxParameters.Tmpfs": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/Tmpfs"
+    },
+    "AWS::ECS::TaskDefinition/LogConfiguration": {
+      "type": "structure",
+      "members": {
+        "SecretOptions": "AWS::ECS::TaskDefinition/LogConfiguration.SecretOptions",
+        "Options": "AWS::ECS::TaskDefinition/LogConfiguration.Options",
+        "LogDriver": "String"
+      },
+      "required": [
+        "LogDriver"
+      ]
+    },
+    "AWS::ECS::TaskDefinition/LogConfiguration.Options": {
+      "type": "map",
+      "value": "String"
+    },
+    "AWS::ECS::TaskDefinition/LogConfiguration.SecretOptions": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/Secret"
+    },
+    "AWS::ECS::TaskDefinition/MountPoint": {
+      "type": "structure",
+      "members": {
+        "ReadOnly": "Boolean",
+        "SourceVolume": "String",
+        "ContainerPath": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/PortMapping": {
+      "type": "structure",
+      "members": {
+        "AppProtocol": "String",
+        "ContainerPortRange": "String",
+        "HostPort": "Integer",
+        "ContainerPort": "Integer",
+        "Protocol": "String",
+        "Name": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/ProxyConfiguration": {
+      "type": "structure",
+      "members": {
+        "ProxyConfigurationProperties": "AWS::ECS::TaskDefinition/ProxyConfiguration.ProxyConfigurationProperties",
+        "Type": "String",
+        "ContainerName": "String"
+      },
+      "required": [
+        "ContainerName"
+      ]
+    },
+    "AWS::ECS::TaskDefinition/ProxyConfiguration.ProxyConfigurationProperties": {
+      "type": "list",
+      "member": "AWS::ECS::TaskDefinition/KeyValuePair"
+    },
+    "AWS::ECS::TaskDefinition/RepositoryCredentials": {
+      "type": "structure",
+      "members": {
+        "CredentialsParameter": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/ResourceRequirement": {
+      "type": "structure",
+      "members": {
+        "Type": "String",
+        "Value": "String"
+      },
+      "required": [
+        "Type"
+      ]
+    },
+    "AWS::ECS::TaskDefinition/RestartPolicy": {
+      "type": "structure",
+      "members": {
+        "IgnoredExitCodes": "AWS::ECS::TaskDefinition/RestartPolicy.IgnoredExitCodes",
+        "RestartAttemptPeriod": "Integer",
+        "Enabled": "Boolean"
+      }
+    },
+    "AWS::ECS::TaskDefinition/RestartPolicy.IgnoredExitCodes": {
+      "type": "list",
+      "member": "Integer"
+    },
+    "AWS::ECS::TaskDefinition/RuntimePlatform": {
+      "type": "structure",
+      "members": {
+        "OperatingSystemFamily": "String",
+        "CpuArchitecture": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/S3FilesVolumeConfiguration": {
+      "type": "structure",
+      "members": {
+        "FileSystemArn": "String",
+        "AccessPointArn": "String",
+        "RootDirectory": "String",
+        "TransitEncryptionPort": "Integer"
+      },
+      "required": [
+        "FileSystemArn"
+      ]
+    },
+    "AWS::ECS::TaskDefinition/Secret": {
+      "type": "structure",
+      "members": {
+        "ValueFrom": "String",
+        "Name": "String"
+      },
+      "required": [
+        "Name",
+        "ValueFrom"
+      ]
+    },
+    "AWS::ECS::TaskDefinition/SystemControl": {
+      "type": "structure",
+      "members": {
+        "Value": "String",
+        "Namespace": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/Tag": {
+      "type": "structure",
+      "members": {
+        "Value": "String",
+        "Key": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/TaskDefinitionPlacementConstraint": {
+      "type": "structure",
+      "members": {
+        "Type": "String",
+        "Expression": "String"
+      },
+      "required": [
+        "Type"
+      ]
+    },
+    "AWS::ECS::TaskDefinition/Tmpfs": {
+      "type": "structure",
+      "members": {
+        "Size": "Integer",
+        "ContainerPath": "String",
+        "MountOptions": "AWS::ECS::TaskDefinition/Tmpfs.MountOptions"
+      },
+      "required": [
+        "Size"
+      ]
+    },
+    "AWS::ECS::TaskDefinition/Tmpfs.MountOptions": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::ECS::TaskDefinition/Ulimit": {
+      "type": "structure",
+      "members": {
+        "SoftLimit": "Integer",
+        "HardLimit": "Integer",
+        "Name": "String"
+      },
+      "required": [
+        "HardLimit",
+        "Name",
+        "SoftLimit"
+      ]
+    },
+    "AWS::ECS::TaskDefinition/Volume": {
+      "type": "structure",
+      "members": {
+        "EFSVolumeConfiguration": "AWS::ECS::TaskDefinition/EFSVolumeConfiguration",
+        "S3FilesVolumeConfiguration": "AWS::ECS::TaskDefinition/S3FilesVolumeConfiguration",
+        "Host": "AWS::ECS::TaskDefinition/HostVolumeProperties",
+        "ConfiguredAtLaunch": "Boolean",
+        "DockerVolumeConfiguration": "AWS::ECS::TaskDefinition/DockerVolumeConfiguration",
+        "FSxWindowsFileServerVolumeConfiguration": "AWS::ECS::TaskDefinition/FSxWindowsFileServerVolumeConfiguration",
+        "Name": "String"
+      }
+    },
+    "AWS::ECS::TaskDefinition/VolumeFrom": {
+      "type": "structure",
+      "members": {
+        "ReadOnly": "Boolean",
+        "SourceContainer": "String"
       }
     },
     "AWS::Events::Rule": {
@@ -105,7 +650,10 @@
       "type": "structure",
       "members": {
         "GraphQLOperation": "String"
-      }
+      },
+      "required": [
+        "GraphQLOperation"
+      ]
     },
     "AWS::Events::Rule/AwsVpcConfiguration": {
       "type": "structure",
@@ -113,7 +661,10 @@
         "SecurityGroups": "AWS::Events::Rule/AwsVpcConfiguration.SecurityGroups",
         "Subnets": "AWS::Events::Rule/AwsVpcConfiguration.Subnets",
         "AssignPublicIp": "String"
-      }
+      },
+      "required": [
+        "Subnets"
+      ]
     },
     "AWS::Events::Rule/AwsVpcConfiguration.SecurityGroups": {
       "type": "list",
@@ -136,7 +687,11 @@
         "JobName": "String",
         "RetryStrategy": "AWS::Events::Rule/BatchRetryStrategy",
         "JobDefinition": "String"
-      }
+      },
+      "required": [
+        "JobName",
+        "JobDefinition"
+      ]
     },
     "AWS::Events::Rule/BatchRetryStrategy": {
       "type": "structure",
@@ -150,7 +705,10 @@
         "CapacityProvider": "String",
         "Base": "Integer",
         "Weight": "Integer"
-      }
+      },
+      "required": [
+        "CapacityProvider"
+      ]
     },
     "AWS::Events::Rule/DeadLetterConfig": {
       "type": "structure",
@@ -175,7 +733,10 @@
         "TagList": "AWS::Events::Rule/EcsParameters.TagList",
         "NetworkConfiguration": "AWS::Events::Rule/NetworkConfiguration",
         "TaskDefinitionArn": "String"
-      }
+      },
+      "required": [
+        "TaskDefinitionArn"
+      ]
     },
     "AWS::Events::Rule/EcsParameters.CapacityProviderStrategy": {
       "type": "list",
@@ -218,7 +779,10 @@
       "members": {
         "InputPathsMap": "AWS::Events::Rule/InputTransformer.InputPathsMap",
         "InputTemplate": "String"
-      }
+      },
+      "required": [
+        "InputTemplate"
+      ]
     },
     "AWS::Events::Rule/InputTransformer.InputPathsMap": {
       "type": "map",
@@ -228,7 +792,10 @@
       "type": "structure",
       "members": {
         "PartitionKeyPath": "String"
-      }
+      },
+      "required": [
+        "PartitionKeyPath"
+      ]
     },
     "AWS::Events::Rule/NetworkConfiguration": {
       "type": "structure",
@@ -260,7 +827,10 @@
         "DbUser": "String",
         "Sql": "String",
         "WithEvent": "Boolean"
-      }
+      },
+      "required": [
+        "Database"
+      ]
     },
     "AWS::Events::Rule/RedshiftDataParameters.Sqls": {
       "type": "list",
@@ -277,7 +847,10 @@
       "type": "structure",
       "members": {
         "RunCommandTargets": "AWS::Events::Rule/RunCommandParameters.RunCommandTargets"
-      }
+      },
+      "required": [
+        "RunCommandTargets"
+      ]
     },
     "AWS::Events::Rule/RunCommandParameters.RunCommandTargets": {
       "type": "list",
@@ -288,7 +861,11 @@
       "members": {
         "Values": "AWS::Events::Rule/RunCommandTarget.Values",
         "Key": "String"
-      }
+      },
+      "required": [
+        "Values",
+        "Key"
+      ]
     },
     "AWS::Events::Rule/RunCommandTarget.Values": {
       "type": "list",
@@ -299,7 +876,11 @@
       "members": {
         "Value": "String",
         "Name": "String"
-      }
+      },
+      "required": [
+        "Value",
+        "Name"
+      ]
     },
     "AWS::Events::Rule/SageMakerPipelineParameters": {
       "type": "structure",
@@ -315,7 +896,10 @@
       "type": "structure",
       "members": {
         "MessageGroupId": "String"
-      }
+      },
+      "required": [
+        "MessageGroupId"
+      ]
     },
     "AWS::Events::Rule/Tag": {
       "type": "structure",
@@ -344,7 +928,11 @@
         "Arn": "String",
         "SageMakerPipelineParameters": "AWS::Events::Rule/SageMakerPipelineParameters",
         "RetryPolicy": "AWS::Events::Rule/RetryPolicy"
-      }
+      },
+      "required": [
+        "Id",
+        "Arn"
+      ]
     },
     "AWS::Lambda::Function": {
       "type": "structure",
@@ -382,7 +970,11 @@
         "Arn": "String",
         "EphemeralStorage": "AWS::Lambda::Function/EphemeralStorage",
         "Architectures": "AWS::Lambda::Function.Architectures"
-      }
+      },
+      "required": [
+        "Code",
+        "Role"
+      ]
     },
     "AWS::Lambda::Function.Architectures": {
       "type": "list",
@@ -404,7 +996,10 @@
       "type": "structure",
       "members": {
         "LambdaManagedInstancesCapacityProviderConfig": "AWS::Lambda::Function/LambdaManagedInstancesCapacityProviderConfig"
-      }
+      },
+      "required": [
+        "LambdaManagedInstancesCapacityProviderConfig"
+      ]
     },
     "AWS::Lambda::Function/Code": {
       "type": "structure",
@@ -430,7 +1025,10 @@
         "KMSKeyArn": "String",
         "ExecutionTimeout": "Integer",
         "RetentionPeriodInDays": "Integer"
-      }
+      },
+      "required": [
+        "ExecutionTimeout"
+      ]
     },
     "AWS::Lambda::Function/Environment": {
       "type": "structure",
@@ -446,7 +1044,10 @@
       "type": "structure",
       "members": {
         "Size": "Integer"
-      }
+      },
+      "required": [
+        "Size"
+      ]
     },
     "AWS::Lambda::Function/FileSystemConfig": {
       "type": "structure",
@@ -454,7 +1055,11 @@
         "S3FilesConfig": "AWS::Lambda::Function/S3FilesConfig",
         "Arn": "String",
         "LocalMountPath": "String"
-      }
+      },
+      "required": [
+        "Arn",
+        "LocalMountPath"
+      ]
     },
     "AWS::Lambda::Function/FunctionScalingConfig": {
       "type": "structure",
@@ -485,7 +1090,10 @@
         "ExecutionEnvironmentMemoryGiBPerVCpu": "Double",
         "CapacityProviderArn": "String",
         "PerExecutionEnvironmentMaxConcurrency": "Integer"
-      }
+      },
+      "required": [
+        "CapacityProviderArn"
+      ]
     },
     "AWS::Lambda::Function/LoggingConfig": {
       "type": "structure",
@@ -504,7 +1112,10 @@
       "members": {
         "UpdateRuntimeOn": "String",
         "RuntimeVersionArn": "String"
-      }
+      },
+      "required": [
+        "UpdateRuntimeOn"
+      ]
     },
     "AWS::Lambda::Function/S3FilesConfig": {
       "type": "structure",
@@ -516,7 +1127,10 @@
       "type": "structure",
       "members": {
         "ApplyOn": "String"
-      }
+      },
+      "required": [
+        "ApplyOn"
+      ]
     },
     "AWS::Lambda::Function/SnapStartResponse": {
       "type": "structure",
@@ -530,13 +1144,19 @@
       "members": {
         "Value": "String",
         "Key": "String"
-      }
+      },
+      "required": [
+        "Key"
+      ]
     },
     "AWS::Lambda::Function/TenancyConfig": {
       "type": "structure",
       "members": {
         "TenantIsolationMode": "String"
-      }
+      },
+      "required": [
+        "TenantIsolationMode"
+      ]
     },
     "AWS::Lambda::Function/TracingConfig": {
       "type": "structure",
@@ -570,7 +1190,10 @@
         "Content": "AWS::Lambda::LayerVersion/Content",
         "LayerVersionArn": "String",
         "CompatibleArchitectures": "AWS::Lambda::LayerVersion.CompatibleArchitectures"
-      }
+      },
+      "required": [
+        "Content"
+      ]
     },
     "AWS::Lambda::LayerVersion.CompatibleArchitectures": {
       "type": "list",
@@ -587,7 +1210,11 @@
         "S3Bucket": "String",
         "S3Key": "String",
         "S3ObjectStorageMode": "String"
-      }
+      },
+      "required": [
+        "S3Bucket",
+        "S3Key"
+      ]
     },
     "Boolean": {
       "type": "boolean"
