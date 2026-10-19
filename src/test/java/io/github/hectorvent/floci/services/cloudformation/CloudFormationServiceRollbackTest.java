@@ -1115,6 +1115,107 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
+     * A bucket policy takes its bucket's name as its own physical id, so the bucket's
+     * {@code BucketName} names the policy as well as itself. That is not a reference: the policy,
+     * created after the bucket, still goes first.
+     */
+    @Test
+    void deleteStack_deletesALeftoverBucketPolicyBeforeItsBucket() {
+        Stack stack = leftoverStack("delete-leftover-policy", "{\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}");
+        StackResource queue = resource("Queue", "queue-1", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource bucket = resource("Bucket", "bucket-1", "AWS::S3::Bucket", "UPDATE_COMPLETE");
+        bucket.getAttributes().put("BucketName", "bucket-1");
+        bucket.getAttributes().put("Arn", "arn:aws:s3:::bucket-1");
+        StackResource policy = resource("Policy", "bucket-1", "AWS::S3::BucketPolicy", "UPDATE_COMPLETE");
+        hold(stack, queue, bucket, policy);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(policy, REGION);
+        deletes.verify(provisioner).delete(bucket, REGION);
+    }
+
+    /** A secret target attachment takes its secret's ARN as its physical id and still goes first. */
+    @Test
+    void deleteStack_deletesALeftoverSecretAttachmentBeforeItsSecret() {
+        String secretArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf";
+        Stack stack = leftoverStack("delete-leftover-attachment", "{\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}");
+        StackResource queue = resource("Queue", "queue-1", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource secret = resource("Secret", secretArn, "AWS::SecretsManager::Secret", "UPDATE_COMPLETE");
+        secret.getAttributes().put("Arn", secretArn);
+        StackResource attachment = resource("Attachment", secretArn,
+                "AWS::SecretsManager::SecretTargetAttachment", "UPDATE_COMPLETE");
+        attachment.getAttributes().put("Id", secretArn);
+        hold(stack, queue, secret, attachment);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(attachment, REGION);
+        deletes.verify(provisioner).delete(secret, REGION);
+    }
+
+    /**
+     * A leftover secret target attachment whose secret the template still names goes before that
+     * secret: it shares the secret's id, and its type says which of the two depends on the other.
+     */
+    @Test
+    void deleteStack_deletesALeftoverSecretAttachmentBeforeTheSecretTheTemplateStillNames() {
+        String secretArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf";
+        Stack stack = leftoverStack("delete-leftover-attachment-ranked",
+                "{\"Secret\": {\"Type\": \"AWS::SecretsManager::Secret\"}}");
+        StackResource secret = resource("Secret", secretArn, "AWS::SecretsManager::Secret", "CREATE_COMPLETE");
+        secret.getAttributes().put("Arn", secretArn);
+        StackResource attachment = resource("Attachment", secretArn,
+                "AWS::SecretsManager::SecretTargetAttachment", "UPDATE_COMPLETE");
+        attachment.getAttributes().put("Id", secretArn);
+        hold(stack, secret, attachment);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(attachment, REGION);
+        deletes.verify(provisioner).delete(secret, REGION);
+    }
+
+    /** A leftover bucket policy recorded before its leftover bucket still goes first. */
+    @Test
+    void deleteStack_deletesALeftoverBucketPolicyRecordedFirstBeforeItsBucket() {
+        Stack stack = leftoverStack("delete-leftover-policy-first", "{\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}");
+        StackResource queue = resource("Queue", "queue-1", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource policy = resource("Policy", "bucket-1", "AWS::S3::BucketPolicy", "UPDATE_COMPLETE");
+        StackResource bucket = resource("Bucket", "bucket-1", "AWS::S3::Bucket", "UPDATE_COMPLETE");
+        bucket.getAttributes().put("BucketName", "bucket-1");
+        hold(stack, queue, policy, bucket);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(policy, REGION);
+        deletes.verify(provisioner).delete(bucket, REGION);
+    }
+
+    /**
+     * A leftover whose physical id extends another's, such as {@code parent-1/child-1}, belongs to
+     * that resource and goes before it, whatever order the two were recorded in.
+     */
+    @Test
+    void deleteStack_deletesALeftoverWhoseIdExtendsAnothersBeforeIt() {
+        Stack stack = leftoverStack("delete-leftover-derived", "{\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}");
+        StackResource queue = resource("Queue", "queue-1", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource child = resource("Child", "parent-1/child-1", "AWS::Test::Child", "UPDATE_COMPLETE");
+        StackResource parent = resource("Parent", "parent-1", "AWS::Test::Parent", "UPDATE_COMPLETE");
+        hold(stack, queue, child, parent);
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(child, REGION);
+        deletes.verify(provisioner).delete(parent, REGION);
+    }
+
+    /**
      * A long chain of leftovers, each naming the next and recorded first link first, is ordered
      * without recursion: on a thread with a small stack the walk still completes, first link first,
      * instead of overflowing.

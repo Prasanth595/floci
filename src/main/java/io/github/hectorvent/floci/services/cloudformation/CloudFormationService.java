@@ -3298,7 +3298,12 @@ public class CloudFormationService implements ResourceProvider {
      * A resource's place in {@link #resourcesInCreationOrder}: its template rank, or for a leftover
      * one step after the latest held resource its attributes name, leftovers included, or else -1.
      * A chain of leftovers stays below the next template rank, and a cycle among them is cut where
-     * it closes. Only the values {@code references} gives count; see {@link #referenceValues}.
+     * it closes. Only the values {@code references} gives count; see {@link #referenceValues}. A value
+     * equal to the leftover's own physical id is not a reference, as a dependent such as a bucket
+     * policy or a secret attachment may take the same id, and neither is a resource whose id extends
+     * the leftover's. A leftover whose id extends another's, {@code parent-1/child-1} of
+     * {@code parent-1}, belongs to it and goes first, as does a bucket policy or secret target
+     * attachment, which takes the id of the bucket or secret it belongs to.
      */
     private static double leftoverPosition(StackResource resource, Map<String, Integer> rank,
                                            Map<String, List<StackResource>> holdersByPhysicalId,
@@ -3361,11 +3366,63 @@ public class CloudFormationService implements ResourceProvider {
     private static List<StackResource> leftoverUses(StackResource resource,
                                                     Map<String, List<StackResource>> holdersByPhysicalId,
                                                     Function<StackResource, Collection<String>> references) {
+        String own = resource.getPhysicalId();
         List<StackResource> uses = new ArrayList<>();
         for (String value : references.apply(resource)) {
-            uses.addAll(holdersByPhysicalId.getOrDefault(value, List.of()));
+            if (value == null || value.equals(own)) {
+                // Its own id, which a dependent such as a bucket policy may share: not a reference.
+                continue;
+            }
+            for (StackResource holder : holdersByPhysicalId.getOrDefault(value, List.of())) {
+                if (!extendsId(holder.getPhysicalId(), own)) {
+                    uses.add(holder);
+                }
+            }
+        }
+        for (String prefix : idPrefixes(own)) {
+            uses.addAll(holdersByPhysicalId.getOrDefault(prefix, List.of()));
+        }
+        if (SAME_ID_DEPENDENT_TYPES.contains(resource.getResourceType())) {
+            // A type that takes its parent's id as its own uses whatever else holds that id.
+            for (StackResource holder : holdersByPhysicalId.getOrDefault(own, List.of())) {
+                if (holder != resource && !SAME_ID_DEPENDENT_TYPES.contains(holder.getResourceType())) {
+                    uses.add(holder);
+                }
+            }
         }
         return uses;
+    }
+
+    /**
+     * Types whose physical id is the id of the resource they depend on: a bucket policy is named by
+     * its bucket, a secret target attachment by its secret's ARN.
+     */
+    private static final Set<String> SAME_ID_DEPENDENT_TYPES =
+            Set.of("AWS::S3::BucketPolicy", "AWS::SecretsManager::SecretTargetAttachment");
+
+    /** The characters after which a physical id may continue as a child's: {@code /}, {@code :} and {@code |}. */
+    private static final String ID_SEPARATORS = "/:|";
+
+    /**
+     * Whether {@code id} extends {@code parent} past a separator, as {@code parent-1/child-1} does
+     * {@code parent-1}: a resource named under another's id belongs to it.
+     */
+    private static boolean extendsId(String id, String parent) {
+        return id != null && parent != null && id.length() > parent.length() && id.startsWith(parent)
+                && ID_SEPARATORS.indexOf(id.charAt(parent.length())) >= 0;
+    }
+
+    /** Every proper prefix of {@code id} that ends just before a separator, which {@code id} extends. */
+    private static List<String> idPrefixes(String id) {
+        List<String> prefixes = new ArrayList<>();
+        if (id != null) {
+            for (int i = 1; i < id.length(); i++) {
+                if (ID_SEPARATORS.indexOf(id.charAt(i)) >= 0) {
+                    prefixes.add(id.substring(0, i));
+                }
+            }
+        }
+        return prefixes;
     }
 
     /**
