@@ -72,7 +72,8 @@ class CfnResourceDispatcherTest {
         CfnResourceDispatcher routed = new CfnResourceDispatcher(mapper, new CloudFormationResourceRegistry(
                 List.of(real(S3CfnProvisioner.class), real(SecretTargetAttachmentCfnProvisioner.class),
                         real(LambdaAddressingCfnProvisioner.class), real(EcsCapacityCfnProvisioner.class),
-                        real(WafV2CfnProvisioner.class), real(CodePipelineCfnProvisioner.class))),
+                        real(WafV2CfnProvisioner.class), real(CodePipelineCfnProvisioner.class),
+                        serving("AWS::CloudFormation::CustomResource"))),
                 dynamicReferences, null);
 
         for (String type : List.of("AWS::S3::BucketPolicy", "AWS::SecretsManager::SecretTargetAttachment",
@@ -85,7 +86,7 @@ class CfnResourceDispatcherTest {
             assertFalse(routed.idPrefixCanNameParent(type), type);
         }
         for (String type : Arrays.asList("AWS::S3::Bucket", "AWS::Lambda::Permission", "AWS::ECS::CapacityProvider",
-                "AWS::WAFv2::WebACLAssociation", "AWS::CodePipeline::Pipeline", TYPE, null)) {
+                "AWS::WAFv2::WebACLAssociation", "AWS::CodePipeline::Pipeline", "Custom::Namer", TYPE, null)) {
             assertFalse(routed.takesParentPhysicalId(type), String.valueOf(type));
             assertTrue(routed.idPrefixCanNameParent(type), String.valueOf(type));
         }

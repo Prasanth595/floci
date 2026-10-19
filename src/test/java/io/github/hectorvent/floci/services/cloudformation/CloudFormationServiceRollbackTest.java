@@ -54,10 +54,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_DEFAULTS;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -1847,10 +1848,13 @@ class CloudFormationServiceRollbackTest {
         return mock(type, CALLS_REAL_METHODS);
     }
 
-    /** A provisioner that serves {@code type}, for routing through a real registry. */
+    /**
+     * A provisioner that serves {@code type}, for routing through a real registry, and answers the
+     * interface's own defaults as a provisioner that overrides none of them does.
+     */
     private static CfnResourceProvisioner serving(String type) {
-        CfnResourceProvisioner serving = mock(CfnResourceProvisioner.class);
-        when(serving.resourceTypes()).thenReturn(Set.of(type));
+        CfnResourceProvisioner serving = mock(CfnResourceProvisioner.class, CALLS_REAL_METHODS);
+        doReturn(Set.of(type)).when(serving).resourceTypes();
         return serving;
     }
 
