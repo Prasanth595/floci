@@ -3312,20 +3312,60 @@ public class CloudFormationService implements ResourceProvider {
         if (known != null) {
             return known;
         }
+        // A depth-first walk on an explicit stack rather than recursion, so a long chain of
+        // leftovers, each naming the next, cannot overflow the thread's stack.
+        Deque<LeftoverVisit> path = new ArrayDeque<>();
+        path.push(new LeftoverVisit(resource, leftoverUses(resource, holdersByPhysicalId, references)));
         visiting.add(resource.getLogicalId());
-        double placed = -1;
-        for (String value : references.apply(resource)) {
-            for (StackResource holder : holdersByPhysicalId.getOrDefault(value, List.of())) {
-                if (!visiting.contains(holder.getLogicalId())) {
-                    placed = Math.max(placed,
-                            leftoverPosition(holder, rank, holdersByPhysicalId, step, position, visiting,
-                                    references) + step);
+        while (true) {
+            LeftoverVisit current = path.peek();
+            if (current.next < current.uses.size()) {
+                StackResource holder = current.uses.get(current.next++);
+                Integer holderRank = rank.get(holder.getLogicalId());
+                Double holderPosition = holderRank != null
+                        ? Double.valueOf(holderRank) : position.get(holder.getLogicalId());
+                if (holderPosition != null) {
+                    current.placed = Math.max(current.placed, holderPosition + step);
+                } else if (!visiting.contains(holder.getLogicalId())) {
+                    // A holder already on the path closes a cycle, which is cut here.
+                    visiting.add(holder.getLogicalId());
+                    path.push(new LeftoverVisit(holder, leftoverUses(holder, holdersByPhysicalId, references)));
                 }
+                continue;
             }
+            path.pop();
+            visiting.remove(current.resource.getLogicalId());
+            position.put(current.resource.getLogicalId(), current.placed);
+            LeftoverVisit parent = path.peek();
+            if (parent == null) {
+                return current.placed;
+            }
+            parent.placed = Math.max(parent.placed, current.placed + step);
         }
-        visiting.remove(resource.getLogicalId());
-        position.put(resource.getLogicalId(), placed);
-        return placed;
+    }
+
+    /** One leftover on the walk's path: the held resources it uses, how many are done, its place so far. */
+    private static final class LeftoverVisit {
+        private final StackResource resource;
+        private final List<StackResource> uses;
+        private int next;
+        private double placed = -1;
+
+        private LeftoverVisit(StackResource resource, List<StackResource> uses) {
+            this.resource = resource;
+            this.uses = uses;
+        }
+    }
+
+    /** The held resources a leftover uses, per {@link #leftoverPosition}. */
+    private static List<StackResource> leftoverUses(StackResource resource,
+                                                    Map<String, List<StackResource>> holdersByPhysicalId,
+                                                    Function<StackResource, Collection<String>> references) {
+        List<StackResource> uses = new ArrayList<>();
+        for (String value : references.apply(resource)) {
+            uses.addAll(holdersByPhysicalId.getOrDefault(value, List.of()));
+        }
+        return uses;
     }
 
     /**

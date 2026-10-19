@@ -1114,6 +1114,43 @@ class CloudFormationServiceRollbackTest {
         deletes.verify(provisioner).delete(source, REGION);
     }
 
+    /**
+     * A long chain of leftovers, each naming the next and recorded first link first, is ordered
+     * without recursion: on a thread with a small stack the walk still completes, first link first,
+     * instead of overflowing.
+     */
+    @Test
+    void deleteStack_ordersALongLeftoverChainWithoutOverflowingTheStack() throws Exception {
+        int length = 10_000;
+        Stack stack = leftoverStack("delete-leftover-chain-long", "{\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}");
+        StackResource[] chain = new StackResource[length];
+        for (int i = 0; i < length; i++) {
+            chain[i] = resource("Link" + i, "link-" + i, "AWS::Test::Link", "UPDATE_COMPLETE");
+            if (i + 1 < length) {
+                chain[i].getAttributes().put("NextId", "link-" + (i + 1));
+            }
+            stack.getResources().put(chain[i].getLogicalId(), chain[i]);
+        }
+        hold(stack);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread worker = new Thread(null, () -> {
+            try {
+                service.deleteStackResources(stack, REGION, ACCOUNT);
+            } catch (Throwable t) {
+                failure.set(t);
+            }
+        }, "small-stack", 256 * 1024);
+        worker.start();
+        worker.join(60_000);
+
+        assertFalse(worker.isAlive(), "the walk did not finish");
+
+        assertNull(failure.get(), () -> String.valueOf(failure.get()));
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(chain[0], REGION);
+        deletes.verify(provisioner).delete(chain[length - 1], REGION);
+    }
+
     private static Stack leftoverStack(String name, String resources) {
         Stack stack = new Stack();
         stack.setStackName(name);
