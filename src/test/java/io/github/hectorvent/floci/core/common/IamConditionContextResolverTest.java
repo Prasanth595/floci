@@ -209,7 +209,7 @@ class IamConditionContextResolverTest {
         query.add("Tag.1.Key", "Team");
         query.add("Tag.1.Value", "A+B%2F");
         query.add("Tag.1.Value", "ignored");
-        when(ec2Service.resourceTags("i-target")).thenReturn(List.of(new Tag("Owner", "alice")));
+        when(ec2Service.resourceTags("us-east-1", "i-target")).thenReturn(List.of(new Tag("Owner", "alice")));
         Map<String, List<String>> conditions = resolver.resolve(
                 "ec2", "ec2:CreateTags", queryRequest("ec2", query));
         assertEquals(List.of("A+B%2F"), conditions.get("aws:RequestTag/Team"));
