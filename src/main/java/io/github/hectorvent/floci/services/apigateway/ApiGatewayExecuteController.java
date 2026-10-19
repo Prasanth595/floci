@@ -1607,13 +1607,13 @@ public class ApiGatewayExecuteController {
             }
             Boolean base64 = httpApi ? httpApiBase64(node) : Boolean.valueOf(node.path("isBase64Encoded").asBoolean(false));
             if (httpApi && (httpApiStatusCode(node) == null || base64 == null
-                    || !httpApiBodyReadable(node.path("body"), base64))) {
+                    || node.path("body").isContainerNode())) {
                 // Measured (eu-west-1, 2026-10-19): an HTTP API answers a response it cannot read
                 // with 500 and its generic message, in format 1.0 a result that is not an object with
                 // a statusCode, and in either format a statusCode that is not a whole number from 100
                 // to 599, though text spelling one ("201") is taken, a body that is an object or a
-                // list, an isBase64Encoded it cannot read as a boolean, and a body it says is base64
-                // that does not decode.
+                // list, and an isBase64Encoded it cannot read as a boolean. A body it says is base64
+                // that does not decode reaches the catch below.
                 return httpApiError(500, "Internal Server Error");
             }
             int statusCode = httpApi ? httpApiStatusCode(node) : node.path("statusCode").asInt(200);
@@ -1651,7 +1651,8 @@ public class ApiGatewayExecuteController {
         } catch (Exception e) {
             LOG.warnv("Failed to parse Lambda response: {0}", e.getMessage());
             if (httpApi) {
-                // A result an HTTP API cannot parse is answered as one it cannot read.
+                // A result an HTTP API cannot parse, and a body said to be base64 that does not
+                // decode (measured), are answered as a response it cannot read.
                 return httpApiError(500, "Internal Server Error");
             }
             return Response.status(502).entity(result.getPayload()).type(MediaType.APPLICATION_JSON).build();
@@ -1682,25 +1683,6 @@ public class ApiGatewayExecuteController {
             return true;
         }
         return FALSE_TEXT.contains(text) ? false : null;
-    }
-
-    /**
-     * Whether an HTTP API can read a Lambda proxy response's body: absent, null or a scalar, which it
-     * takes as text, and, when it is said to be base64, one that decodes (measured).
-     */
-    private static boolean httpApiBodyReadable(JsonNode body, boolean base64) {
-        if (body.isContainerNode()) {
-            return false;
-        }
-        if (!base64 || body.isMissingNode() || body.isNull()) {
-            return true;
-        }
-        try {
-            Base64.getDecoder().decode(body.asText());
-            return true;
-        } catch (IllegalArgumentException notBase64) {
-            return false;
-        }
     }
 
     /**
