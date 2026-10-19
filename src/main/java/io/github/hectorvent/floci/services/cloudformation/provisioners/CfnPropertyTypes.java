@@ -202,8 +202,13 @@ final class CfnPropertyTypes {
             return out;
         }
 
-        /** A literal item that is an object or a list is refused by its index, as for any string. */
+        /**
+         * A literal list keeps its blank entries where the template put them, as CloudFormation
+         * passes it on, and an item that is an object or a list is refused by its index, as for any
+         * string; any other value is read as {@link CfnPropertyTypes#readStringList} says.
+         */
         private JsonNode readStringList(String property, JsonNode raw) {
+            List<String> values;
             if (raw.isArray()) {
                 for (int i = 0; i < raw.size(); i++) {
                     JsonNode item = raw.get(i);
@@ -211,8 +216,10 @@ final class CfnPropertyTypes {
                         throw templateMismatch(String.valueOf(i), "String", containerName(item));
                     }
                 }
+                values = engine.resolveLiteralList(raw);
+            } else {
+                values = CfnPropertyTypes.readStringList(property, raw, engine);
             }
-            List<String> values = CfnPropertyTypes.readStringList(property, raw, engine);
             if (values == null) {
                 return null;
             }

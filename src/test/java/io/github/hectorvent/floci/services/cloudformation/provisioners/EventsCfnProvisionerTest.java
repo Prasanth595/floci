@@ -65,6 +65,11 @@ class EventsCfnProvisionerTest {
             ((JsonNode) inv.getArgument(0)).forEach(value -> values.add(value.asText()));
             return values;
         });
+        when(engine.resolveLiteralList(any())).thenAnswer(inv -> {
+            List<String> values = new ArrayList<>();
+            ((JsonNode) inv.getArgument(0)).forEach(value -> values.add(value.asText()));
+            return values;
+        });
         return new ProvisionContext(engine, REGION, "000000000000", "my-stack", priorPhysicalId);
     }
 
@@ -417,6 +422,29 @@ class EventsCfnProvisionerTest {
         assertEquals(3, ecs.getTaskCount());
         assertEquals(Boolean.TRUE, ecs.getEnableECSManagedTags());
         assertEquals(List.of("5"), ecs.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets());
+    }
+
+    @Test
+    void aLiteralListKeepsItsBlankEntriesWhereTheTemplatePutThem() throws Exception {
+        // Measured: SecurityGroups ["", "sg-..."] reaches the target as both. Path parameter values
+        // are positional, so a blank one dropped would move the next into its wildcard.
+        stubPutRule();
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders");
+        props.putArray("Targets").add(mapper.readTree("""
+                {"Id": "Run", "Arn": "arn:aws:ecs:us-east-1:000000000000:cluster/jobs",
+                 "HttpParameters": {"PathParameterValues": ["", "b"]},
+                 "EcsParameters": {"TaskDefinitionArn": "arn:aws:ecs:us-east-1:000000000000:task-definition/job:1",
+                   "NetworkConfiguration": {"AwsVpcConfiguration": {"Subnets": ["subnet-1"], "SecurityGroups": ["", "sg-1"]}}}}
+                """));
+
+        provisioner.provision(resource("AWS::Events::Rule", "Rule"), props, new ProvisionContext(
+                CloudFormationTemplateEngine.standalone("000000000000", REGION, "my-stack", mapper, null),
+                REGION, "000000000000", "my-stack", null));
+
+        Target put = onlyPutTarget();
+        assertEquals(List.of("", "b"), put.getHttpParameters().getPathParameterValues());
+        assertEquals(List.of("", "sg-1"),
+                put.getEcsParameters().getNetworkConfiguration().getAwsvpcConfiguration().getSecurityGroups());
     }
 
     private Target onlyPutTarget() {

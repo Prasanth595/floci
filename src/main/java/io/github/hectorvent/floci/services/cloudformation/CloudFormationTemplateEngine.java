@@ -579,6 +579,16 @@ public class CloudFormationTemplateEngine {
         return resolveListElements(node, true);
     }
 
+    /**
+     * A list property written as a literal array, as text, a list-valued intrinsic among its elements
+     * expanded in place and blank entries kept: it reaches the resource as written (measured:
+     * {@code SecurityGroups ["", "sg-..."]} reaches a rule target as both). See
+     * {@link #resolveListElements}.
+     */
+    public List<String> resolveLiteralList(JsonNode array) {
+        return resolveListElements(array);
+    }
+
     private List<String> resolveListElements(JsonNode node, boolean resolveDynamicReferences) {
         List<String> out = new ArrayList<>();
         for (JsonNode element : node) {
