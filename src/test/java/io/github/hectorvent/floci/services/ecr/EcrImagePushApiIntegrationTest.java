@@ -81,15 +81,31 @@ class EcrImagePushApiIntegrationTest {
     }
 
     @Test
-    void putImageRefusesATagOutsideTheTagGrammar() {
+    void putImageRefusesATagEcrRefusesWithEcrsMessage() {
         // Each would otherwise change the registry URL: v1?x writes v1, a slash names another repository.
-        for (String tag : new String[] {"v1?x", "team/v1", "v1#x", ".v1", "-v1", "v 1", "t".repeat(129)}) {
-            call("PutImage", "{\"repositoryName\":\"" + REPO + "\",\"imageManifest\":\"{}\","
-                    + "\"imageManifestMediaType\":\"" + OCI_MANIFEST + "\",\"imageTag\":\"" + tag + "\"}")
-                    .statusCode(400)
+        for (String tag : new String[] {"v1?x", "team/v1", "v1#x", "v 1", "v1:x"}) {
+            putTag(tag).statusCode(400)
                     .body("__type", equalTo("InvalidParameterException"))
-                    .body("message", containsString("imageTag"));
+                    .body("message", equalTo("Invalid parameter at 'imageTag' failed to satisfy constraint: "
+                            + "'must satisfy regular expression '[a-zA-Z0-9-_.]+''"));
         }
+        putTag("t".repeat(301)).statusCode(400)
+                .body("message", containsString("Member must have length less than or equal to 300"));
+    }
+
+    @Test
+    void putImageRefusesATagTheBackingRegistryCannotHold() {
+        // ECR takes these; the OCI tag grammar the registry follows does not.
+        for (String tag : new String[] {".v1", "-v1", "t".repeat(129), "t".repeat(300)}) {
+            putTag(tag).statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"))
+                    .body("message", containsString("Floci's backing registry cannot hold the tag"));
+        }
+    }
+
+    private static ValidatableResponse putTag(String tag) {
+        return call("PutImage", "{\"repositoryName\":\"" + REPO + "\",\"imageManifest\":\"{}\","
+                + "\"imageManifestMediaType\":\"" + OCI_MANIFEST + "\",\"imageTag\":\"" + tag + "\"}");
     }
 
     @Test

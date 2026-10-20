@@ -63,7 +63,10 @@ public class EcrService implements ResourceProvider {
     private static final Pattern LAYER_DIGEST = Pattern.compile("[a-zA-Z0-9-_+.]+:[a-fA-F0-9]+");
     private static final ObjectMapper MAPPER = new ObjectMapper();
     /** The OCI distribution spec's tag grammar, which the registry's manifest URL takes. */
-    private static final Pattern IMAGE_TAG = Pattern.compile("[A-Za-z0-9_][A-Za-z0-9._-]{0,127}");
+    /** ECR's imageTag rule, which the service model bounds at 300 characters. */
+    private static final Pattern ECR_IMAGE_TAG = Pattern.compile("[a-zA-Z0-9_.-]+");
+    /** The OCI distribution spec's tag grammar, which the backing registry's manifest URL takes. */
+    private static final Pattern REGISTRY_IMAGE_TAG = Pattern.compile("[A-Za-z0-9_][A-Za-z0-9._-]{0,127}");
     private static final Pattern CREDENTIAL_ARN = Pattern.compile(
             "arn:" + AwsArnUtils.PARTITION_REGEX + ":secretsmanager:[a-zA-Z0-9-:]+:secret:ecr-pullthroughcache/"
                     + "[a-zA-Z0-9/_+=.@-]+");
@@ -651,11 +654,8 @@ public class EcrService implements ResourceProvider {
         if (imageManifest == null || imageManifest.isEmpty()) {
             throw new AwsException("InvalidParameterException", "imageManifest must not be empty", 400);
         }
-        if (imageTag != null && !IMAGE_TAG.matcher(imageTag).matches()) {
-            throw new AwsException("InvalidParameterException",
-                    "Invalid parameter at 'imageTag' failed to satisfy constraint: 'must start with a letter, digit"
-                            + " or underscore, hold only letters, digits, '.', '_' and '-', and be at most 128"
-                            + " characters'", 400);
+        if (imageTag != null) {
+            requireImageTag(imageTag);
         }
         String mediaType = manifestMediaType(imageManifest, imageManifestMediaType);
         String digest = "sha256:" + Digests.sha256Hex(imageManifest.getBytes(StandardCharsets.UTF_8));
@@ -711,6 +711,26 @@ public class EcrService implements ResourceProvider {
         image.setImageManifest(imageManifest);
         image.setImageManifestMediaType(mediaType);
         return image;
+    }
+
+    /**
+     * Refuses a tag ECR refuses, with ECR's message, then a tag ECR takes but the backing registry
+     * cannot hold: one starting with '.' or '-', or longer than 128 characters.
+     */
+    private static void requireImageTag(String imageTag) {
+        if (imageTag.length() > 300) {
+            throw new AwsException("InvalidParameterException", "Invalid parameter at 'imageTag' failed to satisfy"
+                    + " constraint: 'Member must have length less than or equal to 300'", 400);
+        }
+        if (!ECR_IMAGE_TAG.matcher(imageTag).matches()) {
+            throw new AwsException("InvalidParameterException", "Invalid parameter at 'imageTag' failed to satisfy"
+                    + " constraint: 'must satisfy regular expression '[a-zA-Z0-9-_.]+''", 400);
+        }
+        if (!REGISTRY_IMAGE_TAG.matcher(imageTag).matches()) {
+            throw new AwsException("InvalidParameterException", "Floci's backing registry cannot hold the tag '"
+                    + imageTag + "': it must start with a letter, digit or underscore and be at most 128"
+                    + " characters", 400);
+        }
     }
 
     /** Reports which of the given layers the repository holds, with their sizes. */
