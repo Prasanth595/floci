@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.command.InspectVolumeResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.LogConfig;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -35,6 +36,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
@@ -49,6 +51,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -431,6 +434,73 @@ class EcsContainerManagerFirelensTest {
         if (external) {
             verify(s3Service).getObject("firelens-configs", "extra.conf");
         }
+    }
+
+    @Test
+    void exhaustedConfigUploadCleansUpBeforeAnyContainerStarts() {
+        DockerArchiveUploadFixture uploads = failingUploads();
+
+        RuntimeException failure = assertThrows(RuntimeException.class, () -> manager.startTask(
+                task(), retryTaskDefinition("fluentbit", true, "# external config\n"), null, "us-east-1"));
+
+        assertSame(uploads.failure, failure.getCause());
+        assertEquals(6, uploads.commands.size());
+        assertEquals(0, uploads.completed.size());
+        verifyFailedLaunchCleanup();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"fluentbit", "fluentd"})
+    void daemonRejectionDoesNotRetryAndCleansUp(String type) {
+        DockerArchiveUploadFixture uploads = failingUploads();
+        uploads.failure = new NotFoundException("container missing");
+
+        RuntimeException failure = assertThrows(RuntimeException.class, () -> manager.startTask(
+                task(), retryTaskDefinition(type, false, ""), null, "us-east-1"));
+
+        assertSame(uploads.failure, failure.getCause());
+        assertEquals(1, uploads.commands.size());
+        verifyFailedLaunchCleanup();
+    }
+
+    @Test
+    void routerStartTransportFailureDoesNotRetryTheUploadOrStart() {
+        DockerArchiveUploadFixture uploads = new DockerArchiveUploadFixture(dockerClient, "router-id");
+        RuntimeException transportFailure = new RuntimeException(new IOException("Connection reset"));
+        when(lifecycleManager.startCreated(anyString(), any())).thenThrow(transportFailure);
+
+        RuntimeException failure = assertThrows(RuntimeException.class, () -> manager.startTask(
+                task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1"));
+
+        assertSame(transportFailure, failure);
+        assertEquals(1, uploads.commands.size());
+        assertEquals(1, uploads.completed.size());
+        verify(lifecycleManager).startCreated(eq("router-id"), any());
+        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager).removeIfExists("router-id");
+        verifyFirelensVolumeRemoved();
+    }
+
+    private DockerArchiveUploadFixture failingUploads() {
+        DockerArchiveUploadFixture uploads = new DockerArchiveUploadFixture(dockerClient, "router-id");
+        uploads.failures = Integer.MAX_VALUE;
+        uploads.consumedBytes = 73;
+        uploads.failure = new RuntimeException(new IOException("Connection reset"));
+        return uploads;
+    }
+
+    private void verifyFailedLaunchCleanup() {
+        verify(lifecycleManager).create(any());
+        verify(lifecycleManager, never()).startCreated(anyString(), any());
+        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager).removeIfExists("router-id");
+        verifyFirelensVolumeRemoved();
+    }
+
+    private void verifyFirelensVolumeRemoved() {
+        ArgumentCaptor<String> volumeName = ArgumentCaptor.forClass(String.class);
+        verify(lifecycleManager).ensureVolume(volumeName.capture());
+        verify(lifecycleManager).removeVolume(volumeName.getValue());
     }
 
     private TaskDefinition retryTaskDefinition(String type, boolean external, String extra) {
