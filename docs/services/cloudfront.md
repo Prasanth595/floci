@@ -255,9 +255,12 @@ PUT, PATCH and DELETE).
   requests for the distribution. An `IamAuth` endpoint then lets them through, or with IAM enforcement on
   evaluates the function's resource policy for `cloudfront.amazonaws.com`, with the distribution as
   `aws:SourceArn` and its account as `aws:SourceAccount`. Without one, an `IamAuth` endpoint answers
-  with its 403 page. The viewer's `Authorization` reaches the function unless it is an AWS signature.
-- Origin access controls and distributions follow the AWS checks for Lambda origins, which CloudFront
-  tells apart by hostname: a Web Function endpoint needs a `lambda` origin access control with
+  with its 403 page. CloudFront forwards the viewer's `Authorization` on GET and HEAD only when the
+  cache policy includes it. A forwarded `Authorization` reaches the function unless it is an AWS
+  signature.
+- Origin access controls and distributions follow the AWS checks for Lambda origins. CloudFront tells
+  them apart by a hostname under `on.aws` with its fixed labels in lowercase, and Floci also by one
+  under its own host. A Web Function endpoint needs a `lambda` origin access control with
   `always-amz-auth`, signed with `sigv4a` for a `global` endpoint and `sigv4` otherwise, and
   `always-amz-auth` is for Web Function origins only. A Lambda@Edge origin trigger is refused in
   front of an origin signed with `always-amz-auth` or `sigv4a`. The `execute-api` origin type is

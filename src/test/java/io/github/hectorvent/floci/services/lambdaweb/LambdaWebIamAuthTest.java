@@ -243,19 +243,20 @@ class LambdaWebIamAuthTest {
         when(config.services().iam().enforcementEnabled()).thenReturn(true);
         assertFalse(allowsCloudFront(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN)), "no policy denies");
 
-        function.policy = cloudFrontPolicy("Allow", "aws:SourceArn", DISTRIBUTION_ARN);
+        function.policy = cloudFrontPolicy(cloudFrontStatement("Allow", "aws:SourceArn", DISTRIBUTION_ARN));
         assertTrue(allowsCloudFront(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN)));
         assertFalse(allowsCloudFront(iamAuth.cloudFrontSignature(
                 "arn:aws:cloudfront::" + ACCOUNT + ":distribution/E3OTHER")));
 
-        function.policy = cloudFrontPolicy("Allow", "aws:SourceAccount", ACCOUNT);
+        function.policy = cloudFrontPolicy(cloudFrontStatement("Allow", "aws:SourceAccount", ACCOUNT));
         assertTrue(allowsCloudFront(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN)));
         assertFalse(allowsCloudFront(iamAuth.cloudFrontSignature(
                 "arn:aws:cloudfront::" + OTHER_ACCOUNT + ":distribution/E2EXAMPLE")));
 
-        function.policy = cloudFrontPolicy("Allow", "lambda:Resource/WebFunctionAuthType", "IamAuth");
+        String allowIamAuth = cloudFrontStatement("Allow", "lambda:Resource/WebFunctionAuthType", "IamAuth");
+        function.policy = cloudFrontPolicy(allowIamAuth);
         assertTrue(allowsCloudFront(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN)));
-        function.policy = cloudFrontPolicy("Deny", "aws:SourceArn", DISTRIBUTION_ARN);
+        function.policy = cloudFrontPolicy(allowIamAuth, cloudFrontStatement("Deny", "aws:SourceArn", DISTRIBUTION_ARN));
         assertFalse(allowsCloudFront(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN)));
     }
 
@@ -265,11 +266,15 @@ class LambdaWebIamAuthTest {
                 new WebFunctionTarget(ACCOUNT, "us-east-1", function, endpoint));
     }
 
-    private static String cloudFrontPolicy(String effect, String conditionKey, String conditionValue) {
+    private static String cloudFrontPolicy(String... statements) {
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[" + String.join(",", statements) + "]}";
+    }
+
+    private static String cloudFrontStatement(String effect, String conditionKey, String conditionValue) {
         return """
-                {"Version":"2012-10-17","Statement":[{"Effect":"%s","Principal":{"Service":"cloudfront.amazonaws.com"},
+                {"Effect":"%s","Principal":{"Service":"cloudfront.amazonaws.com"},
                  "Action":"lambda:InvokeWebFunctionEndpoint","Resource":"%s",
-                 "Condition":{"StringEquals":{"%s":"%s"}}}]}"""
+                 "Condition":{"StringEquals":{"%s":"%s"}}}"""
                 .formatted(effect, ENDPOINT_ARN, conditionKey, conditionValue);
     }
 

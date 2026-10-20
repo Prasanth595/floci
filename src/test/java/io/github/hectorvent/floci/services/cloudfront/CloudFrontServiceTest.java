@@ -140,6 +140,7 @@ class CloudFrontServiceTest {
 
         when(config.defaultAccountId()).thenReturn(ACCOUNT);
         when(config.hostname()).thenReturn(Optional.empty());
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         when(config.dns()).thenReturn(dnsConfig);
         when(dnsConfig.extraSuffixes()).thenReturn(Optional.empty());
         when(config.services()).thenReturn(servicesConfig);
@@ -597,10 +598,9 @@ class CloudFrontServiceTest {
 
     @Test
     void theExecuteApiOriginTypeIsRefused() {
-        AwsException error = assertThrows(AwsException.class, () -> serviceWithDomainSuffix("cloudfront.net")
+        AwsException error = assertAws("AccessDenied", () -> serviceWithDomainSuffix("cloudfront.net")
                 .createOriginAccessControl(originAccessControl("sigv4", "always", "execute-api")));
 
-        assertEquals("AccessDenied", error.getErrorCode());
         assertEquals("Access Denied.", error.getMessage());
         assertEquals(403, error.getHttpStatus());
     }
@@ -643,17 +643,39 @@ class CloudFrontServiceTest {
     }
 
     @Test
+    void onlyAHostnameUnderOnAwsOrThisFlociIsALambdaOrigin() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        String differ = "The origin type and OAC origin type differ";
+
+        for (String notLambda : List.of("api.lambda-web.us-east-1.example.com",
+                "abcdefghijklmnopqrstuvwxyz.001.lambda-web.us-east-1.on.aws.example.com",
+                "abcdefghijklmnopqrstuvwxyz0123.lambda-url.us-east-1.example.com",
+                "abcdefghijklmnopqrstuvwxyz.001.lambda-web.us-east-1.amazonaws.com",
+                "abcdefghijklmnopqrstuvwxyz.001.lambda-web.us-east-1.floci.example.com",
+                "abcdefghijklmnopqrstuvwxyz.001.LAMBDA-WEB.US-EAST-1.ON.AWS",
+                "abc.lambda-web.Global.on.aws",
+                "lambda-web.us-east-1.on.aws",
+                "abc.lambda-web.foo.on.aws")) {
+            assertOriginAccessControlRefused(service, notLambda, "sigv4a", "always-amz-auth", "lambda", differ);
+        }
+        for (String webFunction : List.of("ABC.lambda-web.us-east-1.on.aws", "a.b.c.lambda-web.us-east-1.on.aws",
+                "abc.lambda-web.xx-fake-9.on.aws", "abcdefghijklmnop.001.lambda-web.us-east-1.localhost")) {
+            assertOriginAccessControlRefused(service, webFunction, "sigv4a", "always-amz-auth", "lambda",
+                    "SigV4a signing protocol is not compatible with this origin domain.");
+        }
+    }
+
+    @Test
     void anUpdateChecksTheOriginAccessControlOfALambdaOrigin() {
         CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
         String never = oac(service, "sigv4", "never", "lambda");
         Distribution created = service.createDistribution(
                 distributionWithOrigin("abcdefghijklmnopqrstuvwxyz0123.lambda-url.us-east-1.on.aws", never, null), Map.of());
 
-        AwsException error = assertThrows(AwsException.class, () -> service.updateDistribution(created.getId(),
-                created.getEtag(), distributionWithOrigin(
+        AwsException error = assertAws("IllegalOriginAccessConfiguration", () -> service.updateDistribution(
+                created.getId(), created.getEtag(), distributionWithOrigin(
                         "abcdefghijklmnopqrstuvwxyz.001.lambda-web.us-east-1.on.aws", never, null)));
 
-        assertEquals("IllegalOriginAccessConfiguration", error.getErrorCode());
         assertEquals("Illegal configuration: Lambda-Web origins require always-amz-auth signing behavior.",
                 error.getMessage());
     }
@@ -661,16 +683,14 @@ class CloudFrontServiceTest {
     @Test
     void aDistributionNamingAnUnknownOriginAccessControlIsRefused() {
         CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
-        AwsException created = assertThrows(AwsException.class, () -> service.createDistribution(
+        AwsException created = assertAws("InvalidOriginAccessControl", () -> service.createDistribution(
                 distributionWithOrigin("example.com", "E0000000000000", null), Map.of()));
-        assertEquals("InvalidOriginAccessControl", created.getErrorCode());
         assertEquals("The specified origin access control does not exist or is not valid.", created.getMessage());
         assertEquals(400, created.getHttpStatus());
 
         Distribution existing = service.createDistribution(distributionWithOrigin("example.com", null, null), Map.of());
-        AwsException updated = assertThrows(AwsException.class, () -> service.updateDistribution(existing.getId(),
+        assertAws("InvalidOriginAccessControl", () -> service.updateDistribution(existing.getId(),
                 existing.getEtag(), distributionWithOrigin("example.com", "E0000000000000", null)));
-        assertEquals("InvalidOriginAccessControl", updated.getErrorCode());
         assertNull(service.getDistribution(existing.getId()).getConfig().getOrigins().getFirst()
                 .getOriginAccessControlId());
     }
@@ -704,9 +724,8 @@ class CloudFrontServiceTest {
 
     private static void assertIllegalUpdate(CloudFrontService service, String id, String protocol, String behavior,
                                             String originType) {
-        AwsException error = assertThrows(AwsException.class,
+        AwsException error = assertAws("IllegalUpdate",
                 () -> updateOriginAccessControl(service, id, protocol, behavior, originType));
-        assertEquals("IllegalUpdate", error.getErrorCode());
         assertEquals("Cannot update origin type when associated to origins.", error.getMessage());
         assertEquals(400, error.getHttpStatus());
     }
@@ -720,9 +739,8 @@ class CloudFrontServiceTest {
                 + " Use a different origin or disassociate the function.";
 
         for (String eventType : List.of("origin-request", "origin-response")) {
-            AwsException error = assertThrows(AwsException.class, () -> service.createDistribution(
+            AwsException error = assertAws("InvalidLambdaFunctionAssociation", () -> service.createDistribution(
                     distributionWithOrigin(regional, amzAuth, eventType), Map.of()));
-            assertEquals("InvalidLambdaFunctionAssociation", error.getErrorCode());
             assertEquals(message, error.getMessage());
             assertEquals(400, error.getHttpStatus());
         }
@@ -733,11 +751,12 @@ class CloudFrontServiceTest {
         behavior.setLambdaFunctionAssociations(List.of(Map.<String, Object>of("LambdaFunctionARN",
                 "arn:aws:lambda:us-east-1:000000000000:function:edge:1", "EventType", "origin-request")));
         onABehavior.getConfig().setCacheBehaviors(List.of(behavior));
-        assertEquals(message, assertThrows(AwsException.class,
+        assertEquals(message, assertAws("InvalidLambdaFunctionAssociation",
                 () -> service.createDistribution(onABehavior, Map.of())).getMessage());
-        assertEquals(message, assertThrows(AwsException.class, () -> service.createDistribution(distributionWithOrigin(
-                "bucket.s3.us-east-1.amazonaws.com", oac(service, "sigv4a", "always", "s3"), "origin-request"),
-                Map.of())).getMessage());
+        Distribution sigv4aS3 = distributionWithOrigin(
+                "bucket.s3.us-east-1.amazonaws.com", oac(service, "sigv4a", "always", "s3"), "origin-request");
+        assertEquals(message, assertAws("InvalidLambdaFunctionAssociation",
+                () -> service.createDistribution(sigv4aS3, Map.of())).getMessage());
 
         assertDoesNotThrow(() -> service.createDistribution(
                 distributionWithOrigin(regional, amzAuth, "viewer-request"), Map.of()));
@@ -1464,10 +1483,9 @@ class CloudFrontServiceTest {
     private static void assertOriginAccessControlRefused(CloudFrontService service, String domainName, String protocol,
                                                          String behavior, String originType, String reason) {
         Distribution distribution = distributionWithOrigin(domainName, oac(service, protocol, behavior, originType), null);
-        AwsException error = assertThrows(AwsException.class, () -> service.createDistribution(distribution, Map.of()),
-                domainName + " " + protocol + " " + behavior + " " + originType);
-        assertEquals("IllegalOriginAccessConfiguration", error.getErrorCode());
-        assertEquals("Illegal configuration: " + reason, error.getMessage());
+        AwsException error = assertAws("IllegalOriginAccessConfiguration",
+                () -> service.createDistribution(distribution, Map.of()));
+        assertEquals("Illegal configuration: " + reason, error.getMessage(), domainName);
         assertEquals(400, error.getHttpStatus());
     }
 
@@ -1519,9 +1537,7 @@ class CloudFrontServiceTest {
 
     private static void assertInvalidOriginAccessControl(
             CloudFrontService service, OriginAccessControl oac, String errorCode, String message) {
-        AwsException error = assertThrows(AwsException.class,
-                () -> service.createOriginAccessControl(oac));
-        assertEquals(errorCode, error.getErrorCode());
+        AwsException error = assertAws(errorCode, () -> service.createOriginAccessControl(oac));
         assertEquals(message, error.getMessage());
         assertEquals(400, error.getHttpStatus());
     }

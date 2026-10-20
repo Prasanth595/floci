@@ -134,10 +134,9 @@ public class LambdaWebIamAuth {
         }
         String principal = ServicePrincipals.of("cloudfront");
         String endpointArn = target.endpoint().endpointArn;
-        Map<String, List<String>> context = new HashMap<>(IamConditionContextResolver.serviceCallContext(principal,
-                endpointArn, target.accountId(), distributionArn, AwsArnUtils.parse(distributionArn).accountId()));
-        context.put("lambda:Resource/WebFunctionAuthType", List.of(target.endpoint().authType));
-        target.function().tags.forEach((key, value) -> context.put("aws:ResourceTag/" + key, List.of(value)));
+        Map<String, List<String>> context = resourceContext(target);
+        context.putAll(IamConditionContextResolver.serviceCallContext(principal, endpointArn, target.accountId(),
+                distributionArn, AwsArnUtils.parse(distributionArn).accountId()));
         String policy = target.function().policy;
         boolean allowed = evaluator.evaluateServicePrincipal(isBlank(policy) ? null : List.of(policy), principal,
                 ACTION, endpointArn, context) == Decision.ALLOW;
@@ -276,9 +275,7 @@ public class LambdaWebIamAuth {
         if (scpLevels != null) {
             caller = caller.withScpLevels(scpLevels);
         }
-        Map<String, List<String>> context = new HashMap<>();
-        context.put("lambda:Resource/WebFunctionAuthType", List.of(target.endpoint().authType));
-        target.function().tags.forEach((key, value) -> context.put("aws:ResourceTag/" + key, List.of(value)));
+        Map<String, List<String>> context = resourceContext(target);
         Optional<CallerArns> callerArns = iamService.resolveCallerArns(accessKeyId);
         if (callerArns.isPresent()) {
             caller = caller.withPrincipalArn(callerArns.get().callerArn());
@@ -295,6 +292,13 @@ public class LambdaWebIamAuth {
                 ? ResourceAccountRelationship.SAME_ACCOUNT : ResourceAccountRelationship.CROSS_ACCOUNT;
         return evaluator.evaluateResolvedResourcePolicy(caller, grant, relationship, ACTION, endpointArn, effective)
                 != Decision.DENY;
+    }
+
+    private static Map<String, List<String>> resourceContext(WebFunctionTarget target) {
+        Map<String, List<String>> context = new HashMap<>();
+        context.put("lambda:Resource/WebFunctionAuthType", List.of(target.endpoint().authType));
+        target.function().tags.forEach((key, value) -> context.put("aws:ResourceTag/" + key, List.of(value)));
+        return context;
     }
 
     private static boolean isBlank(String value) {

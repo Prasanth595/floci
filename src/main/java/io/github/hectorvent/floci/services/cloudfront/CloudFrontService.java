@@ -35,6 +35,7 @@ import io.github.hectorvent.floci.services.iam.ServerCertificateReferenceProvide
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.net.URI;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -68,9 +69,6 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private static final List<String> OAC_SIGNING_PROTOCOLS = List.of("sigv4", "sigv4a");
     private static final List<String> OAC_SIGNING_BEHAVIORS =
             List.of("always-amz-auth", "never", "always", "no-override");
-    /** CloudFront knows a Lambda origin by its hostname alone, which also matches Floci's own endpoints. */
-    private static final Pattern LAMBDA_ORIGIN_HOST = Pattern.compile(
-            "(?:^|\\.)(lambda-web|lambda-url)\\.(global|[a-z]{2,4}-[a-z-]+-\\d+)\\.", Pattern.CASE_INSENSITIVE);
     private static final Set<String> FUNCTION_RUNTIMES = Set.of("cloudfront-js-1.0", "cloudfront-js-2.0");
     private static final int MAX_ORIGIN_CUSTOM_HEADERS = 30;
     private static final int MAX_CUSTOM_HEADER_NAME_LENGTH = 256;
@@ -146,6 +144,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
      * certificate, so a signed URL for either can be downloaded over HTTPS.
      */
     private final List<String> localDeliverySuffixes;
+    private final Pattern lambdaOriginHost;
 
     public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver) {
         this(factory, config, regionResolver, null);
@@ -193,6 +192,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         this.regionResolver = regionResolver;
         this.configuredDomainSuffix = config.services().cloudfront().domainSuffix().orElse(null);
         this.localDeliverySuffixes = localDeliverySuffixes(config);
+        this.lambdaOriginHost = lambdaOriginHost(config);
     }
 
     // ── Distributions ─────────────────────────────────────────────────────────
@@ -1292,13 +1292,23 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     /** The kinds of Lambda origin CloudFront tells apart. */
     private enum LambdaOrigin { NONE, FUNCTION_URL, WEB_FUNCTION, GLOBAL_WEB_FUNCTION }
 
-    private static LambdaOrigin lambdaOrigin(String domainName) {
-        Matcher matcher = LAMBDA_ORIGIN_HOST.matcher(domainName == null ? "" : domainName);
-        if (!matcher.find()) {
+    /**
+     * CloudFront knows a Lambda origin by its hostname alone, case sensitively. The endpoints of this
+     * Floci end in its own host instead of {@code on.aws}.
+     */
+    private static Pattern lambdaOriginHost(EmulatorConfig config) {
+        String flociHost = Pattern.quote(URI.create(config.effectiveBaseUrl()).getHost()) + "(?::\\d+)?";
+        return Pattern.compile(".+\\.(lambda-web|lambda-url)\\.(global|[a-z]{2,4}-[a-z-]+-\\d+)\\.(?:on\\.aws|"
+                + flociHost + ")");
+    }
+
+    private LambdaOrigin lambdaOrigin(String domainName) {
+        Matcher matcher = lambdaOriginHost.matcher(domainName == null ? "" : domainName);
+        if (!matcher.matches()) {
             return LambdaOrigin.NONE;
         }
-        boolean global = "global".equalsIgnoreCase(matcher.group(2));
-        if ("lambda-url".equalsIgnoreCase(matcher.group(1))) {
+        boolean global = "global".equals(matcher.group(2));
+        if ("lambda-url".equals(matcher.group(1))) {
             return global ? LambdaOrigin.NONE : LambdaOrigin.FUNCTION_URL;
         }
         return global ? LambdaOrigin.GLOBAL_WEB_FUNCTION : LambdaOrigin.WEB_FUNCTION;
