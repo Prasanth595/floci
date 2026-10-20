@@ -1354,4 +1354,48 @@ class ElbV2IntegrationTest {
                 .statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("LoadBalancerNotFound"));
     }
+
+    /** SetSubnets takes one or the other as well: both are refused and the balancer keeps its subnets. */
+    @Test
+    @Order(77)
+    void setSubnetsRejectsBothSubnetsAndSubnetMappings() {
+        String bothFormsLbArn = given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "set-both-subnet-forms")
+                .formParam("Type", "application")
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
+                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+
+        given()
+                .formParam("Action", "SetSubnets")
+                .formParam("LoadBalancerArn", bothFormsLbArn)
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "b"))
+                .formParam("SubnetMappings.member.1.SubnetId", Ec2Service.defaultSubnetId("us-east-1", "c"))
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message",
+                        equalTo("You can specify either subnets or subnet mappings, not both"));
+
+        given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("LoadBalancerArns.member.1", bothFormsLbArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
+                        contains(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
+    }
 }

@@ -125,6 +125,22 @@ class ElbV2ServiceTest {
     }
 
     /**
+     * The API handler and the CloudFormation provisioner both take a request's subnets from here: one
+     * side as given, an empty list for neither, and a refusal for both.
+     */
+    @Test
+    void requestedSubnetsAreTheSubnetsOrTheMappingsNotBoth() {
+        assertEquals(List.of("subnet-a"), ElbV2Service.requestedSubnets(List.of("subnet-a"), List.of()));
+        assertEquals(List.of("subnet-b"), ElbV2Service.requestedSubnets(List.of(), List.of("subnet-b")));
+        assertEquals(List.of(), ElbV2Service.requestedSubnets(List.of(), List.of()));
+        AwsException both = assertThrows(AwsException.class,
+                () -> ElbV2Service.requestedSubnets(List.of("subnet-a"), List.of("subnet-b")));
+        assertEquals("ValidationError", both.getErrorCode());
+        assertEquals("You can specify either subnets or subnet mappings, not both", both.getMessage());
+        assertEquals(400, both.getHttpStatus());
+    }
+
+    /**
      * A taken name is reported before missing subnets: a CloudFormation stack update finds the
      * balancer it keeps through DuplicateLoadBalancerName, whatever subnets its template names.
      */

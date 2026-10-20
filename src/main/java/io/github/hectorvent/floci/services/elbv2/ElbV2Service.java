@@ -210,6 +210,19 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     // ── Load Balancers ────────────────────────────────────────────────────────
 
     /**
+     * The subnets a CreateLoadBalancer or SetSubnets request names: {@code Subnets}, or else the subnet
+     * of each {@code SubnetMappings} entry. The two are alternatives, so a request that names subnets
+     * both ways is refused with the error AWS gives; an empty one does not count.
+     */
+    public static List<String> requestedSubnets(List<String> subnets, List<String> mappingSubnetIds) {
+        if (!subnets.isEmpty() && !mappingSubnetIds.isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "You can specify either subnets or subnet mappings, not both", 400);
+        }
+        return mappingSubnetIds.isEmpty() ? subnets : mappingSubnetIds;
+    }
+
+    /**
      * Resolving the subnets and publishing the balancer happen under EC2's subnet lock, so a
      * DeleteSubnet cannot pass its dependency check in between and leave the balancer on a subnet
      * that is gone.
