@@ -158,7 +158,8 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
                     metadataOptionsChange ? optionsBefore : null, attributesBefore, otherChange || tagsChanged));
             if (metadataOptionsChange) {
                 // The last change the step makes: when an earlier one fails, the engine restores the
-                // resource as it was, without this copy, so the options must not have changed yet.
+                // resource as it was, without the record saved above, so the options must not have
+                // changed yet.
                 ec2Service.modifyInstanceMetadataOptions(region, prior.getInstanceId(), metadataOptionsToApply);
             }
             Instance reconciled = findInstance(region, prior.getInstanceId());

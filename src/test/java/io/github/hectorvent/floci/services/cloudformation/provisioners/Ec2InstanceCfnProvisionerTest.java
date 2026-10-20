@@ -829,6 +829,30 @@ class Ec2InstanceCfnProvisionerTest {
     }
 
     /**
+     * An update that changes only the tags, which have no rollback here, still has its declarations
+     * put back, and the rollback reports that it could not undo the update; the options are untouched.
+     */
+    @Test
+    void aRolledBackTagOnlyUpdatePutsTheRecordBackAndReportsItCouldNotUndoIt() throws Exception {
+        launchRequiringTokens();
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "required"}}
+                """), ctx(null));
+        Map<String, String> declared = declarations(r);
+
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "required", "HttpPutResponseHopLimit": 1},
+                 "Tags": [{"Key": "env", "Value": "prod"}]}
+                """), ctx("i-1"));
+        assertFalse(provisioner.rollbackUpdate(r));
+
+        assertEquals(declared, declarations(r));
+        assertFalse(r.getAttributes().containsKey("__FlociPriorInPlaceUpdate"));
+        verify(ec2, never()).modifyInstanceMetadataOptions(any(), any(), any());
+    }
+
+    /**
      * The options are the update's last change: when the tags fail first, the engine restores the
      * resource without a saved copy, so the options must not have changed.
      */
@@ -892,7 +916,7 @@ class Ec2InstanceCfnProvisionerTest {
     }
 
     @Test
-    void aCommittedOrClearedInPlaceUpdateDropsTheSavedMetadataOptions() throws Exception {
+    void aCommittedOrClearedInPlaceUpdateDropsTheSavedRecord() throws Exception {
         Instance i1 = launchRequiringTokens();
         StackResource r = resource("Server");
         provisioner.provision(r, props("""

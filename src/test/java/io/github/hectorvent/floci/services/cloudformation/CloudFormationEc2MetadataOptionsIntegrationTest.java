@@ -294,23 +294,29 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
     }
 
     /**
-     * An update that turns the token requirement off in place, then fails on a later resource,
-     * rolls the instance back to requiring tokens; the stack ends rolled back, not stuck.
+     * An update that changes the instance's MetadataOptions in place, then fails on a later
+     * resource, rolls the instance back; the stack ends rolled back, not stuck. That holds both for
+     * an update that turns the token requirement off and for one that only declares the default
+     * the instance already has, which changes no EC2 setting.
      */
-    @Test
-    void aFailedUpdateRollsTheInstancesMetadataOptionsBack() {
+    @ParameterizedTest
+    @CsvSource({"required,optional,required", "'',optional,optional"})
+    void aFailedUpdateRollsTheInstancesMetadataOptionsBack(String createdTokens, String updatedTokens,
+                                                           String httpTokens) {
         String stackName = "cfn-metadata-rollback-" + UUID.randomUUID().toString().substring(0, 8);
+        String createdOptions = createdTokens.isEmpty() ? ""
+                : ", \"MetadataOptions\": {\"HttpTokens\": \"" + createdTokens + "\"}";
         String created = """
                 {
                   "Resources": {
                     "Inst": {
                       "Type": "AWS::EC2::Instance",
-                      "Properties": {"ImageId": "ami-12345678", "MetadataOptions": {"HttpTokens": "required"}}
+                      "Properties": {"ImageId": "ami-12345678"%s}
                     }
                   },
                   "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
                 }
-                """;
+                """.formatted(createdOptions);
         // The second instance names a launch template that does not exist, so it fails after Inst
         // has been updated, which it depends on.
         String failing = """
@@ -318,7 +324,7 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
                   "Resources": {
                     "Inst": {
                       "Type": "AWS::EC2::Instance",
-                      "Properties": {"ImageId": "ami-12345678", "MetadataOptions": {"HttpTokens": "optional"}}
+                      "Properties": {"ImageId": "ami-12345678", "MetadataOptions": {"HttpTokens": "%s"}}
                     },
                     "Later": {
                       "Type": "AWS::EC2::Instance",
@@ -328,14 +334,14 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
                   },
                   "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
                 }
-                """;
+                """.formatted(updatedTokens);
         try {
             cfn("CreateStack", stackName, created);
             String instanceId = output(describeStack(stackName, "CREATE_COMPLETE"), "InstanceId");
 
             cfn("UpdateStack", stackName, failing);
             describeStack(stackName, "UPDATE_ROLLBACK_COMPLETE");
-            assertEquals("required", describeInstance(instanceId).getString(INSTANCE + "metadataOptions.httpTokens"));
+            assertEquals(httpTokens, describeInstance(instanceId).getString(INSTANCE + "metadataOptions.httpTokens"));
         } finally {
             cfn("DeleteStack", stackName, null);
         }
@@ -393,7 +399,8 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
                         "ImageId": "ami-12345678",
                         "MetadataOptions": {
                           "HttpTokens": {"Ref": "Tokens"},
-                          "HttpPutResponseHopLimit": {"Fn::If": ["Never", 5, {"Ref": "AWS::NoValue"}]}
+                          "HttpPutResponseHopLimit": {"Fn::If": ["Never", 5, {"Ref": "AWS::NoValue"}]},
+                          "HttpEndpoint": {"Fn::If": ["Never", "disabled", {"Ref": "AWS::NoValue"}]}
                         }
                       }
                     }
@@ -406,6 +413,7 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
             XmlPath described = describeInstance(output(describeStack(stackName, "CREATE_COMPLETE"), "InstanceId"));
             assertEquals("required", described.getString(INSTANCE + "metadataOptions.httpTokens"));
             assertEquals("1", described.getString(INSTANCE + "metadataOptions.httpPutResponseHopLimit"));
+            assertEquals("enabled", described.getString(INSTANCE + "metadataOptions.httpEndpoint"));
         } finally {
             cfn("DeleteStack", stackName, null);
         }
