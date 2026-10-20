@@ -145,12 +145,12 @@ class AwsConfigServiceAggregationAuthorizationTest {
         // An interrupted delete leaves the entry removed but its tags behind. Reproduce that
         // state, then retry the delete: the retry must still reach the tags.
         service.deleteAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1");
-        service.tagResource(arn, List.of(Map.of("Key", "env", "Value", "prod")));
+        service.applyTags(arn, List.of(Map.of("Key", "env", "Value", "prod")));
         assertTrue(authorizations(service, REGION).isEmpty(), "precondition: the entry is gone");
 
         service.deleteAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1");
 
-        assertTrue(service.listTagsForResource(arn).isEmpty(),
+        assertTrue(service.storedTags(arn).isEmpty(),
                 "a retried delete must clear tags an interrupted attempt left on the ARN");
         assertEquals(arn,
                 service.putAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1", null)
@@ -165,7 +165,7 @@ class AwsConfigServiceAggregationAuthorizationTest {
         AggregationAuthorization created = service.putAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT,
                 "eu-west-1", List.of(Map.of("Key", "env", "Value", "prod")));
 
-        List<Map<String, String>> tags = service.listTagsForResource(created.aggregationAuthorizationArn());
+        List<Map<String, String>> tags = service.listTagsForResource(REGION, created.aggregationAuthorizationArn());
         assertEquals(List.of(Map.of("Key", "env", "Value", "prod")), tags);
     }
 
@@ -186,17 +186,17 @@ class AwsConfigServiceAggregationAuthorizationTest {
                         + "no overwrite of env, and no tier added");
 
         // Tags do change through the tagging API, which is the only way AWS offers.
-        service.tagResource(arn, List.of(Map.of("Key", "env", "Value", "dev")));
+        service.tagResource(REGION, arn, List.of(Map.of("Key", "env", "Value", "dev")));
         assertEquals(Map.of("env", "dev", "owner", "platform"), tagMap(service, arn),
                 "TagResource must still update an existing tag");
 
-        service.untagResource(arn, List.of("owner"));
+        service.untagResource(REGION, arn, List.of("owner"));
         assertEquals(Map.of("env", "dev"), tagMap(service, arn),
                 "UntagResource must still remove a tag");
     }
 
     private Map<String, String> tagMap(AwsConfigService service, String arn) {
-        return service.listTagsForResource(arn).stream()
+        return service.listTagsForResource(REGION, arn).stream()
                 .collect(Collectors.toMap(t -> t.get("Key"), t -> t.get("Value")));
     }
 
@@ -209,7 +209,7 @@ class AwsConfigServiceAggregationAuthorizationTest {
         service.deleteAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1");
         service.putAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1", null);
 
-        assertTrue(service.listTagsForResource(created.aggregationAuthorizationArn()).isEmpty(),
+        assertTrue(service.listTagsForResource(REGION, created.aggregationAuthorizationArn()).isEmpty(),
                 "tags of a deleted authorization must not resurface on the reused ARN");
     }
 
@@ -218,11 +218,11 @@ class AwsConfigServiceAggregationAuthorizationTest {
         AwsConfigService service = service();
         String arn = service.putConformancePack(REGION, "pack", "s3://bucket/template.yaml", null)
                 .conformancePackArn();
-        service.tagResource(arn, List.of(Map.of("Key", "env", "Value", "prod")));
+        service.tagResource(REGION, arn, List.of(Map.of("Key", "env", "Value", "prod")));
 
         service.deleteConformancePack(REGION, "pack");
 
-        assertTrue(service.listTagsForResource(arn).isEmpty(),
+        assertTrue(service.storedTags(arn).isEmpty(),
                 "tags of a deleted conformance pack must not outlive it");
     }
 
@@ -251,7 +251,7 @@ class AwsConfigServiceAggregationAuthorizationTest {
         service.initializeStorage();
         String arn = service.putConformancePack(REGION, "pack", "s3://bucket/v1.yaml", null)
                 .conformancePackArn();
-        service.tagResource(arn, List.of(Map.of("Key", "env", "Value", "prod")));
+        service.tagResource(REGION, arn, List.of(Map.of("Key", "env", "Value", "prod")));
 
         packs.parkNextWrite();
         ExecutorService pool = Executors.newFixedThreadPool(2);
@@ -275,7 +275,7 @@ class AwsConfigServiceAggregationAuthorizationTest {
 
         assertTrue(service.describeConformancePacks(REGION, null).isEmpty(),
                 "a Delete that succeeded left the pack it deleted in the store");
-        assertTrue(service.listTagsForResource(arn).isEmpty(), "the deleted pack's tags survived");
+        assertTrue(service.storedTags(arn).isEmpty(), "the deleted pack's tags survived");
     }
 
     @Test
@@ -399,7 +399,7 @@ class AwsConfigServiceAggregationAuthorizationTest {
                 List<AggregationAuthorization> after = authorizations(service, REGION);
                 assertTrue(after.size() <= 1);
                 if (after.isEmpty()) {
-                    assertTrue(service.listTagsForResource(
+                    assertTrue(service.storedTags(
                             AwsArnUtils.Arn.of("config", REGION, ACCOUNT,
                                     "aggregation-authorization/" + AUTHORIZED_ACCOUNT + "/eu-west-1").toString())
                             .isEmpty(), "delete left tags behind for a removed authorization");

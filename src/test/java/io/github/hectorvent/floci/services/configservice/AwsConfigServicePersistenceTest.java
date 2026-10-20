@@ -41,7 +41,7 @@ class AwsConfigServicePersistenceTest {
                 "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null)));
         first.putDeliveryChannel(REGION,
                 new DeliveryChannel("default", "config-bucket", null, null, null, null));
-        first.tagResource(rule.configRuleArn(), List.of(Map.of("Key", "env", "Value", "prod")));
+        first.tagResource(REGION, rule.configRuleArn(), List.of(Map.of("Key", "env", "Value", "prod")));
 
         AwsConfigService reloaded = serviceWithStorage(storage);
 
@@ -54,7 +54,7 @@ class AwsConfigServicePersistenceTest {
                 reloaded.describeConfigurationRecorders(REGION, null).getFirst().name());
         assertEquals("config-bucket",
                 reloaded.describeDeliveryChannels(REGION, null).getFirst().s3BucketName());
-        assertEquals("prod", reloaded.listTagsForResource(rule.configRuleArn()).getFirst().get("Value"));
+        assertEquals("prod", reloaded.listTagsForResource(REGION, rule.configRuleArn()).getFirst().get("Value"));
     }
 
     @Test
@@ -65,15 +65,15 @@ class AwsConfigServicePersistenceTest {
         ConfigRule rule = first.putConfigRule(REGION, rule("keep", "AWS", "REQUIRED_TAGS"));
         first.putConfigRule(REGION, rule("drop", "AWS", "REQUIRED_TAGS"));
         first.deleteConfigRule(REGION, "drop");
-        first.tagResource(rule.configRuleArn(),
+        first.tagResource(REGION, rule.configRuleArn(),
                 List.of(Map.of("Key", "env", "Value", "prod"), Map.of("Key", "team", "Value", "sec")));
-        first.untagResource(rule.configRuleArn(), List.of("team"));
+        first.untagResource(REGION, rule.configRuleArn(), List.of("team"));
 
         AwsConfigService reloaded = serviceWithStorage(storage);
 
         assertEquals(List.of("keep"),
                 reloaded.describeConfigRules(REGION, null).stream().map(ConfigRule::configRuleName).toList());
-        Map<String, String> tags = reloaded.listTagsForResource(rule.configRuleArn()).stream()
+        Map<String, String> tags = reloaded.listTagsForResource(REGION, rule.configRuleArn()).stream()
                 .collect(java.util.stream.Collectors.toMap(t -> t.get("Key"), t -> t.get("Value")));
         assertEquals("prod", tags.get("env"));
         assertTrue(!tags.containsKey("team"), "untagged key must not reappear after restart");

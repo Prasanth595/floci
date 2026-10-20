@@ -72,9 +72,9 @@ public class ConfigServiceJsonHandler {
             case "PutAggregationAuthorization" -> putAggregationAuthorization(request, region);
             case "DescribeAggregationAuthorizations" -> describeAggregationAuthorizations(request, region);
             case "DeleteAggregationAuthorization" -> deleteAggregationAuthorization(request, region);
-            case "TagResource" -> tagResource(request);
-            case "UntagResource" -> untagResource(request);
-            case "ListTagsForResource" -> listTagsForResource(request);
+            case "TagResource" -> tagResource(request, region);
+            case "UntagResource" -> untagResource(request, region);
+            case "ListTagsForResource" -> listTagsForResource(request, region);
             default -> throw new io.github.hectorvent.floci.core.common.AwsException(
                     "InvalidAction", "Could not find operation " + action, 400);
         };
@@ -335,23 +335,23 @@ public class ConfigServiceJsonHandler {
 
     // --- Tagging ---
 
-    private Response tagResource(JsonNode req) {
+    private Response tagResource(JsonNode req, String region) {
         String arn = req.path("ResourceArn").asText(null);
-        service.tagResource(arn, extractTags(req));
+        service.tagResource(region, arn, extractTags(req));
         return Response.ok(mapper.createObjectNode()).build();
     }
 
-    private Response untagResource(JsonNode req) {
+    private Response untagResource(JsonNode req, String region) {
         String arn = req.path("ResourceArn").asText(null);
         List<String> tagKeys = new ArrayList<>();
         req.path("TagKeys").forEach(k -> tagKeys.add(k.asText()));
-        service.untagResource(arn, tagKeys);
+        service.untagResource(region, arn, tagKeys);
         return Response.ok(mapper.createObjectNode()).build();
     }
 
-    private Response listTagsForResource(JsonNode req) {
+    private Response listTagsForResource(JsonNode req, String region) {
         String arn = req.path("ResourceArn").asText(null);
-        List<Map<String, String>> tagList = service.listTagsForResource(arn);
+        List<Map<String, String>> tagList = service.listTagsForResource(region, arn);
         ObjectNode resp = mapper.createObjectNode();
         resp.set("Tags", mapper.valueToTree(tagList));
         return Response.ok(resp).build();

@@ -41,6 +41,8 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -929,7 +931,7 @@ public class AwsConfigService {
             store.put(key, authorization);
             persistRegion(aggregationAuthorizations, region);
             if (tagList != null && !tagList.isEmpty()) {
-                tagResource(authorization.aggregationAuthorizationArn(), tagList);
+                applyTags(authorization.aggregationAuthorizationArn(), tagList);
             }
             return authorization;
         }
@@ -987,7 +989,45 @@ public class AwsConfigService {
 
     // --- Tagging ---
 
-    public void tagResource(String arn, List<Map<String, String>> tagList) {
+    /** TagResource, UntagResource and ListTagsForResource each model ResourceNotFoundException.
+     *  For the kinds Floci stores (config rules, conformance packs, aggregation authorizations)
+     *  the ARN must name a resource that exists in the caller's account and the request Region,
+     *  so a deleted resource, or one in another account, Region or partition, is not found. The
+     *  check and the tag write run under the lock that resource's delete takes, so a delete cannot
+     *  land between them and leave an orphan tag entry for a resource that is gone. ARNs of kinds
+     *  Floci does not model are passed through unchecked, as before. */
+    public void tagResource(String region, String arn, List<Map<String, String>> tagList) {
+        onTaggableResource(region, arn, () -> {
+            applyTags(arn, tagList);
+            return null;
+        });
+    }
+
+    public void untagResource(String region, String arn, List<String> tagKeys) {
+        onTaggableResource(region, arn, () -> {
+            Map<String, String> tagMap = tags.get(arn);
+            if (tagMap != null) {
+                tagKeys.forEach(tagMap::remove);
+                tags.put(arn, tagMap); // write back the in-place inner-map mutation
+            }
+            return null;
+        });
+    }
+
+    public List<Map<String, String>> listTagsForResource(String region, String arn) {
+        return onTaggableResource(region, arn, () -> storedTags(arn).entrySet().stream()
+                .map(e -> Map.of("Key", e.getKey(), "Value", e.getValue()))
+                .collect(Collectors.toList()));
+    }
+
+    /** Tags as stored, with no existence check. Callers that already hold the resource's lock
+     *  (creation tags on Put) write through {@link #applyTags}; tests read through this to see
+     *  whether a delete reached the tags, which the API itself can no longer observe. */
+    Map<String, String> storedTags(String arn) {
+        return tags.getOrDefault(arn, Map.of());
+    }
+
+    void applyTags(String arn, List<Map<String, String>> tagList) {
         Map<String, String> tagMap = tags.computeIfAbsent(arn, k -> new ConcurrentHashMap<>());
         for (Map<String, String> t : tagList) {
             tagMap.put(t.get("Key"), t.get("Value"));
@@ -995,19 +1035,53 @@ public class AwsConfigService {
         tags.put(arn, tagMap); // write back the in-place inner-map mutation
     }
 
-    public void untagResource(String arn, List<String> tagKeys) {
-        Map<String, String> tagMap = tags.get(arn);
-        if (tagMap != null) {
-            tagKeys.forEach(tagMap::remove);
-            tags.put(arn, tagMap); // write back the in-place inner-map mutation
+    private <T> T onTaggableResource(String region, String arn, Supplier<T> action) {
+        String resource = AwsArnUtils.resourceIfArnFor(arn, "config").orElse("");
+        String[] parts = resource.split("/", -1);
+        String lockKey;
+        BooleanSupplier exists;
+        switch (parts[0]) {
+            case "conformance-pack" -> {
+                String packName = parts.length > 1 ? parts[1] : "";
+                lockKey = conformancePackLockKey(region, packName);
+                exists = () -> {
+                    ConformancePack pack = packsFor(region).get(packName);
+                    return pack != null && arn.equals(pack.conformancePackArn());
+                };
+            }
+            case "aggregation-authorization" -> {
+                String authorizedAccountId = parts.length == 3 ? parts[1] : "";
+                String authorizedAwsRegion = parts.length == 3 ? parts[2] : "";
+                lockKey = authorizationLockKey(region, authorizedAccountId, authorizedAwsRegion);
+                exists = () -> {
+                    AggregationAuthorization authorization = authorizationsFor(region)
+                            .get(authorizationKey(authorizedAccountId, authorizedAwsRegion));
+                    return authorization != null && arn.equals(authorization.aggregationAuthorizationArn());
+                };
+            }
+            case "config-rule" -> {
+                // A rule ARN carries its id, not its name, and the rule lock is keyed by name.
+                String ruleName = rulesFor(region).values().stream()
+                        .filter(rule -> arn.equals(rule.configRuleArn()))
+                        .map(ConfigRule::configRuleName)
+                        .findFirst().orElse("");
+                lockKey = ruleKey(region, ruleName);
+                exists = () -> {
+                    ConfigRule rule = rulesFor(region).get(ruleName);
+                    return rule != null && arn.equals(rule.configRuleArn());
+                };
+            }
+            default -> {
+                return action.get();
+            }
         }
-    }
-
-    public List<Map<String, String>> listTagsForResource(String arn) {
-        Map<String, String> tagMap = tags.getOrDefault(arn, Map.of());
-        return tagMap.entrySet().stream()
-                .map(e -> Map.of("Key", e.getKey(), "Value", e.getValue()))
-                .collect(Collectors.toList());
+        synchronized (lockFor(lockKey)) {
+            if (!exists.getAsBoolean()) {
+                throw new AwsException("ResourceNotFoundException",
+                        "The resource " + arn + " does not exist.", 400);
+            }
+            return action.get();
+        }
     }
 
     // --- Pagination ---

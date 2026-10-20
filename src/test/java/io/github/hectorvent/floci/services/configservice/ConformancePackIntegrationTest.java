@@ -96,7 +96,7 @@ class ConformancePackIntegrationTest {
     @Test
     @Order(4)
     void deleteConformancePack() {
-        listPackTags().body("Tags", hasSize(1));
+        packTagCall("ListTagsForResource", "").statusCode(200).body("Tags", hasSize(1));
 
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "DeleteConformancePack")
@@ -109,19 +109,27 @@ class ConformancePackIntegrationTest {
         .then()
             .statusCode(200);
 
-        // The pack's tags go with it.
-        listPackTags().body("Tags", empty());
+        // The deleted pack's ARN is not found by any of the tagging operations, and the
+        // rejected TagResource does not bring its tags back.
+        packTagCall("TagResource", ", \"Tags\": [{\"Key\": \"env\", \"Value\": \"prod\"}]")
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+        packTagCall("UntagResource", ", \"TagKeys\": [\"env\"]")
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+        packTagCall("ListTagsForResource", "")
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
     }
 
-    private ValidatableResponse listPackTags() {
+    private ValidatableResponse packTagCall(String action, String extraMembers) {
         return given()
-            .header("X-Amz-Target", TARGET_PREFIX + "ListTagsForResource")
+            .header("X-Amz-Target", TARGET_PREFIX + action)
             .contentType(CONTENT_TYPE)
-            .body("{\"ResourceArn\": \"" + packArn + "\"}")
+            .body("{\"ResourceArn\": \"" + packArn + "\"" + extraMembers + "}")
         .when()
             .post("/")
-        .then()
-            .statusCode(200);
+        .then();
     }
 
     @Test
