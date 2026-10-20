@@ -318,6 +318,7 @@ floci:
       volume-block-devices: false
       volume-helper-image: alpine:3.21
       mock: true
+      mock-public-addresses: none
       instance-resource-limits: true
       aws-faithful-private-ip: false
       # container-ips-routable: true  # see src/main/resources/application.yml

@@ -87,6 +87,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
@@ -100,6 +101,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -1183,6 +1185,190 @@ class IotMqttBrokerServiceTest {
 
         verify(current, timeout(10_000)).publish(eq("kept/topic"), any(), any(), anyBoolean(), anyBoolean());
         verify(current, never()).publish(eq("stale/topic"), any(), any(), anyBoolean(), anyBoolean());
+    }
+
+    /**
+     * Fleet indexing connectivity is per account and region: a plaintext session counts in the
+     * default account, so switching that default stands in for a second account. Account A's
+     * recorded disconnect survives a session of the same client id in account B, while B's session
+     * is live and after it ends.
+     */
+    @Test
+    void connectivityHistoryOfAClientIdIsKeptPerAccountAndRegion() {
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.defaultAccountId()).thenReturn("111111111111");
+        AtomicReference<Handler<Void>> disconnectInA = new AtomicReference<>();
+        broker.handleEndpoint(endpointCapturing("device-1", disconnectInA, new AtomicReference<>()), false);
+        disconnectInA.get().handle(null);
+
+        when(config.defaultAccountId()).thenReturn("222222222222");
+        AtomicReference<Handler<Void>> closeInB = new AtomicReference<>();
+        broker.handleEndpoint(endpointCapturing("device-1", new AtomicReference<>(), closeInB), false);
+
+        assertEquals("CLIENT_INITIATED_DISCONNECT",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertTrue(broker.connectivity("222222222222", "us-east-1", "device-1").orElseThrow().connected());
+        closeInB.get().handle(null);
+        assertEquals("CLIENT_INITIATED_DISCONNECT",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertEquals("CONNECTION_LOST",
+                broker.connectivity("222222222222", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertTrue(broker.connectivity("111111111111", "eu-west-1", "device-1").isEmpty());
+    }
+
+    /**
+     * A client id names one broker session across accounts and regions: a connection in account B
+     * displaces account A's live session of the same client id, which then reports
+     * DUPLICATE_CLIENTID, also after the displaced connection's close arrives.
+     */
+    @Test
+    void aSessionDisplacedByTheSameClientIdInAnotherAccountReportsDuplicateClientId() {
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.defaultAccountId()).thenReturn("111111111111");
+        AtomicReference<Handler<Void>> closeInA = new AtomicReference<>();
+        MqttEndpoint inA = endpointCapturing("device-1", new AtomicReference<>(), closeInA);
+        broker.handleEndpoint(inA, false);
+
+        when(config.defaultAccountId()).thenReturn("222222222222");
+        broker.handleEndpoint(endpointCapturing("device-1", new AtomicReference<>(), new AtomicReference<>()), false);
+
+        verify(inA).close();
+        assertFalse(broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().connected());
+        assertEquals("DUPLICATE_CLIENTID",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        closeInA.get().handle(null);
+        assertEquals("DUPLICATE_CLIENTID",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertTrue(broker.connectivity("222222222222", "us-east-1", "device-1").orElseThrow().connected());
+    }
+
+    /**
+     * DeleteConnection ends the session with API_INITIATED_DISCONNECT, the reason AWS gives a
+     * disconnect through that API, also after the close it causes reaches the broker.
+     */
+    @Test
+    void deleteConnectionEndsTheSessionWithApiInitiatedDisconnect() {
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.defaultAccountId()).thenReturn("111111111111");
+        AtomicReference<Handler<Void>> close = new AtomicReference<>();
+        MqttEndpoint endpoint = endpointCapturing("device-1", new AtomicReference<>(), close);
+        broker.handleEndpoint(endpoint, false);
+
+        assertTrue(broker.disconnectClient("device-1", false));
+
+        verify(endpoint).close();
+        IotMqttBrokerService.Connectivity ended =
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow();
+        assertFalse(ended.connected());
+        assertEquals("API_INITIATED_DISCONNECT", ended.disconnectReason());
+        close.get().handle(null);
+        assertEquals("API_INITIATED_DISCONNECT",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertFalse(broker.disconnectClient("device-1", false));
+    }
+
+    /**
+     * A state reset forgets how sessions ended but keeps a live session connected, and that
+     * session's end after the reset is recorded again.
+     */
+    @Test
+    void aResetForgetsEndedSessionsButNotLiveOnes() {
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.defaultAccountId()).thenReturn("111111111111");
+        AtomicReference<Handler<Void>> disconnectGone = new AtomicReference<>();
+        broker.handleEndpoint(endpointCapturing("gone", disconnectGone, new AtomicReference<>()), false);
+        disconnectGone.get().handle(null);
+        AtomicReference<Handler<Void>> disconnectLive = new AtomicReference<>();
+        broker.handleEndpoint(endpointCapturing("live", disconnectLive, new AtomicReference<>()), false);
+
+        broker.clear();
+
+        assertTrue(broker.connectivity("111111111111", "us-east-1", "gone").isEmpty());
+        assertTrue(broker.connectivity("111111111111", "us-east-1", "live").orElseThrow().connected());
+        disconnectLive.get().handle(null);
+        assertEquals("CLIENT_INITIATED_DISCONNECT",
+                broker.connectivity("111111111111", "us-east-1", "live").orElseThrow().disconnectReason());
+    }
+
+    /**
+     * A fleet index lookup and a state reset each wait for a session end in flight, held where it
+     * schedules the disconnected event: the lookup then reports API_INITIATED_DISCONNECT rather
+     * than a session that is still connected, and the reset forgets that end rather than having
+     * it written back after the reset.
+     */
+    @Test
+    void connectivityLookupsAndResetsWaitForASessionEndInFlight() throws Exception {
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.defaultAccountId()).thenReturn("111111111111");
+        when(iotService.get()).thenReturn(mock(IotService.class));
+
+        assertEquals("API_INITIATED_DISCONNECT", duringHeldDeleteConnection(racing ->
+                racing.connectivity("111111111111", "us-east-1", "held").orElseThrow().disconnectReason()));
+        IotMqttBrokerService reset = duringHeldDeleteConnection(racing -> {
+            racing.clear();
+            return racing;
+        });
+        assertTrue(reset.connectivity("111111111111", "us-east-1", "held").isEmpty());
+    }
+
+    /**
+     * Runs {@code during} on another thread while a DeleteConnection of client id {@code held} is
+     * inside its session end, asserts it waits for that end, and returns its result.
+     */
+    private <T> T duringHeldDeleteConnection(Function<IotMqttBrokerService, T> during) throws Exception {
+        CountDownLatch ending = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicReference<Thread> deletingThread = new AtomicReference<>();
+        Vertx heldVertx = mock(Vertx.class, AdditionalAnswers.delegatesTo(vertx));
+        doAnswer(invocation -> {
+            if (Thread.currentThread() == deletingThread.get()) {
+                ending.countDown();
+                release.await(10, TimeUnit.SECONDS);
+            }
+            vertx.runOnContext(invocation.getArgument(0));
+            return null;
+        }).when(heldVertx).runOnContext(any());
+        IotMqttBrokerService racing = new IotMqttBrokerService(config, heldVertx, iotService, customAuthorizer, registry);
+        racing.handleEndpoint(endpointCapturing("held", new AtomicReference<>(), new AtomicReference<>()), false);
+        AtomicReference<Thread> duringThread = new AtomicReference<>();
+        ExecutorService deleting = Executors.newSingleThreadExecutor();
+        ExecutorService concurrent = Executors.newSingleThreadExecutor();
+        try {
+            Future<Boolean> delete = deleting.submit(() -> {
+                deletingThread.set(Thread.currentThread());
+                return racing.disconnectClient("held", false);
+            });
+            assertTrue(ending.await(10, TimeUnit.SECONDS), "DeleteConnection is ending the session");
+            Future<T> result = concurrent.submit(() -> {
+                duringThread.set(Thread.currentThread());
+                return during.apply(racing);
+            });
+            ThreadStates.awaitBlockedOrDone(duringThread, result);
+            assertFalse(result.isDone(), "waits for the session end in flight");
+            release.countDown();
+            assertTrue(delete.get(10, TimeUnit.SECONDS));
+            return result.get(10, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            deleting.shutdown();
+            concurrent.shutdown();
+        }
+    }
+
+    private static MqttEndpoint endpointCapturing(String clientId, AtomicReference<Handler<Void>> disconnect,
+                                                  AtomicReference<Handler<Void>> close) {
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn(clientId);
+        when(endpoint.isConnected()).thenReturn(true);
+        when(endpoint.disconnectHandler(any())).thenAnswer(invocation -> {
+            disconnect.set(invocation.getArgument(0));
+            return endpoint;
+        });
+        when(endpoint.closeHandler(any())).thenAnswer(invocation -> {
+            close.set(invocation.getArgument(0));
+            return endpoint;
+        });
+        return endpoint;
     }
 
     /**

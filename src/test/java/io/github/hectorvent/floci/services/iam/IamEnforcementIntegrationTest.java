@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
@@ -46,6 +47,9 @@ class IamEnforcementIntegrationTest {
 
     @Inject
     S3Service s3Service;
+
+    @Inject
+    RequestContext requestContext;
 
     // =========================================================================
     // IamPolicyEvaluator — basic allow / deny / implicit-deny
@@ -288,6 +292,28 @@ class IamEnforcementIntegrationTest {
                 List.of(TEAM_SCOPED_EC2_POLICY), "ec2:DeleteTags", "*",
                 conditionContextResolver.resolve("ec2", "ec2:DeleteTags",
                         ec2Request("Action=DeleteTags&ResourceId.1=" + other.getVpcId() + "&Tag.1.Key=Team"))));
+    }
+
+    @Test
+    void resourceTagConditionReadsTheTagsOfTheRequestRegion() {
+        Vpc west = ec2Service.createVpc("eu-west-1", "10.46.0.0/16", false);
+        ec2Service.createTags("eu-west-1", List.of(west.getVpcId()), List.of(new Tag("Team", "payments")));
+        String deleteTeamTag = "Action=DeleteTags&ResourceId.1=" + west.getVpcId() + "&Tag.1.Key=Team";
+        String previousRegion = requestContext.getRegion();
+        try {
+            requestContext.setRegion("eu-west-1");
+            assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                    List.of(TEAM_SCOPED_EC2_POLICY), "ec2:DeleteTags", "*",
+                    conditionContextResolver.resolve("ec2", "ec2:DeleteTags", ec2Request(deleteTeamTag))));
+
+            requestContext.setRegion("us-east-1");
+            assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                    List.of(TEAM_SCOPED_EC2_POLICY), "ec2:DeleteTags", "*",
+                    conditionContextResolver.resolve("ec2", "ec2:DeleteTags", ec2Request(deleteTeamTag))));
+        } finally {
+            requestContext.setRegion(previousRegion);
+            ec2Service.deleteVpc("eu-west-1", west.getVpcId());
+        }
     }
 
     @Test

@@ -1331,11 +1331,33 @@ role each passes:
   pass the roles of the instance profile they name, to `ec2.amazonaws.com`. `CreateFlowLogs` passes
   `DeliverLogsPermissionArn` to `vpc-flow-logs.amazonaws.com`. A profile that does not exist
   passes nothing, and EC2 refuses it as without enforcement.
+- **ECS:** `RegisterTaskDefinition` passes its `taskRoleArn` and `executionRoleArn` to
+  `ecs-tasks.amazonaws.com`. `RunTask` and `StartTask` pass the task definition's task and execution
+  roles and any role in `overrides` there too, and `CreateService`, `UpdateService` and
+  `CreateTaskSet` pass the roles of the task definition they name. The infrastructure roles go to
+  `ecs.amazonaws.com`: a managed EBS volume's `roleArn` (`RunTask`, `StartTask`, `CreateService`,
+  `UpdateService`), the service's `role` and the load balancer, lifecycle hook, Service Connect TLS
+  and VPC Lattice roles (`CreateService`, `UpdateService`), and a Managed Instances provider's
+  `infrastructureRoleArn` (`CreateCapacityProvider`, `UpdateCapacityProvider`). A role given by its
+  name is the role of that name in the caller's account, and a task definition that does not exist
+  passes nothing.
+- **Step Functions:** `CreateStateMachine` and `UpdateStateMachine` pass `roleArn` to
+  `states.amazonaws.com`, in a JSON or a CBOR body.
+- **EventBridge:** `PutRule` passes `RoleArn`, and `PutTargets` each target's `RoleArn`, to
+  `events.amazonaws.com`.
+- **CloudFormation:** `CreateStack`, `UpdateStack`, `DeleteStack`, `CreateChangeSet` and
+  `ContinueUpdateRollback` pass `RoleARN` to `cloudformation.amazonaws.com` when the request names
+  one. `CreateStackSet` and `UpdateStackSet` pass `AdministrationRoleARN`, or, for a self-managed
+  StackSet, the default `AWSCloudFormationStackSetAdministrationRole`.
 
 Launching from a launch template does not check the template's role, as on AWS: the EC2 user guide
 warns that a user who can create launch template versions "can potentially update a launch template
-to pass an IAM role to an instance even if they don't have the iam:PassRole permission". The role
-parameters of other services are not checked yet.
+to pass an IAM role to an instance even if they don't have the iam:PassRole permission". A
+CloudFormation operation that names no role uses the stack's own without checking it, as the
+CloudFormation API reference says the service does "even if the users don't have permission to pass
+it". The CloudFormation user guide has the default StackSet administration role checked "Even when
+you don't specify the AdministrationRoleARN parameter". The role parameters of other services are
+not checked yet.
 
 A request that names its operation, in a Query `Action`, an `X-Amz-Target` header or a Smithy RPC v2
 path (`/service/<service>/operation/<operation>`), is authorized as the action AWS checks for that

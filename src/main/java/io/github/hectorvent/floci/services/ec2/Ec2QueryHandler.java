@@ -801,9 +801,32 @@ public class Ec2QueryHandler {
 
         LaunchTemplateData launchTemplateData = resolveRunInstancesLaunchTemplateData(
                 p, region, userDataEncoded == null || userDataEncoded.isBlank());
+        boolean suppliedInterfaces = p.keySet().stream().anyMatch(name -> name.startsWith("NetworkInterface."));
+        if (p.getFirst("SubnetId") != null && (suppliedInterfaces
+                || launchTemplateData != null && !launchTemplateData.getNetworkInterfaces().isEmpty())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Network interfaces and an instance-level subnet ID may not be specified on the same request", 400);
+        }
         if (launchTemplateData != null) {
             blockDeviceMappings = LaunchTemplateData.BlockDeviceMapping.merge(
                     launchTemplateData.getBlockDeviceMappings(), blockDeviceMappings);
+            if (!suppliedInterfaces) {
+                // With neither request interfaces nor, after the check above, a request SubnetId,
+                // the template's primary interface places the launch.
+                LaunchTemplateData.NetworkInterface primary = launchTemplateData.primaryNetworkInterface();
+                if (primary != null) {
+                    subnetId = primary.getSubnetId();
+                    if (associatePublicIp == null) {
+                        associatePublicIp = primary.getAssociatePublicIpAddress();
+                    }
+                    // An existing interface the template names is the instance's primary, as one
+                    // named on the request would be.
+                    if (isSet(primary.getNetworkInterfaceId())) {
+                        networkInterfaceId = primary.getNetworkInterfaceId();
+                        networkInterfaceDeviceIndex = 0;
+                    }
+                }
+            }
             if (launchTemplateData.getMetadataOptions() != null) {
                 metadataOptions = LaunchTemplateData.MetadataOptions.merge(
                         launchTemplateData.getMetadataOptions(), metadataOptions);
@@ -960,7 +983,7 @@ public class Ec2QueryHandler {
                         launch.instanceTags(),
                         launch.userData(),
                         launch.iamInstanceProfileArn(),
-                        null,
+                        launch.associatePublicIpAddress(),
                         null,
                         0,
                         launch.availabilityZone(), launch.metadataOptions(), null, launch.encodedUserData(), false,
@@ -1098,12 +1121,15 @@ public class Ec2QueryHandler {
         for (Tag tag : fleetInstanceTags) {
             tags.put(tag.getKey(), tag);
         }
-        String templateSubnetId = template.getNetworkInterfaces().stream()
-                .map(networkInterface -> networkInterface.getSubnetId())
-                .filter(Objects::nonNull)
-                .filter(value -> !value.isBlank())
-                .findFirst()
-                .orElse(null);
+        // The primary (device index 0) interface's subnet first; only when that names none does a
+        // fleet fall back, as it always has, to the first interface that names one.
+        LaunchTemplateData.NetworkInterface primary = template.primaryNetworkInterface();
+        String templateSubnetId = primary != null && isSet(primary.getSubnetId()) ? primary.getSubnetId()
+                : template.getNetworkInterfaces().stream()
+                        .map(networkInterface -> networkInterface.getSubnetId())
+                        .filter(Ec2QueryHandler::isSet)
+                        .findFirst()
+                        .orElse(null);
         String subnetId = firstNonBlank(overrideSubnetId, templateSubnetId);
         String templateAvailabilityZone = template.getPlacement() != null
                 ? template.getPlacement().getAvailabilityZone() : null;
@@ -1121,6 +1147,7 @@ public class Ec2QueryHandler {
                 template.getUserData(),
                 template.getEncodedUserData(),
                 service.iamInstanceProfileArn(template),
+                template.effectiveAssociatePublicIpAddress(),
                 template.getMetadataOptions(),
                 template.effectiveSecurityGroupIds(),
                 new ArrayList<>(tags.values()),
@@ -1169,6 +1196,7 @@ public class Ec2QueryHandler {
     private record FleetLaunch(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
                                String instanceType, String imageId, String subnetId, String availabilityZone,
                                String keyName, String userData, String encodedUserData, String iamInstanceProfileArn,
+                               Boolean associatePublicIpAddress,
                                LaunchTemplateData.MetadataOptions metadataOptions,
                                List<String> securityGroupIds, List<Tag> instanceTags,
                                List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings) {}
@@ -4349,7 +4377,7 @@ public class Ec2QueryHandler {
     private Response handleAssociateAddress(MultivaluedMap<String, String> p, String region) {
         String allocationId = p.getFirst("AllocationId");
         String instanceId = p.getFirst("InstanceId");
-        Address addr = service.associateAddress(region, allocationId, instanceId);
+        Address addr = service.associateAddress(region, allocationId, instanceId, p.getFirst("PrivateIpAddress"));
         XmlBuilder xml = new XmlBuilder()
                 .start("AssociateAddressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())

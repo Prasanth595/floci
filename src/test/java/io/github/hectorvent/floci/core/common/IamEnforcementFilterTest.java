@@ -144,7 +144,7 @@ class IamEnforcementFilterTest {
                 new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
                 conditionContextResolver, mock(CloudTrailService.class),
                 mock(CurrentVertxRequest.class),
-                catalog, scpProvider, sessionAccountLookup, null, clock, resourceInfo);
+                catalog, scpProvider, sessionAccountLookup, null, null, clock, resourceInfo);
     }
 
     @Test

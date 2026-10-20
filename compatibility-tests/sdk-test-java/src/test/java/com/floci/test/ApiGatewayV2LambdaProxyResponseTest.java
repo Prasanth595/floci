@@ -26,7 +26,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Measured on AWS (eu-west-1, 2026-10-19): a function that raises, a 1.0 result without a
  * statusCode, and a statusCode that is not a whole number from 100 to 599 are answered 500 with
  * {"message":"Internal Server Error"}; a statusCode given as text that spells one is taken; format
- * 2.0 takes a result without a statusCode as a 200 whose body is the result itself.
+ * 2.0 takes a result without a statusCode as a 200 whose body is the result itself. A body that is
+ * an object, one said to be base64 that is not, and an isBase64Encoded of "yes" are answered 500
+ * too, while "True" is read as true.
  */
 @DisplayName("API Gateway V2 Lambda proxy responses")
 class ApiGatewayV2LambdaProxyResponseTest {
@@ -109,7 +111,15 @@ class ApiGatewayV2LambdaProxyResponseTest {
         "2.0|highstatus|500|" + ERROR,
         "1.0|textstatus|201|x",
         "2.0|textstatus|201|x",
-        "2.0|nostatus|200|{\"body\":\"x\",\"headers\":{\"x-probe\":\"1\"}}"
+        "2.0|nostatus|200|{\"body\":\"x\",\"headers\":{\"x-probe\":\"1\"}}",
+        "1.0|badbase64|500|" + ERROR,
+        "2.0|badbase64|500|" + ERROR,
+        "1.0|bodyobject|500|" + ERROR,
+        "2.0|bodyobject|500|" + ERROR,
+        "1.0|base64yes|500|" + ERROR,
+        "2.0|base64yes|500|" + ERROR,
+        "1.0|base64capital|200|hello",
+        "2.0|base64capital|200|hello"
     })
     void aResultIsAnsweredAsAwsReadsIt(String format, String mode, int status, String body) throws Exception {
         HttpResponse<String> response = get(format, mode);

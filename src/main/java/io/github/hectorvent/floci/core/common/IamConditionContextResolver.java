@@ -648,7 +648,8 @@ public class IamConditionContextResolver {
         if (resourceId == null || resourceId.isBlank() || !ec2Service.isResolvable()) {
             return;
         }
-        for (Tag tag : ec2Service.get().resourceTags(resourceId)) {
+        String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
+        for (Tag tag : ec2Service.get().resourceTags(region, resourceId)) {
             conditions.put(RESOURCE_TAG_PREFIX + tag.getKey(),
                     List.of(tag.getValue() == null ? "" : tag.getValue()));
         }

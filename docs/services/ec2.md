@@ -314,6 +314,19 @@ that publish those images.
 | DeleteTags | Removes tags from supported EC2 resources. |
 | DescribeTags | Lists tags stored for EC2 resources. |
 
+Tags are regional, like the resources they label: `DescribeTags` lists only the tags of resources
+in the request's region, and a tag set in one region is not visible from another. Each result
+carries the resource's `resourceType` (`image`, `volume`, `snapshot`, `network-acl`,
+`vpc-peering-connection` and `spot-instances-request` included). Tags given when a volume or a
+VPC peering connection is created are listed like any other tag, and `DescribeVolumes`,
+`DescribeSnapshots` and `DescribeSpotInstanceRequests` show later `CreateTags` and `DeleteTags`
+changes. Each side of a VPC peering connection sees the tags set in its own account and region.
+A resource's tags go with it: deleting a volume, a snapshot or a peering connection, or the
+removal of a terminated instance, removes its tags. On upgrade, tags stored by an older Floci
+version are moved under their resource's region at startup. Tags on a catalog AMI move to the
+default region, and tags on an EKS node instance move to the node's region once the node is
+restored; any other tag whose resource no longer exists is dropped.
+
 Public tag mutations reject keys beginning with `aws:` regardless of ASCII case.
 An empty `DeleteTags` tag list removes user tags and preserves AWS-managed tags.
 CloudFormation tag updates and rollbacks likewise leave AWS-managed tags intact.
@@ -637,16 +650,31 @@ and [Elastic IP allocation](https://docs.aws.amazon.com/vpc/latest/userguide/Wor
 In a nondefault VPC it returns `InvalidIPAddress.InUse` without changing the association;
 call `DisassociateAddress` first, as specified by the
 [EC2 API reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ReleaseAddress.html).
+Associating an Elastic IP with an instance that already has one on the same private address
+disassociates the earlier address, which stays allocated, as the
+[AssociateAddress reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_AssociateAddress.html)
+describes. That is the primary private address unless `PrivateIpAddress` names a secondary
+address of the instance's primary interface, so an address on a secondary private address
+leaves the primary one, and the instance's public address, in place. For an existing instance,
+any other `PrivateIpAddress` fails with `InvalidParameterValue` and changes no association. The
+exception is container mode without AWS-faithful private addresses: the instance reports its Docker
+bridge address there, so any value means its primary address.
 
 Deleting an interface, including deletion on instance termination, disassociates its
 Elastic IP without releasing the allocation. A retained interface keeps its association
 after termination; release still follows that interface's VPC rules.
 
-An allocated Elastic IP's `54.x.x.x` address is invented and routes nowhere, so associating
-it re-points it at the address the instance is actually reachable on — the same value
-DescribeInstances reports. This is a deliberate deviation from AWS, where an EIP's public IP
-is fixed from allocation: without it, `aws_eip.x.public_ip` hands every caller a dead address.
-The allocation ID, association ID and domain are unaffected, and disassociating restores the
+AllocateAddress draws Elastic IPs from `203.0.113.0/24`, a range reserved for documentation that
+no host answers on, in every mode, so a client never reaches someone else's host through one. An
+allocation never takes an address the account's other Elastic IPs or instances already hold; once
+all 254 are taken, AllocateAddress fails with `AddressLimitExceeded`. Elastic IPs allocated by an
+earlier Floci version keep their `54.x.x.x` address until released. Associating an Elastic IP with an
+instance that has a container re-points it at the address the instance is actually reachable on
+(the same value DescribeInstances reports), and so does associating one with a mock instance's
+primary private address under `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES=fixed`, where it becomes
+the configured address. This is a deliberate deviation from AWS, where an EIP's public IP is fixed
+from allocation: without it, `aws_eip.x.public_ip` hands every caller a dead address. The
+allocation ID, association ID and domain are unaffected, and disassociating restores the
 allocated address.
 
 ### Availability Zones & Regions
@@ -745,7 +773,15 @@ Two behaviours worth calling out, because they are what Terraform reads back:
   requests and `CreateFleet` launches, so `aws_launch_template.iam_instance_profile.name` converges.
 - **`NetworkInterfaces` stays a `NetworkInterfaces` block.** Its `Groups` are not hoisted into
   top-level `SecurityGroupIds`; on AWS the two are mutually exclusive. A launch from the template
-  resolves its security groups from whichever of the two is populated.
+  resolves its security groups from whichever of the two is populated. `RunInstances` and
+  `CreateFleet` launches take their subnet and `AssociatePublicIpAddress` from the interface at
+  device index 0; when that interface names no subnet, `CreateFleet` still uses the first
+  interface that does. A `RunInstances` launch whose template interface at device index 0 names
+  an existing `NetworkInterfaceId` launches on that interface, in its subnet, as a request
+  naming it would. Auto Scaling launches take only its `AssociatePublicIpAddress`, since the
+  group's `VPCZoneIdentifier` places them. Network interfaces, on the `RunInstances` request or
+  in its launch template, cannot be combined with an instance-level `SubnetId`
+  (`InvalidParameterCombination`); place the subnet on the primary network interface instead.
 
 #### Launch template versions
 
@@ -951,6 +987,8 @@ State is reported settled rather than transitional, as elsewhere in this service
 | `FLOCI_SERVICES_EC2_MAX_PUBLISHED_PORTS_PER_INSTANCE` | `20` | Max published ports per instance; also the widest single-rule span published |
 | `FLOCI_SERVICES_EC2_SOCAT_IMAGE` | `alpine/socat` | Image used for the port-forwarding sidecar |
 | `FLOCI_SERVICES_EC2_MOCK` | `false` | Skip Docker; instances jump directly to final state (useful for tests) |
+| `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES` | `none` | Automatic public IPv4 address of a mock instance: `none`, `documentation` (from `203.0.113.0/24`, which routes nowhere) or `fixed` (see below). Instances with containers always report their reachable address (see [Public IPv4 addresses](#public-ipv4-addresses)) |
+| `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESS` | `127.0.0.1` | The address every mock instance due one gets when `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES` is `fixed`, for example this host's own address; an Elastic IP associated with its primary private address shows it too |
 | `FLOCI_SERVICES_EC2_AWS_FAITHFUL_PRIVATE_IP` | `false` | Report the CFN/subnet-allocated private IP instead of the container bridge IP; routing and IMDS are unaffected |
 | `FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE` | auto-detect | Whether an instance's container IP is reachable from the machines consuming Floci's API (Terraform, Terratest, your shell). When it is, DescribeInstances and DescribeAddresses report the container IP, so port 22 really is port 22; when it is not, they report `127.0.0.1` and reachability goes through the published high host ports. Detected by a throwaway TCP connect; set explicitly when Floci itself runs as a container |
 | `FLOCI_SERVICES_EC2_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | On startup, remove instance containers this Floci left on the daemon whose record did not survive the restart or came back terminated; stopped instances are never swept |
@@ -1122,3 +1160,49 @@ The file uses the same schema as `src/main/resources/ec2/image-catalog.yaml` and
 include every image that process should expose. Missing or invalid files fail on first
 catalog use; leaving the setting unset preserves the bundled catalog. Containerized
 Floci needs the file mounted at the configured container path.
+
+### Public IPv4 addresses
+
+Whether an instance has an automatic public IPv4 address is decided by the same rule with and
+without containers. Only the address itself depends on the mode. With a container, it is the
+container's reachable address: its own IP when Floci's clients can route to it, otherwise
+`127.0.0.1` with the DNS name `localhost`. In mock mode there is no container to reach, so
+`FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES` chooses:
+
+- `none` (the default): no automatic address. DescribeInstances shows no `ipAddress` or `dnsName`
+  unless an Elastic IP is associated. The launch still records whether it asked for one, so
+  switching the setting takes effect at the instance's next start.
+- `documentation`: an address from `203.0.113.0/24`, a range reserved for documentation that no
+  host answers on, as Lightsail and EMR use. Instances get addresses distinct from each other and
+  from the account's Elastic IPs while any are free (none once all are taken), and a restart gets
+  a different one.
+- `fixed`: `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESS` (default `127.0.0.1`, DNS name `localhost`)
+  for every instance, so a tool that connects to the public address reaches a host you choose. An
+  Elastic IP associated with the primary private address shows that address too.
+
+For an address that reaches the instance itself, run it with a container (`FLOCI_SERVICES_EC2_MOCK`
+`false`). Elastic IPs come from `203.0.113.0/24` in both modes (see [Elastic IPs](#elastic-ips)).
+
+- An instance applies `MapPublicIpOnLaunch` unless the primary launch interface explicitly sets
+  `AssociatePublicIpAddress`. Direct launches, EC2 Fleet launches and Auto Scaling launch
+  templates preserve both `true` and `false` overrides.
+- As the
+  [InstanceNetworkInterfaceSpecification reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_InstanceNetworkInterfaceSpecification.html)
+  specifies, only an interface the launch creates gets an automatic address. An instance launched
+  on an existing network interface has none.
+- The address appears when the instance reaches `running` and remains stable while it runs. A
+  stop or termination releases it, and a restart assigns a new one (the same one again under
+  `fixed`); the private address does not change. As the
+  [EC2 User Guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-instance-addressing.html#concepts-public-addresses)
+  describes, a released address is not replaced while a second network interface is attached.
+- An Elastic IP associated with the instance's primary private address takes the place of the
+  automatic address and is kept across a stop. Disassociating it from a running instance assigns
+  a new automatic address when the rule above allows one.
+- An Elastic IP that a retained interface carries becomes the public address of the next instance
+  launched on that interface, although DescribeAddresses does not report that instance as its
+  `InstanceId`.
+
+Under `none` the rule still runs, but a mock instance has only the Elastic IP, if any, to show.
+Otherwise a mock instance's address appears whether DescribeInstances or DescribeInstanceStatus
+observes the launch first. A terminated mock instance has no public address, and stopping it does not bring it
+back.

@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackInstance;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSet;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSetAutoDeploymentTarget;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSetOperation;
+import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.organizations.model.Organization;
 import io.github.hectorvent.floci.services.organizations.model.OrganizationAccount;
@@ -29,6 +30,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Future;
@@ -44,7 +46,7 @@ import java.util.regex.Pattern;
  * operation records themselves live in the administration (caller) account's namespace.
  */
 @ApplicationScoped
-public class StackSetService {
+public class StackSetService implements PassedRoleLookup {
 
     private static final Logger LOG = Logger.getLogger(StackSetService.class);
     private static final String STACKSETS_SERVICE_PRINCIPAL = ServicePrincipals.of("stacksets.cloudformation");
@@ -179,6 +181,12 @@ public class StackSetService {
 
     public StackSet describeStackSet(String name) {
         return getStackSetOrThrow(name);
+    }
+
+    /** The StackSet's permission model, which says whether an update naming no administration role passes the default one. */
+    @Override
+    public Optional<String> stackSetPermissionModel(String stackSetName) {
+        return stackSets.get(stackSetName).map(StackSet::getPermissionModel);
     }
 
     public List<StackSet> listStackSets() {

@@ -209,6 +209,31 @@ class IotMqttBrokerDeviceVerificationTest {
         assertEquals(device.certificate().getCertificateId(), disconnected.get("principalIdentifier").asText());
     }
 
+    /**
+     * A TLS session counts in its device certificate's account and region for fleet indexing, not
+     * in the default ones: connected there while live, then how it ended, and nothing elsewhere.
+     */
+    @Test
+    void aTlsSessionsConnectivityCountsInItsCertificatesAccountAndRegion() throws Exception {
+        when(config.defaultAccountId()).thenReturn("000000000000");
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        RegisteredDevice device = new RegisteredDevice("123456789012", "eu-west-1", registered(deviceLeaf).certificate());
+        when(service.findRegisteredCertificate(certificate(deviceLeaf))).thenReturn(Optional.of(device));
+        when(service.isConnectAllowed(eq(device), eq("sensor-1"), eq("127.0.0.1"), isNull())).thenReturn(true);
+
+        MqttClient client = connectTls("sensor-1", deviceLeaf, null);
+        assertTrue(broker.connectivity("123456789012", "eu-west-1", "sensor-1").orElseThrow().connected());
+        assertTrue(broker.connectivity("000000000000", "us-east-1", "sensor-1").isEmpty());
+        client.disconnect();
+        client.close();
+        publishedEvent("$aws/events/presence/disconnected/sensor-1");
+
+        assertEquals("CLIENT_INITIATED_DISCONNECT",
+                broker.connectivity("123456789012", "eu-west-1", "sensor-1").orElseThrow().disconnectReason());
+        assertTrue(broker.connectivity("000000000000", "us-east-1", "sensor-1").isEmpty());
+        assertTrue(broker.connectivity("123456789012", "us-east-1", "sensor-1").isEmpty());
+    }
+
     @Test
     void aDeniedDeviceIsAnsweredWithConnackNotAuthorized() throws Exception {
         RegisteredDevice device = registered(deviceLeaf);

@@ -337,7 +337,8 @@ public final class LambdaUtils {
     /**
      * ZIP containing a Node.js handler that returns the Lambda proxy result its {@code mode} path
      * parameter names: one that raises, one without a statusCode, one whose statusCode is not a
-     * number, one whose statusCode is text that spells one, and one outside 100 to 599.
+     * number, one whose statusCode is text that spells one, one outside 100 to 599, and bodies an HTTP
+     * API cannot read (an object, base64 that is not, an isBase64Encoded of "yes") or reads ("True").
      */
     public static byte[] proxyResponseZip() {
         String code = """
@@ -348,6 +349,10 @@ public final class LambdaUtils {
                     if (mode === 'badstatus') return { statusCode: 'abc', body: 'x' };
                     if (mode === 'textstatus') return { statusCode: '201', body: 'x' };
                     if (mode === 'highstatus') return { statusCode: 600, body: 'x' };
+                    if (mode === 'badbase64') return { statusCode: 200, body: 'not base64!', isBase64Encoded: true };
+                    if (mode === 'bodyobject') return { statusCode: 200, body: { a: 1 } };
+                    if (mode === 'base64yes') return { statusCode: 200, body: 'aGVsbG8=', isBase64Encoded: 'yes' };
+                    if (mode === 'base64capital') return { statusCode: 200, body: 'aGVsbG8=', isBase64Encoded: 'True' };
                     return { statusCode: 200, body: 'ok' };
                 };
                 """;

@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicy
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
 import io.github.hectorvent.floci.services.iam.IamService.PresignedScope;
+import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
 import io.github.hectorvent.floci.services.iam.RequestPrincipal;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
@@ -204,6 +205,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final Instance<ScpProvider> scpProvider;
     private final SessionAccountLookup sessionAccountLookup;
     private final Instance<ResourcePolicyProvider> resourcePolicyProviders;
+    private final Instance<PassedRoleLookup> passedRoleLookups;
     /** The clock {@link IamService} measures session expiry on, so both read the same time. */
     private final Clock clock;
     private final ResourceInfo resourceInfo;
@@ -224,6 +226,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 Instance<ScpProvider> scpProvider,
                                 SessionAccountLookup sessionAccountLookup,
                                 Instance<ResourcePolicyProvider> resourcePolicyProviders,
+                                Instance<PassedRoleLookup> passedRoleLookups,
                                 Clock clock,
                                 @Context ResourceInfo resourceInfo) {
         this.config = config;
@@ -241,6 +244,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.scpProvider = scpProvider;
         this.sessionAccountLookup = sessionAccountLookup;
         this.resourcePolicyProviders = resourcePolicyProviders;
+        this.passedRoleLookups = passedRoleLookups;
         this.clock = clock;
         this.resourceInfo = resourceInfo;
     }
@@ -263,7 +267,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this(config, accountResolver, iamService, evaluator, actionRegistry,
                 new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
                 conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
-                scpProvider, sessionAccountLookup, resourcePolicyProviders, Clock.systemUTC(), null);
+                scpProvider, sessionAccountLookup, resourcePolicyProviders, null, Clock.systemUTC(), null);
     }
 
     /** Package-private constructor for callers predating resourcePolicyProviders. */
@@ -283,7 +287,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this(config, accountResolver, iamService, evaluator, actionRegistry,
                 new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
                 conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
-                scpProvider, sessionAccountLookup, null, Clock.systemUTC(), null);
+                scpProvider, sessionAccountLookup, null, null, Clock.systemUTC(), null);
     }
 
     @Override
@@ -870,15 +874,14 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * A request that passes a role to a service also needs {@code iam:PassRole} on that role (see
      * {@link PassedRoles}), checked as the caller with {@code iam:PassedToService} naming the
      * service and the keys that say who is calling, which {@code callerArns} writes when it is known.
-     * An instance profile is looked up in the request's account, as EC2 resolves it; one that does
-     * not exist passes nothing, and the operation reports it. Returns true when the request was
-     * aborted.
+     * What a request names that holds roles, an instance profile or a task definition, is looked up
+     * in the request's account, as the service resolves it; one that does not exist passes nothing,
+     * and the operation reports it. Returns true when the request was aborted.
      */
     private boolean abortIfRolePassDenied(ContainerRequestContext ctx, CallerContext caller, RequestPrincipal principal,
                                           CallerArns callerArns, String action, String credentialScope,
                                           String region, String accountId, String akid) {
-        for (PassedRoles.PassedRole passed : PassedRoles.of(action, ctx,
-                (name, arn) -> instanceProfileRoleArns(accountId, name, arn))) {
+        for (PassedRoles.PassedRole passed : PassedRoles.of(action, ctx, lookupsFor(accountId, region))) {
             Map<String, List<String>> context = new HashMap<>();
             if (callerArns != null) {
                 callerArns.putPrincipalKeys(context);
@@ -890,6 +893,45 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
         }
         return false;
+    }
+
+    /** What {@link PassedRoles} looks up, in the request's account and Region. */
+    private PassedRoles.Lookups lookupsFor(String accountId, String region) {
+        return new PassedRoles.Lookups() {
+            @Override
+            public List<String> instanceProfileRoleArns(String profileName, String profileArn) {
+                return IamEnforcementFilter.this.instanceProfileRoleArns(accountId, profileName, profileArn);
+            }
+
+            @Override
+            public List<String> taskDefinitionRoles(String reference) {
+                List<String> roles = new ArrayList<>();
+                for (PassedRoleLookup lookup : roleLookups()) {
+                    roles.addAll(lookup.taskDefinitionRoles(reference, region));
+                }
+                return roles;
+            }
+
+            @Override
+            public Optional<String> stackSetPermissionModel(String stackSetName) {
+                for (PassedRoleLookup lookup : roleLookups()) {
+                    Optional<String> model = lookup.stackSetPermissionModel(stackSetName);
+                    if (model.isPresent()) {
+                        return model;
+                    }
+                }
+                return Optional.empty();
+            }
+
+            @Override
+            public String roleArn(String roleName) {
+                return AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "role/" + roleName).toString();
+            }
+        };
+    }
+
+    private Iterable<PassedRoleLookup> roleLookups() {
+        return passedRoleLookups == null || passedRoleLookups.isUnsatisfied() ? List.of() : passedRoleLookups;
     }
 
     /** The ARNs of the roles the instance profile, named by {@code name} or {@code arn}, holds. */

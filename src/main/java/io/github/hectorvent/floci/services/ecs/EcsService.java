@@ -69,6 +69,7 @@ import io.github.hectorvent.floci.services.ecs.model.TaskSet;
 import io.github.hectorvent.floci.services.ecs.model.TaskStatus;
 import io.github.hectorvent.floci.services.ecs.model.UpdateServiceRequest;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -109,7 +110,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @ApplicationScoped
-public class EcsService implements ContainerTeardown, ResourceProvider, Resettable {
+public class EcsService implements ContainerTeardown, ResourceProvider, Resettable, PassedRoleLookup {
 
     private static final Logger LOG = Logger.getLogger(EcsService.class);
     private static final String DEFAULT_CLUSTER = "default";
@@ -5521,8 +5522,17 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private TaskDefinition resolveTaskDefinitionOrThrow(String ref, String region) {
-        if (ref == null || ref.isBlank()) {
+        TaskDefinition td = findTaskDefinition(ref, region);
+        if (td == null) {
             throw new AwsException("ClientException", "Unable to describe task definition: " + ref, 400);
+        }
+        return td;
+    }
+
+    /** The task definition {@code ref} names, a family, a {@code family:revision} or an ARN; null when there is none. */
+    private TaskDefinition findTaskDefinition(String ref, String region) {
+        if (ref == null || ref.isBlank()) {
+            return null;
         }
         TaskDefinition td = taskDefinitions.get(familyKey(region, ref));
         if (td != null) { return td; }
@@ -5538,9 +5548,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             td = taskDefinitionsIn(region)
                     .filter(d -> ref.equals(d.getFamily()) && d.getRevision() == latest)
                     .findFirst().orElse(null);
-            if (td != null) { return td; }
         }
-        throw new AwsException("ClientException", "Unable to describe task definition: " + ref, 400);
+        return td;
+    }
+
+    /** The roles a task started from the definition runs with, for the {@code iam:PassRole} check of RunTask and the rest. */
+    @Override
+    public List<String> taskDefinitionRoles(String reference, String region) {
+        TaskDefinition td = findTaskDefinition(reference, region);
+        if (td == null) {
+            return List.of();
+        }
+        return Stream.of(td.getTaskRoleArn(), td.getExecutionRoleArn())
+                .filter(Objects::nonNull)
+                .toList();
     }
 
     /**

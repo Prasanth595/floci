@@ -26,8 +26,9 @@ public class Instance {
     private String publicIpAddress;
     private String privateDnsName;
     private String publicDnsName;
-    // Whether this instance should be assigned a public IP — true when its subnet
-    // has MapPublicIpOnLaunch (#1984). Instances in private subnets get none.
+    // Whether this instance's launch asked for an automatic public IP: the launch's
+    // AssociatePublicIpAddress, else its subnet's MapPublicIpOnLaunch, and never for an
+    // interface the caller created. AutomaticPublicAddress decides from it in every mode.
     private boolean associatePublicIp = false;
     private String keyName;
     private List<GroupIdentifier> securityGroups = new ArrayList<>();

@@ -65,6 +65,7 @@ import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
@@ -81,6 +82,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -667,6 +669,228 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void describeTagsListsOnlyTheRequestRegionsTags() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        String east = service.createVpc("us-east-1", "10.80.0.0/16", false).getVpcId();
+        String west = service.createVpc("eu-west-1", "10.81.0.0/16", false).getVpcId();
+        service.createTags("us-east-1", List.of(east), List.of(new Tag("Team", "east")));
+        service.createTags("eu-west-1", List.of(west), List.of(new Tag("Team", "west")));
+
+        assertEquals(List.of(east), tagResourceIds(service.describeTags("us-east-1", Map.of("key", List.of("Team")))));
+        assertEquals(List.of(west), tagResourceIds(service.describeTags("eu-west-1", Map.of("key", List.of("Team")))));
+        assertTrue(service.describeTags("eu-west-1", Map.of("resource-id", List.of(east))).isEmpty());
+        assertTrue(service.resourceTags("eu-west-1", east).isEmpty());
+        assertEquals("east", service.resourceTags("us-east-1", east).getFirst().getValue());
+    }
+
+    @Test
+    void tagsCarryTheResourceTypeOfImagesVolumesSnapshotsAclsPeeringsAndSpotRequests() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        Map<String, String> expected = Map.of(
+                "ami-0abc12345678", "image", "vol-0abc12345678", "volume", "snap-0abc12345678", "snapshot",
+                "acl-0abc12345678", "network-acl", "pcx-0abc12345678", "vpc-peering-connection",
+                "sir-0abc12345678", "spot-instances-request");
+        service.createSystemTags("us-east-1", List.copyOf(expected.keySet()), List.of(new Tag("Team", "typed")));
+
+        Map<String, String> types = new HashMap<>();
+        for (Map<String, String> item : service.describeTags("us-east-1", Map.of("key", List.of("Team")))) {
+            types.put(item.get("resourceId"), item.get("resourceType"));
+        }
+        assertEquals(expected, types);
+    }
+
+    @Test
+    void volumeTagsGivenAtCreationAreListedByDescribeTags() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        Volume volume = service.createVolume("us-east-1", "us-east-1a", "gp3", 8,
+                false, 0, null, null, List.of(new Tag("Team", "storage")));
+
+        List<Map<String, String>> listed = service.describeTags("us-east-1",
+                Map.of("resource-id", List.of(volume.getVolumeId())));
+        assertEquals(1, listed.size());
+        assertEquals("volume", listed.getFirst().get("resourceType"));
+        assertTrue(service.describeTags("eu-west-1", Map.of("resource-id", List.of(volume.getVolumeId()))).isEmpty());
+    }
+
+    @Test
+    void tagsStoredByBareIdMoveUnderTheirResourcesRegionAndOrphansAreDropped() {
+        AccountAwareStorageBackend<List<Tag>> tagStore = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = tagTestService(new InMemoryStorageFactory(Map.of("ec2-tags.json", tagStore)));
+        String vpcId = service.createVpc("eu-west-1", "10.82.0.0/16", false).getVpcId();
+        tagStore.put(vpcId, new ArrayList<>(List.of(new Tag("Team", "legacy"))));
+        tagStore.put("vpc-0000dead0000", new ArrayList<>(List.of(new Tag("Team", "orphan"))));
+
+        service.migrateTagsToRegionKeys();
+        service.migrateTagsToRegionKeys();
+
+        assertEquals(List.of(vpcId), tagResourceIds(service.describeTags("eu-west-1", Map.of("key", List.of("Team")))));
+        assertTrue(service.describeTags("us-east-1", Map.of("key", List.of("Team"))).isEmpty());
+        assertTrue(tagStore.keys().stream().allMatch(storeKey -> storeKey.contains("::")));
+    }
+
+    @Test
+    void volumeTagChangesShowInDescribeVolumes() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        String volumeId = service.createVolume("us-east-1", "us-east-1a", "gp3", 8,
+                false, 0, null, null, List.of(new Tag("Team", "storage"))).getVolumeId();
+
+        service.createTags("us-east-1", List.of(volumeId), List.of(new Tag("Env", "dev")));
+        service.deleteTags("us-east-1", List.of(volumeId), List.of(new Tag("Team", null)));
+
+        List<Tag> described = service.describeVolumes("us-east-1", List.of(volumeId), Map.of()).getFirst().getTags();
+        assertEquals(List.of("Env"), described.stream().map(Tag::getKey).toList());
+    }
+
+    @Test
+    void eachSideOfACrossRegionPeeringConnectionSeesItsOwnTags() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        String eastVpc = service.createVpc("us-east-1", "10.83.0.0/16", false).getVpcId();
+        String westVpc = service.createVpc("eu-west-1", "10.84.0.0/16", false).getVpcId();
+        String pcxId = service.createVpcPeeringConnection("us-east-1", eastVpc, westVpc, null, "eu-west-1",
+                List.of(new Tag("Side", "requester"))).getVpcPeeringConnectionId();
+        service.createTags("eu-west-1", List.of(pcxId), List.of(new Tag("Side", "accepter")));
+
+        assertEquals("requester", peeringTag(service, "us-east-1", pcxId));
+        assertEquals("accepter", peeringTag(service, "eu-west-1", pcxId));
+        assertEquals(List.of(pcxId), tagResourceIds(service.describeTags("us-east-1", Map.of("key", List.of("Side")))));
+        assertEquals("requester", peeringTag(service, "us-east-1", pcxId));
+    }
+
+    private static String peeringTag(Ec2Service service, String region, String pcxId) {
+        return service.describeVpcPeeringConnections(region, List.of(pcxId), Map.of()).getFirst().getTags().stream()
+                .filter(tag -> "Side".equals(tag.getKey())).map(Tag::getValue).findFirst().orElse(null);
+    }
+
+    @Test
+    void aDeletedVolumesTagsAreNoLongerListed() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        String volumeId = service.createVolume("us-east-1", "us-east-1a", "gp3", 8,
+                false, 0, null, null, List.of(new Tag("Team", "storage"))).getVolumeId();
+        service.createTags("us-east-1", List.of(volumeId), List.of(new Tag("Env", "dev")));
+
+        service.deleteVolume("us-east-1", volumeId);
+
+        assertTrue(service.describeTags("us-east-1", Map.of("resource-id", List.of(volumeId))).isEmpty());
+    }
+
+    @Test
+    void aRootVolumeDeletedOnTerminationTakesItsTags() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        Instance inst = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        String rootVolumeId = inst.getRootVolumeId();
+        service.createTags("us-east-1", List.of(rootVolumeId), List.of(new Tag("Team", "root")));
+
+        service.terminateInstances("us-east-1", List.of(inst.getInstanceId()));
+
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).stream()
+                .noneMatch(volume -> rootVolumeId.equals(volume.getVolumeId())));
+        assertTrue(service.describeTags("us-east-1", Map.of("resource-id", List.of(rootVolumeId))).isEmpty());
+    }
+
+    @Test
+    void deletingAPeeringConnectionRemovesBothSidesTags() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        String eastVpc = service.createVpc("us-east-1", "10.89.0.0/16", false).getVpcId();
+        String westVpc = service.createVpc("eu-west-1", "10.90.0.0/16", false).getVpcId();
+        String pcxId = service.createVpcPeeringConnection("us-east-1", eastVpc, westVpc, null, "eu-west-1",
+                List.of(new Tag("Side", "requester"))).getVpcPeeringConnectionId();
+        service.createTags("eu-west-1", List.of(pcxId), List.of(new Tag("Side", "accepter")));
+
+        service.deleteVpcPeeringConnection("eu-west-1", pcxId);
+
+        assertTrue(service.describeTags("us-east-1", Map.of("resource-id", List.of(pcxId))).isEmpty());
+        assertTrue(service.describeTags("eu-west-1", Map.of("resource-id", List.of(pcxId))).isEmpty());
+    }
+
+    @Test
+    void migrationKeepsCatalogImageAndClusterNodeTags() {
+        AccountAwareStorageBackend<List<Tag>> tagStore = AccountAwareStorageBackend.inMemory("000000000000");
+        EmulatorConfig config = mockConfig(true);
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(config, mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
+                new AmiImageResolver(imageCatalog), imageCatalog, new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-tags.json", tagStore)));
+        String catalogImageId = imageCatalog.images().getFirst().imageId;
+        String nodeId = "i-0de0000000000001a";
+        tagStore.put(catalogImageId, new ArrayList<>(List.of(new Tag("Team", "image"))));
+        tagStore.put(nodeId, new ArrayList<>(List.of(new Tag("Team", "node"))));
+        tagStore.put("vpc-0000dead0000", new ArrayList<>(List.of(new Tag("Team", "orphan"))));
+
+        service.migrateTagsToRegionKeys();
+
+        assertEquals(List.of(catalogImageId),
+                tagResourceIds(service.describeTags("us-east-1", Map.of("key", List.of("Team")))));
+        assertTrue(tagStore.keys().contains(nodeId));
+        assertFalse(tagStore.keys().contains("vpc-0000dead0000"));
+
+        Instance node = new Instance();
+        node.setInstanceId(nodeId);
+        node.setRegion("eu-west-1");
+        node.setPlacement(new Placement("eu-west-1a"));
+        node.setState(InstanceState.running());
+        node.setInstanceType("m5.large");
+        service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
+            @Override
+            public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
+                return nodeId.equals(instanceId) && "eu-west-1".equals(region) ? Optional.of(node) : Optional.empty();
+            }
+
+            @Override
+            public List<Instance> listInstances(String accountId, String region) {
+                return "eu-west-1".equals(region) ? List.of(node) : List.of();
+            }
+        });
+
+        assertEquals("node", service.describeInstances("eu-west-1", List.of(nodeId), Map.of()).getFirst()
+                .getInstances().getFirst().getTags().getFirst().getValue());
+        assertEquals(List.of(nodeId), tagResourceIds(service.describeTags("eu-west-1", Map.of("key", List.of("Team")))));
+        assertFalse(tagStore.keys().contains(nodeId));
+    }
+
+    @Test
+    void regionlessLookupFilesClusterNodeTagsUnderTheNodesRegion() {
+        AccountAwareStorageBackend<List<Tag>> tagStore = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = tagTestService(new InMemoryStorageFactory(Map.of("ec2-tags.json", tagStore)));
+        String nodeId = "i-0de0000000000002b";
+        tagStore.put(nodeId, new ArrayList<>(List.of(new Tag("Team", "node"))));
+        service.migrateTagsToRegionKeys();
+        Instance node = new Instance();
+        node.setInstanceId(nodeId);
+        node.setRegion("eu-west-1");
+        node.setPlacement(new Placement("eu-west-1a"));
+        node.setState(InstanceState.running());
+        node.setInstanceType("m5.large");
+        service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
+            @Override
+            public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
+                return nodeId.equals(instanceId) && (region == null || "eu-west-1".equals(region))
+                        ? Optional.of(node) : Optional.empty();
+            }
+
+            @Override
+            public List<Instance> listInstances(String accountId, String region) {
+                return region == null || "eu-west-1".equals(region) ? List.of(node) : List.of();
+            }
+        });
+
+        assertEquals("node", service.findInstanceById(nodeId).getTags().getFirst().getValue());
+
+        assertEquals(List.of(nodeId), tagResourceIds(service.describeTags("eu-west-1", Map.of("key", List.of("Team")))));
+        assertFalse(tagStore.keys().contains("null::" + nodeId));
+    }
+
+    private static Ec2Service tagTestService(StorageFactory storageFactory) {
+        return new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), storageFactory);
+    }
+
+    private static List<String> tagResourceIds(List<Map<String, String>> items) {
+        return items.stream().map(item -> item.get("resourceId")).distinct().toList();
+    }
+
+    @Test
     void deleteVpcRemovesItsOwnTagsAndThoseOnItsDefaultResources() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
@@ -1024,6 +1248,538 @@ class Ec2ServiceTest {
         }
         service.releaseAddress(region, address.getAllocationId());
         assertTrue(service.describeAddresses(region, List.of(address.getAllocationId()), Map.of()).isEmpty());
+    }
+
+    @Test
+    void elasticIpOnASecondaryAddressLeavesAReachableInstancesPublicAddressAlone() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.reachablePublicAddress(any())).thenReturn("192.0.2.10");
+        Ec2Service service = new Ec2Service(mockConfig(true), containerManager,
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String subnetId = service.createSubnet(region, service.createVpc(region, "10.238.0.0/24", false).getVpcId(),
+                "10.238.0.0/26", region + "a").getSubnetId();
+        NetworkInterface eni = service.createNetworkInterface(region, subnetId, null, "10.238.0.10",
+                List.of("10.238.0.11"), List.of(), List.of());
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null,
+                null, eni.getNetworkInterfaceId(), 0).getInstances().getFirst();
+
+        Address secondary = service.allocateAddress(region);
+        service.associateAddress(region, secondary.getAllocationId(), instance.getInstanceId(), "10.238.0.11");
+        assertEquals("10.238.0.11", secondary.getPrivateIpAddress());
+        assertNull(instance.getPublicIpAddress());
+
+        Address primary = service.allocateAddress(region);
+        service.associateAddress(region, primary.getAllocationId(), instance.getInstanceId());
+        assertEquals("10.238.0.10", primary.getPrivateIpAddress());
+        assertEquals("192.0.2.10", instance.getPublicIpAddress());
+        assertNotNull(secondary.getAssociationId());
+        assertEquals("10.238.0.11", service.describeAddresses(region, List.of(secondary.getAllocationId()), Map.of())
+                .getFirst().getPrivateIpAddress());
+    }
+
+    @Test
+    void aContainerInstanceReportingItsBridgeAddressStillTakesAnElasticIpForItsLaunchAddress() {
+        EmulatorConfig config = mockConfig(true);
+        Ec2Service service = new Ec2Service(config, mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null, null).getInstances().getFirst();
+        String launchAddress = instance.getPrivateIpAddress();
+        // Container mode without AWS-faithful private addresses: the container manager replaces the
+        // reported address with the Docker bridge one once the container runs.
+        when(config.services().ec2().mock()).thenReturn(false);
+        instance.setPrivateIpAddress("172.17.0.5");
+        instance.getNetworkInterfaces().getFirst().setPrivateIpAddress("172.17.0.5");
+
+        Address address = service.allocateAddress(region);
+        service.associateAddress(region, address.getAllocationId(), instance.getInstanceId(), launchAddress);
+        assertNotNull(address.getAssociationId());
+        assertEquals(instance.getInstanceId(), address.getInstanceId());
+    }
+
+    @Test
+    void containerModeStopReleasesTheAutomaticAddressButKeepsAnElasticIp() {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.239.0.0/24");
+        Instance automatic = runningContainerInstance(service, region, subnetId, null);
+        Instance elastic = runningContainerInstance(service, region, subnetId, null);
+        Address address = service.allocateAddress(region);
+        service.associateAddress(region, address.getAllocationId(), elastic.getInstanceId());
+
+        service.stopInstances(region, List.of(automatic.getInstanceId(), elastic.getInstanceId()));
+
+        assertNull(automatic.getPublicIpAddress());
+        assertNull(automatic.getPublicDnsName());
+        assertEquals("127.0.0.1", elastic.getPublicIpAddress());
+    }
+
+    @Test
+    void containerModeTerminationLeavesNoPublicAddress() {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        Instance instance = runningContainerInstance(service, region, publicSubnet(service, region, "10.240.0.0/24"), null);
+
+        service.terminateInstances(region, List.of(instance.getInstanceId()));
+
+        assertNull(instance.getPublicIpAddress());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void anInstanceLaunchedOnAnExistingInterfaceIsNotDueAnAutomaticAddressInEitherMode(boolean mockMode) {
+        Ec2Service service = mockMode ? mockModeService() : containerModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.241.0.0/24");
+        NetworkInterface eni = service.createNetworkInterface(region, subnetId, null, null, List.of(), List.of(), List.of());
+        Instance onExisting = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null,
+                null, eni.getNetworkInterfaceId(), 0).getInstances().getFirst();
+        Instance onNew = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null, null).getInstances().getFirst();
+
+        assertFalse(onExisting.isAssociatePublicIp());
+        assertTrue(onNew.isAssociatePublicIp());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,1,127.0.0.1", "true,2,", "false,1,"})
+    void containerModeDisassociationGivesBackOnlyAnAddressTheRulesAllow(boolean publicSubnet, int interfaces,
+                                                                        String expected) {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet
+                ? publicSubnet(service, region, "10.242.0.0/24")
+                : service.createSubnet(region, service.createVpc(region, "10.243.0.0/24", false).getVpcId(),
+                        "10.243.0.0/26", region + "a").getSubnetId();
+        Instance instance = runningContainerInstance(service, region, subnetId, null);
+        Address address = service.allocateAddress(region);
+        service.associateAddress(region, address.getAllocationId(), instance.getInstanceId());
+        assertEquals("127.0.0.1", instance.getPublicIpAddress());
+        if (interfaces > 1) {
+            NetworkInterface extra = service.createNetworkInterface(region, subnetId, null, null, List.of(), List.of(),
+                    List.of());
+            service.attachNetworkInterface(region, extra.getNetworkInterfaceId(), instance.getInstanceId(), 1);
+        }
+
+        service.disassociateAddress(region, address.getAssociationId());
+
+        assertEquals(expected, instance.getPublicIpAddress());
+    }
+
+    @Test
+    void containerModeDisassociatingASecondaryAddressLeavesThePublicAddressAlone() {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.244.0.0/24");
+        NetworkInterface eni = service.createNetworkInterface(region, subnetId, null, "10.244.0.10",
+                List.of("10.244.0.11"), List.of(), List.of());
+        Instance instance = runningContainerInstance(service, region, subnetId, eni.getNetworkInterfaceId());
+        Address primary = service.allocateAddress(region);
+        service.associateAddress(region, primary.getAllocationId(), instance.getInstanceId());
+        Address secondary = service.allocateAddress(region);
+        service.associateAddress(region, secondary.getAllocationId(), instance.getInstanceId(), "10.244.0.11");
+        // With a container, both addresses point at the one reachable address.
+        assertEquals("127.0.0.1", instance.getPublicIpAddress());
+
+        service.disassociateAddress(region, secondary.getAssociationId());
+
+        assertEquals("127.0.0.1", instance.getPublicIpAddress());
+        assertNotNull(primary.getAssociationId());
+    }
+
+    @Test
+    void containerModeDisassociationReleasesAnAddressARestartMoved() {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        String subnetId = service.createSubnet(region, service.createVpc(region, "10.245.0.0/24", false).getVpcId(),
+                "10.245.0.0/26", region + "a").getSubnetId();
+        Instance instance = runningContainerInstance(service, region, subnetId, null);
+        Address address = service.allocateAddress(region);
+        service.associateAddress(region, address.getAllocationId(), instance.getInstanceId());
+        // A restart gives the container a new address, which the start publishes for the Elastic IP.
+        instance.setPublicIpAddress("172.17.0.9");
+
+        service.disassociateAddress(region, address.getAssociationId());
+
+        assertNull(instance.getPublicIpAddress(), "nothing backs a public address once the Elastic IP is gone");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,", "true,127.0.0.1"})
+    void containerModeStartDecidesAfreshWhateverStoppedTheInstance(boolean elasticIp, String kept) {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.246.0.0/24");
+        Instance instance = runningContainerInstance(service, region, subnetId, null);
+        if (elasticIp) {
+            Address address = service.allocateAddress(region);
+            service.associateAddress(region, address.getAllocationId(), instance.getInstanceId());
+        }
+        // Stopped without StopInstances, as Floci's shutdown or a failed firewall restore does, so
+        // the automatic address was never released.
+        instance.setState(InstanceState.stopped());
+        instance.setPublicIpAddress("172.17.0.9");
+
+        service.startInstances(region, List.of(instance.getInstanceId()));
+
+        // The container manager then re-points what is left, which is only an Elastic IP's.
+        assertEquals(kept, instance.getPublicIpAddress());
+    }
+
+    @Test
+    void disassociatingAnAddressOnASecondaryInterfaceLeavesThePrimaryPublicAddressAlone() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.247.0.0/24");
+        NetworkInterface retained = service.createNetworkInterface(region, subnetId, null, null, List.of(), List.of(),
+                List.of());
+        Instance first = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null,
+                null, retained.getNetworkInterfaceId(), 0).getInstances().getFirst();
+        Address carried = service.allocateAddress(region);
+        service.associateAddress(region, carried.getAllocationId(), first.getInstanceId());
+        // The interface outlives the instance and keeps the address.
+        service.terminateInstances(region, List.of(first.getInstanceId()));
+        Instance second = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null, null).getInstances().getFirst();
+        service.describeInstances(region, List.of(second.getInstanceId()), Map.of());
+        String automatic = second.getPublicIpAddress();
+        assertNotNull(automatic);
+        service.attachNetworkInterface(region, retained.getNetworkInterfaceId(), second.getInstanceId(), 1);
+        String association = carried.getAssociationId();
+        assertNotNull(association, "the retained interface keeps the address associated");
+
+        service.disassociateAddress(region, association);
+
+        assertNull(carried.getAssociationId());
+        assertEquals(automatic, second.getPublicIpAddress());
+    }
+
+    @Test
+    void mockInstancesGetNoAutomaticAddressUnlessConfiguredButStillRecordTheLaunchIntent() {
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().mockPublicAddresses())
+                .thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.NONE);
+        Ec2Service service = mockModeService(config);
+        String region = "us-east-1";
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), publicSubnet(service, region, "10.243.0.0/24"), null, List.of(), null, null,
+                null).getInstances().getFirst();
+        service.describeInstances(region, List.of(instance.getInstanceId()), Map.of());
+        assertEquals("running", instance.getState().getName());
+        assertNull(instance.getPublicIpAddress());
+        assertNull(instance.getPublicDnsName());
+        assertTrue(instance.isAssociatePublicIp(), "the launch still records that it asked for an address");
+
+        // An Elastic IP still takes the primary private address, and leaves nothing behind.
+        Address elastic = service.allocateAddress(region);
+        service.associateAddress(region, elastic.getAllocationId(), instance.getInstanceId());
+        assertEquals(elastic.getPublicIp(), instance.getPublicIpAddress());
+        service.disassociateAddress(region, elastic.getAssociationId());
+        assertNull(instance.getPublicIpAddress());
+
+        // The recorded intent is what a later start decides from.
+        when(config.services().ec2().mockPublicAddresses())
+                .thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.DOCUMENTATION);
+        service.stopInstances(region, List.of(instance.getInstanceId()));
+        service.startInstances(region, List.of(instance.getInstanceId()));
+        assertTrue(instance.getPublicIpAddress().startsWith("203.0.113."), instance.getPublicIpAddress());
+    }
+
+    @Test
+    void documentationAddressesAreDistinctAndChangeOnRestart() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.242.0.0/24");
+        List<Instance> launched = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                3, 3, null, List.of(), subnetId, null, List.of(), null, null, null).getInstances();
+        service.describeInstances(region, launched.stream().map(Instance::getInstanceId).toList(), Map.of());
+        Set<String> addresses = new HashSet<>();
+        for (Instance instance : launched) {
+            assertTrue(instance.getPublicIpAddress().matches("203\\.0\\.113\\.[0-9]+"), instance.getPublicIpAddress());
+            assertEquals(instance.getPublicIpAddress(), instance.getPublicDnsName());
+            addresses.add(instance.getPublicIpAddress());
+        }
+        assertEquals(3, addresses.size());
+
+        Instance first = launched.getFirst();
+        String before = first.getPublicIpAddress();
+        service.stopInstances(region, List.of(first.getInstanceId()));
+        service.startInstances(region, List.of(first.getInstanceId()));
+        assertNotEquals(before, first.getPublicIpAddress());
+        assertFalse(launched.subList(1, 3).stream()
+                .anyMatch(other -> other.getPublicIpAddress().equals(first.getPublicIpAddress())));
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {"192.168.65.2,192.168.65.2,192.168.65.2", "' 192.168.65.3 ',192.168.65.3,192.168.65.3",
+            "'  ',127.0.0.1,localhost", "NULL,127.0.0.1,localhost"}, nullValues = "NULL")
+    void fixedMockAddressesUseTheConfiguredAddress(String configured, String expected, String dnsName) {
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().mockPublicAddresses())
+                .thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.FIXED);
+        when(config.services().ec2().mockPublicAddress()).thenReturn(Optional.ofNullable(configured));
+        Ec2Service service = mockModeService(config);
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.241.0.0/24");
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null, null).getInstances().getFirst();
+        service.describeInstances(region, List.of(instance.getInstanceId()), Map.of());
+        assertEquals(expected, instance.getPublicIpAddress());
+        assertEquals(dnsName, instance.getPublicDnsName());
+
+        // The rule still decides: released on stop, back on start.
+        service.stopInstances(region, List.of(instance.getInstanceId()));
+        assertNull(instance.getPublicIpAddress());
+        service.startInstances(region, List.of(instance.getInstanceId()));
+        assertEquals(expected, instance.getPublicIpAddress());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void elasticIpsComeFromTheDocumentationRangeApartFromEveryOtherAddress(boolean mockMode) {
+        Ec2Service service = mockMode ? mockModeService() : containerModeService();
+        String region = "us-east-1";
+        Set<String> seen = new HashSet<>();
+        if (mockMode) {
+            Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                    1, 1, null, List.of(), publicSubnet(service, region, "10.240.0.0/24"), null, List.of(), null,
+                    null, null).getInstances().getFirst();
+            service.describeInstances(region, List.of(instance.getInstanceId()), Map.of());
+            seen.add(instance.getPublicIpAddress());
+        }
+        for (int i = 0; i < 3; i++) {
+            String address = service.allocateAddress(region).getPublicIp();
+            assertTrue(address.matches("203\\.0\\.113\\.[0-9]+"), address);
+            assertTrue(seen.add(address), "a second holder of " + address);
+        }
+    }
+
+    @Test
+    void allocationFailsOnceEveryDocumentationAddressIsTaken() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        List<Address> allocated = new ArrayList<>();
+        for (int i = 0; i < 254; i++) {
+            allocated.add(service.allocateAddress(region));
+        }
+        assertEquals(254, allocated.stream().map(Address::getPublicIp).distinct().count());
+        AwsException full = assertThrows(AwsException.class, () -> service.allocateAddress(region));
+        assertEquals("AddressLimitExceeded", full.getErrorCode());
+
+        service.releaseAddress(region, allocated.getFirst().getAllocationId());
+        assertEquals(allocated.getFirst().getPublicIp(), service.allocateAddress(region).getPublicIp());
+    }
+
+    @Test
+    void underFixedAnElasticIpShowsTheConfiguredAddressUntilItIsDisassociated() {
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().mockPublicAddresses())
+                .thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.FIXED);
+        when(config.services().ec2().mockPublicAddress()).thenReturn(Optional.of("192.168.65.2"));
+        Ec2Service service = mockModeService(config);
+        String region = "us-east-1";
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), privateSubnet(service, region, "10.239.0.0/24"), null, List.of(), null, null,
+                null).getInstances().getFirst();
+        service.describeInstances(region, List.of(instance.getInstanceId()), Map.of());
+        assertNull(instance.getPublicIpAddress());
+        Address elastic = service.allocateAddress(region);
+        String allocated = elastic.getPublicIp();
+        assertTrue(allocated.startsWith("203.0.113."), allocated);
+
+        service.associateAddress(region, elastic.getAllocationId(), instance.getInstanceId());
+        assertEquals("192.168.65.2", instance.getPublicIpAddress());
+        assertEquals("192.168.65.2", service.describeAddresses(region, List.of(elastic.getAllocationId()), Map.of())
+                .getFirst().getPublicIp());
+
+        service.disassociateAddress(region, elastic.getAssociationId());
+        assertEquals(allocated, service.describeAddresses(region, List.of(elastic.getAllocationId()), Map.of())
+                .getFirst().getPublicIp());
+        assertNull(instance.getPublicIpAddress(), "the launch asked for no automatic address");
+    }
+
+    @Test
+    void anElasticIpReturnsToItsAllocatedAddressOnceTheSettingIsNoLongerFixed() {
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().mockPublicAddresses())
+                .thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.FIXED);
+        Ec2Service service = mockModeService(config);
+        String region = "us-east-1";
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), privateSubnet(service, region, "10.238.0.0/24"), null, List.of(), null, null,
+                null).getInstances().getFirst();
+        service.describeInstances(region, List.of(instance.getInstanceId()), Map.of());
+        Address elastic = service.allocateAddress(region);
+        String allocated = elastic.getPublicIp();
+        service.associateAddress(region, elastic.getAllocationId(), instance.getInstanceId());
+        assertEquals("127.0.0.1", instance.getPublicIpAddress());
+
+        // As after a restart under another setting: the next read shows the allocated address again.
+        when(config.services().ec2().mockPublicAddresses())
+                .thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.NONE);
+        assertEquals(allocated, service.describeAddresses(region, List.of(elastic.getAllocationId()), Map.of())
+                .getFirst().getPublicIp());
+        assertEquals(allocated, instance.getPublicIpAddress());
+    }
+
+    @Test
+    void anInstanceAddressIsNeverAllocatedAsAnElasticIp() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        for (int i = 0; i < 253; i++) {
+            service.allocateAddress(region);
+        }
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), publicSubnet(service, region, "10.237.0.0/24"), null, List.of(), null, null,
+                null).getInstances().getFirst();
+        service.describeInstances(region, List.of(instance.getInstanceId()), Map.of());
+        assertEquals("203.0.113.254", instance.getPublicIpAddress());
+
+        AwsException full = assertThrows(AwsException.class, () -> service.allocateAddress(region));
+        assertEquals("AddressLimitExceeded", full.getErrorCode());
+    }
+
+    private static String privateSubnet(Ec2Service service, String region, String cidr) {
+        return service.createSubnet(region, service.createVpc(region, cidr, false).getVpcId(), cidr, region + "a")
+                .getSubnetId();
+    }
+
+    @Test
+    void containerModeLaunchOnARetainedInterfaceRecordsTheElasticIpItCarries() {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.249.0.0/24");
+        NetworkInterface retained = service.createNetworkInterface(region, subnetId, null, null, List.of(), List.of(),
+                List.of());
+        Instance first = runningContainerInstance(service, region, subnetId, retained.getNetworkInterfaceId());
+        Address carried = service.allocateAddress(region);
+        service.associateAddress(region, carried.getAllocationId(), first.getInstanceId());
+        service.terminateInstances(region, List.of(first.getInstanceId()));
+        assertNotNull(carried.getAssociationId());
+
+        Instance second = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null,
+                null, retained.getNetworkInterfaceId(), 0).getInstances().getFirst();
+
+        // Not due an automatic address on an existing interface, but the container manager
+        // re-points the Elastic IP recorded here once the container runs.
+        assertFalse(second.isAssociatePublicIp());
+        assertEquals(carried.getPublicIp(), second.getPublicIpAddress());
+    }
+
+    @Test
+    void containerModeDescribeAddressesWritesNothingBackOntoATerminatedInstance() {
+        Ec2Service service = containerModeService();
+        String region = "us-east-1";
+        Instance instance = runningContainerInstance(service, region, publicSubnet(service, region, "10.248.0.0/24"),
+                null);
+        Address address = service.allocateAddress(region);
+        service.associateAddress(region, address.getAllocationId(), instance.getInstanceId());
+        // Terminated while the association stays, as for an instance whose interface did not go.
+        instance.setState(InstanceState.terminated());
+        instance.setPublicIpAddress(null);
+        instance.setPublicDnsName(null);
+
+        service.describeAddresses(region, List.of(address.getAllocationId()), Map.of());
+
+        assertNull(instance.getPublicIpAddress());
+    }
+
+    @Test
+    void containerModeDescribeAddressesRepointsAnElasticIpCarriedToANewInstance() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        // Each container answers on its own address, so a stale one shows.
+        Map<String, String> reachable = new ConcurrentHashMap<>();
+        when(containerManager.reachablePublicAddress(any())).thenAnswer(invocation -> {
+            Instance instance = invocation.getArgument(0);
+            return instance.getDockerContainerId() == null ? null : reachable.computeIfAbsent(
+                    instance.getDockerContainerId(), container -> "192.0.2." + (reachable.size() + 1));
+        });
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
+                images, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String subnetId = publicSubnet(service, region, "10.250.0.0/24");
+        NetworkInterface retained = service.createNetworkInterface(region, subnetId, null, null, List.of(), List.of(),
+                List.of());
+        Instance first = runningContainerInstance(service, region, subnetId, retained.getNetworkInterfaceId());
+        Address carried = service.allocateAddress(region);
+        service.associateAddress(region, carried.getAllocationId(), first.getInstanceId());
+        String firstAddress = carried.getPublicIp();
+        service.terminateInstances(region, List.of(first.getInstanceId()));
+        Instance second = runningContainerInstance(service, region, subnetId, retained.getNetworkInterfaceId());
+        String secondAddress = containerManager.reachablePublicAddress(second);
+        assertNotEquals(firstAddress, secondAddress);
+
+        Address described = service.describeAddresses(region, List.of(carried.getAllocationId()), Map.of()).getFirst();
+
+        assertEquals(secondAddress, described.getPublicIp());
+        assertEquals(secondAddress, second.getPublicIpAddress());
+    }
+
+    @Test
+    void containerModeStopLeavesATerminatedInstanceAlone() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.reachablePublicAddress(any())).thenReturn("127.0.0.1");
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
+                images, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        Instance instance = runningContainerInstance(service, region, publicSubnet(service, region, "10.251.0.0/24"),
+                null);
+        service.terminateInstances(region, List.of(instance.getInstanceId()));
+        // What the container manager's teardown does once the container is gone.
+        instance.setState(InstanceState.terminated());
+
+        service.stopInstances(region, List.of(instance.getInstanceId()));
+
+        // A container stop would set it stopped and so startable again.
+        verify(containerManager, never()).stop(instance);
+        assertNull(instance.getPublicIpAddress());
+    }
+
+    /** Ec2Service in container mode, with a container manager whose containers answer on loopback. */
+    private static Ec2Service containerModeService() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.reachablePublicAddress(any())).thenAnswer(invocation -> {
+            Instance instance = invocation.getArgument(0);
+            return instance.getDockerContainerId() == null ? null : "127.0.0.1";
+        });
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        return new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class), images,
+                mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+    }
+
+    private static String publicSubnet(Ec2Service service, String region, String cidr) {
+        String subnetId = service.createSubnet(region, service.createVpc(region, cidr, false).getVpcId(),
+                cidr, region + "a").getSubnetId();
+        service.modifySubnetAttribute(region, subnetId, "mapPublicIpOnLaunch", "true");
+        return subnetId;
+    }
+
+    /** Launches an instance and does what the container manager does once its container runs. */
+    private static Instance runningContainerInstance(Ec2Service service, String region, String subnetId,
+                                                     String networkInterfaceId) {
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null,
+                null, networkInterfaceId, 0).getInstances().getFirst();
+        instance.setDockerContainerId("container-" + instance.getInstanceId());
+        instance.setState(InstanceState.running());
+        if (instance.isAssociatePublicIp()) {
+            instance.setPublicIpAddress("127.0.0.1");
+            instance.setPublicDnsName("localhost");
+        }
+        return instance;
     }
 
     @Test
@@ -6235,7 +6991,11 @@ class Ec2ServiceTest {
     }
 
     private static Ec2Service mockModeService() {
-        return new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+        return mockModeService(mockConfig(true));
+    }
+
+    private static Ec2Service mockModeService(EmulatorConfig config) {
+        return new Ec2Service(config, mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
@@ -6249,6 +7009,8 @@ class Ec2ServiceTest {
         when(config.services()).thenReturn(services);
         when(services.ec2()).thenReturn(ec2);
         when(ec2.mock()).thenReturn(ec2Mock);
+        when(ec2.mockPublicAddresses()).thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.DOCUMENTATION);
+        when(ec2.mockPublicAddress()).thenReturn(Optional.empty());
         return config;
     }
 

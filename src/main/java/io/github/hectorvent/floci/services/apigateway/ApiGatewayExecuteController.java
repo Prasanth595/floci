@@ -21,6 +21,8 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.CookieHeaders;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
@@ -344,9 +346,17 @@ public class ApiGatewayExecuteController {
     Response dispatch(String httpMethod, String apiId, String stageName,
                               String proxy, HttpHeaders headers, UriInfo uriInfo, byte[] body) {
         String region = regionResolver.resolveRegion(headers);
+        ApiGatewayService.CustomDomainRoute mappedDomain = routeContext.mappedDomain();
+        if (mappedDomain != null) {
+            region = mappedDomain.region();
+            requestContext.setAccountId(mappedDomain.accountId());
+            requestContext.setRegion(region);
+            requestContext.setPartition(AwsPartitions.forRegion(region).map(AwsPartition::id).orElse(null));
+        }
         String httpApiRegion = routeContext.httpApiRegion();
         if (httpApiRegion != null) {
-            Optional<ApiGatewayV2Service.ApiOwner> owner = apiGatewayV2Service.findApiOwner(apiId);
+            Optional<ApiGatewayV2Service.ApiOwner> owner = mappedDomain == null
+                    ? apiGatewayV2Service.findApiOwner(apiId) : Optional.empty();
             if (owner.isPresent()) {
                 applyApiOwnerContext(owner.get());
                 httpApiRegion = owner.get().region();
@@ -360,13 +370,29 @@ public class ApiGatewayExecuteController {
         // fell back to defaultRegion in both cases, so the resolved region is a guess.
         boolean regionUnresolved = regionResolver.resolveRegionFromAuthOrNull(
                 headers == null ? null : headers.getHeaderString("Authorization")) == null;
-        if (regionUnresolved) {
+        Optional<ApiGatewayService.ApiOwner> restOwner = mappedDomain == null
+                ? apiGatewayService.findRestApiOwner(apiId,
+                        regionUnresolved ? null : requestContext.getAccountId(), region) : Optional.empty();
+        if (restOwner.isPresent()) {
+            requestContext.setAccountId(restOwner.get().accountId());
+            if (regionUnresolved) {
+                region = restOwner.get().region();
+                requestContext.setRegion(region);
+                requestContext.setPartition(AwsPartitions.forRegion(region).map(AwsPartition::id).orElse(null));
+            }
+        }
+        if (regionUnresolved && mappedDomain == null) {
             region = apiGatewayService.resolveRestApiRegion(region, apiId);
         }
 
         try {
             apiGatewayService.getRestApi(region, apiId);
         } catch (AwsException restApiError) {
+            if (mappedDomain != null) {
+                return Response.status(restApiError.getHttpStatus())
+                        .entity(jsonMessage(restApiError.getMessage()))
+                        .type(MediaType.APPLICATION_JSON).build();
+            }
             Optional<ApiGatewayV2Service.ApiOwner> owner = apiGatewayV2Service.findApiOwner(apiId);
             if (owner.isPresent()) {
                 applyApiOwnerContext(owner.get());
@@ -546,7 +572,7 @@ public class ApiGatewayExecuteController {
                 authorizerResult.principalId(), authorizerResult.context(), resolvedApiKey, iamIdentity);
 
         try {
-            InvokeResult result = lambdaService.invoke(region, functionName, eventJson.getBytes(),
+            InvokeResult result = lambdaService.invokeTarget(region, functionName, eventJson.getBytes(),
                     InvocationType.RequestResponse);
             Response response = buildProxyResponse(result, false);
             if (response.getStatus() == 502 && isGatewayGeneratedProxyFailure(result)) {
@@ -1039,7 +1065,7 @@ public class ApiGatewayExecuteController {
             RestLambdaAuthorizer.Result verified = restLambdaAuthorizer.get(key);
             if (verified == null) {
                 try (RestLambdaAuthorizer.Invocation pending = restLambdaAuthorizer.beginInvocation(key)) {
-                    InvokeResult invocation = lambdaService.invoke(region, function,
+                    InvokeResult invocation = lambdaService.invokeTarget(region, function,
                             event.getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
                     if (invocation.getFunctionError() != null) {
                         return lambdaAuthorizerFailure(scope, invocation);
@@ -1362,10 +1388,10 @@ public class ApiGatewayExecuteController {
     /**
      * Extracts function name from integration URI like
      * {@code arn:aws:apigateway:...:lambda:path/2015-03-31/functions/{fnArn}/invocations}.
-     * Delegates to {@link LambdaArnUtils#extractFunctionNameFromUri(String)}.
+     * Delegates to {@link LambdaArnUtils#extractFunctionReferenceFromUri(String)}.
      */
     private String functionNameFromUri(String uri) {
-        return LambdaArnUtils.extractFunctionNameFromUri(uri);
+        return LambdaArnUtils.extractFunctionReferenceFromUri(uri);
     }
 
     // Package-private rather than private so a focused unit test can assert the event's wire shape
@@ -1605,11 +1631,15 @@ public class ApiGatewayExecuteController {
                         : result.getPayload();
                 return Response.status(200).entity(inferredBody).type(MediaType.APPLICATION_JSON).build();
             }
-            if (httpApi && httpApiStatusCode(node) == null) {
+            Boolean base64 = httpApi ? httpApiBase64(node) : Boolean.valueOf(node.path("isBase64Encoded").asBoolean(false));
+            if (httpApi && (httpApiStatusCode(node) == null || base64 == null
+                    || node.path("body").isContainerNode())) {
                 // Measured (eu-west-1, 2026-10-19): an HTTP API answers a response it cannot read
                 // with 500 and its generic message, in format 1.0 a result that is not an object with
                 // a statusCode, and in either format a statusCode that is not a whole number from 100
-                // to 599, though text spelling one ("201") is taken.
+                // to 599, though text spelling one ("201") is taken, a body that is an object or a
+                // list, and an isBase64Encoded it cannot read as a boolean. A body it says is base64
+                // that does not decode reaches the catch below.
                 return httpApiError(500, "Internal Server Error");
             }
             int statusCode = httpApi ? httpApiStatusCode(node) : node.path("statusCode").asInt(200);
@@ -1637,8 +1667,7 @@ public class ApiGatewayExecuteController {
             JsonNode bodyNode = node.get("body");
             if (bodyNode != null && !bodyNode.isNull()) {
                 String bodyStr = bodyNode.asText();
-                boolean isBase64 = node.path("isBase64Encoded").asBoolean(false);
-                byte[] bytes = isBase64 ? Base64.getDecoder().decode(bodyStr) : bodyStr.getBytes();
+                byte[] bytes = base64 ? Base64.getDecoder().decode(bodyStr) : bodyStr.getBytes();
                 String ct = findHeaderIgnoreCase(multiHeaders, "Content-Type")
                         .or(() -> findHeaderIgnoreCase(respHeaders, "Content-Type"))
                         .orElse(MediaType.APPLICATION_JSON);
@@ -1647,6 +1676,11 @@ public class ApiGatewayExecuteController {
             return builder.build();
         } catch (Exception e) {
             LOG.warnv("Failed to parse Lambda response: {0}", e.getMessage());
+            if (httpApi) {
+                // A result an HTTP API cannot parse, and a body said to be base64 that does not
+                // decode (measured), are answered as a response it cannot read.
+                return httpApiError(500, "Internal Server Error");
+            }
             return Response.status(502).entity(result.getPayload()).type(MediaType.APPLICATION_JSON).build();
         }
     }
@@ -1657,6 +1691,25 @@ public class ApiGatewayExecuteController {
     }
 
     private static final Pattern WHOLE_STATUS = Pattern.compile("\\d{1,3}");
+    private static final Set<String> TRUE_TEXT = Set.of("1", "t", "T", "TRUE", "true", "True");
+    private static final Set<String> FALSE_TEXT = Set.of("0", "f", "F", "FALSE", "false", "False");
+
+    /**
+     * Whether an HTTP API reads a Lambda proxy response's body as base64, or null when it cannot read
+     * isBase64Encoded: its text read as Go's strconv.ParseBool does (measured: "True", "TRUE", "t" and
+     * 1 are true, "F" and 0 false, and "tRuE", "yes", 2 and 1.5 unreadable). Left out, it is false.
+     */
+    private static Boolean httpApiBase64(JsonNode response) {
+        JsonNode flag = response.path("isBase64Encoded");
+        if (flag.isMissingNode() || flag.isNull()) {
+            return false;
+        }
+        String text = flag.isContainerNode() ? "" : flag.asText();
+        if (TRUE_TEXT.contains(text)) {
+            return true;
+        }
+        return FALSE_TEXT.contains(text) ? false : null;
+    }
 
     /**
      * The status an HTTP API takes from a Lambda proxy response, or null when it cannot read one: a
@@ -1826,7 +1879,7 @@ public class ApiGatewayExecuteController {
                             "Cannot resolve Lambda function name from URI: " + integration.getUri(), 400);
                 }
                 byte[] payload = transformedBody != null ? transformedBody.getBytes(StandardCharsets.UTF_8) : new byte[0];
-                InvokeResult invokeResult = lambdaService.invoke(region, functionName, payload, InvocationType.RequestResponse);
+                InvokeResult invokeResult = lambdaService.invokeTarget(region, functionName, payload, InvocationType.RequestResponse);
                 String lambdaResponseBody = invokeResult.getPayload() != null
                         ? new String(invokeResult.getPayload(), StandardCharsets.UTF_8) : "{}";
                 int lambdaStatus = invokeResult.getStatusCode() > 0 ? invokeResult.getStatusCode() : 200;
@@ -2795,7 +2848,7 @@ public class ApiGatewayExecuteController {
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → Lambda {4}", httpMethod, apiId, stageName, path, functionName);
 
         try {
-            InvokeResult result = lambdaService.invoke(region, functionName,
+            InvokeResult result = lambdaService.invokeTarget(region, functionName,
                     eventJson.getBytes(), InvocationType.RequestResponse);
             return buildProxyResponse(result, true, !payloadV1);
         } catch (AwsException e) {
@@ -3249,7 +3302,7 @@ public class ApiGatewayExecuteController {
         // Invoke the authorizer Lambda
         InvokeResult invokeResult;
         try {
-            invokeResult = lambdaService.invoke(region, functionName,
+            invokeResult = lambdaService.invokeTarget(region, functionName,
                     eventJson.getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
         } catch (Exception e) {
             LOG.warnv("Lambda REQUEST authorizer invocation failed for API {0}: {1}", apiId, e.getMessage());

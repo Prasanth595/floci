@@ -220,9 +220,27 @@ local suffix such as `localhost.floci.io`; see [TLS](../configuration/tls.md).
 Templates can create domains and mappings with `AWS::ApiGateway::DomainName` and
 `AWS::ApiGateway::BasePathMapping`; see [CloudFormation](cloudformation.md).
 
+Custom-domain invocation resolves the domain's owner independently of the caller, then
+uses only that owner's mappings in the domain's region. If the same hostname is stored
+under multiple accounts or regions, invocation returns `409 ConflictException` instead
+of choosing one. Domain and mapping management remain scoped to the requesting account.
+Once a mapping resolves, invocation keeps its API type, account and region even if an
+API with the same ID exists elsewhere. Without a mapping, a signed request can select the
+caller's own API in its signing region; requests without a matching scope reject ambiguous IDs.
+This routing lookup does not add IAM identity or resource-policy evaluation.
+
 ### IAM Authorization (`AWS_IAM`) {#iam-authorization}
 
 A method (v1) or route (v2) whose `authorizationType` is `AWS_IAM` requires a SigV4-signed caller.
+
+REST invocation URLs identify the API owner independently of the caller's account.
+An unsigned request can therefore reach a public method, or receive the method's
+authentication error, when the API belongs to a nondefault account. Signed callers
+from another account use the same resource lookup and still undergo signature
+verification. Management requests remain scoped to the requesting account.
+When an API ID is ambiguous, signed callers retain access to their own account's API in
+the signing region; requests without a matching caller scope are rejected.
+This lookup does not add IAM identity or resource-policy evaluation.
 Before the integration runs, the signature is verified against the request as it arrived (method,
 path, query string, the headers named in `SignedHeaders`, and the SHA-256 of the body). A request
 that reaches the API through a [custom domain](#custom-domain-names) or an `execute-api` virtual
@@ -659,8 +677,11 @@ this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 A Lambda proxy integration's response is read as AWS reads it (measured): a function that raises, a
 format 1.0 result that is not an object with a `statusCode`, and a `statusCode` that is not a whole
 number from 100 to 599 (text that spells one, such as `"201"`, is taken) are answered `500` with
-`{"message":"Internal Server Error"}`. Format 2.0 takes a result without a `statusCode` as a `200`
-whose body is the result itself.
+`{"message":"Internal Server Error"}`, and so are a `body` that is an object or a list, an
+`isBase64Encoded` that Go's `strconv.ParseBool` would not read (`"True"`, `"t"` and `1` are true,
+`"yes"` and `2` are not read), and a `body` said to be base64 that does not decode. A number or a
+boolean `body` is its text. Format 2.0 takes a result without a `statusCode` as a `200` whose body
+is the result itself.
 
 An API with a `corsConfiguration` applies it as AWS does (measured). It ignores the CORS headers an
 integration returns, and sets its own on whatever answers a route: the integration, or API Gateway

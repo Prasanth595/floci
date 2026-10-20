@@ -95,6 +95,61 @@ class S3VectorsWriteLockTest {
         assertEquals(Map.of("new", "tag"), service.getVectorBucket("bucket", REGION).getTags());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void bucketAndIndexTagUpdatesPreserveEachOther(boolean copyOnAccess) throws Exception {
+        setUp(copyOnAccess);
+        createIndex();
+        overlap(() -> service.replaceBucketTags("bucket", Map.of("bucket", "tag"), REGION),
+                () -> service.replaceIndexTags("bucket", "index", Map.of("index", "tag"), REGION));
+        assertEquals(Map.of("bucket", "tag"), service.getVectorBucket("bucket", REGION).getTags());
+        assertEquals(Map.of("index", "tag"), service.getIndex("bucket", "index", REGION).getTags());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void bucketTagsDoNotOverwriteConcurrentIndexCreation(boolean copyOnAccess) throws Exception {
+        setUp(copyOnAccess);
+        overlap(() -> service.replaceBucketTags("bucket", Map.of("bucket", "tag"), REGION), this::createIndex);
+        assertEquals(Map.of("bucket", "tag"), service.getVectorBucket("bucket", REGION).getTags());
+        assertEquals("index", service.getIndex("bucket", "index", REGION).getIndexName());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void indexTagsPreserveVectorWritesAndDoNotReviveDeletedData(boolean copyOnAccess) throws Exception {
+        setUp(copyOnAccess);
+        createIndex();
+        Runnable tagUpdate = () -> service.replaceIndexTags("bucket", "index", Map.of("index", "tag"), REGION);
+        overlap(tagUpdate, () -> service.putVectors("bucket", "index",
+                List.of(new VectorData("key", List.of(1.0f), Map.of())), REGION));
+        assertEquals(Map.of("index", "tag"), service.getIndex("bucket", "index", REGION).getTags());
+        assertEquals(1, service.getVectors("bucket", "index", List.of("key"), REGION).size());
+
+        overlap(tagUpdate, () -> service.deleteVectors("bucket", "index", List.of("key"), REGION));
+        assertTrue(service.getVectors("bucket", "index", List.of("key"), REGION).isEmpty());
+
+        overlap(tagUpdate, () -> service.deleteIndex("bucket", "index", REGION));
+        AwsException error = assertThrows(AwsException.class, () -> service.getIndex("bucket", "index", REGION));
+        assertEquals("NotFoundException", error.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void tagUpdateCannotResurrectADeletedOrRecreatedBucket(boolean copyOnAccess) throws Exception {
+        setUp(copyOnAccess);
+        overlap(() -> service.replaceBucketTags("bucket", Map.of("old", "tag"), REGION),
+                () -> service.deleteVectorBucket("bucket", REGION));
+        assertThrows(AwsException.class, () -> service.getVectorBucket("bucket", REGION));
+
+        service.createVectorBucket("bucket", null, REGION);
+        overlap(() -> service.replaceBucketTags("bucket", Map.of("old", "tag"), REGION), () -> {
+            service.deleteVectorBucket("bucket", REGION);
+            service.createVectorBucket("bucket", null, Map.of("new", "tag"), REGION);
+        });
+        assertEquals(Map.of("new", "tag"), service.getVectorBucket("bucket", REGION).getTags());
+    }
+
     private void putVector(String key) {
         service.putVectors("bucket", "index", List.of(new VectorData(key, List.of(1.0f), Map.of())), REGION);
     }

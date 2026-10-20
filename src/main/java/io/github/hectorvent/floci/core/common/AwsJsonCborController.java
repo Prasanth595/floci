@@ -355,7 +355,8 @@ public class AwsJsonCborController {
         return request;
     }
 
-    private boolean isGZipped(List<String> contentEncodingHeaders) {
+    // Package-private: PassedRoles reads the same body before this controller runs.
+    static boolean isGZipped(List<String> contentEncodingHeaders) {
         if (contentEncodingHeaders == null) {
             return false;
         }
@@ -447,7 +448,7 @@ public class AwsJsonCborController {
         }
     }
 
-    private byte[] decodeBody(byte[] compressed) {
+    static byte[] decodeBody(byte[] compressed) {
         int buffSize = 64 * 1024;
         byte[] buffer = new byte[buffSize]; // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
         int totalRead = 0;

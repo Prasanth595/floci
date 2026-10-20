@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iot.IotMqttBrokerService.Connectivity;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration.Field;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration.GeoLocation;
@@ -98,18 +99,22 @@ public class IotFleetIndexingService {
 
     private final StorageBackend<String, IotIndexingConfiguration> store;
     private final IotService iotService;
+    private final IotMqttBrokerService mqttBrokerService;
     /** Guards the read-modify-write of an update that changes only one of the two configurations. */
     private final Object lock = new Object();
 
     @Inject
-    public IotFleetIndexingService(StorageFactory storageFactory, IotService iotService) {
+    public IotFleetIndexingService(StorageFactory storageFactory, IotService iotService,
+                                   IotMqttBrokerService mqttBrokerService) {
         this(storageFactory.create("iot", "iot-indexing-configuration.json",
-                new TypeReference<Map<String, IotIndexingConfiguration>>() {}), iotService);
+                new TypeReference<Map<String, IotIndexingConfiguration>>() {}), iotService, mqttBrokerService);
     }
 
-    IotFleetIndexingService(StorageBackend<String, IotIndexingConfiguration> store, IotService iotService) {
+    IotFleetIndexingService(StorageBackend<String, IotIndexingConfiguration> store, IotService iotService,
+                            IotMqttBrokerService mqttBrokerService) {
         this.store = store;
         this.iotService = iotService;
+        this.mqttBrokerService = mqttBrokerService;
     }
 
     public void updateIndexingConfiguration(JsonNode request, String region) {
@@ -167,7 +172,7 @@ public class IotFleetIndexingService {
      * and version as sent) and the last thing returned, so a page continues after that thing
      * whatever was deleted before it. It also carries a checksum, so an edited token is invalid.
      */
-    public IotService.Page<ObjectNode> searchIndex(JsonNode request, String region) {
+    public IotService.Page<ObjectNode> searchIndex(JsonNode request, String accountId, String region) {
         if (!request.isObject()) {
             throw serializationError("request body", JsonNodeType.OBJECT);
         }
@@ -216,6 +221,7 @@ public class IotFleetIndexingService {
         Predicate<JsonNode> query = IotFleetIndexQuery.parse(queryString, indexing);
         String parameters = pageParameters(requestedIndexName, queryVersion, queryString);
         String after = pageAfter(nextToken, parameters);
+        boolean connectivityIndexed = "STATUS".equals(indexing.thingConnectivityIndexingMode());
         Map<String, List<String>> thingGroupNames = thingGroupNames(region);
         List<ObjectNode> matches = new ArrayList<>();
         for (Thing thing : iotService.listThings(region)) {
@@ -224,6 +230,12 @@ public class IotFleetIndexingService {
                 continue;
             }
             ObjectNode document = document(thing, thingGroupNames.getOrDefault(thingName, List.of()));
+            if (connectivityIndexed) {
+                document.set("connectivity", mqttBrokerService.connectivity(accountId, region, thingName)
+                        .map(state -> connectivity(state, thingName))
+                        .orElseGet(() -> JsonNodeFactory.instance.objectNode()
+                                .put("clientId", thingName).put("connected", false).put("timestamp", 0)));
+            }
             if (query.test(document)) {
                 matches.add(document);
                 if (matches.size() > pageSize) {
@@ -304,6 +316,18 @@ public class IotFleetIndexingService {
             thing.getAttributes().forEach(attributes::put);
         }
         return document;
+    }
+
+    private static ObjectNode connectivity(Connectivity state, String clientId) {
+        ObjectNode connectivity = JsonNodeFactory.instance.objectNode()
+                .put("connected", state.connected())
+                .put("timestamp", state.timestamp());
+        if (state.disconnectReason() != null) {
+            connectivity.put("disconnectReason", state.disconnectReason());
+        }
+        return connectivity.put("keepAliveDuration", state.keepAliveDuration())
+                .put("cleanSession", state.cleanSession())
+                .put("clientId", clientId);
     }
 
     /** The schema of the named index, null while it is disabled. */
