@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.model.Dashboard;
@@ -83,9 +84,12 @@ public class CloudWatchMetricsJsonHandler {
 
     private Response handlePutMetricData(JsonNode request, String region) {
         String namespace = request.path("Namespace").asText();
-        List<MetricDatum> datums = parseMetricDataJson(request.path("MetricData"));
+        List<MetricDatum> datums = parseMetricDataJson(request.path("MetricData"), "MetricData");
+        int entityIndex = 0;
         for (JsonNode entityMetricData : request.path("EntityMetricData")) {
-            datums.addAll(parseMetricDataJson(entityMetricData.path("MetricData")));
+            entityIndex++;
+            datums.addAll(parseMetricDataJson(entityMetricData.path("MetricData"),
+                    "EntityMetricData.member." + entityIndex + ".MetricData"));
         }
         LOG.debugv("JSON PutMetricData parsed {0} datums for namespace {1}", datums.size(), namespace);
         metricsService.putMetricData(namespace, datums, region);
@@ -609,12 +613,19 @@ public class CloudWatchMetricsJsonHandler {
         return configurations;
     }
 
-    private List<MetricDatum> parseMetricDataJson(JsonNode node) {
+    private List<MetricDatum> parseMetricDataJson(JsonNode node, String listPath) {
         List<MetricDatum> datums = new ArrayList<>();
         if (!node.isArray()) return datums;
+        int index = 0;
         for (JsonNode item : node) {
+            index++;
+            JsonNode metricName = item.path("MetricName");
+            if (!metricName.isTextual() || metricName.asText().isEmpty()) {
+                throw new AwsException("MissingParameter",
+                        "The parameter " + listPath + ".member." + index + ".MetricName is required.", 400);
+            }
             MetricDatum datum = new MetricDatum();
-            datum.setMetricName(item.path("MetricName").asText());
+            datum.setMetricName(metricName.asText());
             datum.setValue(item.path("Value").asDouble(0));
             datum.setUnit(item.path("Unit").asText(null));
             JsonNode ts = item.path("Timestamp");

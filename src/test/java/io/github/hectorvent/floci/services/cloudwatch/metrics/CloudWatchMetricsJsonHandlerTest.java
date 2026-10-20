@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
@@ -19,6 +20,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -200,6 +202,60 @@ class CloudWatchMetricsJsonHandlerTest {
         List<String> names = new ArrayList<>();
         listed.get("Metrics").forEach(m -> names.add(m.get("MetricName").asText()));
         assertEquals(List.of("FirstEntity", "SecondEntity", "TopLevel"), names.stream().sorted().toList());
+    }
+
+    @Test
+    void putMetricData_entityDatumWithoutMetricName_rejectsTheWholeRequest() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("Namespace", "Invalid");
+        req.putArray("MetricData").addObject()
+                .put("MetricName", "TopLevel").put("Value", 1.0);
+        ArrayNode nested = req.putArray("EntityMetricData").addObject().putArray("MetricData");
+        nested.addObject().put("MetricName", "Valid").put("Value", 2.0);
+        nested.addObject().put("Value", 3.0);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricData", req, REGION));
+        assertEquals("MissingParameter", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+        assertEquals("The parameter EntityMetricData.member.1.MetricData.member.2.MetricName is required.",
+                e.getMessage());
+        assertEquals(0, listMetricNames("Invalid").size());
+    }
+
+    @Test
+    void putMetricData_topLevelDatumWithEmptyMetricName_rejectsTheWholeRequest() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("Namespace", "InvalidTop");
+        ArrayNode data = req.putArray("MetricData");
+        data.addObject().put("MetricName", "Valid").put("Value", 1.0);
+        data.addObject().put("MetricName", "").put("Value", 2.0);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricData", req, REGION));
+        assertEquals("MissingParameter", e.getErrorCode());
+        assertEquals("The parameter MetricData.member.2.MetricName is required.", e.getMessage());
+        assertEquals(0, listMetricNames("InvalidTop").size());
+    }
+
+    // AWS constrains MetricName to 1 to 255 characters with no pattern, so whitespace is a name.
+    @Test
+    void putMetricData_whitespaceMetricName_isStored() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("Namespace", "WhitespaceName");
+        req.putArray("MetricData").addObject().put("MetricName", " ").put("Value", 1.0);
+
+        assertEquals(200, handler.handle("PutMetricData", req, REGION).getStatus());
+        assertEquals(List.of(" "), listMetricNames("WhitespaceName"));
+    }
+
+    private List<String> listMetricNames(String namespace) {
+        ObjectNode listReq = MAPPER.createObjectNode();
+        listReq.put("Namespace", namespace);
+        ObjectNode listed = (ObjectNode) handler.handle("ListMetrics", listReq, REGION).getEntity();
+        List<String> names = new ArrayList<>();
+        listed.get("Metrics").forEach(m -> names.add(m.get("MetricName").asText()));
+        return names;
     }
 
     @Test
