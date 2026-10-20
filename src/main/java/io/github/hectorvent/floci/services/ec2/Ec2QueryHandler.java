@@ -3419,7 +3419,7 @@ public class Ec2QueryHandler {
 
     private Response handleCreateKeyPair(MultivaluedMap<String, String> p, String region) {
         String keyName = requireKeyName(p);
-        KeyPair kp = service.createKeyPair(region, keyName);
+        KeyPair kp = service.createKeyPair(region, keyName, p.getFirst("KeyType"), p.getFirst("KeyFormat"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateKeyPairResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())

@@ -35,9 +35,12 @@ public final class Ec2KeyMaterial {
     private Ec2KeyMaterial() {}
 
     /**
-     * @param privateKeyPem   PKCS#1 PEM, the "BEGIN RSA PRIVATE KEY" form AWS returns
-     * @param openSshPublicKey the matching "ssh-rsa AAAA..." line, for authorized_keys
-     * @param fingerprint     SHA-1 of the DER private key, colon-separated hex
+     * @param privateKeyPem    the private key as KeyMaterial returns it: for an RSA key as PEM, the PKCS#1
+     *                         "BEGIN RSA PRIVATE KEY" form AWS returns, for an ED25519 key as an OpenSSH
+     *                         private key, and for KeyFormat ppk as a PuTTY key file
+     * @param openSshPublicKey the matching "ssh-rsa AAAA..." or "ssh-ed25519 AAAA..." line, for authorized_keys
+     * @param fingerprint      for an RSA key the SHA-1 of the DER private key, colon-separated hex; for an
+     *                         ED25519 key the base64 SHA-256 of the public key blob
      */
     public record Generated(String privateKeyPem, String openSshPublicKey, String fingerprint) {}
 
@@ -124,5 +127,25 @@ public final class Ec2KeyMaterial {
 
     private static String colonHex(byte[] digest) {
         return HexFormat.of().withDelimiter(":").formatHex(digest);
+    }
+
+    /**
+     * The key pair CreateKeyPair returns for a KeyType, {@code rsa} or {@code ed25519}, and a
+     * KeyFormat, {@code pem} or {@code ppk}: a new key of that type, its private half in that format.
+     * The request has already been refused for any other value.
+     *
+     * @param keyName the key pair's name, which a PuTTY key file carries as its comment
+     */
+    public static Generated generate(String keyType, String keyFormat, String keyName) {
+        Generated pem = switch (keyType) {
+            case "rsa" -> generateRsa();
+            case "ed25519" -> Ec2Ed25519Keys.generate();
+            default -> throw new IllegalArgumentException("Unsupported key type: " + keyType);
+        };
+        return switch (keyFormat) {
+            case "pem" -> pem;
+            case "ppk" -> Ec2PuttyKeys.of(pem, keyName);
+            default -> throw new IllegalArgumentException("Unsupported key format: " + keyFormat);
+        };
     }
 }
