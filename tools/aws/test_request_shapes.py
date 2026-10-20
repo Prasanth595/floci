@@ -1,4 +1,5 @@
-"""Tests for request_shapes, the generator behind regen_dynamodb_shapes, regen_sesv2_shapes and regen_ecs_shapes.
+"""Tests for request_shapes, the generator behind regen_dynamodb_shapes, regen_sesv2_shapes and regen_ecs_shapes,
+and of the constraints regen_resource_groups_shapes and regen_ecr_shapes vendor.
 
 Run with: pytest tools/aws -q  (or: make aws-data-test)
 """
@@ -11,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import regen_dynamodb_shapes
+import regen_ecr_shapes
 import regen_ecs_shapes
 import regen_sesv2_shapes
 import request_shapes as r
@@ -178,3 +180,47 @@ def test_each_script_runs_the_shared_main_with_its_model_and_output(script, mode
         "output": r.REPO_ROOT / "src/main/resources/aws" / output,
         "description": script.__doc__,
     })]
+
+
+CONSTRAINED_MODEL = {
+    "operations": {
+        "Put": {"input": {"shape": "PutRequest"}, "output": {"shape": "PutResponse"}},
+        "Unused": {"input": {"shape": "UnusedRequest"}},
+    },
+    "shapes": {
+        "PutRequest": {"type": "structure", "required": ["name"], "members": {
+            "name": {"shape": "Name", "documentation": "dropped"},
+            "rules": {"shape": "RuleList"},
+            "tags": {"shape": "TagMap"},
+            "id": {"shape": "Name", "location": "uri", "locationName": "Id"},
+        }},
+        "PutResponse": {"type": "structure", "members": {}},
+        "UnusedRequest": {"type": "structure", "members": {"other": {"shape": "Other"}}},
+        "Name": {"type": "string", "min": 1, "max": 5, "pattern": "[a-z]+", "documentation": "dropped"},
+        "RuleList": {"type": "list", "min": 0, "max": 25, "member": {"shape": "Kind"}},
+        "Kind": {"type": "string", "enum": ["A", "B"]},
+        "TagMap": {"type": "map", "key": {"shape": "Name"}, "value": {"shape": "Kind"}},
+        "Other": {"type": "string"},
+    },
+}
+
+
+def test_build_constraints_keeps_the_named_operations_with_their_constraints():
+    doc = r.build_constraints(CONSTRAINED_MODEL, ("Put",), "botocore test", "tools/aws/regen_x_shapes.py")
+
+    assert doc["_source"] == {"generator": "tools/aws/regen_x_shapes.py", "botocore": "botocore test"}
+    assert doc["operations"] == {"Put": "PutRequest"}
+    assert set(doc["shapes"]) == {"PutRequest", "Name", "RuleList", "Kind", "TagMap"}
+    # Members bound elsewhere than the body stay: the JSON protocols send every member in the body.
+    assert doc["shapes"]["PutRequest"] == {"type": "structure", "required": ["name"], "members": {
+        "name": "Name", "rules": "RuleList", "tags": "TagMap", "id": "Name"}}
+    assert doc["shapes"]["Name"] == {"type": "string", "min": 1, "max": 5, "pattern": "[a-z]+"}
+    assert doc["shapes"]["RuleList"] == {"type": "list", "min": 0, "max": 25, "member": "Kind"}
+    assert doc["shapes"]["Kind"] == {"type": "string", "enum": ["A", "B"]}
+    assert doc["shapes"]["TagMap"] == {"type": "map", "key": "Name", "value": "Kind"}
+
+
+def test_ecr_shapes_name_the_ecr_model_and_its_registry_setting_actions():
+    assert regen_ecr_shapes.MODEL == Path("ecr/2015-09-21")
+    assert regen_ecr_shapes.OUTPUT.name == "ecr-request-shapes.json"
+    assert "PutReplicationConfiguration" in regen_ecr_shapes.OPERATIONS

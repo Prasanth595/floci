@@ -295,6 +295,9 @@ class EcrTest {
 
     private static String sha256(byte[] bytes) throws Exception {
         return "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+    }
+
+    @Test
     @Order(14)
     @DisplayName("Registry policy, replication and scanning configuration round-trip")
     void registrySettingsRoundTrip() {

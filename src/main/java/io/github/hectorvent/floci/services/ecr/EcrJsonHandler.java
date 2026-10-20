@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * AWS JSON 1.1 dispatcher for the {@code AmazonEC2ContainerRegistry_V20150921}
@@ -43,7 +44,16 @@ public class EcrJsonHandler {
         this.objectMapper = objectMapper;
     }
 
+    /** The actions whose requests are checked against the vendored model constraints first. */
+    private static final Set<String> MODEL_CHECKED = Set.of(
+            "PutRegistryPolicy", "GetRegistryPolicy", "DeleteRegistryPolicy",
+            "PutReplicationConfiguration", "DescribeRegistry",
+            "PutRegistryScanningConfiguration", "GetRegistryScanningConfiguration");
+
     public Response handle(String action, JsonNode request, String region) {
+        if (MODEL_CHECKED.contains(action)) {
+            EcrRequestShapes.check(action, request);
+        }
         return switch (action) {
             case "CreateRepository" -> handleCreateRepository(request, region);
             case "CreatePullThroughCacheRule" -> handleCreatePullThroughCacheRule(request, region);
@@ -627,9 +637,6 @@ public class EcrJsonHandler {
 
     private Response handlePutReplicationConfiguration(JsonNode request, String region) {
         JsonNode config = request.path("replicationConfiguration");
-        if (!config.isObject() || !config.path("rules").isArray()) {
-            throw new AwsException("InvalidParameterException", "replicationConfiguration.rules is required", 400);
-        }
         List<RegistrySettings.ReplicationRule> rules = new ArrayList<>();
         for (JsonNode rule : config.path("rules")) {
             List<RegistrySettings.ReplicationDestination> destinations = null;

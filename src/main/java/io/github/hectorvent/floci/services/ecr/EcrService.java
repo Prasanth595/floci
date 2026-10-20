@@ -68,13 +68,6 @@ public class EcrService implements ResourceProvider {
     private static final Pattern ECR_IMAGE_TAG = Pattern.compile("[a-zA-Z0-9_.-]+");
     /** The OCI distribution spec's tag grammar, which the backing registry's manifest URL takes. */
     private static final Pattern REGISTRY_IMAGE_TAG = Pattern.compile("[A-Za-z0-9_][A-Za-z0-9._-]{0,127}");
-    private static final Pattern REPLICATION_REGION = Pattern.compile("[0-9a-z-]{2,25}");
-    private static final Pattern REPLICATION_FILTER = Pattern.compile(
-            "^(?:[a-z0-9]+(?:[._-][a-z0-9]*)*/)*[a-z0-9]*(?:[._-][a-z0-9]*)*$");
-    private static final Pattern SCANNING_FILTER = Pattern.compile("^[a-z0-9*](?:[._\\-/a-z0-9*]?[a-z0-9*]+)*$");
-    private static final Set<String> SCAN_TYPES = Set.of("BASIC", "ENHANCED");
-    private static final Set<String> SCAN_FREQUENCIES = Set.of("SCAN_ON_PUSH", "CONTINUOUS_SCAN", "MANUAL");
-    private static final int MAX_REGISTRY_POLICY_LENGTH = 10240;
     private static final Pattern CREDENTIAL_ARN = Pattern.compile(
             "arn:" + AwsArnUtils.PARTITION_REGEX + ":secretsmanager:[a-zA-Z0-9-:]+:secret:ecr-pullthroughcache/"
                     + "[a-zA-Z0-9/_+=.@-]+");
@@ -1003,15 +996,14 @@ public class EcrService implements ResourceProvider {
     // Registry settings (policy, replication, scanning)
     // ============================================================
 
-    /** Stores the registry policy; text that is not a JSON object is refused. */
+    /**
+     * Stores the registry policy. Its length is checked against the model before this is reached;
+     * text that is not a JSON object is refused here, as the model cannot say so.
+     */
     public String putRegistryPolicy(String policyText, String region) {
-        if (policyText == null || policyText.isBlank() || policyText.length() > MAX_REGISTRY_POLICY_LENGTH) {
-            throw new AwsException("InvalidParameterException",
-                    "policyText must be a JSON policy of at most " + MAX_REGISTRY_POLICY_LENGTH + " characters", 400);
-        }
         JsonNode parsed;
         try {
-            parsed = MAPPER.readTree(policyText);
+            parsed = policyText == null ? null : MAPPER.readTree(policyText);
         } catch (Exception e) {
             parsed = null;
         }
@@ -1046,49 +1038,12 @@ public class EcrService implements ResourceProvider {
         });
     }
 
-    /** Stores the replication rules; an empty list clears them. Floci does not replicate images. */
+    /**
+     * Stores the replication rules; an empty list clears them. The rules are checked against the
+     * model before this is reached. Floci does not replicate images.
+     */
     public List<RegistrySettings.ReplicationRule> putReplicationConfiguration(
             List<RegistrySettings.ReplicationRule> rules, String region) {
-        if (rules == null) {
-            throw new AwsException("InvalidParameterException", "replicationConfiguration.rules is required", 400);
-        }
-        if (rules.size() > 25) {
-            throw new AwsException("InvalidParameterException", "A replication configuration can have at most 25 rules", 400);
-        }
-        for (RegistrySettings.ReplicationRule rule : rules) {
-            if (rule.destinations() == null || rule.destinations().size() > 100) {
-                throw new AwsException("InvalidParameterException",
-                        "Each replication rule needs destinations, at most 100", 400);
-            }
-            for (RegistrySettings.ReplicationDestination destination : rule.destinations()) {
-                if (destination.region() == null || !REPLICATION_REGION.matcher(destination.region()).matches()) {
-                    throw new AwsException("InvalidParameterException",
-                            "Invalid replication destination region: " + destination.region(), 400);
-                }
-                if (destination.registryId() == null || !REGISTRY_ID.matcher(destination.registryId()).matches()) {
-                    throw new AwsException("InvalidParameterException",
-                            "Invalid replication destination registryId: " + destination.registryId(), 400);
-                }
-            }
-            List<RegistrySettings.RepositoryFilter> filters = rule.repositoryFilters();
-            if (filters != null) {
-                if (filters.isEmpty() || filters.size() > 100) {
-                    throw new AwsException("InvalidParameterException",
-                            "repositoryFilters must hold 1 to 100 filters", 400);
-                }
-                for (RegistrySettings.RepositoryFilter filter : filters) {
-                    if (!"PREFIX_MATCH".equals(filter.filterType())) {
-                        throw new AwsException("InvalidParameterException",
-                                "Invalid replication filterType: " + filter.filterType(), 400);
-                    }
-                    if (filter.filter() == null || filter.filter().length() < 2 || filter.filter().length() > 256
-                            || !REPLICATION_FILTER.matcher(filter.filter()).matches()) {
-                        throw new AwsException("InvalidParameterException",
-                                "Invalid replication filter: " + filter.filter(), 400);
-                    }
-                }
-            }
-        }
         updateRegistrySettings(region, settings -> {
             settings.setReplicationRules(rules.isEmpty() ? null : List.copyOf(rules));
             return null;
@@ -1103,40 +1058,18 @@ public class EcrService implements ResourceProvider {
     }
 
     /**
-     * Stores the scanning configuration. {@code CONTINUOUS_SCAN} is offered only with enhanced
-     * scanning, so it is refused with {@code BASIC}. Floci does not scan images.
+     * Stores the scanning configuration. The model's constraints are checked before this is
+     * reached; {@code CONTINUOUS_SCAN} is refused here with {@code BASIC}, as the API reference
+     * offers it only with enhanced scanning and the model cannot say so. Floci does not scan images.
      */
     public RegistrySettings putRegistryScanningConfiguration(String scanType, List<RegistrySettings.ScanningRule> rules,
                                                              String region) {
         String type = scanType == null ? "BASIC" : scanType;
-        if (!SCAN_TYPES.contains(type)) {
-            throw new AwsException("InvalidParameterException", "Invalid scanType: " + scanType, 400);
-        }
         List<RegistrySettings.ScanningRule> given = rules == null ? List.of() : rules;
-        if (given.size() > 2) {
-            throw new AwsException("InvalidParameterException", "A scanning configuration can have at most 2 rules", 400);
-        }
         for (RegistrySettings.ScanningRule rule : given) {
-            if (rule.scanFrequency() == null || !SCAN_FREQUENCIES.contains(rule.scanFrequency())) {
-                throw new AwsException("InvalidParameterException", "Invalid scanFrequency: " + rule.scanFrequency(), 400);
-            }
             if ("BASIC".equals(type) && "CONTINUOUS_SCAN".equals(rule.scanFrequency())) {
                 throw new AwsException("InvalidParameterException",
                         "CONTINUOUS_SCAN is supported only with the ENHANCED scan type", 400);
-            }
-            if (rule.repositoryFilters() == null || rule.repositoryFilters().size() > 100) {
-                throw new AwsException("InvalidParameterException",
-                        "Each scanning rule needs repositoryFilters, at most 100", 400);
-            }
-            for (RegistrySettings.RepositoryFilter filter : rule.repositoryFilters()) {
-                if (!"WILDCARD".equals(filter.filterType())) {
-                    throw new AwsException("InvalidParameterException",
-                            "Invalid scanning filterType: " + filter.filterType(), 400);
-                }
-                if (filter.filter() == null || filter.filter().isEmpty() || filter.filter().length() > 255
-                        || !SCANNING_FILTER.matcher(filter.filter()).matches()) {
-                    throw new AwsException("InvalidParameterException", "Invalid scanning filter: " + filter.filter(), 400);
-                }
             }
         }
         updateRegistrySettings(region, settings -> {

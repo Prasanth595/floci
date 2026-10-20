@@ -139,6 +139,8 @@ teardown() {
     run aws_cmd ecr describe-images --repository-name "$REPO_NAME" --image-ids imageTag=release
     assert_success
     [ "$(json_get "$output" '.imageDetails[0].imageDigest')" = "$digest" ]
+}
+
 @test "ECR: registry policy, replication and scanning configuration round-trip" {
     policy='{"Version":"2012-10-17","Statement":[{"Sid":"Replicate","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111111111111:root"},"Action":["ecr:CreateRepository","ecr:ReplicateImage"],"Resource":"*"}]}'
     run aws_cmd ecr put-registry-policy --policy-text "$policy"

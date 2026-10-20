@@ -21,6 +21,8 @@
 # by tools/aws/regen_sesv2_shapes.py.
 # src/main/resources/aws/ecs-request-shapes.json is generated from botocore's ECS model
 # by tools/aws/regen_ecs_shapes.py.
+# src/main/resources/aws/ecr-request-shapes.json, the ECR request constraints, is generated
+# from botocore's ECR model by tools/aws/regen_ecr_shapes.py.
 # src/test/resources/aws/rest-routes.json, the REST routes IamRestRouteCoverageTest checks, is
 # generated from botocore's models by tools/aws/regen_rest_routes.py.
 
@@ -216,6 +218,7 @@ aws-data-sync: ## Regenerate src/main/resources/aws/*.json and the IAM managed-p
 	$(PYTHON) tools/aws/regen_dynamodb_shapes.py
 	$(PYTHON) tools/aws/regen_redshift_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_resource_groups_shapes.py
+	$(PYTHON) tools/aws/regen_ecr_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_types.py
 	$(PYTHON) tools/aws/regen_sesv2_shapes.py
 	$(PYTHON) tools/aws/regen_ecs_shapes.py
@@ -250,6 +253,12 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 	}
 	@$(PYTHON) tools/aws/regen_resource_groups_shapes.py --check || { \
 		echo "error: Resource Groups request shapes are out of date; run 'make aws-data-sync'."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_ecr_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/ecr-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
 	@$(PYTHON) tools/aws/regen_apigateway_types.py --check || { \

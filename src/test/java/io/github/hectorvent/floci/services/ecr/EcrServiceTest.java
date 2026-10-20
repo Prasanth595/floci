@@ -1375,7 +1375,6 @@ class EcrServiceTest {
         assertInvalid(() -> service.putRegistryPolicy("not json", REGION));
         assertInvalid(() -> service.putRegistryPolicy("[]", REGION));
         assertInvalid(() -> service.putRegistryPolicy("", REGION));
-        assertInvalid(() -> service.putRegistryPolicy("{\"a\":\"" + "x".repeat(10240) + "\"}", REGION));
     }
 
     @Test
@@ -1393,28 +1392,6 @@ class EcrServiceTest {
     }
 
     @Test
-    void replication_checksDestinationsAndFilters() {
-        assertInvalid(() -> service.putReplicationConfiguration(null, REGION));
-        assertInvalid(() -> service.putReplicationConfiguration(
-                List.of(replicateTo("US_WEST", ACCOUNT, null)), REGION));
-        assertInvalid(() -> service.putReplicationConfiguration(
-                List.of(replicateTo("us-west-2", "12345", null)), REGION));
-        assertInvalid(() -> service.putReplicationConfiguration(
-                List.of(new RegistrySettings.ReplicationRule(null, null)), REGION));
-        assertInvalid(() -> service.putReplicationConfiguration(List.of(new RegistrySettings.ReplicationRule(
-                List.of(new RegistrySettings.ReplicationDestination("us-west-2", ACCOUNT)),
-                List.of(new RegistrySettings.RepositoryFilter("prod", "WILDCARD")))), REGION));
-        assertInvalid(() -> service.putReplicationConfiguration(
-                List.of(replicateTo("us-west-2", ACCOUNT, "Prod")), REGION));
-        assertInvalid(() -> service.putReplicationConfiguration(List.of(new RegistrySettings.ReplicationRule(
-                List.of(new RegistrySettings.ReplicationDestination("us-west-2", ACCOUNT)), List.of())), REGION));
-        assertInvalid(() -> service.putReplicationConfiguration(
-                Collections.nCopies(26, replicateTo("us-west-2", ACCOUNT, null)), REGION));
-        assertDoesNotThrow(() -> service.putReplicationConfiguration(
-                Collections.nCopies(25, replicateTo("us-west-2", ACCOUNT, null)), REGION));
-    }
-
-    @Test
     void scanning_defaultsToBasicAndRoundTrips() {
         RegistrySettings initial = service.registryScanningConfiguration(REGION);
         assertEquals("BASIC", initial.getScanType());
@@ -1427,23 +1404,13 @@ class EcrServiceTest {
     }
 
     @Test
-    void scanning_refusesContinuousScanWithBasicAndUnknownValues() {
+    void scanning_refusesContinuousScanWithBasic() {
         assertInvalid(() -> service.putRegistryScanningConfiguration(
                 "BASIC", List.of(scan("CONTINUOUS_SCAN", "*")), REGION));
-        assertInvalid(() -> service.putRegistryScanningConfiguration("FULL", List.of(), REGION));
         assertInvalid(() -> service.putRegistryScanningConfiguration(
-                "ENHANCED", List.of(scan("HOURLY", "*")), REGION));
-        assertInvalid(() -> service.putRegistryScanningConfiguration("ENHANCED", List.of(
-                new RegistrySettings.ScanningRule("SCAN_ON_PUSH",
-                        List.of(new RegistrySettings.RepositoryFilter("*", "PREFIX_MATCH")))), REGION));
-        assertInvalid(() -> service.putRegistryScanningConfiguration(
-                "ENHANCED", List.of(scan("SCAN_ON_PUSH", "Bad Filter")), REGION));
-        assertInvalid(() -> service.putRegistryScanningConfiguration("ENHANCED", List.of(
-                new RegistrySettings.ScanningRule("SCAN_ON_PUSH", null)), REGION));
-        assertInvalid(() -> service.putRegistryScanningConfiguration("ENHANCED",
-                List.of(scan("SCAN_ON_PUSH", "a"), scan("SCAN_ON_PUSH", "b"), scan("CONTINUOUS_SCAN", "c")), REGION));
+                null, List.of(scan("CONTINUOUS_SCAN", "*")), REGION));
         assertDoesNotThrow(() -> service.putRegistryScanningConfiguration(
-                "BASIC", List.of(scan("SCAN_ON_PUSH", "*")), REGION));
+                "ENHANCED", List.of(scan("CONTINUOUS_SCAN", "*")), REGION));
     }
 
     @Test
