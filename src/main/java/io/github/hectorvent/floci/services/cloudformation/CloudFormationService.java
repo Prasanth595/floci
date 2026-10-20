@@ -401,6 +401,7 @@ public class CloudFormationService implements ResourceProvider {
                                       Map<String, String> tags, String region, String accountId,
                                       boolean attachToReviewInProgressStack, boolean fromPreviousTemplate) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
+        requireNoNullValues(resolvedTemplate);
         boolean isCreateType = "CREATE".equalsIgnoreCase(changeSetType);
         // An update names its stack by name or stack ID; the map is keyed by name. One that names no
         // live stack is keyed as given, so it lands in the missing-stack branch below.
@@ -4478,6 +4479,63 @@ public class CloudFormationService implements ResourceProvider {
                     + ", but this output was not found. The output may have been deleted.", 400);
         }
         return value;
+    }
+
+    /** ValidateTemplate's check of a template: the null values AWS refuses there. */
+    public void validateTemplate(String templateBody, String templateUrl) {
+        String resolvedBody = resolveTemplateBody(templateBody, templateUrl);
+        if (resolvedBody != null) {
+            requireNoNullValues(resolvedBody);
+        }
+    }
+
+    /**
+     * Refuses a template that holds a null value anywhere, as AWS does when ValidateTemplate,
+     * CreateStack, UpdateStack or CreateChangeSet is requested, before anything is created
+     * (measured, eu-west-1, 2026-10-20): ValidationError "[path] 'null' values are not allowed in
+     * templates", naming the first null in document order. Below a resource's Properties the path
+     * says Type where Properties would be, as AWS's does; a null Properties is named as it is.
+     */
+    private void requireNoNullValues(String templateBody) {
+        JsonNode parsed;
+        try {
+            parsed = parseTemplate(templateBody);
+        } catch (Exception e) {
+            // As validateResourceDependencies: a template that does not parse fails where it is
+            // processed, with the parser's error.
+            LOG.debugv("Skipping null value validation; template did not parse: {0}", e.getMessage());
+            return;
+        }
+        String path = firstNullPath(parsed, "", false);
+        if (path != null) {
+            throw new AwsException("ValidationError",
+                    "[" + path + "] 'null' values are not allowed in templates", 400);
+        }
+    }
+
+    private static String firstNullPath(JsonNode node, String path, boolean isResource) {
+        if (node.isNull()) {
+            return path;
+        }
+        if (node.isObject()) {
+            boolean childIsResource = "/Resources".equals(path);
+            for (Map.Entry<String, JsonNode> member : node.properties()) {
+                String name = isResource && "Properties".equals(member.getKey()) && !member.getValue().isNull()
+                        ? "Type" : member.getKey();
+                String found = firstNullPath(member.getValue(), path + "/" + name, childIsResource);
+                if (found != null) {
+                    return found;
+                }
+            }
+        } else if (node.isArray()) {
+            for (int i = 0; i < node.size(); i++) {
+                String found = firstNullPath(node.get(i), path + "/" + i, false);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
     }
 
     /**
