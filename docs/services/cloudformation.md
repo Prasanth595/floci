@@ -639,6 +639,19 @@ templates`. The path names the first `null` in document order, as AWS's does: be
 `Properties` it says `Type` where `Properties` would be (`[/Resources/Queue/Type/QueueName]`), a
 `null` `Properties` is `[/Resources/Queue/Properties]`, list entries are numbered from 0, and an
 intrinsic's arguments are part of the path (`[/Resources/Queue/Type/QueueName/Fn::Join/1/1]`).
+A template that is null as a whole (`null`, `~`) is refused with `Template format error: At least
+one Resources member must be defined.` `CreateStackSet` and `UpdateStackSet` refuse a template
+holding a `null` before the stack set keeps it, with the same message followed by the service
+exception's details, as on AWS.
+
+## Template URLs
+
+A `TemplateURL` names an object in Floci's S3, virtual-hosted or path-style. As on AWS, one whose
+bucket or object does not exist is refused by `ValidateTemplate`, `CreateStack` and
+`GetTemplateSummary` alike, with `ValidationError` `S3 error: The specified bucket does not exist`
+or `S3 object does not exist. Bucket: <bucket>, Key: <key>. Error: NoSuchKey`. AWS also refuses a
+URL that is not an S3 one (`TemplateURL must be a supported URL.`); Floci reads any host as S3, so
+the URL can name Floci by whatever host reaches it.
 
 ## Template Parameters
 

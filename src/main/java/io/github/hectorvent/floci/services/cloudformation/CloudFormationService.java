@@ -3975,6 +3975,18 @@ public class CloudFormationService implements ResourceProvider {
         try {
             S3Object obj = s3Service.getObject(ref.bucket(), ref.key());
             return new String(obj.getData());
+        } catch (AwsException e) {
+            // Measured (eu-west-1, 2026-10-20), alike for ValidateTemplate, CreateStack and GetTemplateSummary.
+            if ("NoSuchBucket".equals(e.getErrorCode())) {
+                throw new AwsException("ValidationError", "S3 error: The specified bucket does not exist\nFor more"
+                        + " information check http://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html", 400);
+            }
+            if ("NoSuchKey".equals(e.getErrorCode())) {
+                throw new AwsException("ValidationError", "S3 object does not exist. Bucket: " + ref.bucket()
+                        + ", Key: " + ref.key() + ". Error: NoSuchKey", 400);
+            }
+            LOG.errorv("Failed to fetch CloudFormation template from {0}: {1}", url, e.getMessage());
+            throw new RuntimeException("Failed to fetch CloudFormation template from " + url + ": " + e.getMessage(), e);
         } catch (Exception e) {
             LOG.errorv("Failed to fetch CloudFormation template from {0}: {1}", url, e.getMessage());
             throw new RuntimeException("Failed to fetch CloudFormation template from " + url + ": " + e.getMessage(), e);
@@ -4496,7 +4508,7 @@ public class CloudFormationService implements ResourceProvider {
      * templates", naming the first null in document order. Below a resource's Properties the path
      * says Type where Properties would be, as AWS's does; a null Properties is named as it is.
      */
-    private void requireNoNullValues(String templateBody) {
+    void requireNoNullValues(String templateBody) {
         JsonNode parsed;
         try {
             parsed = parseTemplate(templateBody);
@@ -4505,6 +4517,11 @@ public class CloudFormationService implements ResourceProvider {
             // processed, with the parser's error.
             LOG.debugv("Skipping null value validation; template did not parse: {0}", e.getMessage());
             return;
+        }
+        if (parsed == null || parsed.isNull()) {
+            // Measured: a template that is null as a whole ("null", "~") lacks its resources first.
+            throw new AwsException("ValidationError",
+                    "Template format error: At least one Resources member must be defined.", 400);
         }
         String path = firstNullPath(parsed, "", false);
         if (path != null) {

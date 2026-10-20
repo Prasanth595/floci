@@ -28,13 +28,10 @@ class CloudFormationNullValuesTest {
         stackName = TestFixtures.uniqueName("compat-cfn-null");
     }
 
+    /** The stack is never created, and DeleteStack of a stack that does not exist succeeds; this covers a regression. */
     @AfterEach
     void cleanup() {
-        try {
-            cfn.deleteStack(r -> r.stackName(stackName));
-        } catch (CloudFormationException ignored) {
-            // The stack is never created; this only covers the rejection regressing.
-        }
+        cfn.deleteStack(r -> r.stackName(stackName));
     }
 
     @AfterAll
