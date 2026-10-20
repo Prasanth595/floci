@@ -4515,16 +4515,47 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public record OwnedSecretKey(String secretAccessKey, String accountId) {}
 
+    /**
+     * The account that owns an access key id, in whatever state the key is, which is the lookup STS
+     * GetAccessKeyInfo answers from: "This operation does not indicate the state of the access key.
+     * The key might be active, inactive, or deleted." {@link #resolveAccountId} is the other
+     * question, the one authentication asks, and it takes only an active key and a live session.
+     */
+    public Optional<String> findAccountForAccessKeyId(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return Optional.empty();
+        }
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return accessKeyInAnyAccount(accessKeyId)
+                    .map(AccountAwareStorageBackend.AccountEntry::accountId);
+        }
+        return storedSessionAnyAccount(accessKeyId)
+                .map(session -> AwsArnUtils.accountOrDefault(session.getRoleArn(), session.getOriginAccountId()))
+                .filter(account -> !account.isBlank());
+    }
+
+    /** The long-term key with this id from whichever account holds it, Active or not. */
+    private Optional<AccountAwareStorageBackend.AccountEntry<AccessKey>> accessKeyInAnyAccount(
+            String accessKeyId) {
+        return longTermKeysInAnyAccount(accessKeyId).stream().findFirst();
+    }
+
     /** The active long-term key with this ID, from whichever account owns it. */
     private Optional<AccountAwareStorageBackend.AccountEntry<AccessKey>> activeAccessKeyInAnyAccount(
             String accessKeyId) {
-        if (accessKeyId == null || isTemporaryAccessKey(accessKeyId)
-                || !(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
-            return Optional.empty();
-        }
-        return aware.scanAllAccountEntries(accessKeyId::equals).stream()
+        return longTermKeysInAnyAccount(accessKeyId).stream()
                 .filter(entry -> "Active".equals(entry.value().getStatus()))
                 .findFirst();
+    }
+
+    /** Every long-term key stored under this id, across accounts, in whatever state. */
+    private List<AccountAwareStorageBackend.AccountEntry<AccessKey>> longTermKeysInAnyAccount(
+            String accessKeyId) {
+        if (accessKeyId == null || isTemporaryAccessKey(accessKeyId)
+                || !(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
+            return List.of();
+        }
+        return aware.scanAllAccountEntries(accessKeyId::equals);
     }
 
     private Optional<String> activeAccessKeySecret(String accessKeyId) {

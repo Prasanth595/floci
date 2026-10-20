@@ -14,6 +14,23 @@
 | `GetFederationToken` | Get temporary credentials for a federated user |
 | `DecodeAuthorizationMessage` | Decode an encoded authorization failure message |
 | `GetDelegatedAccessToken` | Exchange a delegation request's trade-in token for temporary credentials |
+| `GetAccessKeyInfo` | Returns the account an access key ID belongs to |
+
+## Access Key Info
+
+`GetAccessKeyInfo` answers the account an access key ID belongs to, and nothing about the key
+itself: AWS states that the operation "does not indicate the state of the access key. The key might
+be active, inactive, or deleted", so an inactive key answers its account the same as an active one.
+A long-term `AKIA` key resolves through the account that holds it and a temporary `ASIA` key through
+the session that minted it. The ID is read against its own shape first, 16 to 128 characters of
+`[\w]`, which answers `ValidationError` before any lookup.
+
+One answer is Floci's own. The operation models no errors at all, and the reference says only that
+"providing a deleted access key might return an error that the key doesn't exist", so a well-formed
+ID that this emulator never issued answers `InvalidParameterValue`, the published common error
+closest to that sentence. Nothing in the reference says what AWS answers for an ID it never issued,
+and real access key IDs are not random the way Floci's are, so treat that one as a deviation rather
+than a recorded behaviour.
 
 ## Delegated Access Token
 

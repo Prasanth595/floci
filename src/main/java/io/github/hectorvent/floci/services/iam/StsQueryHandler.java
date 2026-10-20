@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.WebIdentityToken;
 import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
@@ -35,6 +36,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Pattern;
 
 /**
  * Query-protocol handler for STS (Security Token Service) actions.
@@ -43,6 +45,11 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 @ApplicationScoped
 public class StsQueryHandler {
+
+    /** accessKeyIdType, the only member GetAccessKeyInfo takes: 16 to 128 characters of {@code [\w]}. */
+    private static final Pattern ACCESS_KEY_ID_PATTERN = Pattern.compile("[\\w]*");
+    private static final int ACCESS_KEY_ID_MIN_LENGTH = 16;
+    private static final int ACCESS_KEY_ID_MAX_LENGTH = 128;
 
     private static final Logger LOG = Logger.getLogger(StsQueryHandler.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -113,6 +120,7 @@ public class StsQueryHandler {
         return switch (action) {
             case "AssumeRole"                  -> handleAssumeRole(params);
             case "GetCallerIdentity"           -> handleGetCallerIdentity(params);
+            case "GetAccessKeyInfo"            -> handleGetAccessKeyInfo(params);
             case "GetSessionToken"             -> handleGetSessionToken(params);
             case "AssumeRoleWithWebIdentity"   -> handleAssumeRoleWithWebIdentity(params);
             case "AssumeRoleWithSAML"          -> handleAssumeRoleWithSAML(params);
@@ -256,6 +264,70 @@ public class StsQueryHandler {
                 .elem("Arn", arn)
                 .build();
         return Response.ok(AwsQueryResponse.envelope("GetCallerIdentity", AwsNamespaces.STS, result)).build();
+    }
+
+    /**
+     * The account an access key id belongs to. AWS answers one member and models no errors at all,
+     * and the page is explicit that the key's state is not part of the answer: "This operation does
+     * not indicate the state of the access key. The key might be active, inactive, or deleted." So
+     * the lookup takes the key whatever state it is in, which is why it is not
+     * {@code resolveAccountId}, the authentication path, that answers here.
+     *
+     * <p>A key Floci does not hold is the one answer the reference leaves open. It models no error
+     * for it and says only that "providing a deleted access key might return an error that the key
+     * doesn't exist", so this answers {@code InvalidParameterValue}, the published common error
+     * nearest that sentence, and {@code docs/services/sts.md} records it as the deviation it is.
+     */
+    private Response handleGetAccessKeyInfo(MultivaluedMap<String, String> params) {
+        Response validation = validateAccessKeyId(params);
+        if (validation != null) {
+            return validation;
+        }
+        String accessKeyId = getParam(params, "AccessKeyId");
+        Optional<String> account = iamService.findAccountForAccessKeyId(accessKeyId);
+        if (account.isEmpty()) {
+            return AwsQueryResponse.error("InvalidParameterValue",
+                    "The access key " + accessKeyId + " does not exist.", AwsNamespaces.STS, 400);
+        }
+        String result = new XmlBuilder().elem("Account", account.get()).build();
+        return Response.ok(AwsQueryResponse.envelope("GetAccessKeyInfo", AwsNamespaces.STS, result)).build();
+    }
+
+    /**
+     * accessKeyIdType: required, 16 to 128 characters of {@code [\w]*}, which the reference
+     * describes as "any upper- or lowercase letter or digit". Read before the lookup, so a
+     * malformed id answers for its shape rather than for a key that could not exist.
+     *
+     * <p>An absent member and a present empty one are different answers: only the absent one is
+     * "Member must not be null", where {@code AccessKeyId=} is a value that fails the minimum. That
+     * is what IAM answers for an empty {@code RoleName} on this same wire.
+     *
+     * <p>The member is named the way AWS names it in a constraint message, lower camel case, and
+     * the offending value is quoted beside it, which is what the one recorded rendering Floci
+     * follows elsewhere does: {@link IamService} reads {@code roleName} that way, and so does this
+     * handler's own {@code DurationSeconds} check. The older STS operations name the parameter as
+     * written instead, which is a drift of its own rather than something to copy here.
+     */
+    private Response validateAccessKeyId(MultivaluedMap<String, String> params) {
+        String accessKeyId = params.getFirst("AccessKeyId");
+        String constraint;
+        if (accessKeyId == null) {
+            constraint = "Member must not be null";
+        } else if (accessKeyId.length() < ACCESS_KEY_ID_MIN_LENGTH) {
+            constraint = "Member must have length greater than or equal to " + ACCESS_KEY_ID_MIN_LENGTH;
+        } else if (accessKeyId.length() > ACCESS_KEY_ID_MAX_LENGTH) {
+            constraint = "Member must have length less than or equal to " + ACCESS_KEY_ID_MAX_LENGTH;
+        } else if (!ACCESS_KEY_ID_PATTERN.matcher(accessKeyId).matches()) {
+            constraint = "Member must satisfy regular expression pattern: "
+                    + ACCESS_KEY_ID_PATTERN.pattern();
+        } else {
+            return null;
+        }
+        String value = accessKeyId == null ? "null" : "'" + accessKeyId + "'";
+        return AwsQueryResponse.error("ValidationError",
+                SmithyValidationErrors.message(List.of("Value " + value
+                        + " at 'accessKeyId' failed to satisfy constraint: " + constraint)),
+                AwsNamespaces.STS, 400);
     }
 
     private Response handleGetSessionToken(MultivaluedMap<String, String> params) {

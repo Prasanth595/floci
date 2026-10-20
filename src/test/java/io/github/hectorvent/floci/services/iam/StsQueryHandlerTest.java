@@ -514,6 +514,102 @@ class StsQueryHandlerTest {
         PartitionMatrix.assertGlobalArnIn(partitionCase, arn);
     }
 
+    @Test
+    void getAccessKeyInfoAnswersTheAccountThatHoldsTheKey() {
+        IamService service = mock(IamService.class);
+        when(service.findAccountForAccessKeyId("AKIAIOSFODNN7EXAMPLE"))
+                .thenReturn(Optional.of("111122223333"));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AccessKeyId", "AKIAIOSFODNN7EXAMPLE");
+
+        Response response = newHandler(service, new RegionResolver(REGION, "000000000000"))
+                .handle("GetAccessKeyInfo", params);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<GetAccessKeyInfoResponse"), body);
+        assertTrue(body.contains("<Account>111122223333</Account>"), body);
+        // The lookup is the state-independent one, not the authentication path.
+        verify(service).findAccountForAccessKeyId("AKIAIOSFODNN7EXAMPLE");
+        verify(service, never()).resolveAccountId(anyString());
+    }
+
+    @Test
+    void getAccessKeyInfoRefusesAKeyNobodyHolds() {
+        // The operation models no error at all, and the page says only that a deleted key "might
+        // return an error that the key doesn't exist", so this is the published common error
+        // nearest that sentence rather than a reading.
+        IamService service = mock(IamService.class);
+        when(service.findAccountForAccessKeyId(anyString())).thenReturn(Optional.empty());
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AccessKeyId", "AKIAABSENTKEY0000000");
+
+        Response response = newHandler(service, new RegionResolver(REGION, "000000000000"))
+                .handle("GetAccessKeyInfo", params);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>InvalidParameterValue</Code>"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "-, Value null at 'accessKeyId' failed to satisfy constraint: Member must not be null",
+        "AKIATOOSHORT, Value 'AKIATOOSHORT' at 'accessKeyId' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 16",
+        "AKIA-NOT-A-VALID-KEY-ID, Member must satisfy regular expression pattern",
+    })
+    void getAccessKeyInfoReadsTheIdsShapeBeforeAnyLookup(String accessKeyId, String expected) {
+        IamService service = mock(IamService.class);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        if (!"-".equals(accessKeyId)) {
+            params.add("AccessKeyId", accessKeyId);
+        }
+
+        Response response = newHandler(service, new RegionResolver(REGION, "000000000000"))
+                .handle("GetAccessKeyInfo", params);
+
+        assertEquals(400, response.getStatus());
+        // The Query error body escapes the apostrophes the message quotes the member with.
+        String body = ((String) response.getEntity()).replace("&apos;", "'");
+        assertTrue(body.contains("<Code>ValidationError</Code>"), body);
+        assertTrue(body.contains(expected), body);
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "   "})
+    void getAccessKeyInfoReadsAPresentBlankIdAsAValue(String accessKeyId) {
+        // Present and empty is a value, not an absence: it fails the minimum and is quoted in the
+        // message, which is what IAM answers for an empty RoleName over this same wire.
+        IamService service = mock(IamService.class);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AccessKeyId", accessKeyId);
+
+        Response response = newHandler(service, new RegionResolver(REGION, "000000000000"))
+                .handle("GetAccessKeyInfo", params);
+
+        assertEquals(400, response.getStatus());
+        String body = ((String) response.getEntity()).replace("&apos;", "'");
+        assertTrue(body.contains("Value '" + accessKeyId + "' at 'accessKeyId' failed to satisfy "
+                + "constraint: Member must have length greater than or equal to 16"), body);
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void getAccessKeyInfoRefusesAnIdPastTheMaximum() {
+        IamService service = mock(IamService.class);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AccessKeyId", "A".repeat(129));
+
+        Response response = newHandler(service, new RegionResolver(REGION, "000000000000"))
+                .handle("GetAccessKeyInfo", params);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(response.getEntity().toString()
+                .contains("Member must have length less than or equal to 128"));
+        verifyNoInteractions(service);
+    }
+
     @ParameterizedTest
     @MethodSource("io.github.hectorvent.floci.testing.PartitionMatrix#cases")
     void getFederationTokenMintsTheFederatedUserArnInTheDeploymentsPartition(PartitionCase partitionCase) {
