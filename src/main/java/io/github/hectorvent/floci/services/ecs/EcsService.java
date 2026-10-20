@@ -4973,9 +4973,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
             try {
                 reconcileService(entry.getKey(), entry.getValue());
-                publishContainerInsights(entry.getKey(), entry.getValue());
             } catch (Exception e) {
                 LOG.debugv("Error reconciling ECS service {0}: {1}", entry.getKey(), e.getMessage());
+            }
+            try {
+                publishContainerInsights(entry.getKey(), entry.getValue());
+            } catch (Exception e) {
+                LOG.warnv(e, "Could not publish Container Insights task counts for ECS service {0}", entry.getKey());
             }
         }
     }
