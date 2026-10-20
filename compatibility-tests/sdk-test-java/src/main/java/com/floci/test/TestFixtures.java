@@ -54,6 +54,7 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.streams.DynamoDbStreamsClient;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.Subnet;
+import software.amazon.awssdk.services.ec2.model.Vpc;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.efs.EfsClient;
@@ -287,14 +288,21 @@ public final class TestFixtures {
      */
     public static List<String> defaultVpcSubnets() {
         try (Ec2Client ec2 = ec2Client()) {
-            String vpcId = ec2.describeVpcs(r -> r.filters(f -> f.name("is-default").values("true")))
-                    .vpcs().get(0).vpcId();
+            List<Vpc> defaults = ec2.describeVpcs(r -> r.filters(f -> f.name("is-default").values("true"))).vpcs();
+            if (defaults.isEmpty()) {
+                throw new IllegalStateException("no default VPC in " + REGION.id() + " to put a load balancer in");
+            }
+            String vpcId = defaults.get(0).vpcId();
             Map<String, String> byZone = new TreeMap<>();
             for (Subnet subnet : ec2.describeSubnets(r -> r.filters(f -> f.name("vpc-id").values(vpcId)))
                     .subnets()) {
                 if (Boolean.TRUE.equals(subnet.defaultForAz())) {
                     byZone.putIfAbsent(subnet.availabilityZone(), subnet.subnetId());
                 }
+            }
+            if (byZone.size() < 2) {
+                throw new IllegalStateException("default VPC " + vpcId + " has default subnets in "
+                        + byZone.keySet() + ", and a load balancer needs two availability zones");
             }
             return byZone.values().stream().limit(2).toList();
         }

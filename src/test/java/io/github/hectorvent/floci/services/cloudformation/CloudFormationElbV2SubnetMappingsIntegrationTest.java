@@ -108,6 +108,8 @@ class CloudFormationElbV2SubnetMappingsIntegrationTest {
                 ? template(name, "").replace(", \"SubnetMappings\": []", "")
                 : template(name, mappings))
                 .replace("\"Type\": \"network\"", "\"Type\": \"" + type + "\"");
+        assertEquals(mappings != null, template.contains("SubnetMappings"), template);
+        assertTrue(template.contains("\"Type\": \"" + type + "\""), template);
         try {
             request(CFN_AUTH, "CreateStack", "StackName", stack, "TemplateBody", template).statusCode(200);
             CfnStackWaits.awaitStatus(stack, "ROLLBACK_COMPLETE");

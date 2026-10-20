@@ -108,6 +108,8 @@ class ElbV2IntegrationTest {
         given()
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Name", "my-test-lb")
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
+                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
