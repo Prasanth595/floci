@@ -59,10 +59,11 @@ class ProvidedRuntimeBootstrapTest {
 
     @Test
     void executableBinaryRetainsArguments() throws Exception {
-        Files.createSymbolicLink(task.resolve("bootstrap"), Path.of("/bin/echo"));
-        Result result = run("binary", "two words");
+        // Not /bin/echo: on Ubuntu 26.04 it is a multicall binary that refuses to run as "bootstrap".
+        Files.createSymbolicLink(task.resolve("bootstrap"), Path.of("/bin/sh"));
+        Result result = run("-c", "printf '%s|' \"$@\"", "sh", "binary", "two words");
         assertEquals(0, result.exit());
-        assertEquals("binary two words\n", result.output());
+        assertEquals("binary|two words|", result.output());
     }
 
     @Test
