@@ -53,9 +53,6 @@ class ContainerLifecycleManagerStartTest {
     private ContainerDetector containerDetector;
 
     @Mock
-    private PortAllocator portAllocator;
-
-    @Mock
     private EmulatorConfig config;
 
     private final ContainerSpec spec = new ContainerSpec("busybox:latest");
@@ -77,7 +74,7 @@ class ContainerLifecycleManagerStartTest {
 
     private ContainerLifecycleManager manager(DockerClient docker) {
         return new ContainerLifecycleManager(
-                docker, imageCacheService, containerDetector, portAllocator, config);
+                docker, imageCacheService, containerDetector, config);
     }
 
     @Test

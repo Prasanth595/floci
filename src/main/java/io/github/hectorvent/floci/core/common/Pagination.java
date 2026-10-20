@@ -34,13 +34,26 @@ public final class Pagination {
                                                     Integer maxResults, String nextToken,
                                                     int defaultPageSize, int maxResultsLimit,
                                                     String errorCode) {
+        return paginate(all, cursorOf, maxResults, nextToken, defaultPageSize, maxResultsLimit, errorCode,
+                "nextToken");
+    }
+
+    /**
+     * As above, naming the token parameter in the invalid-token message: query-protocol and DMS
+     * operations call it {@code Marker}, and an error naming {@code nextToken} points the caller
+     * at a parameter the operation does not have.
+     */
+    public static <T> PaginatedResult<T> paginate(List<T> all, Function<T, String> cursorOf,
+                                                    Integer maxResults, String nextToken,
+                                                    int defaultPageSize, int maxResultsLimit,
+                                                    String errorCode, String tokenName) {
         if (maxResults != null && (maxResults < 1 || maxResults > maxResultsLimit)) {
             throw new AwsException(errorCode,
                     "maxResults must be between 1 and " + maxResultsLimit, 400);
         }
         int limit = maxResults != null ? maxResults : defaultPageSize;
         return slice(all, cursorOf, limit,
-                decodeCursor(nextToken, "", token -> new AwsException(errorCode, "Invalid nextToken.", 400)), "");
+                decodeCursor(nextToken, "", token -> new AwsException(errorCode, "Invalid " + tokenName + ".", 400)), "");
     }
 
     /**
@@ -100,7 +113,7 @@ public final class Pagination {
     }
 
     private static String encodeToken(String cursor) {
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(cursor.getBytes(StandardCharsets.UTF_8));
+        return Base64Url.encode(cursor);
     }
 
     private static String decodeCursor(String token, String prefix,

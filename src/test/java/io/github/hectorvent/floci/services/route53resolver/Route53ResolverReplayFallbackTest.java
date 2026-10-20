@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.route53resolver;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -36,7 +37,8 @@ class Route53ResolverReplayFallbackTest {
     void setUp() {
         endpointIpRequests = new InMemoryStorage<>();
         service = new Route53ResolverService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), endpointIpRequests, objectMapper);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), endpointIpRequests, new InMemoryStorage<>(),
+                objectMapper);
     }
 
     private JsonNode createRequest(String token, String ip) {
@@ -45,9 +47,13 @@ class Route53ResolverReplayFallbackTest {
         request.put("Direction", "INBOUND");
         request.put("CreatorRequestId", token);
         request.putArray("SecurityGroupIds").add("sg-abc123");
-        ObjectNode ipRequest = request.putArray("IpAddressRequests").addObject();
+        ArrayNode ipRequests = request.putArray("IpAddressRequests");
+        ObjectNode ipRequest = ipRequests.addObject();
         ipRequest.put("SubnetId", "subnet-aaa");
         ipRequest.put("Ip", ip);
+        ipRequest = ipRequests.addObject();
+        ipRequest.put("SubnetId", "subnet-bbb");
+        ipRequest.put("Ip", "10.0.0.6");
         return request;
     }
 
@@ -79,6 +85,21 @@ class Route53ResolverReplayFallbackTest {
         AwsException conflict = assertThrows(AwsException.class,
                 () -> service.createResolverEndpoint(createRequest(token, "10.0.0.5"), REGION, ACCOUNT));
         assertEquals("ResourceExistsException", conflict.jsonType());
+    }
+
+    @Test
+    void listingIpAddressesWithoutARecordFailsInsteadOfReturningEmpty() {
+        // An empty list beside IpAddressCount=2 would be a silent wrong answer; the modeled
+        // InternalServiceErrorException says the state is broken.
+        ObjectNode created = service.createResolverEndpoint(createRequest("tok-list", "10.0.0.5"), REGION, ACCOUNT);
+        String id = created.get("Id").asText();
+        assertEquals(2, service.listResolverEndpointIpAddresses(id).size());
+
+        endpointIpRequests.delete(id);
+        AwsException broken = assertThrows(AwsException.class,
+                () -> service.listResolverEndpointIpAddresses(id));
+        assertEquals("InternalServiceErrorException", broken.jsonType());
+        assertEquals(400, broken.getHttpStatus());
     }
 
     @Test

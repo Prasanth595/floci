@@ -6,19 +6,19 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Api;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Reply;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.ConnectException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
@@ -150,10 +150,7 @@ class DynamoDbLocalClientTest {
 
     @Test
     void connectionRefused() throws Exception {
-        int port;
-        try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
-            port = socket.getLocalPort();
-        }
+        int port = FreePorts.loopbackIpv4Port();
         client = new DynamoDbLocalClient(URI.create("http://127.0.0.1:" + port),
                 Duration.ofSeconds(2), Duration.ofSeconds(2), mapper);
 
@@ -237,10 +234,10 @@ class DynamoDbLocalClientTest {
                 + "x-amz-date:" + amzDate + "\n"
                 + "x-amz-target:" + headers.getFirst("X-Amz-Target") + "\n\n"
                 + "content-type;host;x-amz-date;x-amz-target\n"
-                + SigV4RequestValidator.sha256Hex(request.body());
+                + Digests.sha256Hex(request.body());
         String credentialScope = date + "/eu-west-1/dynamodb/aws4_request";
         String toSign = "AWS4-HMAC-SHA256\n" + amzDate + "\n" + credentialScope + "\n"
-                + SigV4RequestValidator.sha256Hex(canonical);
+                + Digests.sha256Hex(canonical);
         byte[] key = SigV4RequestValidator.deriveSigningKey("floci", date, "eu-west-1", "dynamodb");
         return SigV4RequestValidator.hexEncode(SigV4RequestValidator.hmacSha256(key, toSign));
     }

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -10,12 +11,15 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.apigateway.model.Account;
@@ -25,6 +29,7 @@ import io.github.hectorvent.floci.services.apigateway.model.Authorizer;
 import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
 import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
 import io.github.hectorvent.floci.services.apigateway.model.Deployment;
+import io.github.hectorvent.floci.services.apigateway.model.DeploymentExportSnapshot;
 import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
 import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
 import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
@@ -41,6 +46,7 @@ import io.github.hectorvent.floci.services.apigateway.model.Stage;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigateway.model.VpcLink;
+import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.swagger.parser.OpenAPIParser;
 import io.swagger.v3.core.util.Json;
 import io.swagger.v3.oas.models.OpenAPI;
@@ -55,6 +61,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
@@ -63,8 +70,10 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -79,6 +88,12 @@ public class ApiGatewayService implements ResourceProvider {
     /** The only partition where API Gateway offers edge-optimized APIs and custom domain names. */
     private static final Set<String> EDGE_OPTIMIZED_PARTITIONS = Set.of("aws");
 
+    /**
+     * The regional hosted zone a custom domain reports in a region with no published one. Only
+     * the two GovCloud regions have a sourced zone ({@link AwsRegionFacts#apiGatewayRegionalHostedZoneId}).
+     */
+    private static final String UNSOURCED_REGIONAL_HOSTED_ZONE_ID = "Z2FDTNDATAQYL2"; // partition-literal: placeholder kept where no per-region source exists
+
     private static final ObjectMapper JSON = new ObjectMapper();
 
     /** Documented default page size for GetUsage. */
@@ -92,9 +107,10 @@ public class ApiGatewayService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayService.class);
 
-    private final StorageBackend<String, RestApi> apiStore;
+    private final AccountAwareStorageBackend<RestApi> apiStore;
     private final StorageBackend<String, ApiGatewayResource> resourceStore;
     private final StorageBackend<String, Deployment> deploymentStore;
+    private final StorageBackend<String, Map<String, String>> deploymentModelStore;
     private final StorageBackend<String, Stage> stageStore;
     private final StorageBackend<String, Authorizer> authorizerStore;
     private final StorageBackend<String, ApiKey> apiKeyStore;
@@ -105,8 +121,8 @@ public class ApiGatewayService implements ResourceProvider {
     private final StorageBackend<String, Model> modelStore;
     private final StorageBackend<String, VpcLink> vpcLinkStore;
     private final StorageBackend<String, Account> accountStore;
-    private final StorageBackend<String, CustomDomain> domainStore;
-    private final StorageBackend<String, BasePathMapping> basePathMappingStore;
+    private final AccountAwareStorageBackend<CustomDomain> domainStore;
+    private final AccountAwareStorageBackend<BasePathMapping> basePathMappingStore;
     /**
      * Guards every change to a custom domain or a base path mapping. The stores hand out live
      * objects, so a patch or a tag write is a read-modify-write; two of them on one domain at the
@@ -117,6 +133,8 @@ public class ApiGatewayService implements ResourceProvider {
     private final TlsCertificateManager certificateManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    /** The v2 APIs an API mapping can point at; a custom domain is shared by both APIs. */
+    private final ApiGatewayV2Service apiGatewayV2Service;
 
     // Constants
     private static final String EPC_KEY = "endpointConfiguration";
@@ -124,6 +142,21 @@ public class ApiGatewayService implements ResourceProvider {
     private static final String EPC_VPC_IDS_KEY = "vpcEndpointIds";
     private static final String EPC_TYPES_PATH = "/endpointConfiguration/types/";
     private static final String EPC_VPC_IDS_PATH = "/endpointConfiguration/vpcEndpointIds";
+    private static final String TLS_1_2 = "TLS_1_2";
+    /** The API type a mapping to a REST API is stored with, beside a v2 API's protocol type. */
+    private static final String REST_API_TYPE = "REST";
+    /** What AWS answers for a v2 API mapping call on an edge-optimized domain. */
+    private static final String V2_EDGE_DOMAIN_MESSAGE = "Only REGIONAL domain names can be managed through the "
+            + "API Gateway V2 API. For EDGE domain names, please use the API Gateway V1 API. Also note that only REST "
+            + "APIs can be attached to EDGE domain names.";
+    /** What AWS answers for a v2 domain created or updated with the EDGE endpoint type. */
+    private static final String V2_EDGE_ENDPOINT_TYPE_MESSAGE =
+            "EDGE endpoint type is not supported for APIGatewayV2 domainName";
+    /** The characters AWS allows in an API mapping key, its level separator included, and the most it takes. */
+    private static final Pattern API_MAPPING_KEY = Pattern.compile("[A-Za-z0-9$\\-_.+!*'(),/]+");
+    private static final int MAX_API_MAPPING_KEY_LENGTH = 300;
+    private static final String MAPPING_KEY_SLASHES_MESSAGE =
+            "API mapping key should not start with a '/' or have consecutive '/'s.";
 
     ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
                       TlsCertificateManager certificateManager) {
@@ -131,12 +164,20 @@ public class ApiGatewayService implements ResourceProvider {
                 new RegionResolver(config.defaultRegion(), config.defaultAccountId()));
     }
 
+    ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
+                      TlsCertificateManager certificateManager, RegionResolver regionResolver) {
+        this(storageFactory, config, certificateManager, regionResolver,
+                new ApiGatewayV2Service(storageFactory, config, regionResolver));
+    }
+
     @Inject
     public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
-                             TlsCertificateManager certificateManager, RegionResolver regionResolver) {
+                             TlsCertificateManager certificateManager, RegionResolver regionResolver,
+                             ApiGatewayV2Service apiGatewayV2Service) {
         this.certificateManager = certificateManager;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.apiGatewayV2Service = apiGatewayV2Service;
         this.apiStore = storageFactory.create("apigateway", "apigateway-apis.json",
                 new TypeReference<>() {
                 });
@@ -144,6 +185,9 @@ public class ApiGatewayService implements ResourceProvider {
                 new TypeReference<>() {
                 });
         this.deploymentStore = storageFactory.create("apigateway", "apigateway-deployments.json",
+                new TypeReference<>() {
+                });
+        this.deploymentModelStore = storageFactory.create("apigateway", "apigateway-deployment-models.json",
                 new TypeReference<>() {
                 });
         this.stageStore = storageFactory.create("apigateway", "apigateway-stages.json",
@@ -300,6 +344,7 @@ public class ApiGatewayService implements ResourceProvider {
             throw new AwsException("BadRequestException",
                     "Endpoint configuration types must contain exactly one value.", 400);
         }
+        requireEndpointTypeAvailable(endpointConfiguration.getTypes().getFirst().name(), region);
 
         api.setEndpointConfiguration(endpointConfigurationOf(endpointConfiguration.getTypes().getFirst(),
                 endpointConfiguration.getVpcEndpointIds()));
@@ -350,6 +395,38 @@ public class ApiGatewayService implements ResourceProvider {
         return apiStore.keys().stream().anyMatch(key -> key.endsWith("::" + apiId));
     }
 
+    public boolean hasRestApi(String region, String apiId) {
+        return apiStore.get(apiKey(region, apiId)).isPresent();
+    }
+
+    public record ApiOwner(String accountId, String region) {}
+
+    /** Resolve resource ownership for data-plane URLs without changing management isolation. */
+    public Optional<ApiOwner> findRestApiOwner(String apiId) {
+        return findRestApiOwner(apiId, null, null);
+    }
+
+    public Optional<ApiOwner> findRestApiOwner(String apiId, String callerAccount, String callerRegion) {
+        List<AccountAwareStorageBackend.AccountEntry<RestApi>> matches =
+                apiStore.scanAllAccountEntries(key -> key.endsWith("::" + apiId));
+        if (matches.size() > 1 && callerAccount != null
+                && matches.stream().anyMatch(entry -> callerAccount.equals(entry.accountId())
+                        && (callerRegion + "::" + apiId).equals(entry.key()))) {
+            return Optional.of(new ApiOwner(callerAccount, callerRegion));
+        }
+        if (matches.size() > 1) {
+            throw new AwsException("ConflictException",
+                    "REST API id '" + apiId + "' is ambiguous across accounts", 409);
+        }
+        return matches.stream().findFirst().map(entry -> {
+            int delimiter = entry.key().indexOf("::");
+            if (delimiter <= 0) {
+                throw new IllegalStateException("Invalid REST API storage key: " + entry.key());
+            }
+            return new ApiOwner(entry.accountId(), entry.key().substring(0, delimiter));
+        });
+    }
+
 
     public String resolveRestApiRegion(String preferredRegion, String apiId) {
         if (apiStore.get(apiKey(preferredRegion, apiId)).isPresent()) {
@@ -375,6 +452,7 @@ public class ApiGatewayService implements ResourceProvider {
         String prefix = region + "::" + apiId + "::";
         resourceStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(resourceStore::delete);
         deploymentStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(deploymentStore::delete);
+        deploymentModelStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(deploymentModelStore::delete);
         stageStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(stageStore::delete);
         modelStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(modelStore::delete);
         requestValidatorStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(requestValidatorStore::delete);
@@ -746,7 +824,19 @@ public class ApiGatewayService implements ResourceProvider {
     public Deployment createDeployment(String region, String apiId, Map<String, Object> request) {
         getRestApi(region, apiId);
         String description = (String) request.getOrDefault("description", "");
-        Deployment deployment = new Deployment(shortId(10), description, System.currentTimeMillis() / 1000L);
+        String snapshot;
+        Map<String, String> schemas;
+        try {
+            snapshot = JSON.writeValueAsString(new DeploymentExportSnapshot(getRestApi(region, apiId),
+                    getResources(region, apiId), getModels(region, apiId), getAuthorizers(region, apiId),
+                    getRequestValidators(region, apiId), getGatewayResponses(region, apiId).stream()
+                            .filter(response -> !response.isDefaultResponse()).toList()));
+            schemas = modelSchemas(JSON.readValue(snapshot, DeploymentExportSnapshot.class).models());
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot capture REST API deployment", e);
+        }
+        Deployment deployment = new Deployment(shortId(10), description, System.currentTimeMillis() / 1000L, snapshot);
+        deploymentModelStore.put(deploymentKey(region, apiId, deployment.id()), schemas);
         deploymentStore.put(deploymentKey(region, apiId, deployment.id()), deployment);
         LOG.infov("Created deployment {0} for API {1}", deployment.id(), apiId);
 
@@ -801,6 +891,32 @@ public class ApiGatewayService implements ResourceProvider {
     public void deleteDeployment(String region, String apiId, String deploymentId) {
         getDeployment(region, apiId, deploymentId);
         deploymentStore.delete(deploymentKey(region, apiId, deploymentId));
+        deploymentModelStore.delete(deploymentKey(region, apiId, deploymentId));
+    }
+
+    Map<String, String> getDeploymentModelSchemas(String region, String apiId, String deploymentId) {
+        if (deploymentId != null) {
+            Optional<Map<String, String>> schemas = deploymentModelStore.get(deploymentKey(region, apiId, deploymentId));
+            if (schemas.isPresent()) {
+                return schemas.get();
+            }
+        }
+        // Deployments persisted before model snapshots were introduced retain their existing behavior.
+        return currentModelSchemas(region, apiId);
+    }
+
+    private Map<String, String> currentModelSchemas(String region, String apiId) {
+        return modelSchemas(getModels(region, apiId));
+    }
+
+    private Map<String, String> modelSchemas(List<Model> models) {
+        Map<String, String> schemas = new HashMap<>();
+        for (Model model : models) {
+            if (model.getSchema() != null) {
+                schemas.put(model.getName(), model.getSchema());
+            }
+        }
+        return Map.copyOf(schemas);
     }
 
     public Deployment updateDeployment(String region, String apiId, String deploymentId, List<Map<String, String>> patchOperations) {
@@ -822,11 +938,46 @@ public class ApiGatewayService implements ResourceProvider {
                 }
                 newDescription = value;
             }
-            Deployment updated = new Deployment(existing.id(), newDescription, existing.createdDate());
+            Deployment updated = new Deployment(existing.id(), newDescription, existing.createdDate(), existing.exportSnapshot());
             deploymentStore.put(deploymentKey(region, apiId, deploymentId), updated);
             return updated;
         }
         return existing;
+    }
+
+    public ObjectNode exportRestApi(String region, String apiId, String stageName, String exportType,
+                                    String extensions) {
+        Stage stage = getStage(region, apiId, stageName);
+        if (!"oas30".equals(exportType) && !"swagger".equals(exportType)) {
+            throw new AwsException("BadRequestException", "Invalid export type: " + exportType, 400);
+        }
+        Set<String> selected = extensions == null || extensions.isBlank()
+                ? Set.of() : new HashSet<>(List.of(extensions.split(",")));
+        if (!Set.of("integrations", "authorizers", "apigateway").containsAll(selected)) {
+            throw new AwsException("BadRequestException", "Unsupported export extensions: " + extensions, 400);
+        }
+        Deployment deployment = getDeployment(region, apiId, stage.getDeploymentId());
+        if (deployment.exportSnapshot() == null) {
+            throw new AwsException("BadRequestException",
+                    "This deployment predates export snapshots. Redeploy the API before exporting it.", 400);
+        }
+        try {
+            DeploymentExportSnapshot snapshot = JSON.readValue(deployment.exportSnapshot(), DeploymentExportSnapshot.class);
+            boolean all = selected.contains("apigateway");
+            ObjectNode document = RestApiOpenApiExporter.export(snapshot, "swagger".equals(exportType),
+                    all || selected.contains("integrations"), all || selected.contains("authorizers"), all);
+            String host = apiId + ".execute-api." + region + "." + AwsRegions.dnsSuffixFor(region);
+            if ("swagger".equals(exportType)) {
+                document.put("host", host);
+                document.put("basePath", "/" + stageName);
+                document.putArray("schemes").add("https");
+            } else {
+                document.putArray("servers").addObject().put("url", "https://" + host + "/" + stageName);
+            }
+            return document;
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot read REST API deployment snapshot", e);
+        }
     }
 
     // ──────────────────────────── Stages ────────────────────────────
@@ -2012,6 +2163,14 @@ public class ApiGatewayService implements ResourceProvider {
 
     // ──────────────────────────── Custom Domains ────────────────────────────
 
+    /**
+     * A public custom domain's ARN, {@code arn:<partition>:apigateway:<region>::/domainnames/<name>},
+     * which both APIs report and CloudFormation's {@code DomainNameArn} returns.
+     */
+    public static String domainNameArn(String region, String domainName) {
+        return AwsArnUtils.Arn.of("apigateway", region, "", "/domainnames/" + domainName).toString();
+    }
+
     public CustomDomain createDomainName(String region, Map<String, Object> request) {
         String domainName = (String) request.get("domainName");
         if (domainName == null) throw new AwsException("BadRequestException", "domainName is required", 400);
@@ -2030,7 +2189,8 @@ public class ApiGatewayService implements ResourceProvider {
         domain.setRegionalCertificateName((String) request.get("regionalCertificateName"));
         domain.setRegionalCertificateArn((String) request.get("regionalCertificateArn"));
         domain.setRegionalDomainName(domainName + ".regional.local");
-        domain.setRegionalHostedZoneId("Z2FDTNDATAQYL2"); // partition-literal: no published per-region source for the regional zone
+        domain.setRegionalHostedZoneId(AwsRegionFacts.apiGatewayRegionalHostedZoneId(region)
+                .orElse(UNSOURCED_REGIONAL_HOSTED_ZONE_ID));
         applyEndpointType(domain, endpointType, region);
         domain.setSecurityPolicy((String) request.getOrDefault("securityPolicy", "TLS_1_2"));
         // Nothing is provisioned behind the domain, so it is usable as soon as it exists.
@@ -2083,7 +2243,8 @@ public class ApiGatewayService implements ResourceProvider {
             domain.setDistributionDomainName(null);
             domain.setDistributionHostedZoneId(null);
         } else if (domain.getDistributionDomainName() == null) {
-            CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(region, config.services().cloudfront().domainSuffix());
+            CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(regionResolver.partitionForRegion(region),
+                    config.services().cloudfront().domainSuffix().orElse(null));
             domain.setDistributionDomainName(edge.domainName());
             domain.setDistributionHostedZoneId(edge.hostedZoneId());
         }
@@ -2199,6 +2360,9 @@ public class ApiGatewayService implements ResourceProvider {
                 throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
             }
         }
+        if (!Objects.equals(newSecurityPolicy, domain.getSecurityPolicy())) {
+            requireMappingsAllowSecurityPolicy(region, domainName, newSecurityPolicy);
+        }
         // Only a change of type is held to the partition: an EDGE domain stored before the rule
         // existed must still take certificate or security-policy updates.
         if (!Objects.equals(newEndpointConfigurationType, domain.getEndpointConfigurationType())) {
@@ -2227,11 +2391,11 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     public BasePathMapping createBasePathMapping(String region, String domainName, Map<String, Object> request) {
-        return createBasePathMapping(region, domainName, request, "REST");
+        return createBasePathMapping(region, domainName, request, REST_API_TYPE, Set.of());
     }
 
-    BasePathMapping createBasePathMapping(String region, String domainName,
-                                          Map<String, Object> request, String apiType) {
+    private BasePathMapping createBasePathMapping(String region, String domainName, Map<String, Object> request,
+                                                  String apiType, Set<String> excludedIds) {
         String basePath = canonicalBasePath((String) request.get("basePath"));
         String apiId = (String) request.get("restApiId");
         String stage = (String) request.get("stage");
@@ -2244,6 +2408,8 @@ public class ApiGatewayService implements ResourceProvider {
             if (basePathMappingStore.get(key).isPresent()) {
                 throw new AwsException("ConflictException", "Base path already exists for this domain name", 409);
             }
+            requireProtocolTypesCompatible(region, domainName, apiType, null);
+            mapping.setApiMappingId(unusedApiMappingId(region, domainName, basePath, excludedIds));
             basePathMappingStore.put(key, mapping);
         }
         LOG.infov("Created mapping for {0} path={1} -> API {2}", domainName, basePath, apiId);
@@ -2371,15 +2537,471 @@ public class ApiGatewayService implements ResourceProvider {
         return mapping;
     }
 
+    // ──────────────────────────── Custom Domains and API Mappings (v2) ────────────────────────────
+    //
+    // A custom domain is one resource in AWS, reachable through both APIs, so the v2 operations read
+    // and write the same records the v1 ones do. The rules live here rather than in the controller
+    // because CloudFormation's AWS::ApiGatewayV2 types go through them too.
+
+    /** {@code CreateDomainName} through the v2 API, from its request body. */
+    public CustomDomain createV2DomainName(String region, Map<String, Object> request) {
+        return createDomainName(region, toV1DomainRequest(request));
+    }
+
+    /**
+     * {@code UpdateDomainName} through the v2 API: a body with a configuration replaces the domain's
+     * as {@link #replaceV2DomainConfiguration} does. One without changes nothing, after the same
+     * refusals: of what Floci does not emulate, and of an edge-optimized domain, which the v2 API
+     * does not manage.
+     */
+    public CustomDomain updateV2DomainName(String region, String domainName, Map<String, Object> request) {
+        if (request.get("domainNameConfigurations") != null) {
+            return replaceV2DomainConfiguration(region, domainName, request);
+        }
+        rejectUnemulatedDomainInputs(request, Map.of());
+        CustomDomain domain = getDomainName(region, domainName);
+        requireRegionalDomain(domain);
+        return domain;
+    }
+
+    /**
+     * Drives a domain's configuration to the one in a v2 {@code CreateDomainName} body, validated the
+     * same way. This is what an update of {@code DomainNameConfigurations} does on AWS: the list is
+     * replaced as a whole, so a certificate the body leaves out is cleared and a security policy it
+     * leaves out takes the {@code TLS_1_2} default. The domain is regional, so its certificate goes to
+     * the regional fields, and one left in the edge-optimized fields by an earlier v2 write is
+     * cleared with the rest. Tags are not touched.
+     */
+    public CustomDomain replaceV2DomainConfiguration(String region, String domainName,
+                                                     Map<String, Object> request) {
+        Map<String, Object> v1Request = toV1DomainRequest(request);
+        String securityPolicy = (String) v1Request.getOrDefault("securityPolicy", TLS_1_2);
+        synchronized (domainNameLock) {
+            CustomDomain domain = getDomainName(region, domainName);
+            requireRegionalDomain(domain);
+            if (!Objects.equals(securityPolicy, domain.getSecurityPolicy())) {
+                requireMappingsAllowSecurityPolicy(region, domainName, securityPolicy);
+            }
+            domain.setCertificateArn(null);
+            domain.setCertificateName(null);
+            domain.setRegionalCertificateArn((String) v1Request.get("regionalCertificateArn"));
+            domain.setRegionalCertificateName((String) v1Request.get("regionalCertificateName"));
+            domain.setSecurityPolicy(securityPolicy);
+            applyEndpointType(domain, endpointTypeOf(v1Request), region);
+            domainStore.put(domainKey(region, domainName), domain);
+            return domain;
+        }
+    }
+
+    /**
+     * Flattens a v2 {@code CreateDomainName} body onto the keys the shared custom-domain store is
+     * written with, after refusing what floci does not emulate.
+     */
+    private static Map<String, Object> toV1DomainRequest(Map<String, Object> request) {
+        // HTTP APIs require exactly one configuration, where the REST API takes none at all. It has
+        // to be an object: a scalar or a list there is still a body AWS would not have accepted.
+        if (!(request.get("domainNameConfigurations") instanceof List<?> configurations)
+                || configurations.size() != 1
+                || !(configurations.getFirst() instanceof Map<?, ?> configuration)) {
+            throw new AwsException("BadRequestException",
+                    "Invalid input. Expected one domain name configuration", 400);
+        }
+        if ("EDGE".equals(configuration.get("endpointType"))) {
+            throw new AwsException("BadRequestException", V2_EDGE_ENDPOINT_TYPE_MESSAGE, 400);
+        }
+        rejectUnemulatedDomainInputs(request, configuration);
+        Map<String, Object> v1Request = new HashMap<>();
+        v1Request.put("domainName", request.get("domainName"));
+        copyIfPresent(request, v1Request, "tags", "tags");
+        // An HTTP API domain is regional: API Gateway creates or keeps any other endpoint type it is
+        // given, PRIVATE or one it does not know, as REGIONAL (measured, eu-west-1, 2026-10-04). Its
+        // certificate is the regional one, which the v1 API reports as regionalCertificateArn.
+        copyIfPresent(configuration, v1Request, "certificateArn", "regionalCertificateArn");
+        copyIfPresent(configuration, v1Request, "certificateName", "regionalCertificateName");
+        v1Request.put("endpointType", "REGIONAL");
+        copyIfPresent(configuration, v1Request, "securityPolicy", "securityPolicy");
+        return v1Request;
+    }
+
+    /**
+     * Refuses the parts of a domain that floci does not emulate, rather than accepting them and
+     * answering with a domain that behaves differently from the one that was asked for.
+     */
+    private static void rejectUnemulatedDomainInputs(Map<String, Object> request, Map<?, ?> configuration) {
+        Object routingMode = request.get("routingMode");
+        if (routingMode != null && !"API_MAPPING_ONLY".equals(routingMode)) {
+            throw new AwsException("BadRequestException",
+                    "Only API_MAPPING_ONLY routing is supported", 400);
+        }
+        if (request.get("mutualTlsAuthentication") != null) {
+            throw new AwsException("BadRequestException",
+                    "Mutual TLS authentication is not supported", 400);
+        }
+        Object ipAddressType = configuration.get("ipAddressType");
+        if (ipAddressType != null && !"ipv4".equals(ipAddressType)) {
+            throw new AwsException("BadRequestException",
+                    "Only the ipv4 address type is supported", 400);
+        }
+        if (configuration.get("ownershipVerificationCertificateArn") != null) {
+            throw new AwsException("BadRequestException",
+                    "Ownership verification certificates are not supported", 400);
+        }
+    }
+
+    private static void copyIfPresent(Map<?, ?> source, Map<String, Object> target, String from, String to) {
+        Object value = source.get(from);
+        if (value != null) {
+            target.put(to, value);
+        }
+    }
+
+    /** A v2 API mapping: the base path mapping record, with the base path it is stored under. */
+    public record StoredMapping(String storedPath, BasePathMapping mapping) {
+
+        /** The id stored on the record, or for a record persisted before ids were stored, the derived one. */
+        public String apiMappingId() {
+            return mapping.getApiMappingId() != null
+                    ? mapping.getApiMappingId()
+                    : ApiGatewayService.apiMappingId(storedPath);
+        }
+    }
+
+    /** What a mapping routes to: an API, one of its stages, and the type of API it is routed as. */
+    private record MappingTarget(String apiId, String stage, String apiType) {}
+
+    /** The mappings of a domain, refused for an edge-optimized one as AWS refuses every v2 call on it. */
+    public List<StoredMapping> getApiMappings(String region, String domainName) {
+        requireRegionalDomain(getDomainName(region, domainName));
+        List<StoredMapping> mappings = new ArrayList<>();
+        basePathMappingsByStoredPath(region, domainName)
+                .forEach((storedPath, mapping) -> mappings.add(new StoredMapping(storedPath, mapping)));
+        return mappings;
+    }
+
+    /**
+     * Creates a v2 API mapping, stored as a base path mapping that remembers the type of API it
+     * routes to.
+     */
+    public StoredMapping createApiMapping(String region, String domainName, String apiMappingKey,
+                                          String apiId, String stage) {
+        return createApiMapping(region, domainName, apiMappingKey, apiId, stage, Set.of());
+    }
+
+    /**
+     * As above, with ids the new mapping must not be given. A caller that still tracks a mapping on
+     * another domain under one of them would otherwise hold two mappings it cannot tell apart; on
+     * AWS a new mapping never takes the id of another.
+     */
+    public StoredMapping createApiMapping(String region, String domainName, String apiMappingKey,
+                                          String apiId, String stage, Set<String> excludedIds) {
+        // A mapping to an API or stage that does not exist would route nowhere, so AWS refuses it
+        // rather than answering 201 with something unusable.
+        requireValidApiMappingKey(apiMappingKey, false);
+        MappingTarget target = requireMappingTarget(region, apiId, stage);
+        String basePath = canonicalBasePath(apiMappingKey);
+        synchronized (domainNameLock) {
+            requireMappingAllowed(getDomainName(region, domainName), basePath, target.apiType());
+            requireApiMappingKeyFree(region, domainName, basePath);
+
+            Map<String, Object> v1Request = new HashMap<>();
+            v1Request.put("restApiId", target.apiId());
+            v1Request.put("stage", target.stage());
+            v1Request.put("basePath", basePath);
+            return new StoredMapping(basePath,
+                    createBasePathMapping(region, domainName, v1Request, target.apiType(), excludedIds));
+        }
+    }
+
+    /**
+     * The v2 {@code UpdateApiMapping} from its request body: what the body leaves out keeps its value,
+     * as on AWS. The values it keeps are read under the lock the update takes, so two updates naming
+     * different fields of one mapping cannot write back each other's old values.
+     */
+    public StoredMapping updateApiMapping(String region, String domainName, String apiMappingId,
+                                          Map<String, Object> request) {
+        synchronized (domainNameLock) {
+            StoredMapping current = getApiMapping(region, domainName, apiMappingId);
+            String currentKey = canonicalBasePath(current.storedPath());
+            String apiMappingKey = request.containsKey("apiMappingKey")
+                    ? Objects.toString(request.get("apiMappingKey"), null)
+                    : ("(none)".equals(currentKey) ? null : currentKey);
+            String apiId = Objects.toString(request.get("apiId"), current.mapping().getRestApiId());
+            String stage = Objects.toString(request.get("stage"), current.mapping().getStage());
+            return updateApiMapping(region, domainName, apiMappingId, apiMappingKey, apiId, stage);
+        }
+    }
+
+    /**
+     * Points a v2 API mapping at a new key, API and stage, the v2 {@code UpdateApiMapping}. The id
+     * names the mapping rather than its key, so it stays with the record when the key changes, as on
+     * AWS.
+     */
+    public StoredMapping updateApiMapping(String region, String domainName, String apiMappingId,
+                                          String apiMappingKey, String apiId, String stage) {
+        requireValidApiMappingKey(apiMappingKey, true);
+        MappingTarget target = requireMappingTarget(region, apiId, stage);
+        String basePath = canonicalBasePath(apiMappingKey);
+        synchronized (domainNameLock) {
+            CustomDomain domain = getDomainName(region, domainName);
+            StoredMapping found = getApiMapping(region, domainName, apiMappingId);
+            requireMappingAllowed(domain, basePath, target.apiType());
+            requireProtocolTypesCompatible(region, domainName, target.apiType(), found.storedPath());
+            BasePathMapping mapping = found.mapping();
+            String storedPath = found.storedPath();
+            if (!basePath.equals(canonicalBasePath(storedPath))) {
+                requireApiMappingKeyFree(region, domainName, basePath);
+                // Pinned before the record leaves the path a legacy id was derived from.
+                mapping.setApiMappingId(found.apiMappingId());
+                basePathMappingStore.delete(mappingKey(region, domainName, storedPath));
+                mapping.setBasePath(basePath);
+                storedPath = basePath;
+            }
+            mapping.setRestApiId(target.apiId());
+            mapping.setStage(target.stage());
+            mapping.setApiType(target.apiType());
+            basePathMappingStore.put(mappingKey(region, domainName, storedPath), mapping);
+            return new StoredMapping(storedPath, mapping);
+        }
+    }
+
+    /**
+     * The API and stage a v2 API mapping points at. AWS takes a REST API here as well as an HTTP or
+     * WebSocket API, which is how a REST API gets a mapping with more than one level, and refuses an
+     * API or stage that does not exist rather than creating a mapping that routes nowhere. A v2 API
+     * answers first, as it did before REST APIs were accepted.
+     */
+    private MappingTarget requireMappingTarget(String region, String apiId, String stageName) {
+        String apiType = v2ApiType(region, apiId);
+        boolean restApi = apiType == null && restApiExists(region, apiId);
+        if (apiType == null && !restApi) {
+            throw new AwsException("BadRequestException", "Invalid API identifier specified: " + apiId, 400);
+        }
+        try {
+            if (restApi) {
+                getStage(region, apiId, stageName);
+            } else {
+                apiGatewayV2Service.getStage(region, apiId, stageName);
+            }
+        } catch (AwsException e) {
+            throw new AwsException("BadRequestException", "Invalid stage identifier specified", 400);
+        }
+        return new MappingTarget(apiId, stageName, restApi ? REST_API_TYPE : apiType);
+    }
+
+    private String v2ApiType(String region, String apiId) {
+        try {
+            return apiGatewayV2Service.getApi(region, apiId).getProtocolType();
+        } catch (AwsException notAV2Api) {
+            LOG.debugv("{0} is not an HTTP or WebSocket API in {1}: {2}", apiId, region, notAV2Api.getMessage());
+            return null;
+        }
+    }
+
+    private boolean restApiExists(String region, String apiId) {
+        try {
+            getRestApi(region, apiId);
+            return true;
+        } catch (AwsException notARestApi) {
+            LOG.debugv("{0} is not a REST API in {1}: {2}", apiId, region, notARestApi.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Refuses an API mapping key that API Gateway refuses, with its messages (measured, eu-west-1,
+     * 2026-10-04). No key or an empty one is the root mapping, and so is a key of whitespace only
+     * on a create; an update refuses that one.
+     */
+    private static void requireValidApiMappingKey(String apiMappingKey, boolean update) {
+        if (apiMappingKey == null || apiMappingKey.isEmpty()) {
+            return;
+        }
+        if (apiMappingKey.isBlank()) {
+            if (update) {
+                throw new AwsException("BadRequestException", MAPPING_KEY_SLASHES_MESSAGE, 400);
+            }
+            return;
+        }
+        if (apiMappingKey.length() > MAX_API_MAPPING_KEY_LENGTH) {
+            throw new AwsException("BadRequestException",
+                    "ApiMapping key length must be under " + MAX_API_MAPPING_KEY_LENGTH + " characters.", 400);
+        }
+        if (apiMappingKey.endsWith("/")) {
+            throw new AwsException("BadRequestException", "API mapping key should not end with a '/'.", 400);
+        }
+        if (apiMappingKey.startsWith("/") || apiMappingKey.contains("//")) {
+            throw new AwsException("BadRequestException", MAPPING_KEY_SLASHES_MESSAGE, 400);
+        }
+        if (!API_MAPPING_KEY.matcher(apiMappingKey).matches()) {
+            throw new AwsException("BadRequestException",
+                    "An API mapping key may contain only letters, numbers and one of $-_.+!*'(), characters.", 400);
+        }
+    }
+
+    /**
+     * The restrictions AWS puts on an API mapping's domain: only a regional domain is reachable
+     * through the v2 API, and an HTTP API or a key with more than one level needs a domain on the
+     * TLS 1.2 security policy.
+     */
+    private static void requireMappingAllowed(CustomDomain domain, String basePath, String apiType) {
+        requireRegionalDomain(domain);
+        boolean root = "(none)".equals(basePath);
+        if (!TLS_1_2.equals(securityPolicyOf(domain))) {
+            if ("HTTP".equals(apiType)) {
+                throw new AwsException("BadRequestException",
+                        "HTTP APIs can only be mapped to a regional custom domain name with the TLS 1.2 security policy",
+                        400);
+            }
+            if (!root && basePath.contains("/")) {
+                throw new AwsException("BadRequestException",
+                        "API mappings with multiple levels require a regional custom domain name with the TLS 1.2 "
+                                + "security policy", 400);
+            }
+        }
+    }
+
+    private static void requireRegionalDomain(CustomDomain domain) {
+        if ("EDGE".equals(domain.getEndpointConfigurationType())) {
+            throw new AwsException("BadRequestException", V2_EDGE_DOMAIN_MESSAGE, 400);
+        }
+    }
+
+    /**
+     * A domain whose mappings need TLS 1.2, an HTTP API or a key with more than one level, cannot be
+     * moved to another security policy: the mappings AWS accepted would no longer be allowed on it.
+     */
+    private void requireMappingsAllowSecurityPolicy(String region, String domainName, String securityPolicy) {
+        if (TLS_1_2.equals(securityPolicy == null ? TLS_1_2 : securityPolicy)) {
+            return;
+        }
+        for (Map.Entry<String, BasePathMapping> entry : basePathMappingsByStoredPath(region, domainName).entrySet()) {
+            String basePath = canonicalBasePath(entry.getKey());
+            if ("HTTP".equals(entry.getValue().getApiType())
+                    || (!"(none)".equals(basePath) && basePath.contains("/"))) {
+                throw new AwsException("BadRequestException", "Custom domain name " + domainName
+                        + " has HTTP API mappings or API mappings with multiple levels, which require the TLS 1.2 "
+                        + "security policy", 400);
+            }
+        }
+    }
+
+    /**
+     * AWS keeps WebSocket APIs off a custom domain name that an HTTP or REST API is mapped to, and the
+     * other way round. {@code ignoredStoredPath} is the mapping being changed, if any. A record
+     * persisted before mappings remembered their API type is not held against either.
+     */
+    private void requireProtocolTypesCompatible(String region, String domainName, String apiType,
+                                                String ignoredStoredPath) {
+        boolean webSocket = "WEBSOCKET".equals(apiType);
+        for (Map.Entry<String, BasePathMapping> entry : basePathMappingsByStoredPath(region, domainName).entrySet()) {
+            String otherType = entry.getValue().getApiType();
+            if (otherType == null || entry.getKey().equals(ignoredStoredPath)) {
+                continue;
+            }
+            if (webSocket != "WEBSOCKET".equals(otherType)) {
+                throw new AwsException("BadRequestException",
+                        "WebSocket APIs can't be mapped to the same custom domain name as an HTTP API or REST API",
+                        400);
+            }
+        }
+    }
+
+    private static String securityPolicyOf(CustomDomain domain) {
+        return domain.getSecurityPolicy() == null ? TLS_1_2 : domain.getSecurityPolicy();
+    }
+
+    /** Whichever spelling an earlier record was written under, "" and an omitted key are one key. */
+    private void requireApiMappingKeyFree(String region, String domainName, String basePath) {
+        boolean keyTaken = basePathMappingsByStoredPath(region, domainName).keySet().stream()
+                .anyMatch(existing -> canonicalBasePath(existing).equals(basePath));
+        if (keyTaken) {
+            throw new AwsException("ConflictException",
+                    "ApiMapping key already exists for this domain name", 409);
+        }
+    }
+
+    public StoredMapping getApiMapping(String region, String domainName, String apiMappingId) {
+        requireRegionalDomain(getDomainName(region, domainName));
+        return basePathMappingsByStoredPath(region, domainName).entrySet().stream()
+                .map(entry -> new StoredMapping(entry.getKey(), entry.getValue()))
+                .filter(stored -> stored.apiMappingId().equals(apiMappingId))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Unable to find ApiMapping with ID " + apiMappingId, 404));
+    }
+
+    /**
+     * The id a new mapping on {@code basePath} is given: the one derived from the path, so a mapping
+     * gets the id it always had, unless a mapping whose key changed since it was created still holds
+     * it, or the caller excludes it. Then a numbered variant, so no two mappings on a domain share one.
+     */
+    private String unusedApiMappingId(String region, String domainName, String basePath, Set<String> excludedIds) {
+        Set<String> taken = new HashSet<>(excludedIds);
+        basePathMappingsByStoredPath(region, domainName)
+                .forEach((storedPath, mapping) -> taken.add(new StoredMapping(storedPath, mapping).apiMappingId()));
+        String derived = apiMappingId(basePath);
+        String id = derived;
+        for (int n = 2; taken.contains(id); n++) {
+            id = derived + "-" + n;
+        }
+        return id;
+    }
+
+    public void deleteApiMapping(String region, String domainName, String apiMappingId) {
+        // Deleted by the path the selected record is stored under, so the record that answered the
+        // lookup is the record that goes.
+        StoredMapping found = getApiMapping(region, domainName, apiMappingId);
+        deleteBasePathMappingRecord(region, domainName, found.storedPath());
+    }
+
+    /**
+     * Derives a mapping id from the path the mapping is stored under. A new mapping is given this id
+     * and stores it, so the id outlives a later change of key; a record persisted before ids were
+     * stored is still read under it. The base path is encoded rather than hashed: two base paths
+     * sharing a hash would share an id, and a read or delete by that id would pick between them.
+     */
+    public static String apiMappingId(String storedPath) {
+        // Encoded from the key the record is stored under: not its canonical form, and not the
+        // record's own field, which BasePathMapping normalises on construction. State written
+        // before writes were canonicalised can sit under "" or "/" beside "(none)", and reading
+        // identity from anywhere but the key hands several records one id for a read or a delete
+        // to choose between. The prefix keeps an empty stored path from producing an empty id.
+        return "m" + HexFormat.of().formatHex(
+                (storedPath == null ? "" : storedPath).getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** The certificate a v2 domain configuration reports, see {@link #v2CertificateIsRegional}. */
+    public static String v2CertificateArn(CustomDomain domain) {
+        return v2CertificateIsRegional(domain) ? domain.getRegionalCertificateArn() : domain.getCertificateArn();
+    }
+
+    /** The certificate name a v2 domain configuration reports, see {@link #v2CertificateIsRegional}. */
+    public static String v2CertificateName(CustomDomain domain) {
+        return v2CertificateIsRegional(domain) ? domain.getRegionalCertificateName() : domain.getCertificateName();
+    }
+
+    /**
+     * The v1 model keeps an edge-optimized domain's certificate apart from a regional one's, and the
+     * v2 API reports whichever the domain uses. A regional domain the v2 API wrote before its
+     * certificate went to the regional fields still holds it in the edge-optimized ones, so those
+     * answer while the regional ones are empty.
+     */
+    private static boolean v2CertificateIsRegional(CustomDomain domain) {
+        return !"EDGE".equals(domain.getEndpointConfigurationType())
+                && (domain.getRegionalCertificateArn() != null || domain.getRegionalCertificateName() != null);
+    }
+
     // ──────────────────────────── Custom Domain Resolution ────────────────────────────
+
+    public record CustomDomainRoute(String accountId, String region, String domainName) {}
 
     /**
      * Resolves a custom domain by its regionalDomainName (e.g., "my-domain.regional.local").
      * Derives the domain name from the regionalDomainName and performs a key-based lookup.
      *
-     * @return the CustomDomain if found, or null if no domain matches
+     * @return the domain's routing scope if found, or null if no domain matches
      */
-    public CustomDomain findDomainByRegionalHostname(String regionalDomainName) {
+    public CustomDomainRoute findDomainByRegionalHostname(String regionalDomainName) {
         if (!regionalDomainName.endsWith(".regional.local")) {
             return null;
         }
@@ -2389,27 +3011,41 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     /**
-     * Resolves a custom domain by its actual domain name (e.g., "api.example.com").
-     * Domain names are globally unique across regions.
+     * Resolves data-plane ownership before the caller's account context is initialized.
+     * Management reads keep their account-scoped lookup.
      *
-     * @return the CustomDomain if found, or null if no domain matches
+     * @return the domain's routing scope if found, or null if no domain matches
      */
-    public CustomDomain findDomainByName(String domainName) {
-        List<CustomDomain> results = domainStore.scan(k -> k.endsWith("::" + domainName));
-        return results.isEmpty() ? null : results.get(0);
+    public CustomDomainRoute findDomainByName(String domainName) {
+        List<AccountAwareStorageBackend.AccountEntry<CustomDomain>> matches =
+                domainStore.scanAllAccountEntries(key -> key.endsWith("::" + domainName));
+        if (matches.size() > 1) {
+            throw new AwsException("ConflictException",
+                    "Custom domain '" + domainName + "' is ambiguous across accounts or regions", 409);
+        }
+        if (matches.isEmpty()) {
+            return null;
+        }
+        AccountAwareStorageBackend.AccountEntry<CustomDomain> entry = matches.getFirst();
+        int delimiter = entry.key().indexOf("::");
+        if (delimiter <= 0) {
+            throw new IllegalStateException("Invalid custom domain storage key: " + entry.key());
+        }
+        return new CustomDomainRoute(entry.accountId(), entry.key().substring(0, delimiter), domainName);
     }
 
     /**
      * Resolves the base path mapping for a given domain and request path.
      * Uses longest-prefix matching on the base path.
      *
-     * @param domainName the custom domain name
+     * @param domain the exact custom domain owner and region
      * @param requestPath the incoming request path (e.g., "/v1/items/123")
      * @return the matching BasePathMapping, or null if none matches
      */
-    public BasePathMapping resolveBasePathMapping(String domainName, String requestPath) {
-        // Get all mappings across all regions for this domain
-        List<BasePathMapping> allMappings = basePathMappingStore.scan(k -> k.contains("::" + domainName + "::"));
+    public BasePathMapping resolveBasePathMapping(CustomDomainRoute domain, String requestPath) {
+        String mappingPrefix = domainKey(domain.region(), domain.domainName()) + "::";
+        List<BasePathMapping> allMappings =
+                basePathMappingStore.scanForAccount(domain.accountId(), key -> key.startsWith(mappingPrefix));
 
         if (allMappings.isEmpty()) {
             return null;
@@ -2463,7 +3099,7 @@ public class ApiGatewayService implements ResourceProvider {
         if (patchOperations != null) {
             // Worked out before anything is set: the store hands back the live API, and a rejected
             // endpoint change must leave it as it was.
-            EndpointConfiguration endpointConfiguration = patchEndpointConfiguration(api, patchOperations);
+            EndpointConfiguration endpointConfiguration = patchEndpointConfiguration(api, patchOperations, region);
             for (Map<String, String> op : patchOperations) {
                 if (!"replace" .equals(op.get("op"))) continue;
                 String path = op.getOrDefault("path", "");
@@ -2490,11 +3126,13 @@ public class ApiGatewayService implements ResourceProvider {
      * and disassociate a VPC endpoint.
      */
     private static EndpointConfiguration patchEndpointConfiguration(RestApi api,
-                                                                    List<Map<String, String>> patchOperations) {
+                                                                    List<Map<String, String>> patchOperations,
+                                                                    String region) {
         EndpointConfiguration current = api.getEndpointConfiguration();
         // An API stored without one is REGIONAL, which is also what GetRestApi reports for it.
-        EndpointType type = current == null || current.getTypes().isEmpty()
+        EndpointType currentType = current == null || current.getTypes().isEmpty()
                 ? EndpointType.REGIONAL : current.getTypes().getFirst();
+        EndpointType type = currentType;
         List<String> vpcEndpointIds = new ArrayList<>(current == null ? List.of() : current.getVpcEndpointIds());
         boolean patched = false;
         for (Map<String, String> op : patchOperations) {
@@ -2522,6 +3160,9 @@ public class ApiGatewayService implements ResourceProvider {
                     patched = true;
                 }
             }
+        }
+        if (type != currentType) {
+            requireEndpointTypeAvailable(type.name(), region);
         }
         return patched ? endpointConfigurationOf(type, vpcEndpointIds) : null;
     }
@@ -3126,31 +3767,56 @@ public class ApiGatewayService implements ResourceProvider {
         if (openAPI.getPaths() != null) {
             for (Map.Entry<String, PathItem> entry : openAPI.getPaths().entrySet()) {
                 PathItem pathItem = entry.getValue();
+                for (Map.Entry<PathItem.HttpMethod, Operation> operation : pathItem.readOperationsMap().entrySet()) {
+                    addImportedIntegrationWarning(entry.getKey(), operation.getKey().name(),
+                            operation.getValue(), warnings);
+                }
                 Object anyMethod = pathItem.getExtensions() != null
                         ? pathItem.getExtensions().get("x-amazon-apigateway-any-method") : null;
                 if (anyMethod != null) {
                     OpenAPIDeserializer.ParseResult anyResult = new OpenAPIDeserializer.ParseResult();
-                    parseAnyMethodOperation(entry.getKey(), anyMethod, anyResult);
+                    Operation operation = parseAnyMethodOperation(entry.getKey(), anyMethod, anyResult);
                     warnings.addAll(anyResult.getMessages());
+                    addImportedIntegrationWarning(entry.getKey(), "ANY", operation, warnings);
                 }
             }
         }
         if (failOnWarnings && !warnings.isEmpty()) {
-            throw new AwsException("BadRequestException", String.join("; ", warnings), 400);
+            throw new AwsException("BadRequestException",
+                    "Warnings found during import:\n\t" + String.join("\n\t", warnings), 400);
         }
         return new ParsedOpenApi(openAPI, List.copyOf(warnings));
+    }
+
+    private static void addImportedIntegrationWarning(String path, String httpMethod,
+                                                       Operation operation, List<String> warnings) {
+        Object extension = operation.getExtensions() == null
+                ? null : operation.getExtensions().get("x-amazon-apigateway-integration");
+        if (extension instanceof Map<?, ?> integration
+                && integration.get("type") instanceof String type
+                && ApiGatewayIntegrationTypes.canonical(type) == null) {
+            warnings.add("Unknown integration type '" + type + "' for '" + httpMethod + " " + path + "'. Ignoring.");
+        }
     }
 
     private void validateImportedAuthorizers(OpenAPI openAPI) {
         if (openAPI.getComponents() == null || openAPI.getComponents().getSecuritySchemes() == null) {
             return;
         }
-        for (var entry : openAPI.getComponents().getSecuritySchemes().entrySet()) {
+        Set<String> referencedSchemes = referencedSecuritySchemes(openAPI);
+        for (Map.Entry<String, SecurityScheme> entry : openAPI.getComponents().getSecuritySchemes().entrySet()) {
             String schemeName = entry.getKey();
             SecurityScheme scheme = entry.getValue();
-            importedAuthorizationType(scheme, schemeName);
+            String authorizationType = importedAuthorizationType(scheme, schemeName);
             Map<String, Object> authDef = importedAuthorizerDefinition(scheme, schemeName);
             if (authDef == null) {
+                if (referencedSchemes.contains(schemeName)
+                        && ("custom".equalsIgnoreCase(authorizationType)
+                        || "cognito_user_pools".equalsIgnoreCase(authorizationType))) {
+                    throw new AwsException("BadRequestException",
+                            "Missing authorizer definition for security scheme " + schemeName
+                                    + ". Export with extensions=authorizers or extensions=apigateway before importing.", 400);
+                }
                 continue;
             }
             String type = importedAuthorizerType(authDef, schemeName);
@@ -3166,6 +3832,30 @@ public class ApiGatewayService implements ResourceProvider {
                         400);
             }
         }
+    }
+
+    private Set<String> referencedSecuritySchemes(OpenAPI openAPI) {
+        Set<String> schemes = new HashSet<>();
+        if (openAPI.getPaths() == null) {
+            return schemes;
+        }
+        for (Map.Entry<String, PathItem> entry : openAPI.getPaths().entrySet()) {
+            PathItem path = entry.getValue();
+            List<Operation> operations = new ArrayList<>(path.readOperations());
+            Object anyMethod = path.getExtensions() == null
+                    ? null : path.getExtensions().get("x-amazon-apigateway-any-method");
+            if (anyMethod != null) {
+                operations.add(parseAnyMethodOperation(entry.getKey(), anyMethod));
+            }
+            for (Operation operation : operations) {
+                List<SecurityRequirement> requirements = operation.getSecurity() != null
+                        ? operation.getSecurity() : openAPI.getSecurity();
+                if (requirements != null) {
+                    requirements.forEach(requirement -> schemes.addAll(requirement.keySet()));
+                }
+            }
+        }
+        return schemes;
     }
 
     @SuppressWarnings("unchecked")
@@ -3349,6 +4039,16 @@ public class ApiGatewayService implements ResourceProvider {
         String defaultValidatorId = null;
         Map<String, Object> topExtensions = openAPI.getExtensions();
         if (topExtensions != null) {
+            RestApi api = getRestApi(region, apiId);
+            Object binaryTypes = topExtensions.get("x-amazon-apigateway-binary-media-types");
+            if (binaryTypes instanceof List<?> types) {
+                api.setBinaryMediaTypes(types.stream().filter(String.class::isInstance).map(String.class::cast).toList());
+            }
+            Object policy = topExtensions.get("x-amazon-apigateway-policy");
+            if (policy != null) {
+                api.setPolicy(JSON.valueToTree(policy).toString());
+            }
+            apiStore.put(apiKey(region, apiId), api);
             Map<String, Object> validators = (Map<String, Object>) topExtensions
                     .get("x-amazon-apigateway-request-validators");
             if (validators != null) {
@@ -3384,6 +4084,7 @@ public class ApiGatewayService implements ResourceProvider {
         // Lambda authorizer land as authorizationType=NONE and are silently open at runtime.
         Map<String, String> schemeToAuthorizerId = new HashMap<>();
         Map<String, String> schemeToAuthType = new HashMap<>();
+        Set<String> apiKeySchemes = new HashSet<>();
         Map<String, String> authorizerNameToId = new HashMap<>();
         for (Authorizer authorizer : getAuthorizers(region, apiId)) {
             if (authorizer.getName() != null) {
@@ -3401,6 +4102,12 @@ public class ApiGatewayService implements ResourceProvider {
                 SecurityScheme scheme = schemeEntry.getValue();
                 String authtype = importedAuthorizationType(scheme, schemeName);
                 Map<String, Object> authDef = importedAuthorizerDefinition(scheme, schemeName);
+                if (authDef == null && scheme != null
+                        && SecurityScheme.Type.APIKEY.equals(scheme.getType())
+                        && scheme.getIn() != null && "header".equalsIgnoreCase(scheme.getIn().toString())
+                        && scheme.getName() != null && "x-api-key".equalsIgnoreCase(scheme.getName())) {
+                    apiKeySchemes.add(schemeName);
+                }
                 if (authDef != null) {
                     String t = importedAuthorizerType(authDef, schemeName); // token | request | cognito_user_pools
                     Map<String, Object> req = new HashMap<>();
@@ -3495,7 +4202,8 @@ public class ApiGatewayService implements ResourceProvider {
                     String httpMethod = opEntry.getKey().name().toUpperCase();
                     try {
                         applyOperation(region, apiId, resourceId, httpMethod, opEntry.getValue(), openAPI,
-                                schemeToAuthorizerId, schemeToAuthType, validatorNameToId, defaultValidatorId);
+                                schemeToAuthorizerId, schemeToAuthType, apiKeySchemes,
+                                validatorNameToId, defaultValidatorId);
                     } catch (AwsException e) {
                         if (PARAMETER_NAME_ERROR.equals(e.getMessage())) {
                             throw importParameterNameFailure(httpMethod, path, e);
@@ -3516,7 +4224,8 @@ public class ApiGatewayService implements ResourceProvider {
                     Operation anyOperation = parseAnyMethodOperation(path, anyMethodExt);
                     try {
                         applyOperation(region, apiId, resourceId, "ANY", anyOperation, openAPI,
-                                schemeToAuthorizerId, schemeToAuthType, validatorNameToId, defaultValidatorId);
+                                schemeToAuthorizerId, schemeToAuthType, apiKeySchemes,
+                                validatorNameToId, defaultValidatorId);
                     } catch (AwsException e) {
                         if (PARAMETER_NAME_ERROR.equals(e.getMessage())) {
                             throw importParameterNameFailure("ANY", path, e);
@@ -3577,7 +4286,8 @@ public class ApiGatewayService implements ResourceProvider {
 
     private void applyOperation(String region, String apiId, String resourceId, String httpMethod,
             Operation operation, OpenAPI openAPI, Map<String, String> schemeToAuthorizerId,
-            Map<String, String> schemeToAuthType, Map<String, String> validatorNameToId,
+            Map<String, String> schemeToAuthType, Set<String> apiKeySchemes,
+            Map<String, String> validatorNameToId,
             String defaultValidatorId) {
         // Create the method
         Map<String, Object> methodRequest = new HashMap<>();
@@ -3585,18 +4295,22 @@ public class ApiGatewayService implements ResourceProvider {
         // to a method authorizationType (CUSTOM/AWS_IAM/COGNITO_USER_POOLS) + authorizerId.
         List<SecurityRequirement> secReqs = operation.getSecurity() != null
                 ? operation.getSecurity() : openAPI.getSecurity();
+        boolean apiKeyRequired = secReqs != null && !secReqs.isEmpty()
+                && secReqs.stream().anyMatch(requirement -> requirement.keySet().stream()
+                        .anyMatch(apiKeySchemes::contains));
         String authType = "NONE";
         String authorizerId = null;
         List<String> authorizationScopes = List.of();
         if (secReqs != null) {
-            // AWS resolves the OR-list of security requirements to the first declared
-            // authorizer scheme (a method has exactly one authorizer), so stop at the first match.
-            resolveAuth:
             for (SecurityRequirement secReq : secReqs) {
                 for (String schemeName : secReq.keySet()) {
                     String mapped = schemeToAuthType.get(schemeName);
                     if (mapped == null || "NONE".equals(mapped)) {
                         continue;
+                    }
+                    if (!"NONE".equals(authType)) {
+                        throw new AwsException("BadRequestException",
+                                "Only one Authorizer or IAM authorization is allowed per operation", 400);
                     }
                     authType = mapped;
                     authorizerId = schemeToAuthorizerId.get(schemeName);
@@ -3604,11 +4318,11 @@ public class ApiGatewayService implements ResourceProvider {
                     if (requestedScopes != null) {
                         authorizationScopes = requestedScopes;
                     }
-                    break resolveAuth;
                 }
             }
         }
         methodRequest.put("authorizationType", authType);
+        methodRequest.put("apiKeyRequired", apiKeyRequired);
         if (authorizerId != null) {
             methodRequest.put("authorizerId", authorizerId);
         }
@@ -3691,6 +4405,19 @@ public class ApiGatewayService implements ResourceProvider {
 
         if (integrationExt != null) {
             applyIntegration(region, apiId, resourceId, httpMethod, integrationExt);
+        }
+        if (operation.getResponses() != null) {
+            operation.getResponses().forEach((status, response) -> {
+                if (!status.matches("[1-5][0-9]{2}")) {
+                    return;
+                }
+                Map<String, Boolean> headers = new HashMap<>();
+                if (response.getHeaders() != null) {
+                    response.getHeaders().forEach((name, header) ->
+                            headers.put("method.response.header." + name, Boolean.TRUE.equals(header.getRequired())));
+                }
+                putMethodResponse(region, apiId, resourceId, httpMethod, status, Map.of("responseParameters", headers));
+            });
         }
     }
 
@@ -3777,10 +4504,18 @@ public class ApiGatewayService implements ResourceProvider {
     private void applyIntegration(String region, String apiId, String resourceId,
                                   String httpMethod, Map<String, Object> integrationExt) {
         Map<String, Object> integrationRequest = new HashMap<>();
-        integrationRequest.put("type", integrationExt.get("type"));
+        Object integrationType = integrationExt.get("type");
+        if (integrationType instanceof String type) {
+            integrationType = ApiGatewayIntegrationTypes.canonical(type);
+            if (integrationType == null) {
+                return;
+            }
+        }
+        integrationRequest.put("type", integrationType);
         integrationRequest.put("httpMethod", integrationExt.get("httpMethod"));
         integrationRequest.put("uri", integrationExt.get("uri"));
-        integrationRequest.put("passthroughBehavior", integrationExt.get("passthroughBehavior"));
+        Object passthrough = integrationExt.get("passthroughBehavior");
+        integrationRequest.put("passthroughBehavior", passthrough instanceof String behavior ? behavior.toUpperCase(Locale.ROOT) : passthrough);
         for (String field : List.of("contentHandling", "timeoutInMillis", "connectionType",
                 "connectionId", "credentials", "cacheNamespace", "cacheKeyParameters", "tlsConfig",
                 "responseTransferMode")) {
@@ -3811,6 +4546,7 @@ public class ApiGatewayService implements ResourceProvider {
                 irRequest.put("selectionPattern", pattern);
                 irRequest.put("responseParameters", respDef.get("responseParameters"));
                 irRequest.put("responseTemplates", respDef.get("responseTemplates"));
+                irRequest.put("contentHandling", respDef.get("contentHandling"));
 
                 putIntegrationResponse(region, apiId, resourceId, httpMethod, statusCode, irRequest);
 

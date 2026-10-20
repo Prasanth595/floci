@@ -194,3 +194,8 @@ aws configservice delete-config-rule --config-rule-name s3-bucket-versioning
       data is aggregated: configuration aggregators are not emulated.
       `DeleteAggregationAuthorization` on an authorization that does not exist succeeds,
       because the Config API models no "not found" error for that operation.
+    - `TagResource`, `UntagResource` and `ListTagsForResource` answer
+      `ResourceNotFoundException` for a config rule, conformance pack or aggregation
+      authorization ARN that does not name an existing resource in the caller's account and
+      region. ARNs of resource kinds Floci does not model (configuration aggregators, stored
+      queries, organization rules and packs, recorders) are accepted without a check.

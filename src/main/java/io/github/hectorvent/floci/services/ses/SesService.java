@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.ses.address.SesAddressLength;
+import io.github.hectorvent.floci.services.ses.address.SesAddressSyntax;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
@@ -47,8 +49,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 /**
  * What is left of the original single SES service after the store-based domain split and the
@@ -209,6 +213,10 @@ public class SesService {
                 "tenant", tenantService);
     }
 
+    private String callerAccountId() {
+        return regionResolver != null ? regionResolver.getAccountId() : defaultAccountId;
+    }
+
     /**
      * v2 CreateEmailIdentity. The identity domain builds and persists the complete record in one
      * write; only the configuration-set existence check is cross-domain, so it is passed in as the
@@ -226,7 +234,7 @@ public class SesService {
         if (identityValue == null || identityValue.isBlank()) {
             return;
         }
-        String accountId = regionResolver != null ? regionResolver.getAccountId() : defaultAccountId;
+        String accountId = callerAccountId();
         tenantService.deleteBackingResource(SesTenantService.RESOURCE_TYPE_IDENTITY, identityValue,
                 region, () -> certificateService.deleteIdentityGuarded(identityValue, accountId, region,
                         () -> doDeleteIdentity(identityValue, region)));
@@ -242,15 +250,39 @@ public class SesService {
         LOG.infov("Deleted identity: {0}", identityValue);
     }
 
+    /**
+     * The SES send operations: v1 {@code SendEmail}, {@code SendRawEmail} and
+     * {@code SendTemplatedEmail}, and v2 {@code SendEmail}. The Source, the return path and, on a raw
+     * send, every From mailbox the send reads, the Sender and the Return-Path header must be verified
+     * identities, the address itself, its domain or a parent domain, as on AWS. An address that a
+     * sending-authorization ARN puts under another account's identity is not checked.
+     */
     public String sendEmail(SendEmailRequest request) {
+        return sendEmail(request, true);
+    }
+
+    /**
+     * A message another service sends to its users, such as a Cognito verification code or
+     * invitation. Its sender is not checked against the account's identities: Cognito's default
+     * sender, {@code no-reply@verificationemail.com}, belongs to an SES account Cognito owns, and a
+     * pool's {@code EmailConfiguration} sender is used only once Cognito has found it verified.
+     */
+    public String sendServiceEmail(SendEmailRequest request) {
+        return sendEmail(request, false);
+    }
+
+    private String sendEmail(SendEmailRequest request, boolean requireVerifiedSender) {
         if (request.content() instanceof EmailContent.Raw raw) {
-            return sendRawEmail(request, raw);
+            return sendRawEmail(request, raw, requireVerifiedSender);
         }
         if (request.content() instanceof EmailContent.InlineTemplate inline) {
             requireInlineTemplateContent(inline.subject(), inline.textPart(), inline.htmlPart());
         }
-        // AWS reports an unknown configuration set, then an over-long address, and only then a
-        // missing stored template (probe-confirmed), so the content is resolved after these checks.
+        // After a missing sender, AWS reports a malformed address ahead of the destination and
+        // configuration-set checks, then an over-long address, and only then a missing stored
+        // template (probe-confirmed), so the content is resolved after these checks.
+        requireSource(request);
+        SesAddressSyntax.requireEnvelope(request);
         String effectiveConfigSet = validateEnvelope(request);
         SesAddressLength.requireEnvelope(request);
         EmailContent.Simple content = switch (request.content()) {
@@ -260,7 +292,78 @@ public class SesService {
             case EmailContent.InlineTemplate inline -> SesTemplateService.render(inline);
             case EmailContent.Raw raw -> throw new IllegalStateException("Raw content is sent above");
         };
+        if (requireVerifiedSender) {
+            requireVerifiedSenders(List.of(
+                    new SendingAddress(request.source(), request.sourceArn()),
+                    new SendingAddress(request.returnPath(), request.returnPathArn())), request.region());
+        }
         return sendSimpleEmail(request.toBuilder().content(content).build(), content, effectiveConfigSet);
+    }
+
+    /**
+     * An address a send uses as a sender, and the sending-authorization ARN of the identity that
+     * covers it, when the request names one.
+     */
+    private record SendingAddress(String address, String identityArn) {
+    }
+
+    // "The message must be sent from a verified email address or domain" (API_SendEmail), and the
+    // error "could apply to the "From", "Source", "Sender", or "Return-Path" address" (developer
+    // guide, Email sending errors). It runs after the request's own validation so that
+    // probe-confirmed order is unchanged; where AWS places this check among those errors has not
+    // been probed.
+    private void requireVerifiedSenders(List<SendingAddress> senders, String region) {
+        String accountId = callerAccountId();
+        // A blank address is not used, and neither is the null reverse-path "<>".
+        List<String> unverified = senders.stream()
+                .filter(sender -> sender.address() != null)
+                .filter(sender -> !isAnotherAccountsIdentity(sender.identityArn(), accountId))
+                .map(sender -> extractEmailAddress(sender.address()))
+                .filter(address -> !address.isEmpty())
+                .filter(address -> !identityService.isVerifiedSender(address, region))
+                .distinct()
+                .toList();
+        if (!unverified.isEmpty()) {
+            throw new AwsException("MessageRejected",
+                    "Email address is not verified. The following identities failed the check in region "
+                            + region.toUpperCase(Locale.ROOT) + ": " + String.join(", ", unverified), 400);
+        }
+    }
+
+    // Sending authorization: an ARN naming another account's identity puts the address under that
+    // account's identity and policy. Floci evaluates neither, so it lets the delegate through. An
+    // ARN of the caller's own account, or one that names no SES identity, changes nothing.
+    private static boolean isAnotherAccountsIdentity(String identityArn, String accountId) {
+        return AwsArnUtils.resourceIfArnFor(identityArn, "ses")
+                .filter(resource -> resource.startsWith("identity/"))
+                .isPresent()
+                && AwsArnUtils.isForeignAccount(AwsArnUtils.parse(identityArn), accountId);
+    }
+
+    // A raw send's senders. The From header counts wherever the send reads it: always on v1, and on
+    // v2 only in place of a missing FromEmailAddress (a v2 send with one accepts any From header,
+    // probe-confirmed). An ARN passed as a parameter wins over its X-SES-*-ARN header, and the
+    // source ARN also covers the From and return-path addresses that have no ARN of their own ("If
+    // you only specify the SourceArn, Amazon SES sets the "From" address and the "Return Path"
+    // addresses to the identity that you specified in SourceArn"). AWS names no ARN for the Sender.
+    // Whether AWS still checks a Return-Path header that the request's return path overrides has
+    // not been probed; every address present is checked.
+    private static List<SendingAddress> rawSendingAddresses(SendEmailRequest request, EmailContent.Raw raw,
+                                                            SmtpRelay.RawMessageHeaders headers) {
+        String sourceArn = firstNonBlank(request.sourceArn(), headers.sourceArn());
+        String fromArn = firstNonBlank(request.fromArn(), headers.fromArn(), sourceArn);
+        String returnPathArn = firstNonBlank(request.returnPathArn(), headers.returnPathArn(), sourceArn);
+        List<SendingAddress> senders = new ArrayList<>();
+        senders.add(new SendingAddress(request.source(), sourceArn));
+        if (raw.checksFromHeader(request.hasSource())) {
+            for (String from : headers.fromAddresses()) {
+                senders.add(new SendingAddress(from, fromArn));
+            }
+        }
+        senders.add(new SendingAddress(headers.sender(), null));
+        senders.add(new SendingAddress(request.returnPath(), returnPathArn));
+        senders.add(new SendingAddress(headers.returnPath(), returnPathArn));
+        return senders;
     }
 
     private static EmailContent.Simple renderInlineTemplate(EmailContent.InlineTemplate template) {
@@ -268,11 +371,14 @@ public class SesService {
         return SesTemplateService.render(template);
     }
 
-    private String validateEnvelope(SendEmailRequest request) {
-        String source = request.source();
-        if (source == null || source.isBlank()) {
+    private static void requireSource(SendEmailRequest request) {
+        if (request.source() == null || request.source().isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
+    }
+
+    private String validateEnvelope(SendEmailRequest request) {
+        String source = request.source();
         if (!request.hasRecipients()) {
             throw new AwsException("InvalidParameterValue", "At least one destination address is required.", 400);
         }
@@ -414,20 +520,18 @@ public class SesService {
         return List.copyOf(out);
     }
 
-    private String sendRawEmail(SendEmailRequest request, EmailContent.Raw raw) {
+    private String sendRawEmail(SendEmailRequest request, EmailContent.Raw raw, boolean requireVerifiedSender) {
         String source = request.source();
         String region = request.region();
-        List<String> destinations = request.recipients();
         if (raw.data() == null || raw.data().isBlank()) {
             throw new AwsException("InvalidParameterValue", "RawMessage.Data is required.", 400);
         }
-        boolean hasExplicitDestinations = destinations != null && !destinations.isEmpty();
-        boolean sourceOmitted = source == null || source.isBlank();
         // The MIME headers are always parsed: X-SES-CONFIGURATION-SET can name the configuration
         // set that decides whether events are published at all, so the configuration set cannot be
         // resolved before the message has been read.
         SmtpRelay.ParsedRawMessage parsed = SmtpRelay.parseRawMessage(raw.data());
         SmtpRelay.RawMessageHeaders headers = parsed.headers();
+        SesAddressSyntax.requireRaw(request, raw, parsed.message());
         // AWS accepts the configuration set either as a request field or as the
         // X-SES-CONFIGURATION-SET header on the message itself; the request field wins.
         String requestedConfigSet = firstNonBlank(request.configurationSetName(), headers.configurationSet());
@@ -439,7 +543,7 @@ public class SesService {
         List<MessageTag> effectiveTags = (request.emailTags() == null || request.emailTags().isEmpty())
                 ? headers.messageTags()
                 : request.emailTags();
-        String effectiveSource = sourceOmitted && !headers.from().isBlank()
+        String effectiveSource = !request.hasSource() && !headers.from().isBlank()
                 ? headers.from()
                 : source;
         if (effectiveSource == null || effectiveSource.isBlank()) {
@@ -449,21 +553,24 @@ public class SesService {
             // both with this message.
             throw new AwsException("InvalidParameterValue", "Missing required header 'From'.", 400);
         }
-        SesAddressLength.requireRaw(request, parsed.message());
         // FromEmailAddress was omitted, so the configuration set couldn't be resolved from the
         // sender until the MIME "From" was parsed. Re-resolve from the effective sender now so an
         // email identity's default configuration set still applies to a Raw send without an
         // explicit FromEmailAddress.
-        if (sourceOmitted && (requestedConfigSet == null || requestedConfigSet.isBlank())) {
+        if (!request.hasSource() && (requestedConfigSet == null || requestedConfigSet.isBlank())) {
             effectiveConfigSet = resolveDefaultConfigurationSet(requestedConfigSet, effectiveSource, region);
             configSetService.validateForSending(effectiveConfigSet, region);
         }
-        List<String> effectiveDestinations = hasExplicitDestinations
-                ? destinations
+        List<String> effectiveDestinations = request.hasRecipients()
+                ? request.recipients()
                 : SendEmailRequest.recipients(headers.to(), headers.cc(), headers.bcc());
         if (effectiveDestinations.isEmpty()) {
-            throw new AwsException("InvalidParameterValue",
-                    "At least one destination address is required.", 400);
+            throw new AwsException("InvalidParameterValue", "Missing required header 'To'.", 400);
+        }
+        SesAddressSyntax.requireFromHeaderAt(request, raw, parsed.message());
+        SesAddressLength.requireRaw(request, raw, parsed.message());
+        if (requireVerifiedSender) {
+            requireVerifiedSenders(rawSendingAddresses(request, raw, headers), region);
         }
         // Resolve suppression before recording the message so a bad ListManagementOptions (e.g. an
         // unknown contact list) fails the whole send without leaving an orphaned SentEmail record.
@@ -566,7 +673,7 @@ public class SesService {
         Instant timestamp = Instant.now();
         // Report the caller's account (resolved per request) in the event payload and source ARN,
         // falling back to the default account outside a request context (e.g. unit tests).
-        String sendingAccountId = regionResolver != null ? regionResolver.getAccountId() : defaultAccountId;
+        String sendingAccountId = callerAccountId();
         String sourceArn = (source == null || source.isBlank())
                 ? null
                 : AwsArnUtils.Arn.of("ses", region, sendingAccountId,
@@ -588,10 +695,15 @@ public class SesService {
             }
             IdentityNotificationTarget target = identityTargets.get(event.eventType());
             if (target != null) {
-                eventPublisher.publishIdentityNotification(target.topicArn(), target.includeHeaders(),
-                        event, messageId, source, sourceArn, sendingAccountId, publishedSubject,
-                        toAddresses, ccAddresses, bccAddresses, envelope, publishedHeaders,
-                        timestamp, region);
+                String identityArn = AwsArnUtils.Arn.of("ses", region, sendingAccountId,
+                        "identity/" + target.identity()).toString();
+                boolean allowed = eventPublisher.publishIdentityNotification(target.topicArn(), identityArn,
+                        target.includeHeaders(), event, messageId, source, sourceArn, sendingAccountId,
+                        publishedSubject, toAddresses, ccAddresses, bccAddresses, envelope,
+                        publishedHeaders, timestamp, region);
+                if (!allowed) {
+                    identityService.dropRefusedNotificationTopic(target.identity(), target.topicArn(), region);
+                }
             }
         }
     }
@@ -633,7 +745,7 @@ public class SesService {
             boolean includeHeaders = Boolean.TRUE.equals(
                     owner.getHeadersInNotificationsEnabled().get(type));
             targets.put(type.toUpperCase(Locale.ROOT),
-                    new IdentityNotificationTarget(topic, includeHeaders));
+                    new IdentityNotificationTarget(owner.getIdentity(), topic, includeHeaders));
         }
         return targets;
     }
@@ -646,7 +758,8 @@ public class SesService {
         return topic != null && !topic.isBlank() ? topic : null;
     }
 
-    private record IdentityNotificationTarget(String topicArn, boolean includeHeaders) {}
+    /** A notification topic and the identity that names it, the sender's own or its domain's. */
+    private record IdentityNotificationTarget(String identity, String topicArn, boolean includeHeaders) {}
 
     // Package-private: the metric aggregation normalizes a stored Source the same way the
     // send path does, so "Name <addr>" still matches an EMAIL_IDENTITY dimension.
@@ -1059,16 +1172,24 @@ public class SesService {
 
     /**
      * The raw-content variant of the tenant send gate: when {@code FromEmailAddress} is omitted,
-     * the effective sender comes from the MIME {@code From} header — the same derivation
-     * {@code sendRawEmail} applies — so the gate must resolve it the same way before checking.
+     * the effective sender comes from the MIME {@code From} header, the same derivation
+     * {@code sendRawEmail} applies, so the gate must resolve it the same way before checking.
+     * {@code hasDestination} says whether the request named any recipient; when it did not and the
+     * MIME To, Cc and Bcc headers are empty too, only the tenant's existence is checked.
      */
     public void checkTenantRawSendAccess(String tenantName, String fromEmailAddress,
-                                         String rawMessage, String configurationSetName,
-                                         String accountId, String region) {
+                                         String rawMessage, boolean hasDestination,
+                                         String configurationSetName, String accountId, String region) {
         if (tenantName == null) {
             return;
         }
         SmtpRelay.RawMessageHeaders headers = SmtpRelay.parseRawHeaders(rawMessage);
+        // AWS checks that the tenant exists, then reports a message with no recipients anywhere
+        // ahead of the association gate (probe-confirmed), so that error is left to sendRawEmail.
+        if (!hasDestination && SendEmailRequest.recipients(headers.to(), headers.cc(), headers.bcc()).isEmpty()) {
+            tenantService.tenantForSending(tenantName, region, accountId);
+            return;
+        }
         String effectiveSource = fromEmailAddress;
         if (effectiveSource == null || effectiveSource.isBlank()) {
             effectiveSource = headers.from().isBlank() ? null : headers.from();
@@ -1253,7 +1374,7 @@ public class SesService {
      * mismatched or the resource doesn't exist anywhere.
      */
     private void requireCallerAccount(ResourceRef ref) {
-        String callerAccountId = regionResolver != null ? regionResolver.getAccountId() : defaultAccountId;
+        String callerAccountId = callerAccountId();
         if (!ref.account().equals(callerAccountId)) {
             throw new AwsException("BadRequestException",
                     "Operations on a resource created in a different account is not allowed", 400);
@@ -1561,9 +1682,11 @@ public class SesService {
             }
         }
 
+        boolean requestHasRecipient = request.entries().stream().anyMatch(SesService::hasNonNullRecipient);
         List<BulkEmailEntryResult> results = new ArrayList<>(request.entries().size());
         for (BulkEmailEntry entry : request.entries()) {
             try {
+                SesAddressSyntax.requireBulkDestination(entry, request.replyToAddresses(), requestHasRecipient);
                 JsonNode merged = mergeTemplateData(template.templateData(), entry.replacementTemplateData());
                 List<MessageTag> mergedTags = mergeEmailTags(request.defaultEmailTags(), entry.replacementEmailTags());
                 List<MessageHeader> mergedHeaders = mergeHeaders(template.headers(), entry.replacementHeaders());
@@ -1584,9 +1707,10 @@ public class SesService {
                         .region(request.region())
                         .content(rendered)
                         .build();
-                // SesAddressLength is not applied: AWS rejects an over-long bulk sender as "Invalid
-                // email address", and an over-long destination did not fail the length check ahead
-                // of sender verification (probe-confirmed; the verified-sender case is unprobed).
+                // SesAddressLength is not applied to entries: an over-long bulk destination did not
+                // fail the length check ahead of sender verification (probe-confirmed; the
+                // verified-sender case is unprobed). The bulk sender and return path are checked
+                // by requireBulkAddress.
                 String messageId = sendSimpleEmail(entryRequest, rendered, validateEnvelope(entryRequest));
                 results.add(BulkEmailEntryResult.success(messageId));
             } catch (AwsException e) {
@@ -1597,6 +1721,13 @@ public class SesService {
             }
         }
         return results;
+    }
+
+    private static boolean hasNonNullRecipient(BulkEmailEntry entry) {
+        return Stream.of(entry.toAddresses(), entry.ccAddresses(), entry.bccAddresses())
+                .filter(Objects::nonNull)
+                .flatMap(List::stream)
+                .anyMatch(Objects::nonNull);
     }
 
     private static List<String> headerText(List<MessageHeader> headers) {

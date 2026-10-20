@@ -55,6 +55,24 @@ public class BackupVault {
     @JsonProperty("MaxRetentionDays")
     private Long maxRetentionDays;
 
+    // Floci-internal, not an AWS member: identifies this incarnation of the vault name, so
+    // sub-resources and in-flight jobs bind to the vault rather than to a name that a
+    // delete-and-recreate can hand to a different vault within the same second. Persisted,
+    // but BackupController strips it from every response. Null on vaults stored before it
+    // existed; BackupService falls back to the creation date for those.
+    @JsonProperty(VAULT_ID_FIELD)
+    private String vaultId;
+
+    public static final String VAULT_ID_FIELD = "FlociVaultId";
+
+    // Stored only on logically air-gapped vaults; a standard vault leaves VaultType null and
+    // BackupController reports it as BACKUP_VAULT. VaultState is set on air-gapped vaults only.
+    @JsonProperty("VaultType")
+    private String vaultType;
+
+    @JsonProperty("VaultState")
+    private String vaultState;
+
     public BackupVault() {}
 
     public String getBackupVaultName() { return backupVaultName; }
@@ -62,6 +80,9 @@ public class BackupVault {
 
     public String getBackupVaultArn() { return backupVaultArn; }
     public void setBackupVaultArn(String backupVaultArn) { this.backupVaultArn = backupVaultArn; }
+
+    public String getVaultId() { return vaultId; }
+    public void setVaultId(String vaultId) { this.vaultId = vaultId; }
 
     public String getEncryptionKeyArn() { return encryptionKeyArn; }
     public void setEncryptionKeyArn(String encryptionKeyArn) { this.encryptionKeyArn = encryptionKeyArn; }
@@ -89,4 +110,10 @@ public class BackupVault {
 
     public Long getMaxRetentionDays() { return maxRetentionDays; }
     public void setMaxRetentionDays(Long maxRetentionDays) { this.maxRetentionDays = maxRetentionDays; }
+
+    public String getVaultType() { return vaultType; }
+    public void setVaultType(String vaultType) { this.vaultType = vaultType; }
+
+    public String getVaultState() { return vaultState; }
+    public void setVaultState(String vaultState) { this.vaultState = vaultState; }
 }

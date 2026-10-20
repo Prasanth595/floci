@@ -181,6 +181,24 @@ class MskServiceTest {
     }
 
     @Test
+    void configurationsAreRegionalLikeClusters() {
+        MskConfiguration east = mskService.createConfiguration("shared-config", "desc", List.of("3.6.0"), "props");
+
+        when(regionResolver.getRegion()).thenReturn("eu-west-1");
+        // The same name is free in another region, and each region lists and reads only its own.
+        MskConfiguration west = mskService.createConfiguration("shared-config", "desc", List.of("3.6.0"), "props");
+        assertEquals(List.of(west), mskService.listConfigurations(null, null).items());
+        AwsException describe = assertThrows(AwsException.class,
+                () -> mskService.describeConfiguration(east.getArn()));
+        assertEquals("BadRequestException", describe.getErrorCode());
+        assertThrows(AwsException.class, () -> mskService.listTagsForResource(east.getArn()));
+
+        when(regionResolver.getRegion()).thenReturn("us-east-1");
+        assertEquals(List.of(east), mskService.listConfigurations(null, null).items());
+        assertEquals(east, mskService.describeConfiguration(east.getArn()));
+    }
+
+    @Test
     void deleteCluster() {
         MskCluster cluster = mskService.createCluster("test-cluster");
         mskService.deleteCluster(cluster.getClusterArn());
@@ -1023,5 +1041,26 @@ class MskServiceTest {
         request.setServerless(new Serverless());
 
         assertThrows(AwsException.class, () -> mskService.createCluster(request));
+    }
+
+    @Test
+    void createServerlessClusterWithoutDockerDaemonStillReachesActive() {
+        when(config.services().msk().mock()).thenReturn(false);
+        Mockito.doThrow(new RuntimeException("Cannot connect to the Docker daemon"))
+                .when(redpandaManager).startContainer(Mockito.any());
+        when(redpandaManager.tryStartContainer(Mockito.any())).thenReturn(false);
+
+        Serverless serverless = new Serverless();
+        serverless.setVpcConfigs(List.of(new VpcConfig()));
+        CreateClusterV2Request request = new CreateClusterV2Request();
+        request.setClusterName("no-docker-serverless");
+        request.setServerless(serverless);
+
+        MskCluster cluster = mskService.createCluster(request);
+
+        assertEquals(ClusterState.ACTIVE, cluster.getState());
+        assertEquals("localhost:9092", cluster.getBootstrapBrokers());
+        assertEquals(ClusterState.ACTIVE,
+                mskService.describeCluster(cluster.getClusterArn()).getState());
     }
 }

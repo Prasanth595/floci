@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.glue.GlueService;
@@ -18,18 +19,15 @@ import io.github.hectorvent.floci.services.redshift.proxy.S3CopySimulator;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -63,6 +61,7 @@ public class ExternalTableMaterializer {
     private final S3Service s3Service;
     private final IamService iamService;
     private final EmulatorConfig config;
+    private final ExternalCatalogLocks catalogLocks;
     private final ConcurrentHashMap<String, String> fingerprints = new ConcurrentHashMap<>();
     /** Column definitions each loaded table was created with, to tell a data reload from a schema change. */
     private final ConcurrentHashMap<String, String> schemaSignatures = new ConcurrentHashMap<>();
@@ -97,15 +96,34 @@ public class ExternalTableMaterializer {
 
     public ExternalTableMaterializer(FlociDuckClient duckClient, GlueService glueService, S3Service s3Service,
                                      IamService iamService, EmulatorConfig config) {
+        this(duckClient, glueService, s3Service, iamService, config, new ExternalCatalogLocks());
+    }
+
+    @Inject
+    public ExternalTableMaterializer(FlociDuckClient duckClient, GlueService glueService, S3Service s3Service,
+                                     IamService iamService, EmulatorConfig config, ExternalCatalogLocks catalogLocks) {
         this.duckClient = duckClient;
         this.glueService = glueService;
         this.s3Service = s3Service;
         this.iamService = iamService;
         this.config = config;
+        this.catalogLocks = catalogLocks;
+    }
+
+    ExternalCatalogLocks catalogLocks() {
+        return catalogLocks;
     }
 
     public Outcome ensureCurrent(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
                                  String tableName) {
+        try (ExternalCatalogLocks.Guard ignored = catalogLocks.read(binding,
+                session.inTransaction() || !backend.permitsCachePublication())) {
+            return ensureCurrentLocked(backend, session, binding, tableName);
+        }
+    }
+
+    private Outcome ensureCurrentLocked(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
+                                        String tableName) {
         Table table;
         try {
             table = RequestScopes.callAs(session.accountId(), () -> glueService.getTable(binding.glueDatabase(), tableName));
@@ -214,6 +232,20 @@ public class ExternalTableMaterializer {
         forgetMatching(key -> key.equals(clusterKey + "|" + databaseName + "|" + schemaName + "|" + tableName));
     }
 
+    /** Reloads data after a catalog change without dropping the table's grants and dependent views. */
+    public void invalidateTable(String clusterKey, String databaseName, String schemaName, String tableName) {
+        String key = clusterKey + "|" + databaseName + "|" + schemaName + "|" + tableName;
+        ReentrantLock lock = locks.computeIfAbsent(key, ignored -> new ReentrantLock());
+        lock.lock();
+        try {
+            fingerprints.remove(key);
+            latestLoads.remove(key);
+            pendingLoads.values().forEach(loads -> loads.remove(key));
+        } finally {
+            lock.unlock();
+        }
+    }
+
     /** Forgets every table of one external schema, so a dropped and recreated schema is reloaded. */
     public void forgetSchema(String clusterKey, String databaseName, String schemaName) {
         String prefix = schemaPrefix(clusterKey, databaseName, schemaName);
@@ -221,9 +253,19 @@ public class ExternalTableMaterializer {
     }
 
     private void forgetMatching(Predicate<String> matches) {
-        fingerprints.keySet().removeIf(matches);
-        schemaSignatures.keySet().removeIf(matches);
-        latestLoads.keySet().removeIf(matches);
+        locks.forEach((key, lock) -> {
+            if (matches.test(key)) {
+                lock.lock();
+                try {
+                    fingerprints.remove(key);
+                    schemaSignatures.remove(key);
+                    latestLoads.remove(key);
+                    pendingLoads.values().forEach(loads -> loads.remove(key));
+                } finally {
+                    lock.unlock();
+                }
+            }
+        });
         // Keep locks: removing a held lock lets another thread create a second lock for the same table.
     }
 
@@ -573,11 +615,7 @@ public class ExternalTableMaterializer {
         for (S3Object object : objects) {
             value.append(object.getKey()).append(':').append(object.getSize()).append(':').append(object.getETag()).append(';');
         }
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.toString().getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("SHA-256 is not available", exception);
-        }
+        return Digests.sha256Hex(value.toString());
     }
 
     /**

@@ -47,11 +47,17 @@
   "AWS::ApiGatewayV2::Api": [
     "ProtocolType"
   ],
+  "AWS::ApiGatewayV2::ApiMapping": [
+    "DomainName"
+  ],
   "AWS::ApiGatewayV2::Authorizer": [
     "ApiId"
   ],
   "AWS::ApiGatewayV2::Deployment": [
     "ApiId"
+  ],
+  "AWS::ApiGatewayV2::DomainName": [
+    "DomainName"
   ],
   "AWS::ApiGatewayV2::Integration": [
     "ApiId"
@@ -151,8 +157,13 @@
   ],
   "AWS::CloudFront::CachePolicy": [],
   "AWS::CloudFront::Distribution": [],
+  "AWS::CloudFront::Function": [
+    "Name"
+  ],
+  "AWS::CloudFront::KeyGroup": [],
   "AWS::CloudFront::OriginAccessControl": [],
   "AWS::CloudFront::OriginRequestPolicy": [],
+  "AWS::CloudFront::PublicKey": [],
   "AWS::CloudFront::ResponseHeadersPolicy": [],
   "AWS::CloudTrail::Trail": [
     "TrailName"
@@ -193,6 +204,10 @@
   "AWS::Cognito::UserPoolGroup": [
     "UserPoolId",
     "GroupName"
+  ],
+  "AWS::Cognito::UserPoolResourceServer": [
+    "Identifier",
+    "UserPoolId"
   ],
   "AWS::Config::ConfigRule": [
     "ConfigRuleName"
@@ -404,6 +419,14 @@
     "AmiType",
     "Subnets"
   ],
+  "AWS::ElastiCache::ServerlessCache": [
+    "ServerlessCacheName",
+    "KmsKeyId",
+    "SnapshotArnsToRestore",
+    "SubnetIds",
+    "ConnectionType",
+    "NetworkType"
+  ],
   "AWS::ElasticLoadBalancingV2::Listener": [
     "LoadBalancerArn"
   ],
@@ -434,6 +457,7 @@
   "AWS::Events::Rule": [
     "Name"
   ],
+  "AWS::GuardDuty::MalwareProtectionPlan": [],
   "AWS::IAM::AccessKey": [
     "UserName",
     "Serial"
@@ -549,6 +573,22 @@
     "CodeSha256",
     "ProvisionedConcurrencyConfig",
     "RuntimePolicy"
+  ],
+  "AWS::Lambda::WebFunction": [
+    "FunctionName"
+  ],
+  "AWS::Lambda::WebFunctionEndpoint": [
+    "FunctionName",
+    "EndpointName",
+    "EndpointType",
+    "Regions"
+  ],
+  "AWS::Lambda::WebFunctionRevision": [
+    "FunctionName",
+    "Description",
+    "KmsKeyArn",
+    "BuildConfig",
+    "ServiceConfig"
   ],
   "AWS::Logs::LogGroup": [
     "LogGroupName"
@@ -678,8 +718,25 @@
   "AWS::S3::BucketPolicy": [
     "Bucket"
   ],
+  "AWS::S3Vectors::Index": [
+    "DataType",
+    "Dimension",
+    "DistanceMetric",
+    "EncryptionConfiguration",
+    "IndexName",
+    "MetadataConfiguration",
+    "VectorBucketArn",
+    "VectorBucketName"
+  ],
+  "AWS::S3Vectors::VectorBucket": [
+    "VectorBucketName",
+    "EncryptionConfiguration"
+  ],
   "AWS::Scheduler::ScheduleGroup": [
     "Name"
+  ],
+  "AWS::SES::EmailIdentity": [
+    "EmailIdentity"
   ],
   "AWS::SecretsManager::Secret": [
     "Name"
@@ -708,6 +765,10 @@
   "AWS::StepFunctions::StateMachine": [
     "StateMachineName",
     "StateMachineType"
+  ],
+  "AWS::WAFv2::IPSet": [
+    "Name",
+    "Scope"
   ],
   "AWS::WAFv2::WebACL": [
     "Name",

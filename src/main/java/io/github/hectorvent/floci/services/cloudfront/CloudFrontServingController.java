@@ -8,8 +8,11 @@ import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService;
+import io.github.hectorvent.floci.services.s3.ByteRange;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import io.quarkus.vertx.http.HttpServer;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpVersion;
@@ -33,6 +36,7 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
+import org.jboss.resteasy.reactive.server.core.CurrentRequestManager;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -99,29 +103,38 @@ public class CloudFrontServingController {
             java.util.Set.of("Expires", "Signature", "Key-Pair-Id", "Policy", "Hash-Algorithm");
     /** Viewer methods that can carry a request body and that CloudFront never caches. */
     private static final Set<String> BODY_METHODS = Set.of("POST", "PUT", "PATCH", "DELETE");
+    /** The 504 body CloudFront returns when the origin did not answer in time. */
+    static final String ORIGIN_TIMEOUT_MESSAGE = "The origin didn't respond before the request expired.";
 
     private final CloudFrontService service;
     private final S3Service s3Service;
+    private final LambdaWebService lambdaWebService;
     private final CurrentVertxRequest currentVertxRequest;
+    private final HttpServer httpServer;
     private final CloudFrontOriginHttpClient httpClient;
+    private final CloudFrontOriginHttpClient flociClient = CloudFrontOriginHttpClient.toFloci();
 
     @Inject
     public CloudFrontServingController(CloudFrontService service, S3Service s3Service,
-                                       EmulatorConfig emulatorConfig,
-                                       CurrentVertxRequest currentVertxRequest) {
+                                       LambdaWebService lambdaWebService, EmulatorConfig emulatorConfig,
+                                       CurrentVertxRequest currentVertxRequest, HttpServer httpServer) {
         this.service = service;
         this.s3Service = s3Service;
+        this.lambdaWebService = lambdaWebService;
         this.currentVertxRequest = currentVertxRequest;
+        this.httpServer = httpServer;
         this.httpClient = new CloudFrontOriginHttpClient(
                 emulatorConfig.services().cloudfront().allowedPrivateOriginHosts().orElse(List.of()));
     }
 
     @PreDestroy
     void closeHttpClient() {
-        try {
-            httpClient.close();
-        } catch (Exception e) {
-            LOG.debugv("Could not close CloudFront origin HTTP client: {0}", e.getMessage());
+        for (CloudFrontOriginHttpClient client : List.of(httpClient, flociClient)) {
+            try {
+                client.close();
+            } catch (Exception e) {
+                LOG.debugv("Could not close CloudFront origin HTTP client: {0}", e.getMessage());
+            }
         }
     }
 
@@ -473,8 +486,9 @@ public class CloudFrontServingController {
             }
             String key = CloudFrontRequestRouter.resolveOriginKey(
                     origin.getOriginPath(), decodedViewerPath, config.getDefaultRootObject());
-            return fetchFromS3(
-                    distribution, origin, key, viewerAuthorization, !"HEAD".equals(method));
+            HttpServerRequest request = currentVertxRequest.getCurrent().request();
+            return fetchFromS3(distribution, origin, key, viewerAuthorization, !"HEAD".equals(method),
+                    new ViewerRange(request.getHeader("Range"), request.getHeader("If-Range")));
         }
         String forwardUri = CloudFrontRequestRouter.resolveForwardUri(
                 origin.getOriginPath(), rawViewerPath, config.getDefaultRootObject());
@@ -565,7 +579,8 @@ public class CloudFrontServingController {
             Origin origin,
             String key,
             String viewerAuthorization,
-            boolean includeBody) {
+            boolean includeBody,
+            ViewerRange viewerRange) {
         String bucket = CloudFrontRequestRouter.bucketFromS3Domain(origin.getDomainName());
         if (bucket == null) {
             return OriginResponse.error(502, "Could not determine S3 bucket for origin.");
@@ -577,14 +592,9 @@ public class CloudFrontServingController {
             if (includeBody) {
                 // The body is streamed to the viewer, so an object of any size is served without
                 // being read into the heap; the metadata and the stream come from one snapshot.
-                S3Service.ObjectRead read = s3Service.openObject(bucket, key, null);
-                S3Object obj = read.object();
-                response = new OriginResponse(
-                        200, contentType(obj), null, read.body(), obj.getSize(), s3ObjectHeaders(obj));
+                response = s3ObjectResponse(s3Service.openObject(bucket, key, null), viewerRange);
             } else {
-                S3Object meta = s3Service.headObject(bucket, key);
-                response = new OriginResponse(
-                        200, contentType(meta), null, meta.getSize(), s3ObjectHeaders(meta));
+                response = s3HeadResponse(s3Service.headObject(bucket, key), viewerRange);
             }
         } catch (AwsException e) {
             response = OriginResponse.error(e.getHttpStatus(), e.getMessage());
@@ -595,6 +605,69 @@ public class CloudFrontServingController {
         } catch (RuntimeException e) {
             response.closeStream();
             throw e;
+        }
+    }
+
+    /**
+     * The GET of an S3 object, answered as S3 answers the viewer's {@code Range}: the one range it
+     * asks for, or 416 when that range starts past the end of the object. CloudFront serves the
+     * whole object, as for no {@code Range} at all, when the header is not one valid range, which
+     * covers several ranges, since S3 serves one range per request, and when an {@code If-Range}
+     * no longer describes the object.
+     */
+    private static OriginResponse s3ObjectResponse(S3Service.ObjectRead read, ViewerRange viewerRange) {
+        S3Object obj = read.object();
+        ByteRange.Resolution resolution = resolveRange(viewerRange, obj);
+        return switch (resolution.outcome()) {
+            case PART -> {
+                ByteRange range = resolution.range();
+                Map<String, List<String>> headers = s3ObjectHeaders(obj);
+                putHeader(headers, "Content-Range", range.contentRange(obj.getSize()));
+                yield new OriginResponse(206, contentType(obj), null, range.slice(read.body()),
+                        range.length(), headers);
+            }
+            case NOT_SATISFIABLE -> {
+                closeUnsent(read);
+                yield rangeNotSatisfiable(obj.getSize());
+            }
+            case WHOLE -> new OriginResponse(
+                    200, contentType(obj), null, read.body(), obj.getSize(), s3ObjectHeaders(obj));
+        };
+    }
+
+    /**
+     * The HEAD of an S3 object, answered as HeadObject answers a {@code Range}: "If the Range is
+     * satisfiable, only the ContentLength is affected in the response. If the Range is not
+     * satisfiable, S3 returns a 416". A header that is not one valid range is ignored, as for a GET.
+     */
+    private static OriginResponse s3HeadResponse(S3Object meta, ViewerRange viewerRange) {
+        ByteRange.Resolution resolution = resolveRange(viewerRange, meta);
+        return switch (resolution.outcome()) {
+            case PART -> new OriginResponse(
+                    200, contentType(meta), null, resolution.range().length(), s3ObjectHeaders(meta));
+            case NOT_SATISFIABLE -> rangeNotSatisfiable(meta.getSize());
+            case WHOLE -> new OriginResponse(
+                    200, contentType(meta), null, meta.getSize(), s3ObjectHeaders(meta));
+        };
+    }
+
+    /** The viewer's {@code Range} resolved against an object, unless its {@code If-Range} no longer matches it. */
+    private static ByteRange.Resolution resolveRange(ViewerRange viewerRange, S3Object obj) {
+        String rangeHeader = ByteRange.rangeApplies(viewerRange.ifRange(), obj.getETag(), obj.getLastModified())
+                ? viewerRange.range() : null;
+        return ByteRange.resolve(rangeHeader, obj.getSize());
+    }
+
+    private static OriginResponse rangeNotSatisfiable(long size) {
+        return OriginResponse.error(416, ByteRange.NOT_SATISFIABLE_MESSAGE)
+                .withHeaders(Map.of("Content-Range", List.of(ByteRange.unsatisfiedContentRange(size))));
+    }
+
+    private static void closeUnsent(S3Service.ObjectRead read) {
+        try {
+            read.close();
+        } catch (IOException e) {
+            LOG.debugv("Could not close an unsent S3 object: {0}", e.getMessage());
         }
     }
 
@@ -695,11 +768,19 @@ public class CloudFrontServingController {
                                                  String viewerScheme, String method, ViewerBody viewerBody) {
         boolean includeBody = !"HEAD".equals(method);
         try {
-            URI target = buildCustomOriginUri(
-                    origin, viewerScheme, forwardUri, originRequest.rawQuery());
+            // Floci serves its own Web Function endpoints, whatever port and protocol the origin names.
+            String webEndpoint = webFunctionEndpoint(origin);
+            if (webEndpoint != null && originRequest.headers().stream()
+                    .anyMatch(header -> "Host".equalsIgnoreCase(header.name()))) {
+                // CloudFront checks the endpoint's certificate against the forwarded viewer Host, which it never names.
+                LOG.debugv("CloudFront forwards the viewer Host to Web Function origin {0}", origin.getId());
+                return OriginResponse.error(502, "Bad Gateway.");
+            }
+            URI target = webEndpoint != null
+                    ? flociListenerUri(forwardUri, originRequest.rawQuery())
+                    : buildCustomOriginUri(origin, viewerScheme, forwardUri, originRequest.rawQuery());
             HttpRequest.Builder rb = HttpRequest.newBuilder()
-                    .uri(target)
-                    .timeout(Duration.ofSeconds(30));
+                    .uri(target);
             // Origin custom headers: CloudFront adds these to every request it forwards to the origin
             // (overriding any same-named viewer header), which is how a distribution restricts an origin
             // to CloudFront-only traffic via a shared secret header.
@@ -714,13 +795,17 @@ public class CloudFrontServingController {
                     }
                 }
             }
+            if (webEndpoint != null) {
+                originHeaders.put("Host", webEndpoint);
+            }
             rb.method(method, HttpRequest.BodyPublishers.noBody());
             // Both bodies are streamed, so neither has to fit in memory: the viewer's goes out with its
             // own Content-Length, or chunked as it came, and the origin's comes back as it arrives.
             ViewerBody requestBody = originRequestBody(method, viewerBody);
-            CloudFrontOriginHttpClient.OpenResponse resp = httpClient.open(rb.build(), originRequest.headers(),
+            CloudFrontOriginHttpClient.OpenResponse resp = (webEndpoint != null ? flociClient : httpClient).open(
+                    rb.build(), originRequest.headers(),
                     originHeaders, requestBody != null ? requestBody.stream() : null,
-                    requestBody != null ? requestBody.length() : -1);
+                    requestBody != null ? requestBody.length() : -1, originTimeouts(origin));
             String ct = resp.headers().firstValue("content-type").orElse(DEFAULT_CONTENT_TYPE);
             long contentLength = resp.contentLength();
             if (!includeBody) {
@@ -733,12 +818,61 @@ public class CloudFrontServingController {
             LOG.warnv("CloudFront custom origin fetch was interrupted for host {0}",
                     safeOriginName(origin));
             return OriginResponse.error(502, "Bad Gateway.");
+        } catch (CloudFrontOriginTimeoutException e) {
+            LOG.warnv("CloudFront custom origin timed out for host {0}", safeOriginName(origin));
+            return OriginResponse.error(504, ORIGIN_TIMEOUT_MESSAGE);
         } catch (Exception e) {
             // Do not log the target URI: forwarded query strings can contain credentials or tokens.
             LOG.warnv("CloudFront custom origin fetch failed for host {0}: {1}",
                     safeOriginName(origin), e.getClass().getSimpleName());
             return OriginResponse.error(502, "Bad Gateway.");
         }
+    }
+
+    private String webFunctionEndpoint(Origin origin) {
+        try {
+            return lambdaWebService.endpointDomain(normalizeOriginHost(origin.getDomainName())).orElse(null);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /**
+     * The plain HTTP port at the address the viewer reached Floci at, which also serves the Web
+     * Function endpoints. A viewer over TLS reached the HTTPS port instead.
+     */
+    private URI flociListenerUri(String forwardUri, String rawQuery) {
+        SocketAddress local = currentVertxRequest.getCurrent().request().localAddress();
+        String host = local.hostAddress().indexOf(':') >= 0 ? "[" + local.hostAddress() + "]" : local.hostAddress();
+        return buildCustomOriginUri("http", host, httpServer.getPort(), forwardUri, rawQuery);
+    }
+
+    /**
+     * The origin's connection settings for one request: {@code Origin.ConnectionTimeout},
+     * {@code CustomOriginConfig.OriginReadTimeout} and {@code Origin.ConnectionAttempts}. A value
+     * outside the range AWS accepts falls back to the AWS default, since the model can be built
+     * programmatically or loaded from persisted state without the API validation.
+     */
+    private static CloudFrontOriginHttpClient.OriginTimeouts originTimeouts(Origin origin) {
+        int connectSeconds = clampToDefault(origin.getConnectionTimeout(),
+                CloudFrontOriginTimeouts.MIN_CONNECTION_TIMEOUT_SECONDS,
+                CloudFrontOriginTimeouts.MAX_CONNECTION_TIMEOUT_SECONDS,
+                CloudFrontOriginTimeouts.DEFAULT_CONNECTION_TIMEOUT_SECONDS);
+        int readSeconds = clampToDefault(
+                intOrDefault(origin.getCustomOriginConfig(), "OriginReadTimeout",
+                        CloudFrontOriginTimeouts.DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS),
+                CloudFrontOriginTimeouts.MIN_ORIGIN_READ_TIMEOUT_SECONDS,
+                CloudFrontOriginTimeouts.MAX_ORIGIN_READ_TIMEOUT_SECONDS,
+                CloudFrontOriginTimeouts.DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS);
+        int attempts = clampToDefault(origin.getConnectionAttempts(),
+                1, CloudFrontOriginTimeouts.MAX_CONNECTION_ATTEMPTS,
+                CloudFrontOriginTimeouts.DEFAULT_CONNECTION_ATTEMPTS);
+        return new CloudFrontOriginHttpClient.OriginTimeouts(
+                Duration.ofSeconds(connectSeconds), Duration.ofSeconds(readSeconds), attempts);
+    }
+
+    private static int clampToDefault(int value, int min, int max, int fallback) {
+        return value < min || value > max ? fallback : value;
     }
 
     /**
@@ -757,6 +891,11 @@ public class CloudFrontServingController {
 
     /** A viewer request body, read as it is forwarded, and its length, {@code -1} when it comes chunked. */
     record ViewerBody(InputStream stream, long length) {
+    }
+
+    /** The viewer's {@code Range} and the {@code If-Range} that qualifies it, either one possibly absent. */
+    private record ViewerRange(String range, String ifRange) {
+        static final ViewerRange NONE = new ViewerRange(null, null);
     }
 
     private static String originAccessIdentityId(Origin origin) {
@@ -911,8 +1050,9 @@ public class CloudFrontServingController {
         OriginResponse page;
         if (CloudFrontRequestRouter.isS3Origin(errOrigin)) {
             String key = CloudFrontRequestRouter.resolveOriginKey(errOrigin.getOriginPath(), errNormalized, null);
+            // The viewer's Range is for the object it asked for, not for the page served instead.
             page = fetchFromS3(
-                    distribution, errOrigin, key, viewerAuthorization, includeBody);
+                    distribution, errOrigin, key, viewerAuthorization, includeBody, ViewerRange.NONE);
         } else {
             String forwardUri = CloudFrontRequestRouter.resolveForwardUri(errOrigin.getOriginPath(), errNormalized, null);
             page = fetchFromCustomOrigin(
@@ -955,6 +1095,9 @@ public class CloudFrontServingController {
                 }
             }
             if (includeBody && origin.stream() != null) {
+                // A disconnected viewer can skip StreamingOutput entirely, so its finally block
+                // alone cannot release the origin connection.
+                CurrentRequestManager.get().registerCompletionCallback(ignored -> origin.closeStream());
                 InputStream body = origin.stream();
                 StreamingOutput entity = output -> {
                     try (InputStream in = body) {

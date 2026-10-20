@@ -50,6 +50,8 @@ public class Route53ResolverJsonHandler {
                 case "GetResolverEndpoint" -> resolverEndpointResponse(
                         service.getResolverEndpoint(text(request, "ResolverEndpointId")));
                 case "ListResolverEndpoints" -> handleListResolverEndpoints();
+                case "ListResolverEndpointIpAddresses" -> handleListResolverEndpointIpAddresses(
+                        text(request, "ResolverEndpointId"));
                 case "UpdateResolverEndpoint" -> resolverEndpointResponse(
                         service.updateResolverEndpoint(text(request, "ResolverEndpointId"), request));
 
@@ -70,6 +72,18 @@ public class Route53ResolverJsonHandler {
                 case "GetResolverRuleAssociation" -> resolverRuleAssociationResponse(
                         service.getResolverRuleAssociation(text(request, "ResolverRuleAssociationId")));
                 case "ListResolverRuleAssociations" -> handleListResolverRuleAssociations();
+
+                case "TagResource" -> {
+                    service.tagResource(text(request, "ResourceArn"), request.get("Tags"), region, accountId);
+                    yield Response.ok(objectMapper.createObjectNode()).build();
+                }
+                case "UntagResource" -> {
+                    service.untagResource(text(request, "ResourceArn"), request.get("TagKeys"), region, accountId);
+                    yield Response.ok(objectMapper.createObjectNode()).build();
+                }
+                case "ListTagsForResource" -> Response.ok(service.listTagsForResource(
+                        text(request, "ResourceArn"), request.get("MaxResults"),
+                        text(request, "NextToken"), region, accountId)).build();
 
                 default -> Response.status(400)
                         .entity(new AwsErrorResponse("UnknownOperationException",
@@ -141,6 +155,12 @@ public class Route53ResolverJsonHandler {
         for (ObjectNode endpoint : service.listResolverEndpoints()) {
             endpoints.add(endpoint);
         }
+        return Response.ok(result).build();
+    }
+
+    private Response handleListResolverEndpointIpAddresses(String endpointId) {
+        ObjectNode result = objectMapper.createObjectNode();
+        result.putArray("IpAddresses").addAll(service.listResolverEndpointIpAddresses(endpointId));
         return Response.ok(result).build();
     }
 

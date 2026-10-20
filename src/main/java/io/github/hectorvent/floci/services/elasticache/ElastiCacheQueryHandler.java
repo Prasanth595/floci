@@ -33,7 +33,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -50,15 +49,18 @@ public class ElastiCacheQueryHandler {
     private final ElastiCacheService service;
     private final ElastiCacheMemcachedService memcachedService;
     private final RegionResolver regionResolver;
+    private final ElastiCacheServerlessQueryHandler serverlessHandler;
 
     @Inject
     public ElastiCacheQueryHandler(SigV4Validator sigV4Validator, ElastiCacheService service,
                                    ElastiCacheMemcachedService memcachedService,
-                                   RegionResolver regionResolver) {
+                                   RegionResolver regionResolver,
+                                   ElastiCacheServerlessQueryHandler serverlessHandler) {
         this.sigV4Validator = sigV4Validator;
         this.service = service;
         this.memcachedService = memcachedService;
         this.regionResolver = regionResolver;
+        this.serverlessHandler = serverlessHandler;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -78,6 +80,8 @@ public class ElastiCacheQueryHandler {
             case "ModifyUserGroup"            -> handleModifyUserGroup(params);
             case "DeleteUserGroup"            -> handleDeleteUserGroup(params);
             case "CreateCacheCluster"         -> handleCreateCacheCluster(params, region);
+            case "CreateServerlessCache", "DescribeServerlessCaches", "ModifyServerlessCache", "DeleteServerlessCache" ->
+                    serverlessHandler.handle(action, params);
             case "DescribeCacheClusters"      -> handleDescribeCacheClusters(params);
             case "DeleteCacheCluster"         -> handleDeleteCacheCluster(params);
             case "CreateCacheSubnetGroup"     -> handleCreateCacheSubnetGroup(params);
@@ -139,7 +143,8 @@ public class ElastiCacheQueryHandler {
                             intParam(params, "Port"),
                             replicationGroupSettings(params),
                             parseTags(params),
-                            extractMemberList(params, "UserGroupIds.member.")));
+                            extractMemberList(params, "UserGroupIds.member."),
+                            parseSecurityGroupIds(params)));
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {
@@ -396,7 +401,10 @@ public class ElastiCacheQueryHandler {
             xml.elem("member", replicationGroupId);
         }
         xml.end("ReplicationGroups");
-        xml.start("ServerlessCaches").end("ServerlessCaches");
+        xml.raw(memberListXml("ServerlessCaches", g.getServerlessCacheEngines().keySet().stream()
+                .map(key -> key.contains("/") ? key.substring(key.indexOf('/') + 1) : key)
+                .distinct()
+                .toList()));
         xml.elem("ARN", g.getArn());
         return xml.build();
     }
@@ -518,6 +526,7 @@ public class ElastiCacheQueryHandler {
         if (g.getCacheSubnetGroupName() != null) {
             xml.elem("CacheSubnetGroupName", g.getCacheSubnetGroupName());
         }
+        appendSecurityGroups(xml, g.getSecurityGroupIds());
         if (showNodeInfo && g.getConfigurationEndpoint() != null) {
             xml.start("CacheNodes")
                .start("CacheNode")
@@ -762,6 +771,9 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             }
 
             Map<String, String> tags = Map.of();
+            if ("serverlesscache".equals(arn[5])) {
+                tags = serverlessHandler.getTags(arn[6]);
+            }
             if ("replicationgroup".equals(arn[5])) {
                 // the store keys groups by id alone; the record must be the one the ARN names
                 ReplicationGroup group = service.getReplicationGroup(arn[6]);
@@ -782,9 +794,12 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                     }
                     tags = cluster.getTags();
                 } else if (service.listMemberCacheClusters(arn[6]).isEmpty()) {
-                    // Memcached clusters and replication group members carry no tags, but they do
-                    // exist. Only an id no source knows is a not-found.
-                    memcachedService.getCacheCluster(arn[6]);
+                    CacheCluster mcCluster = memcachedService.getCacheCluster(arn[6]);
+                    if (mcCluster.getArn() != null && !mcCluster.getArn().equalsIgnoreCase(resourceName)) {
+                        throw new AwsException("CacheClusterNotFound",
+                                "Cache cluster " + arn[6] + " not found.", 404);
+                    }
+                    tags = mcCluster.getTags();
                 }
             }
             if ("subnetgroup".equals(arn[5])) {
@@ -946,16 +961,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         if (c.getIpDiscovery() != null) {
             xml.elem("IpDiscovery", c.getIpDiscovery());
         }
-        if (!c.getSecurityGroupIds().isEmpty()) {
-            xml.start("SecurityGroups");
-            for (String securityGroupId : c.getSecurityGroupIds()) {
-                xml.start("member")
-                   .elem("SecurityGroupId", securityGroupId)
-                   .elem("Status", "active")
-                   .end("member");
-            }
-            xml.end("SecurityGroups");
-        }
+        appendSecurityGroups(xml, c.getSecurityGroupIds());
         if (c.getCacheNodeType() != null) {
             xml.elem("CacheNodeType", c.getCacheNodeType());
         }
@@ -1001,6 +1007,19 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             xml.end("CacheNodes");
         }
         return xml.end("CacheCluster").build();
+    }
+
+    private static void appendSecurityGroups(XmlBuilder xml, List<String> securityGroupIds) {
+        if (!securityGroupIds.isEmpty()) {
+            xml.start("SecurityGroups");
+            for (String securityGroupId : securityGroupIds) {
+                xml.start("member")
+                   .elem("SecurityGroupId", securityGroupId)
+                   .elem("Status", "active")
+                   .end("member");
+            }
+            xml.end("SecurityGroups");
+        }
     }
 
     /**
@@ -1165,57 +1184,13 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                 regionResolver.getAccountId(), "user:" + u.getUserId()).toString();
     }
 
-    private record UserAuthentication(AuthMode mode, List<String> passwords) {}
-
-    /**
-     * Resolves the authentication a CreateUser or ModifyUser request asks for. AWS accepts it
-     * either as an {@code AuthenticationMode} or through the top-level {@code Passwords} and
-     * {@code NoPasswordRequired} members, so passwords given either way mean password
-     * authentication. Returns null when the request names no authentication at all.
-     */
     private static UserAuthentication resolveUserAuthentication(MultivaluedMap<String, String> params) {
-        String type = params.getFirst("AuthenticationMode.Type");
         List<String> passwords = extractMemberList(params, "AuthenticationMode.Passwords.member.");
         if (passwords.isEmpty()) {
             passwords = extractMemberList(params, "Passwords.member.");
         }
-        boolean noPasswordRequired = Boolean.parseBoolean(params.getFirst("NoPasswordRequired"));
-
-        if (type == null || type.isBlank()) {
-            if (noPasswordRequired && !passwords.isEmpty()) {
-                throw invalidCombination("NoPasswordRequired cannot be true when Passwords are provided.");
-            }
-            if (!passwords.isEmpty()) {
-                return new UserAuthentication(AuthMode.PASSWORD, passwords);
-            }
-            return noPasswordRequired ? new UserAuthentication(AuthMode.NO_AUTH, List.of()) : null;
-        }
-
-        String normalizedType = type.toLowerCase(Locale.ROOT);
-        if (noPasswordRequired && !"no-password-required".equals(normalizedType)) {
-            throw invalidCombination("NoPasswordRequired cannot be true when AuthenticationMode.Type is " + type + ".");
-        }
-        return switch (normalizedType) {
-            case "password" -> {
-                if (passwords.isEmpty()) {
-                    throw new AwsException("InvalidParameterValue",
-                            "Passwords are required when AuthenticationMode.Type is password.", 400);
-                }
-                yield new UserAuthentication(AuthMode.PASSWORD, passwords);
-            }
-            case "iam", "no-password-required" -> {
-                if (!passwords.isEmpty()) {
-                    throw invalidCombination("Passwords cannot be provided when AuthenticationMode.Type is " + type + ".");
-                }
-                yield new UserAuthentication("iam".equals(normalizedType) ? AuthMode.IAM : AuthMode.NO_AUTH, List.of());
-            }
-            default -> throw new AwsException("InvalidParameterValue",
-                    "Invalid AuthenticationMode.Type " + type + ". Valid values are password, no-password-required and iam.", 400);
-        };
-    }
-
-    private static AwsException invalidCombination(String message) {
-        return new AwsException("InvalidParameterCombination", message, 400);
+        return UserAuthentication.resolve(params.getFirst("AuthenticationMode.Type"), passwords,
+                Boolean.parseBoolean(params.getFirst("NoPasswordRequired")));
     }
 
     private static String memberListXml(String name, Collection<String> values) {

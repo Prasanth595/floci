@@ -37,8 +37,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -77,6 +79,8 @@ public class SecretsManagerService implements ResourceProvider {
     // stripe only contend; no lock is held while a rotation Lambda runs.
     private static final int ROTATION_LOCK_STRIPE_COUNT = 32;
     private final Object[] rotationLockStripes = newLockStripes(ROTATION_LOCK_STRIPE_COUNT);
+    // Entries exist only while a service owner changes backend credentials outside the stripe.
+    private final Set<String> managedReleases = ConcurrentHashMap.newKeySet();
 
     private static Object[] newLockStripes(int count) {
         Object[] stripes = new Object[count];
@@ -414,6 +418,39 @@ public class SecretsManagerService implements ResourceProvider {
     }
 
     /**
+     * The full ARN of the secret {@code secretId} names in the given account, or empty when there is
+     * none, resolved in the order the operations resolve it: a name in {@code region}, or an ARN,
+     * matched exactly before it is read as a partial ARN without the random suffix. An ARN that
+     * matches neither way in this account is empty, and the caller authorizes the ARN as given, which
+     * is the secret the operations then look for in the account the ARN names. IAM enforcement reads
+     * it before the request runs: AWS authorizes a request against the secret's ARN, random suffix
+     * included, however the request names the secret.
+     */
+    public Optional<String> findArn(String accountId, String secretId, String region) {
+        if (!secretId.startsWith("arn:")) {
+            return findArnByName(accountId, secretId, region);
+        }
+        AwsArnUtils.Arn arn = parseOrNull(secretId);
+        String nameFromArn = secretNameOrNull(arn);
+        if (nameFromArn == null) {
+            return Optional.empty();
+        }
+        if (findByArnInAccount(accountId, secretId, arn) != null) {
+            return Optional.of(secretId);
+        }
+        return findArnByName(accountId, nameFromArn, arn.region());
+    }
+
+    /** The full ARN of the secret with this name in the given account and region, or empty when there is none. */
+    Optional<String> findArnByName(String accountId, String name, String region) {
+        String key = regionKey(region, name);
+        Optional<Secret> secret = store instanceof AccountAwareStorageBackend<Secret> aware
+                ? aware.getForAccount(accountId, key).or(() -> aware.getLegacyForAccount(accountId, key))
+                : store.get(key);
+        return secret.map(Secret::getArn);
+    }
+
+    /**
      * Marks the secret with this ARN as owned by an AWS service, so that it rotates the way a
      * service-managed secret does. Ownership is normally set when the owning service creates the
      * secret; this backfills secrets persisted before floci tracked it. A secret that is already
@@ -454,9 +491,14 @@ public class SecretsManagerService implements ResourceProvider {
 
     /** Finds a secret by full ARN within the account and region that ARN names. */
     private Secret findByArnInAccount(String secretArn, AwsArnUtils.Arn arn) {
+        return findByArnInAccount(arn.accountId(), secretArn, arn);
+    }
+
+    /** Finds a secret by full ARN within the given account and the region that ARN names. */
+    private Secret findByArnInAccount(String accountId, String secretArn, AwsArnUtils.Arn arn) {
         Predicate<String> inRegion = key -> key.startsWith(arn.region() + "::");
         List<Secret> candidates = store instanceof AccountAwareStorageBackend<Secret> aware
-                ? aware.scanForAccount(arn.accountId(), inRegion)
+                ? aware.scanForAccount(accountId, inRegion)
                 : store.scan(inRegion);
         return candidates.stream()
                 .filter(s -> secretArn.equals(s.getArn()))
@@ -658,6 +700,55 @@ public class SecretsManagerService implements ResourceProvider {
 
     public record Filter(String key, List<String> values) {}
 
+    /**
+     * Reserves release under the secret monitor, then changes backend credentials without holding
+     * a shared stripe. Replication and deletion refuse a reserved secret until the action finishes.
+     * Returns false without running the action when replicas prevent deletion.
+     */
+    public boolean deleteManagedSecretAfter(String secretArn, String region, Runnable changeCredentials) {
+        boolean secretExists = true;
+        synchronized (lockFor(secretArn)) {
+            throwIfManagedRelease(secretArn);
+            Secret secret = null;
+            try {
+                secret = resolveSecret(secretArn, region);
+            } catch (AwsException e) {
+                if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                    throw e;
+                }
+                // An already removed secret does not prevent its owner from releasing management.
+                secretExists = false;
+            }
+            if (secret != null) {
+                throwIfReplica(secret);
+                if (secret.getReplicationStatus() != null && !secret.getReplicationStatus().isEmpty()) {
+                    return false;
+                }
+            }
+            managedReleases.add(secretArn);
+        }
+        boolean credentialsChanged = false;
+        try {
+            changeCredentials.run();
+            credentialsChanged = true;
+            return true;
+        } finally {
+            synchronized (lockFor(secretArn)) {
+                managedReleases.remove(secretArn);
+                if (credentialsChanged && secretExists) {
+                    deleteSecret(secretArn, null, true, region);
+                }
+            }
+        }
+    }
+
+    private void throwIfManagedRelease(String secretArn) {
+        if (managedReleases.contains(secretArn)) {
+            throw new AwsException("InvalidRequestException",
+                    "The secret's managed credentials are being released. Try again after the release completes.", 400);
+        }
+    }
+
     public Secret deleteSecret(String secretId, Integer recoveryWindowInDays, boolean forceDelete, String region) {
         // Parameters are checked before the secret is resolved, the way AWS orders it: an invalid
         // window is reported as such even when the secret does not exist.
@@ -676,6 +767,7 @@ public class SecretsManagerService implements ResourceProvider {
         Secret resolved = resolveSecret(secretId, region);
         synchronized (lockFor(resolved.getArn())) {
             Secret secret = resolveSecret(resolved.getArn(), region);
+            throwIfManagedRelease(secret.getArn());
             throwIfReplica(secret);
             // AWS: "You can't delete a primary secret that is replicated to other Regions. You must
             // first delete the replicas." Deleting it here would strand every replica with no primary
@@ -868,11 +960,12 @@ public class SecretsManagerService implements ResourceProvider {
                     "AddReplicaRegions must contain at least one Region.", 400);
         }
 
-        Secret primary = resolveSecret(secretId, region);
-        throwIfPendingDeletion(primary);
-        throwIfReplica(primary);
-
-        synchronized (lockFor(primary.getArn())) {
+        Secret resolved = resolveSecret(secretId, region);
+        synchronized (lockFor(resolved.getArn())) {
+            Secret primary = resolveSecret(resolved.getArn(), region);
+            throwIfManagedRelease(primary.getArn());
+            throwIfPendingDeletion(primary);
+            throwIfReplica(primary);
             List<Secret.ReplicaStatus> statuses = primary.getReplicationStatus() != null
                     ? new ArrayList<>(primary.getReplicationStatus()) : new ArrayList<>();
 
@@ -967,10 +1060,11 @@ public class SecretsManagerService implements ResourceProvider {
                     "RemoveReplicaRegions must contain at least one Region.", 400);
         }
 
-        Secret primary = resolveSecret(secretId, region);
-        throwIfReplica(primary);
-
-        synchronized (lockFor(primary.getArn())) {
+        Secret resolved = resolveSecret(secretId, region);
+        synchronized (lockFor(resolved.getArn())) {
+            Secret primary = resolveSecret(resolved.getArn(), region);
+            throwIfManagedRelease(primary.getArn());
+            throwIfReplica(primary);
             List<Secret.ReplicaStatus> statuses = primary.getReplicationStatus() != null
                     ? new ArrayList<>(primary.getReplicationStatus()) : new ArrayList<>();
 
@@ -1013,6 +1107,18 @@ public class SecretsManagerService implements ResourceProvider {
         // halves of the promotion run inside one critical section for the same reason: a sync
         // landing between them would write the replica back over the copy just promoted.
         synchronized (lockFor(primary != null ? primary.getArn() : replica.getArn())) {
+            // A removal or promotion may have completed while this call waited. Never write the
+            // pre-lock objects back over a deletion or over a newly independent secret.
+            replica = resolveSecret(replica.getArn(), region);
+            if (!replica.isReplica() || !primaryRegionName.equals(replica.getPrimaryRegion())) {
+                throw new AwsException("InvalidRequestException",
+                        "The secret is no longer a replica of the original primary.", 400);
+            }
+            if (primary != null) {
+                primary = resolveSecret(primary.getArn(), primaryRegionName);
+                throwIfManagedRelease(primary.getArn());
+            }
+            throwIfManagedRelease(replica.getArn());
             replica.setPrimaryRegion(null);
             replica.setLastChangedDate(Instant.now());
             putSecret(region, replica);
@@ -1149,10 +1255,11 @@ public class SecretsManagerService implements ResourceProvider {
 
         // A function that cannot be found is reported the way AWS reports it, AccessDeniedException with
         // HTTP 400; any other reference Lambda refuses is an invalid RotationLambdaARN. Either way the
-        // secret is left as it was.
+        // secret is left as it was. The function is looked up where the rotation will invoke it: in the
+        // ARN's account, and as the version or alias the ARN names.
         if (!serviceManaged && lambdaService != null) {
             try {
-                lambdaService.getFunction(region, functionArn);
+                lambdaService.getFunctionByArn(functionArn);
             } catch (AwsException e) {
                 if (e.getHttpStatus() == 404) {
                     throw new AwsException("AccessDeniedException",
@@ -1705,16 +1812,11 @@ public class SecretsManagerService implements ResourceProvider {
             //    ARN format: arn:<partition>:secretsmanager:<region>:<account>:secret:<name>
             //    Parsed rather than matched against a literal prefix, because the ARN carries the
             //    region's own partition and a pinned "arn:aws:" refused a GovCloud or China
-            //    secret its own ARN. The name comes off the parsed resource without a second
-            //    split: a secret name may itself contain colons.
+            //    secret its own ARN.
             AwsArnUtils.Arn parsedArn = parseOrNull(secretId);
-            String secretResourcePrefix = "secret:";
-            if (parsedArn != null
-                    && "secretsmanager".equals(parsedArn.service())
-                    && parsedArn.resource().startsWith(secretResourcePrefix)) {
-                String arnRegion = parsedArn.region();
-                String nameFromArn = parsedArn.resource().substring(secretResourcePrefix.length());
-                Secret byName = store.get(regionKey(arnRegion, nameFromArn)).orElse(null);
+            String nameFromArn = secretNameOrNull(parsedArn);
+            if (nameFromArn != null) {
+                Secret byName = store.get(regionKey(parsedArn.region(), nameFromArn)).orElse(null);
                 if (byName != null) {
                     return byName;
                 }
@@ -1764,6 +1866,19 @@ public class SecretsManagerService implements ResourceProvider {
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    /**
+     * The secret name a Secrets Manager secret ARN carries, taken off the parsed resource without a
+     * second split because a name may itself contain colons, or {@code null} for any other ARN.
+     */
+    private static String secretNameOrNull(AwsArnUtils.Arn arn) {
+        String secretResourcePrefix = "secret:";
+        if (arn == null || !"secretsmanager".equals(arn.service())
+                || !arn.resource().startsWith(secretResourcePrefix)) {
+            return null;
+        }
+        return arn.resource().substring(secretResourcePrefix.length());
     }
 
     private static String regionKey(String region, String name) {

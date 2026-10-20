@@ -127,6 +127,11 @@ public class RegionResolver {
         return AwsPartitions.forRegion(region).isPresent();
     }
 
+    /** A colon separates ARN fields and cannot be part of a request's region label. */
+    public static boolean containsArnDelimiter(String region) {
+        return region != null && region.indexOf(':') >= 0;
+    }
+
     /**
      * Resolves the region from an X-Amz-Credential value found in
      * presigned URL query parameters.
@@ -275,10 +280,15 @@ public class RegionResolver {
      * {@link #buildGlobalArn(String, String)}.
      */
     public String buildArn(String service, String region, String resource) {
+        return buildArn(service, region, getAccountId(), resource);
+    }
+
+    /** Mints an ARN for an explicit owner, including during background restoration. */
+    public String buildArn(String service, String region, String accountId, String resource) {
         if (region == null || region.isBlank()) {
-            return buildGlobalArn(service, resource);
+            return buildGlobalArn(service, accountId, resource);
         }
-        return new AwsArnUtils.Arn(partitionForRegion(region), service, region, getAccountId(), resource).toString();
+        return new AwsArnUtils.Arn(partitionForRegion(region), service, region, accountId, resource).toString();
     }
 
     /** Mints a regionless ARN ({@code arn:<partition>:iam::<account>:...}) in the request's partition. */

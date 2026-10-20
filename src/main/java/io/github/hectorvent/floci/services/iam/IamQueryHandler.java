@@ -2,9 +2,12 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.*;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.AccountPasswordPolicy;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.DelegationPermission;
+import io.github.hectorvent.floci.services.iam.model.DelegationRequest;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
@@ -12,7 +15,9 @@ import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.LoginProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
+import io.github.hectorvent.floci.services.iam.model.OrganizationsAccessReportJob;
 import io.github.hectorvent.floci.services.iam.model.OutboundWebIdentityFederation;
+import io.github.hectorvent.floci.services.iam.model.PolicyParameter;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
@@ -32,13 +37,16 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Pattern;
@@ -54,9 +62,13 @@ public class IamQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(IamQueryHandler.class);
 
-    /** {@code MaxItems} on the last-accessed readers: "defaults to 100", valid range 1 to 1000. */
+    /** {@code MaxItems} on the readers that page through {@link #paginate}: "defaults to 100", range 1 to 1000. */
     private static final int DEFAULT_MAX_ITEMS = 100;
     private static final int MAX_MAX_ITEMS = 1000;
+    /** {@code sortKeyType} on {@code GetOrganizationsAccessReport}. */
+    private static final Set<String> SORT_KEYS = Set.of("SERVICE_NAMESPACE_ASCENDING",
+            "SERVICE_NAMESPACE_DESCENDING", "LAST_AUTHENTICATED_TIME_ASCENDING",
+            "LAST_AUTHENTICATED_TIME_DESCENDING");
     /** {@code serviceNamespaceListType}: minimum 1 item, maximum 200. */
     private static final int MAX_SERVICE_NAMESPACES = 200;
     private static final int MAX_TAG_LIST_MEMBERS = 50;
@@ -70,6 +82,8 @@ public class IamQueryHandler {
     private final AccountResolver accountResolver;
     private final SAMLProviderService samlProviderService;
     private final ServiceLastAccessedService serviceLastAccessedService;
+    private final OrganizationsAccessReportService organizationsAccessReportService;
+    private final DelegationRequestService delegationRequestService;
     private final RegionResolver regionResolver;
     private final Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders;
 
@@ -77,6 +91,8 @@ public class IamQueryHandler {
     public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator,
                            AccountResolver accountResolver, SAMLProviderService samlProviderService,
                            ServiceLastAccessedService serviceLastAccessedService,
+                           OrganizationsAccessReportService organizationsAccessReportService,
+                           DelegationRequestService delegationRequestService,
                            RegionResolver regionResolver,
                            Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders) {
         this.iamService = iamService;
@@ -84,6 +100,8 @@ public class IamQueryHandler {
         this.accountResolver = accountResolver;
         this.samlProviderService = samlProviderService;
         this.serviceLastAccessedService = serviceLastAccessedService;
+        this.organizationsAccessReportService = organizationsAccessReportService;
+        this.delegationRequestService = delegationRequestService;
         this.regionResolver = regionResolver;
         this.serverCertificateReferenceProviders = serverCertificateReferenceProviders;
     }
@@ -120,6 +138,7 @@ public class IamQueryHandler {
             case "GetLoginProfile" -> handleGetLoginProfile(params, authorization);
             case "UpdateLoginProfile" -> handleUpdateLoginProfile(params);
             case "DeleteLoginProfile" -> handleDeleteLoginProfile(params, authorization);
+            case "ChangePassword" -> handleChangePassword(params, authorization);
 
             // Multi-factor authentication
             case "CreateVirtualMFADevice" -> handleCreateVirtualMFADevice(params);
@@ -265,7 +284,7 @@ public class IamQueryHandler {
             case "CreateAccessKey" -> handleCreateAccessKey(params);
             case "DeleteAccessKey" -> handleDeleteAccessKey(params, authorization);
             case "ListAccessKeys" -> handleListAccessKeys(params, authorization);
-            case "UpdateAccessKey" -> handleUpdateAccessKey(params);
+            case "UpdateAccessKey" -> handleUpdateAccessKey(params, authorization);
             case "GetAccessKeyLastUsed" -> handleGetAccessKeyLastUsed(params);
 
             case "ListOrganizationsFeatures" -> handleListOrganizationsFeatures(params);
@@ -300,7 +319,21 @@ public class IamQueryHandler {
             case "GetServiceLastAccessedDetails" -> handleGetServiceLastAccessedDetails(params, authorization);
             case "GetServiceLastAccessedDetailsWithEntities" ->
                     handleGetServiceLastAccessedDetailsWithEntities(params, authorization);
+            case "GenerateOrganizationsAccessReport" ->
+                    handleGenerateOrganizationsAccessReport(params, authorization);
+            case "GetOrganizationsAccessReport" ->
+                    handleGetOrganizationsAccessReport(params, authorization);
             case "ListPoliciesGrantingServiceAccess" -> handleListPoliciesGrantingServiceAccess(params, authorization);
+
+            // Delegation requests
+            case "CreateDelegationRequest" -> handleCreateDelegationRequest(params);
+            case "AssociateDelegationRequest" -> handleAssociateDelegationRequest(params, authorization);
+            case "AcceptDelegationRequest" -> handleAcceptDelegationRequest(params, authorization);
+            case "RejectDelegationRequest" -> handleRejectDelegationRequest(params);
+            case "UpdateDelegationRequest" -> handleUpdateDelegationRequest(params);
+            case "SendDelegationToken" -> handleSendDelegationToken(params, authorization);
+            case "GetDelegationRequest" -> handleGetDelegationRequest(params);
+            case "ListDelegationRequests" -> handleListDelegationRequests(params);
 
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported.", AwsNamespaces.IAM, 400);
@@ -325,8 +358,8 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("CreateUser", AwsNamespaces.IAM, result)).build();
     }
 
-    // UserName is optional on GetUser/ListAccessKeys/DeleteAccessKey: real AWS determines
-    // it implicitly from the access key that signed the request. Mirrors moto: an access
+    // UserName is optional on GetUser/ListAccessKeys/DeleteAccessKey/UpdateAccessKey: real AWS
+    // determines it implicitly from the access key that signed the request. Mirrors moto: an access
     // key that maps to no stored IAM user is the documented NoSuchEntity error.
     private String resolveUserName(MultivaluedMap<String, String> params, String authorization) {
         String userName = getParam(params, "UserName");
@@ -555,6 +588,40 @@ public class IamQueryHandler {
         String userName = resolveUserName(params, authorization);
         iamService.deleteLoginProfile(userName);
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteLoginProfile", AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * Changes the calling user's console password. The operation takes no {@code UserName}: the
+     * reference says it "changes the password of the IAM user who is calling this operation", and
+     * the CLI reference adds that it "can be called by IAM users only. If this command is called
+     * using AWS account (root) credentials, the command returns an InvalidUserType error". A
+     * signing key that belongs to no stored user is Floci's stand-in for exactly that caller, so
+     * it answers the same way rather than reporting the key as missing.
+     */
+    private Response handleChangePassword(MultivaluedMap<String, String> params,
+                                          String authorization) {
+        // Both members are required, and read through getParam rather than requireParam because
+        // requireParam refuses a blank value where passwordType permits one: the pattern starts
+        // at \u0020, so a password of spaces is a value the model accepts. The shape check
+        // therefore stays with the pattern, which also names which of the two members failed.
+        iamService.changePassword(callingIamUser(authorization),
+                getParam(params, "OldPassword"), getParam(params, "NewPassword"));
+        return Response.ok(
+                AwsQueryResponse.envelopeNoResult("ChangePassword", AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * The IAM user whose access key signed the request, for the one operation that acts on the
+     * caller and gives no way to name anyone else. Unlike {@link #resolveUserName}, a key with no
+     * user behind it is not a missing entity here: the caller is not an IAM user, which is the
+     * case {@code InvalidUserType} is published for.
+     */
+    private String callingIamUser(String authorization) {
+        String accessKeyId = accountResolver.extractAccessKeyId(authorization);
+        return iamService.findUserNameByAccessKeyId(accessKeyId)
+                .orElseThrow(() -> new AwsException("InvalidUserType",
+                        "The request was rejected because the type of user for the transaction "
+                                + "was incorrect.", 400));
     }
 
     private String loginProfileXml(LoginProfile profile) {
@@ -902,10 +969,10 @@ public class IamQueryHandler {
         try {
             return Integer.valueOf(raw.trim());
         } catch (NumberFormatException e) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + raw + "' at '"
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + raw + "' at '"
                             + Character.toLowerCase(name.charAt(0)) + name.substring(1)
-                            + "' failed to satisfy constraint: Member must be an integer", 400);
+                            + "' failed to satisfy constraint: Member must be an integer");
         }
     }
 
@@ -1305,7 +1372,7 @@ public class IamQueryHandler {
     }
 
     private Response handleGetRole(MultivaluedMap<String, String> params) {
-        IamRole role = iamService.getRole(getParam(params, "RoleName"));
+        IamRole role = iamService.getValidatedRole(getParam(params, "RoleName"));
         String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
         return Response.ok(AwsQueryResponse.envelope("GetRole", AwsNamespaces.IAM, result)).build();
     }
@@ -1337,12 +1404,15 @@ public class IamQueryHandler {
     }
 
     private Response handleListRoles(MultivaluedMap<String, String> params) {
-        List<IamRole> roleList = iamService.listRoles(getParam(params, "PathPrefix"));
+        Page<IamRole> page = paginate(iamService.listRoles(getParam(params, "PathPrefix")), params);
         XmlBuilder xml = new XmlBuilder().start("Roles");
-        for (IamRole r : roleList) {
+        for (IamRole r : page.items()) {
             xml.start("member").raw(roleXml(r, false)).end("member");
         }
-        xml.end("Roles").elem("IsTruncated", false);
+        xml.end("Roles").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
         return Response.ok(AwsQueryResponse.envelope("ListRoles", AwsNamespaces.IAM, xml.build())).build();
     }
 
@@ -1403,13 +1473,16 @@ public class IamQueryHandler {
     }
 
     private Response handleListPolicies(MultivaluedMap<String, String> params) {
-        List<IamPolicy> policyList = iamService.listPolicies(
-                getParam(params, "Scope"), getParam(params, "PathPrefix"));
+        Page<IamPolicy> page = paginate(iamService.listPolicies(
+                getParam(params, "Scope"), getParam(params, "PathPrefix")), params);
         XmlBuilder xml = new XmlBuilder().start("Policies");
-        for (IamPolicy p : policyList) {
+        for (IamPolicy p : page.items()) {
             xml.start("member").raw(policyXml(p, false)).end("member");
         }
-        xml.end("Policies").elem("IsTruncated", false);
+        xml.end("Policies").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
         return Response.ok(AwsQueryResponse.envelope("ListPolicies", AwsNamespaces.IAM, xml.build())).build();
     }
 
@@ -1891,21 +1964,26 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("ListAccessKeys", AwsNamespaces.IAM, xml.build())).build();
     }
 
-    private Response handleUpdateAccessKey(MultivaluedMap<String, String> params) {
-        iamService.updateAccessKey(getParam(params, "UserName"),
-                getParam(params, "AccessKeyId"), getParam(params, "Status"));
+    private Response handleUpdateAccessKey(MultivaluedMap<String, String> params, String authorization) {
+        // "If the UserName is not specified, the user name is determined implicitly based on the
+        // AWS access key ID used to sign the request", the same sentence DeleteAccessKey carries.
+        // Read the way the other three statusType operations read theirs, the status included.
+        iamService.updateAccessKey(resolveUserName(params, authorization),
+                requireParam(params, "AccessKeyId"), getParam(params, "Status"));
         return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateAccessKey", AwsNamespaces.IAM)).build();
     }
 
     private Response handleGetAccessKeyLastUsed(MultivaluedMap<String, String> params) {
         // Access-key usage is not modeled, so return the IAM API's documented
         // "never used" shape: an AccessKeyLastUsed with ServiceName=N/A and Region=N/A
-        // and NO LastUsedDate. UserName is optional and its type is non-empty
-        // (length 1-128); since the emulator exposes no AccessKeyId→UserName lookup,
-        // the element is omitted rather than emitted empty — an empty string could be
-        // rejected by a strict client, and callers that need the owner already have it
-        // from the preceding ListAccessKeys call.
-        String result = new XmlBuilder()
+        // and NO LastUsedDate. UserName names the key's owner; Terraform's
+        // aws_iam_access_key import reads it and fails on "empty response" without it.
+        // Its type is non-empty (length 1-128), so for a key the emulator does not
+        // hold the element is omitted rather than emitted empty.
+        XmlBuilder xml = new XmlBuilder();
+        iamService.findAccessKeyOwnerInThisAccount(getParam(params, "AccessKeyId"))
+                .ifPresent(userName -> xml.elem("UserName", userName));
+        String result = xml
                 .start("AccessKeyLastUsed")
                 .elem("ServiceName", "N/A")
                 .elem("Region", "N/A")
@@ -2050,7 +2128,24 @@ public class IamQueryHandler {
         CallerContext caller = iamService.resolvePrincipalContext(policySourceArn);
         List<String> actionNames = requireActionNames(params);
         List<String> resourceArns = extractResourceArnsOrWildcard(params);
-        Map<String, List<String>> context = extractContextEntries(params);
+        // Keyed without regard to case, as the evaluator compares condition key names: a value
+        // the call supplied has to shadow a populated one however the call spelled the key.
+        Map<String, List<String>> context = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        context.putAll(extractContextEntries(params));
+        // The simulator fills the principal keys in itself rather than asking for them, so a
+        // policy scoped to ${aws:username} or keyed on who is calling simulates as it evaluates.
+        // A value the call supplied stays, being the one the caller asked to simulate with. The
+        // account comes from the identity that was resolved, not from the ARN the call wrote,
+        // which need not be one this evaluator can parse.
+        iamService.simulationPrincipalKeys(policySourceArn).ifPresent(principal -> {
+            Map<String, List<String>> populated = new HashMap<>();
+            principal.putPrincipalKeys(populated);
+            String account = AwsArnUtils.accountOrDefault(principal.principalArn(), null);
+            if (account != null) {
+                populated.put("aws:PrincipalAccount", List.of(account));
+            }
+            populated.forEach(context::putIfAbsent);
+        });
         String result = simulationResultsXml(caller, actionNames, resourceArns, context);
         return Response.ok(AwsQueryResponse.envelope("SimulatePrincipalPolicy", AwsNamespaces.IAM, result)).build();
     }
@@ -2120,7 +2215,11 @@ public class IamQueryHandler {
 
     private Response handleGetContextKeysForPrincipalPolicy(MultivaluedMap<String, String> params) {
         String policySourceArn = getParam(params, "PolicySourceArn");
-        CallerContext caller = iamService.resolvePrincipalContext(policySourceArn);
+        // "Only context keys referenced by the identity-based policies attached to the specified
+        // entity, and any additional policies that you provide, are included": a grant the account
+        // applies without attaching it is therefore not read here, though a simulation evaluates
+        // with it.
+        CallerContext caller = iamService.resolveAttachedPrincipalContext(policySourceArn);
         List<String> allDocuments = new ArrayList<>(caller.identityPolicies());
         allDocuments.addAll(extractIndexedValues(params, "PolicyInputList.member"));
         List<String> keys = policyEvaluator.contextKeysReferencedIn(allDocuments);
@@ -2183,6 +2282,115 @@ public class IamQueryHandler {
         }
         return Response.ok(AwsQueryResponse.envelope("GetServiceLastAccessedDetails", AwsNamespaces.IAM,
                 xml.build())).build();
+    }
+
+    /**
+     * Generates the Organizations access report now and returns its job id, mirroring the Access
+     * Advisor generator above. The report is the services the SCPs along the entity path leave
+     * reachable; the reference is explicit that service last accessed data "only applies SCP
+     * logic", so no identity policy, resource policy or permissions boundary enters it.
+     *
+     * <p>{@code ReportGenerationLimitExceeded} is the operation's only modeled error and stays
+     * unreachable here: it reports concurrent generations for the account, and a Floci job is
+     * complete the moment it is created, so two can never overlap.
+     */
+    private Response handleGenerateOrganizationsAccessReport(MultivaluedMap<String, String> params,
+                                                             String authorization) {
+        OrganizationsAccessReportJob job = organizationsAccessReportService.generate(
+                accountResolver.resolve(authorization), requireParam(params, "EntityPath"),
+                params.getFirst("OrganizationsPolicyId"));
+        return Response.ok(AwsQueryResponse.envelope("GenerateOrganizationsAccessReport",
+                AwsNamespaces.IAM,
+                new XmlBuilder().elem("JobId", job.getJobId()).build())).build();
+    }
+
+    /**
+     * Retrieves a generated report. AWS lists a service account principals are allowed to reach
+     * even when it was never used, and its own example gives such a service as a namespace and a
+     * zero count with no region, entity path or last-authenticated time. Floci records no access,
+     * so every entry takes that shape and {@code NumberOfServicesNotAccessed} equals
+     * {@code NumberOfServicesAccessible}.
+     *
+     * <p>A job that failed carries {@code ErrorDetails} and no report, which is where an entity
+     * path naming something outside the organization lands, the operation publishing no
+     * synchronous error for one.
+     */
+    private Response handleGetOrganizationsAccessReport(MultivaluedMap<String, String> params,
+                                                        String authorization) {
+        String jobId = requireParam(params, "JobId");
+        // Read before the lookup, because a value outside the enum is a bad request whether or not
+        // the job exists: validating it after would answer NoSuchEntity for a request AWS rejects.
+        String sortKey = validatedSortKey(params);
+        OrganizationsAccessReportJob job = organizationsAccessReportService.get(
+                accountResolver.resolve(authorization), jobId);
+        XmlBuilder xml = new XmlBuilder()
+                .elem("JobStatus", job.getJobStatus())
+                .elem("JobCreationDate", isoDate(job.getJobCreationDate()))
+                .elem("JobCompletionDate", isoDate(job.getJobCompletionDate()));
+        if (job.getErrorCode() != null) {
+            return Response.ok(AwsQueryResponse.envelope("GetOrganizationsAccessReport",
+                    AwsNamespaces.IAM,
+                    xml.elem("IsTruncated", false)
+                       .start("ErrorDetails")
+                       .elem("Message", job.getErrorMessage())
+                       .elem("Code", job.getErrorCode())
+                       .end("ErrorDetails")
+                       .build())).build();
+        }
+        List<String> namespaces = sortedByKey(job.getServiceNamespaces(), sortKey);
+        Page<String> page = paginate(namespaces, params);
+        xml.elem("NumberOfServicesAccessible", namespaces.size())
+           .elem("NumberOfServicesNotAccessed", namespaces.size())
+           .start("AccessDetails");
+        for (String namespace : page.items()) {
+            // ServiceName carries a display name ("Amazon S3") that Floci has no mapping for, so
+            // the namespace stands in for it, as it does on the last-accessed reader.
+            xml.start("member")
+               .elem("ServiceName", namespace)
+               .elem("ServiceNamespace", namespace)
+               .elem("TotalAuthenticatedEntities", 0)
+               .end("member");
+        }
+        xml.end("AccessDetails").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("GetOrganizationsAccessReport",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * {@code SortKey} if the request carries one the enum permits, null if it carries none. A
+     * request that carries the member is held to the enum whatever it carries: an empty value is
+     * not one of the four, and reading it as an absent member would answer a default-ordered
+     * report to a request AWS rejects.
+     */
+    private static String validatedSortKey(MultivaluedMap<String, String> params) {
+        String sortKey = params.getFirst("SortKey");
+        if (sortKey == null) {
+            return null;
+        }
+        if (!SORT_KEYS.contains(sortKey)) {
+            throw validationError(sortKey, "sortKey", "Member must satisfy enum value set: "
+                    + "[SERVICE_NAMESPACE_ASCENDING, SERVICE_NAMESPACE_DESCENDING, "
+                    + "LAST_AUTHENTICATED_TIME_ASCENDING, LAST_AUTHENTICATED_TIME_DESCENDING]");
+        }
+        return sortKey;
+    }
+
+    /**
+     * Applies {@code SortKey}. The namespace keys sort the list the reference says they do, and
+     * the two time keys leave it in namespace order: sorting by a last-authenticated time no
+     * entry carries would be ordering on nothing, and the reference's default is the namespace
+     * anyway.
+     */
+    private static List<String> sortedByKey(List<String> namespaces, String sortKey) {
+        if (!"SERVICE_NAMESPACE_DESCENDING".equals(sortKey)) {
+            return namespaces;
+        }
+        List<String> descending = new ArrayList<>(namespaces);
+        descending.sort(Comparator.reverseOrder());
+        return descending;
     }
 
     /**
@@ -2269,6 +2477,274 @@ public class IamQueryHandler {
                 AwsNamespaces.IAM, xml.build())).build();
     }
 
+    // ── Delegation requests ───────────────────────────────────────────────────
+
+    /**
+     * Files a delegation request for the calling partner account.
+     *
+     * <p>Members are read without {@code requireParam} and handed over as they arrived: the
+     * service validates them and answers {@code ValidationError}, which the reference's common
+     * errors publish for a member that breaks its format or constraints across every IAM
+     * operation. The modeled {@code InvalidInput} is left for a value that cannot be read as the
+     * member's type at all, which is what {@link #delegationInt} and
+     * {@link #parseDelegationBoolean} answer.
+     */
+    private Response handleCreateDelegationRequest(MultivaluedMap<String, String> params) {
+        DelegationRequestService.NewRequest command = new DelegationRequestService.NewRequest(
+                getParam(params, "Description"),
+                getParam(params, "NotificationChannel"),
+                getParam(params, "RequestorWorkflowId"),
+                delegationInt(params, "SessionDuration"),
+                parseDelegationPermissions(params),
+                getParam(params, "OwnerAccountId"),
+                getParam(params, "RedirectUrl"),
+                getParam(params, "RequestMessage"),
+                parseDelegationBoolean(params, "OnlySendByOwner"));
+        DelegationRequestService.Created created = delegationRequestService.create(
+                regionResolver.getAccountId(), regionResolver.getRegion(), command);
+        String result = new XmlBuilder()
+                .elem("DelegationRequestId", created.request().getDelegationRequestId())
+                .elem("ConsoleDeepLink", created.consoleDeepLink())
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("CreateDelegationRequest",
+                AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleAssociateDelegationRequest(MultivaluedMap<String, String> params,
+                                                      String authorization) {
+        delegationRequestService.associate(regionResolver.getAccountId(),
+                callerPrincipalArn(authorization), getParam(params, "DelegationRequestId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("AssociateDelegationRequest",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleAcceptDelegationRequest(MultivaluedMap<String, String> params,
+                                                   String authorization) {
+        delegationRequestService.accept(regionResolver.getAccountId(),
+                callerPrincipalArn(authorization), getParam(params, "DelegationRequestId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("AcceptDelegationRequest",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleRejectDelegationRequest(MultivaluedMap<String, String> params) {
+        delegationRequestService.reject(regionResolver.getAccountId(),
+                getParam(params, "DelegationRequestId"), getParam(params, "Notes"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("RejectDelegationRequest",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleUpdateDelegationRequest(MultivaluedMap<String, String> params) {
+        delegationRequestService.update(regionResolver.getAccountId(),
+                getParam(params, "DelegationRequestId"), getParam(params, "Notes"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateDelegationRequest",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * Releases the exchange token on an accepted request, which finalizes it.
+     *
+     * <p>The operation answers no output shape at all, so the envelope carries no result, and the
+     * token itself goes nowhere from here: AWS publishes it on the partner's SNS topic and
+     * returns it from no operation on the family.
+     *
+     * <p>The caller's ARN goes with the account because this is the one delegation call that can
+     * be scoped to an identity: {@code OnlySendByOwner} holds the release to whoever claimed the
+     * request, who need not be the approver that accepted it.
+     */
+    private Response handleSendDelegationToken(MultivaluedMap<String, String> params,
+                                               String authorization) {
+        delegationRequestService.release(regionResolver.getAccountId(),
+                callerPrincipalArn(authorization), getParam(params, "DelegationRequestId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("SendDelegationToken",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * One request, with the permission check only when it was asked for.
+     *
+     * <p>{@code PermissionCheckResult} answers {@code UNSURE}, which the enum models for exactly
+     * this: the check asks whether the caller may act on the request, and a delegation request
+     * carries no permission for Floci to evaluate, so claiming {@code ALLOWED} or {@code DENIED}
+     * would be inventing an answer. Omitting both members when the flag is absent keeps a plain
+     * read the shape AWS gives it.
+     */
+    private Response handleGetDelegationRequest(MultivaluedMap<String, String> params) {
+        DelegationRequest request = delegationRequestService.get(regionResolver.getAccountId(),
+                getParam(params, "DelegationRequestId"));
+        XmlBuilder xml = new XmlBuilder().start("DelegationRequest")
+                .raw(delegationRequestXml(request)).end("DelegationRequest");
+        if (Boolean.TRUE.equals(parseDelegationBoolean(params, "DelegationPermissionCheck"))) {
+            xml.elem("PermissionCheckStatus", "COMPLETE").elem("PermissionCheckResult", "UNSURE");
+        }
+        return Response.ok(AwsQueryResponse.envelope("GetDelegationRequest",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleListDelegationRequests(MultivaluedMap<String, String> params) {
+        Page<DelegationRequest> page = paginate(delegationRequestService.list(
+                regionResolver.getAccountId(), getParam(params, "OwnerId")), params);
+        XmlBuilder xml = new XmlBuilder().start("DelegationRequests");
+        for (DelegationRequest request : page.items()) {
+            xml.start("member").raw(delegationRequestXml(request)).end("member");
+        }
+        // isTruncated is lower-cased on this one operation, where every other IAM list spells it
+        // IsTruncated. The model names the member that way, so the wire follows the model.
+        xml.end("DelegationRequests").elem("isTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListDelegationRequests",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private String delegationRequestXml(DelegationRequest request) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("DelegationRequestId", request.getDelegationRequestId())
+                .elem("Description", request.getDescription())
+                .elem("RequestMessage", request.getRequestMessage())
+                .elem("RequestorId", request.getRequestorId())
+                .elem("RequestorName", request.getRequestorName())
+                .elem("OwnerAccountId", request.getOwnerAccountId())
+                .elem("OwnerId", request.getOwnerId())
+                .elem("ApproverId", request.getApproverId())
+                .elem("State", request.getState() == null ? null : request.getState().name())
+                .elem("PermissionPolicy", request.getPermissionPolicy())
+                .elem("RedirectUrl", request.getRedirectUrl())
+                .elem("Notes", request.getNotes())
+                .elem("RejectionReason", request.getRejectionReason());
+        if (request.getSessionDuration() != null) {
+            xml.elem("SessionDuration", request.getSessionDuration());
+        }
+        if (request.getOnlySendByOwner() != null) {
+            xml.elem("OnlySendByOwner", request.getOnlySendByOwner());
+        }
+        if (request.getCreateDate() != null) {
+            xml.elem("CreateDate", isoDate(request.getCreateDate()));
+        }
+        if (request.getUpdatedTime() != null) {
+            xml.elem("UpdatedTime", isoDate(request.getUpdatedTime()));
+        }
+        if (request.getExpirationTime() != null) {
+            xml.elem("ExpirationTime", isoDate(request.getExpirationTime()));
+        }
+        if (!request.getRolePermissionRestrictionArns().isEmpty()) {
+            xml.start("RolePermissionRestrictionArns");
+            for (String arn : request.getRolePermissionRestrictionArns()) {
+                xml.elem("member", arn);
+            }
+            xml.end("RolePermissionRestrictionArns");
+        }
+        DelegationPermission permissions = request.getPermissions();
+        if (permissions != null) {
+            xml.start("Permissions").elem("PolicyTemplateArn", permissions.getPolicyTemplateArn());
+            if (!permissions.getParameters().isEmpty()) {
+                xml.start("Parameters");
+                for (PolicyParameter parameter : permissions.getParameters()) {
+                    xml.start("member").elem("Name", parameter.getName())
+                       .elem("Type", parameter.getType()).start("Values");
+                    for (String value : parameter.getValues()) {
+                        xml.elem("member", value);
+                    }
+                    xml.end("Values").end("member");
+                }
+                xml.end("Parameters");
+            }
+            xml.end("Permissions");
+        }
+        return xml.build();
+    }
+
+    /** {@code Permissions} is a structure, so its members arrive dotted under that prefix. */
+    private DelegationPermission parseDelegationPermissions(MultivaluedMap<String, String> params) {
+        String templateArn = getParam(params, "Permissions.PolicyTemplateArn");
+        List<PolicyParameter> parameters = new ArrayList<>();
+        for (int index : memberIndices(params, "Permissions.Parameters.member.")) {
+            String prefix = "Permissions.Parameters.member." + index;
+            List<String> values = new ArrayList<>();
+            for (int valueIndex : memberIndices(params, prefix + ".Values.member.")) {
+                values.add(getParam(params, prefix + ".Values.member." + valueIndex));
+            }
+            parameters.add(new PolicyParameter(getParam(params, prefix + ".Name"),
+                    getParam(params, prefix + ".Type"), values));
+        }
+        if (templateArn == null && parameters.isEmpty()
+                && params.getFirst("Permissions") == null) {
+            // Nothing under the prefix at all, which the service reports as the missing required
+            // member rather than being read here as an empty structure.
+            return null;
+        }
+        return new DelegationPermission(templateArn, parameters);
+    }
+
+    /**
+     * The indices a request supplied under an indexed member prefix, in order. Read from the keys
+     * the request carries rather than counted up from one, so a list numbered from two, or one
+     * with a gap in it, keeps every entry instead of being cut short at the first index missing.
+     */
+    private static List<Integer> memberIndices(MultivaluedMap<String, String> params, String prefix) {
+        return params.keySet().stream()
+                .filter(key -> key.startsWith(prefix))
+                .map(key -> key.substring(prefix.length()).split("\\.")[0])
+                .filter(segment -> segment.matches("\\d+"))
+                .map(Integer::valueOf)
+                .distinct()
+                .sorted()
+                .toList();
+    }
+
+    /**
+     * The caller's principal ARN, or the account-root stand-in when the access key maps to no IAM
+     * user, which is the same synthesized principal {@code IamEnforcementFilter} uses. An owner has
+     * to be an identity ARN, and the credentials a local caller signs with are usually not a
+     * stored user's.
+     */
+    private String callerPrincipalArn(String authorization) {
+        String accessKeyId = accountResolver.extractAccessKeyId(authorization);
+        return Optional.ofNullable(accessKeyId)
+                .flatMap(iamService::resolveCallerArns)
+                .map(IamService.CallerArns::callerArn)
+                .orElseGet(() -> regionResolver.buildGlobalArn("iam", "root"));
+    }
+
+    /** An integer member on a delegation operation, refused with the code those operations model. */
+    private Integer delegationInt(MultivaluedMap<String, String> params, String name) {
+        String raw = getParam(params, name);
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidInput", "The request was rejected because an invalid or "
+                    + "out-of-range value was supplied for '"
+                    + Character.toLowerCase(name.charAt(0)) + name.substring(1)
+                    + "': Member must be a number", 400);
+        }
+    }
+
+    /**
+     * A boolean member on a delegation operation. The Query protocol writes {@code true} or
+     * {@code false}, so anything else is a value the member cannot carry and is refused with the
+     * code a malformed number gets rather than read as {@code false}.
+     */
+    private Boolean parseDelegationBoolean(MultivaluedMap<String, String> params, String name) {
+        String raw = getParam(params, name);
+        if (raw == null) {
+            return null;
+        }
+        String value = raw.trim();
+        if (value.equalsIgnoreCase("true")) {
+            return Boolean.TRUE;
+        }
+        if (value.equalsIgnoreCase("false")) {
+            return Boolean.FALSE;
+        }
+        throw new AwsException("InvalidInput", "The request was rejected because an invalid or "
+                + "out-of-range value was supplied for '"
+                + Character.toLowerCase(name.charAt(0)) + name.substring(1)
+                + "': Member must be a boolean", 400);
+    }
+
     /** One page of a response list, plus the marker that continues it. */
     private record Page<T>(List<T> items, boolean truncated, String marker) {}
 
@@ -2295,7 +2771,7 @@ public class IamQueryHandler {
         // rather than answered emptily just because the marker happens to sit past the end.
         int from = markerIndex(params);
         // An omitted MaxItems is not "no limit": the API reference states the count "defaults to
-        // 100" on both readers, so a report wider than that is truncated with a Marker exactly as
+        // 100" on each reader paged here, so a list wider than that is truncated with a Marker as
         // it would be against AWS. Operations that model no MaxItems at all pass through whole.
         int limit = maxItemsModeled ? DEFAULT_MAX_ITEMS : items.size();
         if (maxItemsModeled) {
@@ -2377,7 +2853,15 @@ public class IamQueryHandler {
             case "user" -> {
                 IamUser user = requireMatchingArn(iamService.getUser(parsed.name()).getArn(), arn,
                         iamService.getUser(parsed.name()));
-                yield new AccessAdvisorTarget(identityPolicyDocuments(accountId, arn), List.of(entityOf(user)));
+                // The report lists "every AWS service that the resource could access using
+                // permissions policies", so a permission the account applies to its users without
+                // attaching it counts: a user with no policies of their own still reaches IAM
+                // while the password policy allows self-service. It is added to the documents the
+                // service list is read from rather than to policiesForIdentity, since it is no
+                // policy of the user's and has no name or ARN to report as one.
+                List<String> documents = new ArrayList<>(identityPolicyDocuments(accountId, arn));
+                documents.addAll(iamService.accountLevelUserGrants(accountId));
+                yield new AccessAdvisorTarget(documents, List.of(entityOf(user)));
             }
             case "role" -> {
                 IamRole role = requireMatchingArn(iamService.getRole(parsed.name()).getArn(), arn,
@@ -2549,7 +3033,11 @@ public class IamQueryHandler {
         }
     }
 
-    /** The documents behind an identity ARN, reusing the scoping rules above. */
+    /**
+     * The documents behind an identity ARN, reusing the scoping rules above. These are the
+     * identity's own policies only: a grant the account applies without attaching it is no policy
+     * of theirs, so the user branch above adds it to what it reports rather than finding it here.
+     */
     private List<String> identityPolicyDocuments(String accountId, String arn) {
         List<String> documents = new ArrayList<>();
         for (GrantingPolicy candidate : policiesForIdentity(accountId, arn)) {
@@ -2811,9 +3299,9 @@ public class IamQueryHandler {
      */
     private static void checkListLength(int members, String param, int limit) {
         if (members > limit) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at '" + param + "' failed to satisfy constraint: "
-                            + "Member must have length less than or equal to " + limit, 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value at '" + param + "' failed to satisfy constraint: "
+                            + "Member must have length less than or equal to " + limit);
         }
     }
 
@@ -2837,9 +3325,9 @@ public class IamQueryHandler {
      * outside a range reports the side it fell outside, not the whole range.
      */
     private static AwsException validationError(String value, String at, String constraint) {
-        return new AwsException("ValidationError",
-                "1 validation error detected: Value '" + value + "' at '" + at + "' failed to satisfy constraint: "
-                        + constraint, 400);
+        return SmithyValidationErrors.validationError(
+                "Value '" + value + "' at '" + at + "' failed to satisfy constraint: "
+                        + constraint);
     }
 
     private List<String> getMemberList(MultivaluedMap<String, String> params, String name) {
@@ -2912,10 +3400,10 @@ public class IamQueryHandler {
     private String requireParam(MultivaluedMap<String, String> params, String name) {
         String value = params.getFirst(name);
         if (value == null || value.isBlank()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value null at '"
+            throw SmithyValidationErrors.validationError(
+                    "Value null at '"
                             + Character.toLowerCase(name.charAt(0)) + name.substring(1)
-                            + "' failed to satisfy constraint: Member must not be null", 400);
+                            + "' failed to satisfy constraint: Member must not be null");
         }
         return value;
     }
@@ -2936,7 +3424,7 @@ public class IamQueryHandler {
 
     private String isoDate(Instant instant) {
         if (instant == null) return "";
-        return DateTimeFormatter.ISO_INSTANT.format(instant);
+        return DateTimeFormatter.ISO_INSTANT.format(instant.truncatedTo(ChronoUnit.MILLIS));
     }
 
     /** For a member AWS types as a blob, which the Query protocol carries base64-encoded. */

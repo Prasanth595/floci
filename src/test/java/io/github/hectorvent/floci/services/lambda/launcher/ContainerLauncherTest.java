@@ -30,6 +30,7 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -37,6 +38,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
@@ -90,6 +92,7 @@ class ContainerLauncherTest {
     ContainerLauncher launcher;
     /** Collects remote paths passed to withRemotePath across all copy mocks. */
     final java.util.List<String> capturedRemotePaths = new java.util.ArrayList<>();
+    String capturedRuntimeBootstrap;
 
     @BeforeEach
     void setUp() {
@@ -107,7 +110,9 @@ class ContainerLauncherTest {
         when(config.docker()).thenReturn(docker);
         when(docker.logMaxSize()).thenReturn("10m");
         when(docker.logMaxFile()).thenReturn("3");
-        when(config.baseUrl()).thenReturn("http://localhost:4566");
+        lenient().when(config.baseUrl()).thenReturn("http://localhost:4566");
+        lenient().when(config.port()).thenReturn(4566);
+        lenient().when(config.tls()).thenReturn(mock(EmulatorConfig.TlsConfig.class));
         lenient().when(config.defaultRegion()).thenReturn("us-east-1");
         lenient().when(config.defaultAccountId()).thenReturn("000000000000");
         lenient().when(config.hostname()).thenReturn(Optional.empty());
@@ -130,7 +135,7 @@ class ContainerLauncherTest {
 
         ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
         ContainerReachableEndpoint reachableEndpoint =
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer);
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
         LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
         launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
                 runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
@@ -154,17 +159,20 @@ class ContainerLauncherTest {
         lenient().when(lifecycleManager.startCreated(eq("container-123"), any())).thenReturn(info);
         lenient().when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
-        // Stub the Docker copy chain so copyDirToContainer / copyFileToContainer
+        // Stub the Docker copy chain so code and bootstrap archive copies
         // don't throw when the mock DockerClient is used. Each invocation
         // returns a fresh mock that drains the tar InputStream on exec() to
         // prevent the background PipedOutputStream writer thread from blocking
         // when the pipe buffer fills.
         capturedRemotePaths.clear();
+        capturedRuntimeBootstrap = null;
         lenient().when(dockerClient.copyArchiveToContainerCmd(any())).thenAnswer(inv -> {
             CopyArchiveToContainerCmd cmd = mock(CopyArchiveToContainerCmd.class);
             final java.io.InputStream[] captured = {null};
+            String[] remote = {null};
             when(cmd.withRemotePath(any())).thenAnswer(pathInv -> {
                 capturedRemotePaths.add(pathInv.getArgument(0));
+                remote[0] = pathInv.getArgument(0);
                 return cmd;
             });
             when(cmd.withTarInputStream(any())).thenAnswer(streamInv -> {
@@ -173,6 +181,13 @@ class ContainerLauncherTest {
             });
             doAnswer(execInv -> {
                 if (captured[0] != null) {
+                    if ("/var/runtime".equals(remote[0])) {
+                        try (TarArchiveInputStream tar = new TarArchiveInputStream(captured[0])) {
+                            assertEquals("bootstrap", tar.getNextEntry().getName());
+                            capturedRuntimeBootstrap = new String(tar.readAllBytes(), StandardCharsets.UTF_8);
+                        }
+                        return null;
+                    }
                     try { captured[0].transferTo(java.io.OutputStream.nullOutputStream()); }
                     catch (Exception ignored) {}
                 }
@@ -223,6 +238,40 @@ class ContainerLauncherTest {
                 .filter(m -> m.getType() == MountType.VOLUME && "/var/task".equals(m.getTarget()))
                 .findFirst()
                 .orElse(null);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"$LATEST", "1", "7"})
+    void launchExposesTheExecutingVersion(String version) {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("version-fn");
+        fn.setHotReloadHostPath("/home/ci/code");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setVersion(version);
+
+        launcher.launch(fn);
+
+        assertEquals(List.of("AWS_LAMBDA_FUNCTION_VERSION=" + version),
+                captureRealContainerSpec().env().stream()
+                        .filter(value -> value.startsWith("AWS_LAMBDA_FUNCTION_VERSION=")).toList());
+    }
+
+    @Test
+    void launchPreventsAnEnvironmentOverrideOfTheExecutingVersion() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("version-fn");
+        fn.setHotReloadHostPath("/home/ci/code");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setVersion("7");
+        fn.setEnvironment(Map.of("AWS_LAMBDA_FUNCTION_VERSION", "user-override"));
+
+        launcher.launch(fn);
+
+        assertEquals(List.of("AWS_LAMBDA_FUNCTION_VERSION=7"),
+                captureRealContainerSpec().env().stream()
+                        .filter(value -> value.startsWith("AWS_LAMBDA_FUNCTION_VERSION=")).toList());
     }
 
     @Test
@@ -422,6 +471,8 @@ class ContainerLauncherTest {
 
     @Test
     void launchFunction_appliesConfiguredDockerFlagsToRealContainer() throws Exception {
+        lenient().when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.4"));
+        when(dockerHostResolver.resolve()).thenReturn("172.18.0.9");
         when(config.services().lambda().dockerFlags()).thenReturn(Optional.of(
                 "--env NODE_EXTRA_CA_CERTS=/opt/certs/root.pem "
                         + "--volume /tmp/certs:/opt/certs:ro --add-host api.local:host-gateway "
@@ -445,10 +496,30 @@ class ContainerLauncherTest {
         assertEquals(Map.of(5050, 5050), spec.portBindings());
         assertEquals(List.of(5050), spec.loopbackPortBindings());
         assertTrue(spec.extraHosts().contains("api.local:host-gateway"));
-        assertTrue(spec.dnsServers().contains("1.1.1.1"));
+        assertEquals(List.of("1.1.1.1"), spec.dnsServers());
+        assertTrue(spec.env().contains("AWS_ENDPOINT_URL=http://172.18.0.9:4566"));
         assertEquals("debug", spec.labels().get("purpose"));
         assertEquals("/opt/certs", spec.binds().getFirst().getVolume().getPath());
         assertEquals("/tmp/certs", spec.binds().getFirst().getPath());
+    }
+
+    @Test
+    void launchFunction_usesEmbeddedDnsEndpointWithoutExplicitResolvers() throws Exception {
+        when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.4"));
+        when(config.dns()).thenReturn(mock(EmulatorConfig.DnsConfig.class));
+        Path codePath = Files.createDirectory(tempDir.resolve("embedded-dns-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("embedded-dns-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertEquals("172.18.0.4", spec.dnsServers().getFirst());
+        assertTrue(spec.env().contains("AWS_ENDPOINT_URL=http://localhost.floci.io:4566"));
     }
 
     @Test
@@ -615,6 +686,55 @@ class ContainerLauncherTest {
     }
 
     @Test
+    void launchFunction_writesToTheLogGroupLoggingConfigNames() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("custom-log-group"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("custom-logs-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setFunctionArn("arn:aws:lambda:us-east-1:000000000000:function:custom-logs-fn");
+        fn.setLogGroup("/shared/app-logs");
+
+        launcher.launch(fn);
+
+        List<String> env = captureRealContainerSpec().env();
+        assertTrue(env.contains("AWS_LAMBDA_LOG_GROUP_NAME=/shared/app-logs"));
+        String stream = env.stream()
+                .filter(e -> e.startsWith("AWS_LAMBDA_LOG_STREAM_NAME="))
+                .findFirst().orElseThrow()
+                .substring("AWS_LAMBDA_LOG_STREAM_NAME=".length());
+        assertTrue(stream.matches("\\d{4}/\\d{2}/\\d{2}/custom-logs-fn\\[\\$LATEST][0-9a-f]{8}"), stream);
+        verify(logStreamer).ensureLogGroupAndStreamForAccount(
+                eq("000000000000"), eq("/shared/app-logs"), eq(stream), eq("us-east-1"));
+        verify(logStreamer).attachForAccount(
+                eq("000000000000"), eq("container-123"), eq("/shared/app-logs"), eq(stream),
+                eq("us-east-1"), eq("lambda:custom-logs-fn"));
+    }
+
+    @Test
+    void launchFunction_endpointUsesListenPortNotAdvertisedBaseUrlPort() throws Exception {
+        // docker run -p 4811:4566 -e FLOCI_BASE_URL=http://localhost:4811: 4811 exists only on the
+        // host. The function container reaches Floci over the Docker network, where it listens on
+        // quarkus.http.port (4566, set in setUp), so that is the port AWS_ENDPOINT_URL must carry.
+        Path codePath = Files.createDirectory(tempDir.resolve("endpoint-port"));
+        // lenient: the fixed code never reads base-url here; the stub sets up the mismatch.
+        lenient().when(config.baseUrl()).thenReturn("http://localhost:4811");
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("endpoint-port-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        List<String> env = captureRealContainerSpec().env();
+        assertTrue(env.contains("AWS_ENDPOINT_URL=http://127.0.0.1:4566"), env.toString());
+    }
+
+    @Test
     void launchFunction_injectsConfiguredDefaultRegionWhenArnMissing() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("region-default"));
         when(config.defaultRegion()).thenReturn("eu-central-1");
@@ -722,7 +842,7 @@ class ContainerLauncherTest {
     }
 
     @Test
-    void launchProvidedRuntime_copiesBootstrapBeforeStart() throws Exception {
+    void launchProvidedRuntime_delegatesToOriginalBootstrapBeforeStart() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("provided-code"));
         Files.writeString(codePath.resolve("bootstrap"), "#!/bin/sh\necho hello");
 
@@ -739,7 +859,7 @@ class ContainerLauncherTest {
         // path, so everything happens on the one real container (no populate helper).
         //
         // Ordering:
-        //   real: create -> copy /var/task + copy bootstrap to /var/runtime -> start
+        //   real: create -> copy /var/task + install runtime delegate -> start
         // (two copyArchiveToContainerCmd calls on the real container: code, then bootstrap).
         InOrder inOrder = inOrder(lifecycleManager, dockerClient);
         inOrder.verify(lifecycleManager).create(any());
@@ -751,12 +871,42 @@ class ContainerLauncherTest {
         assertTrue(capturedRemotePaths.contains("/var/task"),
                 "small code should be tar-copied directly to /var/task");
         assertTrue(capturedRemotePaths.contains("/var/runtime"),
-                "bootstrap should be copied to /var/runtime on the real container");
+                "runtime delegate should be copied to /var/runtime on the real container");
+        assertEquals(ProvidedRuntimeBootstrap.SCRIPT, capturedRuntimeBootstrap);
+        assertEquals("#!/bin/sh\necho hello", Files.readString(codePath.resolve("bootstrap")));
 
         // No populate helper for small code.
         verify(lifecycleManager, times(1)).create(any());
         verify(lifecycleManager, never()).stopAndRemove(any(), any());
         verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void launchProvidedRuntimeWithoutPackageBootstrapStillInstallsLayerFallback() throws Exception {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("layer-runtime");
+        fn.setRuntime("provided.al2023");
+        fn.setHandler("bootstrap");
+        fn.setCodeLocalPath(Files.createDirectory(tempDir.resolve("without-bootstrap")).toString());
+
+        launcher.launch(fn);
+
+        assertEquals(ProvidedRuntimeBootstrap.SCRIPT, capturedRuntimeBootstrap);
+        assertTrue(capturedRemotePaths.contains("/var/task"));
+    }
+
+    @Test
+    void launchHotReloadProvidedRuntimeInstallsDelegateWithoutCopyingPackage() throws Exception {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("hot-runtime");
+        fn.setRuntime("provided.al2023");
+        fn.setHandler("bootstrap");
+        fn.setHotReloadHostPath(Files.createDirectory(tempDir.resolve("hot-runtime")).toString());
+
+        launcher.launch(fn);
+
+        assertEquals(ProvidedRuntimeBootstrap.SCRIPT, capturedRuntimeBootstrap);
+        assertFalse(capturedRemotePaths.contains("/var/task"));
     }
 
     @Test
@@ -959,6 +1109,7 @@ class ContainerLauncherTest {
         fn.setHandler("index.handler");
         fn.setCodeLocalPath(codePath.toString());
         fn.setCodeSha256("large-fn-sha-v1");
+        when(lifecycleManager.create(any())).thenReturn("helper-123", "container-123");
 
         long original = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
         try {
@@ -984,11 +1135,47 @@ class ContainerLauncherTest {
         // Two creates: the helper + the real container. The helper is discarded.
         verify(lifecycleManager, times(2)).create(any());
         verify(lifecycleManager, atLeastOnce()).ensureVolume(any());
-        verify(lifecycleManager, times(1)).stopAndRemove(any(), any()); // the helper only
+        verify(lifecycleManager).stopAndRemove("helper-123", null, 0);
+        verify(lifecycleManager, never()).stopAndRemove(any(), any());
+        InOrder order = inOrder(lifecycleManager);
+        order.verify(lifecycleManager).stopAndRemove("helper-123", null, 0);
+        order.verify(lifecycleManager).create(any());
+        order.verify(lifecycleManager).startCreated(eq("container-123"), any());
         // A superseded code-version volume is never deleted synchronously within a single launch
         // (see the cleanupSupersededVolumes tests below for the deferred sweep; this fn has no
         // prior volume to supersede, since it's the fn's first deploy here).
         verify(lifecycleManager, never()).removeVolume(any());
+    }
+
+    @Test
+    void launchFunction_failedCodeCopyImmediatelyRemovesOnlyItsHelper() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("failed-code-copy"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]);
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("copy-failure");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setCodeSha256("copy-failure-sha");
+        when(lifecycleManager.create(any())).thenReturn("helper-123");
+        doThrow(new IllegalStateException("fixture copy failed"))
+                .when(dockerClient).copyArchiveToContainerCmd("helper-123");
+
+        withLoweredCodeVolumeThreshold(() -> {
+            RuntimeException failure = assertThrows(RuntimeException.class, () -> launcher.launch(fn));
+            assertTrue(failure.getMessage().contains("fixture copy failed"));
+        });
+
+        InOrder order = inOrder(lifecycleManager, dockerClient);
+        order.verify(lifecycleManager).startCreated(eq("helper-123"), any());
+        order.verify(dockerClient).copyArchiveToContainerCmd("helper-123");
+        order.verify(lifecycleManager).stopAndRemove("helper-123", null, 0);
+        verify(lifecycleManager, times(1)).create(any());
+        verify(lifecycleManager, never()).stopAndRemove(any(), any());
+        verify(lifecycleManager, never()).removeVolume(any());
+        verify(runtimeApiServerFactory).release(runtimeApiServer);
+        assertFalse(Files.exists(tempDir.resolve("lambda-codevol-markers")
+                .resolve(ContainerLauncher.codeVolumeName(fn))));
     }
 
     @Test
@@ -1666,7 +1853,7 @@ class ContainerLauncherTest {
     void launchFunction_forwardsExtensionOutputToCloudWatchLogs() throws Exception {
         CloudWatchLogsService cloudWatchLogs = mock(CloudWatchLogsService.class);
         ContainerReachableEndpoint reachableEndpoint =
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer);
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
         ContainerLauncher launcherWithRealStreamer = new ContainerLauncher(
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
                 lifecycleManager,
@@ -1857,4 +2044,14 @@ class ContainerLauncherTest {
         assertEquals(List.of("/opt/extensions/lambda-adapter", "/opt/extensions/otel-collector"),
                 capturedLaunchPaths(launchCmds));
     }
+    private static void withLoweredCodeVolumeThreshold(Runnable action) {
+        long original = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024;
+            action.run();
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = original;
+        }
+    }
+
 }

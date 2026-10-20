@@ -10,6 +10,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 
 /**
@@ -121,23 +122,27 @@ class HttpApiLambdaProxyResponseInferenceIntegrationTest {
     @Test
     @Order(12)
     void functionErrorAnswersInternalServerErrorMessage() {
+        // Measured on HTTP APIs (eu-west-1, 2026-10-19): 500, in both payload formats.
         given()
                 .when().get("/execute-api/" + apiId + "/test/throw")
                 .then()
-                .statusCode(502)
+                .statusCode(500)
                 .contentType(startsWith("application/json"))
                 .body("message", equalTo("Internal Server Error"));
     }
 
     @Test
     @Order(13)
-    void payloadV1ResponseFieldsAreNotInferred() {
+    void payloadV1ResponseWithoutStatusCodeAnswersInternalServerErrorMessage() {
+        // Format 1.0 infers nothing: a result with headers and a body but no statusCode is one
+        // the HTTP API cannot read, and it answers 500 (measured, eu-west-1, 2026-10-19).
         given()
                 .when().get("/execute-api/" + apiId + "/test/v1")
                 .then()
-                .statusCode(200)
-                .header("X-Trace", "value")
-                .body(equalTo("inner"));
+                .statusCode(500)
+                .contentType(startsWith("application/json"))
+                .header("X-Trace", nullValue())
+                .body("message", equalTo("Internal Server Error"));
     }
 
     @Test

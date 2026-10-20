@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
@@ -9,16 +11,20 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -28,6 +34,59 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class Ec2QueryHandlerTest {
+
+    @ParameterizedTest
+    @CsvSource({
+            "CreateVpc,vpc", "CreateSubnet,subnet", "CreateSecurityGroup,security-group",
+            "CreateInternetGateway,internet-gateway", "CreateRouteTable,route-table",
+            "CreateCapacityReservation,capacity-reservation", "AllocateHosts,dedicated-host",
+            "AllocateAddress,elastic-ip", "AuthorizeSecurityGroupIngress,security-group-rule",
+            "AuthorizeSecurityGroupEgress,security-group-rule", "RunInstances,instance",
+            "RunInstances,network-interface", "CreateVolume,volume",
+            "RequestSpotInstances,spot-instances-request", "RequestSpotInstances,instance"
+    })
+    void rejectsReservedCreationTagsBeforeAllocatingResources(String action, String resourceType) {
+        for (String prefix : List.of("TagSpecification", "TagSpecifications")) {
+            Ec2Service service = mock(Ec2Service.class);
+            MultivaluedMap<String, String> params = createSubnetParams("10.38.1.0/24");
+            params.putSingle("GroupName", "test");
+            params.putSingle("GroupDescription", "test");
+            params.putSingle("MinCount", "1");
+            params.putSingle("MaxCount", "1");
+            params.putSingle(prefix + ".1.ResourceType", resourceType);
+            params.putSingle(prefix + ".1.Tag.1.Key", "Name");
+            params.putSingle(prefix + ".1.Tag.1.Value", "valid");
+            params.putSingle(prefix + ".1.Tag.2.Key", "aWs:reserved");
+            params.putSingle(prefix + ".1.Tag.2.Value", "invalid");
+
+            Response response = handler(service).handle(action, params, "us-east-1");
+
+            assertEquals(400, response.getStatus());
+            String code = List.of("vpc", "subnet", "security-group-rule", "spot-instances-request")
+                    .contains(resourceType)
+                    ? "InvalidParameter" : "InvalidParameterValue";
+            assertTrue(response.getEntity().toString().contains("<Code>" + code + "</Code>"));
+            assertTrue(response.getEntity().toString().contains("reserved for internal use"));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CreateLaunchTemplate", "CreateLaunchTemplateVersion"})
+    void rejectsReservedNestedTemplateTagsBeforeCreatingATemplateOrVersion(String action) {
+        Ec2Service service = mock(Ec2Service.class);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("LaunchTemplateName", "test");
+        params.putSingle("LaunchTemplateId", "lt-test");
+        params.putSingle("LaunchTemplateData.TagSpecification.1.ResourceType", "instance");
+        params.putSingle("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "aws:reserved");
+
+        Response response = handler(service).handle(action, params, "us-east-1");
+
+        assertEquals(400, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>InvalidTagKey.Malformed</Code>"));
+        verifyNoInteractions(service);
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"TagSpecification", "TagSpecifications"})
@@ -97,7 +156,7 @@ class Ec2QueryHandlerTest {
         Ec2Service service = mock(Ec2Service.class);
         Vpc vpc = new Vpc();
         vpc.setVpcId("vpc-test");
-        when(service.createVpc("us-east-1", "10.38.0.0/16", false, false)).thenReturn(vpc);
+        when(service.createVpc("us-east-1", "10.38.0.0/16", false, false, null)).thenReturn(vpc);
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("CidrBlock", "10.38.0.0/16");
         params.putSingle("TagSpecification.1.ResourceType", "vpc");
@@ -184,11 +243,40 @@ class Ec2QueryHandlerTest {
         assertEquals(cleanupFails ? List.of(cleanupFailure) : List.of(), List.of(thrown.getSuppressed()));
     }
 
+    @Test
+    void describeRegionsListsTheDeploymentPartitionForARegionNoPartitionPublishes() {
+        String xml = describeRegions(new RegionResolver("cn-north-1", "000000000000"), "polygondwanaland-west-1");
+
+        assertTrue(xml.contains("<regionName>cn-north-1</regionName>"), xml);
+        assertTrue(xml.contains("<regionEndpoint>ec2.cn-north-1.amazonaws.com.cn</regionEndpoint>"), xml);
+        assertFalse(xml.contains("us-east-1"), xml);
+    }
+
+    @Test
+    void describeRegionsKeepsAPublishedRegionInItsOwnPartition() {
+        String xml = describeRegions(new RegionResolver("cn-north-1", "000000000000"), "us-gov-west-1");
+
+        assertTrue(xml.contains("<regionEndpoint>ec2.us-gov-west-1.amazonaws.com</regionEndpoint>"), xml);
+        assertFalse(xml.contains("cn-north-1"), xml);
+    }
+
+    private String describeRegions(RegionResolver regionResolver, String region) {
+        Ec2Service service = mock(Ec2Service.class);
+        when(service.describeRegions(any(AwsPartition.class), anyBoolean())).thenCallRealMethod();
+        Response response = handler(service, regionResolver)
+                .handle("DescribeRegions", new MultivaluedHashMap<>(), region);
+        return (String) response.getEntity();
+    }
+
     private Ec2QueryHandler handler(Ec2Service service) {
+        return handler(service, new RegionResolver("us-east-1", "000000000000"));
+    }
+
+    private Ec2QueryHandler handler(Ec2Service service, RegionResolver regionResolver) {
         return new Ec2QueryHandler(
                 service, mock(EmulatorConfig.class), mock(FlowLogService.class),
                 mock(Ec2EbsEncryptionService.class), mock(Ec2SnapshotBlockPublicAccessService.class),
-                mock(Ec2IpamService.class));
+                mock(Ec2IpamService.class), regionResolver);
     }
 
     private MultivaluedMap<String, String> createSubnetParams(String cidrBlock) {

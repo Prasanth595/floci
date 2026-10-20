@@ -34,9 +34,6 @@ class ContainerLifecycleManagerLivenessTest {
     private ContainerDetector containerDetector;
 
     @Mock
-    private PortAllocator portAllocator;
-
-    @Mock
     private EmulatorConfig config;
 
     @Mock
@@ -47,7 +44,7 @@ class ContainerLifecycleManagerLivenessTest {
     @BeforeEach
     void setUp() {
         manager = new ContainerLifecycleManager(
-                dockerClient, imageCacheService, containerDetector, portAllocator, config);
+                dockerClient, imageCacheService, containerDetector, config);
         when(dockerClient.inspectContainerCmd("c1")).thenReturn(inspectCmd);
     }
 

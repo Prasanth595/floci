@@ -6,6 +6,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -83,6 +84,11 @@ public class GlueService {
     static final String COLUMN_TYPE = "ColumnType";
     static final String ANALYZED_TIME = "AnalyzedTime";
     static final String STATISTICS_DATA = "StatisticsData";
+    private static final Map<String, List<String>> NUMERIC_STATISTICS_FIELDS = Map.of(
+            "StringColumnStatisticsData",
+            List.of("MaximumLength", "AverageLength", "NumberOfNulls", "NumberOfDistinctValues"),
+            "BinaryColumnStatisticsData",
+            List.of("MaximumLength", "AverageLength", "NumberOfNulls"));
     private static final Pattern COMPARISON_EXPRESSION = Pattern.compile(
             "\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(=|<>|<=|>=|<|>)\\s*('?[^']*'?|[^\\s]+)\\s*",
             Pattern.CASE_INSENSITIVE);
@@ -793,7 +799,7 @@ public class GlueService {
             Optional<Map<String, Object>> statistics =
                     columnStatisticsStore.get(columnStatisticsKey(table.getDatabaseName(), table.getName(), columnName));
             if (statistics.isPresent()) {
-                columnStatistics.add(new LinkedHashMap<>(statistics.get()));
+                columnStatistics.add(withNumericDefaults(statistics.get()));
             }
             else {
                 errors.add(new ColumnError(
@@ -1121,6 +1127,7 @@ public class GlueService {
         List<ColumnError> errors = new ArrayList<>();
         for (String columnName : columnNames) {
             partitionColumnStatisticsStore.get(partitionColumnStatisticsKey(databaseName, tableName, partitionValues, columnName))
+                    .map(GlueService::withNumericDefaults)
                     .ifPresentOrElse(columnStatistics::add, () -> errors.add(columnStatisticsNotFoundError(columnName)));
         }
         return new ColumnStatisticsResult(columnStatistics, errors);
@@ -1272,7 +1279,7 @@ public class GlueService {
     }
 
     private static String encodePartitionValue(String value) {
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(value.getBytes(StandardCharsets.UTF_8));
+        return Base64Url.encode(value);
     }
 
     private static String partitionColumnStatisticsKey(
@@ -1300,6 +1307,34 @@ public class GlueService {
             throw new AwsException("InvalidInputException", field + " is required", 400);
         }
         return stringValue;
+    }
+
+    /**
+     * Glue reads back the numeric string and binary statistics a writer left out as 0, and clients such as Trino
+     * unbox them without a null check, so every statistic read back carries all of them, whatever the stored
+     * record holds.
+     */
+    private static Map<String, Object> withNumericDefaults(Map<String, Object> statistics) {
+        Map<String, Object> stored = new LinkedHashMap<>(statistics);
+        if (!(stored.get(STATISTICS_DATA) instanceof Map<?, ?> data)) {
+            return stored;
+        }
+        Map<String, Object> storedData = copyOf(data);
+        NUMERIC_STATISTICS_FIELDS.forEach((typeKey, fields) -> {
+            if (storedData.get(typeKey) instanceof Map<?, ?> typed) {
+                Map<String, Object> filled = copyOf(typed);
+                fields.forEach(field -> filled.putIfAbsent(field, 0));
+                storedData.put(typeKey, filled);
+            }
+        });
+        stored.put(STATISTICS_DATA, storedData);
+        return stored;
+    }
+
+    private static Map<String, Object> copyOf(Map<?, ?> source) {
+        Map<String, Object> copy = new LinkedHashMap<>();
+        source.forEach((key, value) -> copy.put(String.valueOf(key), value));
+        return copy;
     }
 
     private static Object requireColumnStatisticsField(Map<String, Object> statistics, String field) {
@@ -2929,7 +2964,8 @@ public class GlueService {
     }
 
     private void validateResourceExists(String arn) {
-        String[] parts = arn.split(":");
+        // At most six parts: a job, table or other name may itself contain ':'.
+        String[] parts = arn.split(":", 6);
         if (parts.length >= 6) {
             String resource = parts[5];
             if (resource.startsWith("job/")) {

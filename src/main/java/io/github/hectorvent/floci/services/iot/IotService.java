@@ -6,11 +6,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.CertificateMaterialException;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -51,8 +52,6 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.X509Certificate;
 import java.time.Clock;
@@ -62,7 +61,6 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -74,7 +72,6 @@ import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
-import java.util.function.BiConsumer;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
@@ -83,17 +80,24 @@ public class IotService {
 
     private static final Logger LOG = Logger.getLogger(IotService.class);
 
+    public static final String NON_EXCLUSIVE_THING = "NON_EXCLUSIVE_THING";
+    private static final String EXCLUSIVE_THING = "EXCLUSIVE_THING";
+
     static final String DEFAULT_ENDPOINT_TYPE = "iot:Data-ATS";
 
     private static final Pattern THING_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]{1,128}");
+    private static final Pattern SHADOW_NAME_PATTERN = Pattern.compile("[$a-zA-Z0-9:_-]{1,64}");
     /** The {@code FirehoseSeparator} shape of the IoT API model. */
     private static final Pattern FIREHOSE_SEPARATOR = Pattern.compile("([\\n\\t])|(\\r\\n)|(,)");
-    /** An AWS policy variable such as {@code ${iot:ClientId}}. */
-    private static final Pattern POLICY_VARIABLE = Pattern.compile("\\$\\{[^}]*\\}");
     public static final int MAX_POLICY_VERSIONS = 5;
 
     /** One lock for every policy version write and the policy delete, so a cap check, an append and a delete cannot interleave. */
     private final Object policyWriteLock = new Object();
+    /** Makes the duplicate check and the store write of RegisterCertificateWithoutCA one step. */
+    private final Object certificateRegistrationLock = new Object();
+
+    /** One lock for every shadow update and delete, so a shadow's previous, current and version stay consistent. */
+    private final Object shadowWriteLock = new Object();
 
     /** certificateId to the partition and key it was last found under; see {@link #findRegisteredCertificate}. */
     private final Map<String, CertificateLocation> certificateLocations = new ConcurrentHashMap<>();
@@ -352,6 +356,39 @@ public class IotService {
         return certificate;
     }
 
+    /** As on AWS, the certificate is trusted because it is registered: no CA is checked, and its mode is {@code SNI_ONLY}. */
+    public IotCertificate registerCertificateWithoutCa(String certificatePem, String status, String region) {
+        startMqttIfEnabled();
+        if (certificatePem == null || certificatePem.isBlank()) {
+            throw new AwsException("InvalidRequestException", "certificatePem is required", 400);
+        }
+        String effectiveStatus = status == null ? "INACTIVE" : status;
+        validateCertificateStatus(effectiveStatus);
+        IotCertificate certificate = new IotCertificate();
+        try {
+            fill(certificate, Pem.parseCertificate(certificatePem));
+        } catch (CertificateMaterialException e) {
+            throw new AwsException("CertificateValidationException", e.getMessage(), 400);
+        } catch (Exception e) {
+            throw new AwsException("InternalFailureException", "Could not read device certificate: " + e.getMessage(), 500);
+        }
+        String key = certificateKey(region, certificate.getCertificateId());
+        certificate.setCertificateArn(regionResolver.buildArn("iot", region, "cert/" + certificate.getCertificateId()));
+        certificate.setStatus(effectiveStatus);
+        certificate.setCertificateMode("SNI_ONLY");
+        certificate.setCreationDate(Instant.now());
+        synchronized (certificateRegistrationLock) {
+            if (certificateStore.get(key).isPresent()) {
+                throw new AwsException("ResourceAlreadyExistsException", "Certificate already exists: " + certificate.getCertificateId(), 409,
+                        Map.of("resourceId", certificate.getCertificateId(), "resourceArn", certificate.getCertificateArn()));
+            }
+            certificateStore.put(key, certificate);
+        }
+        // A device that connected before may now be registered in a second account.
+        certificateLocations.remove(certificate.getCertificateId());
+        return certificate;
+    }
+
     /** As on AWS, the private key is returned once and never kept: the stored record has none. */
     private static IotCertificate withoutPrivateKey(IotCertificate certificate) {
         IotCertificate stored = new IotCertificate();
@@ -360,6 +397,7 @@ public class IotService {
         stored.setCertificatePem(certificate.getCertificatePem());
         stored.setPublicKey(certificate.getPublicKey());
         stored.setStatus(certificate.getStatus());
+        stored.setCertificateMode(certificate.getCertificateMode());
         stored.setCreationDate(certificate.getCreationDate());
         stored.setNotBefore(certificate.getNotBefore());
         stored.setNotAfter(certificate.getNotAfter());
@@ -403,8 +441,8 @@ public class IotService {
     }
 
     /** AWS IoT's certificateId is the lowercase hex SHA-256 of the certificate's DER encoding. */
-    private static String certificateIdOf(X509Certificate x509) throws CertificateEncodingException, NoSuchAlgorithmException {
-        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(x509.getEncoded()));
+    private static String certificateIdOf(X509Certificate x509) throws CertificateEncodingException {
+        return Digests.sha256Hex(x509.getEncoded());
     }
 
     public IotCertificate describeCertificate(String certificateId, String region) {
@@ -451,13 +489,14 @@ public class IotService {
      * across every account partition: a connecting device carries no request context. The
      * partition and key a certificate was found under are remembered, so a device's next connect
      * is one keyed read; a remembered location that no longer resolves is dropped and the scan
-     * runs again.
+     * runs again. AWS picks the account from the server name; Floci cannot yet, so a certificate
+     * registered in more than one account is refused rather than admitted under one of them.
      */
     public Optional<RegisteredDevice> findRegisteredCertificate(X509Certificate presented) {
         String certificateId;
         try {
             certificateId = certificateIdOf(presented);
-        } catch (CertificateEncodingException | NoSuchAlgorithmException e) {
+        } catch (CertificateEncodingException e) {
             LOG.debugv("Could not fingerprint the presented device certificate: {0}", e.getMessage());
             return Optional.empty();
         }
@@ -469,14 +508,28 @@ public class IotService {
             }
             certificateLocations.remove(certificateId, known);
         }
+        // compute serializes this scan with the remove in registerCertificateWithoutCa, so a
+        // registration in a second account cannot leave a stale location cached.
+        CertificateLocation location = certificateLocations.compute(certificateId, (id, stale) -> locateRegistration(id));
+        if (location == null) {
+            return Optional.empty();
+        }
+        return getForAccount(certificateStore, location.accountId(), location.key())
+                .map(certificate -> new RegisteredDevice(location.accountId(), regionOfCertificateKey(location.key()), certificate));
+    }
+
+    private CertificateLocation locateRegistration(String certificateId) {
         String suffix = ":" + certificateId;
-        Optional<AccountAwareStorageBackend.AccountEntry<IotCertificate>> found =
-                registeredCertificates(key -> key.startsWith("cert:") && key.endsWith(suffix)).stream()
-                        .sorted(Comparator.comparing((AccountAwareStorageBackend.AccountEntry<IotCertificate> entry) -> entry.accountId())
-                                .thenComparing(AccountAwareStorageBackend.AccountEntry::key))
-                        .findFirst();
-        found.ifPresent(entry -> certificateLocations.put(certificateId, new CertificateLocation(entry.accountId(), entry.key())));
-        return found.map(entry -> new RegisteredDevice(entry.accountId(), regionOfCertificateKey(entry.key()), entry.value()));
+        List<AccountAwareStorageBackend.AccountEntry<IotCertificate>> registrations =
+                registeredCertificates(key -> key.startsWith("cert:") && key.endsWith(suffix));
+        if (registrations.stream().map(AccountAwareStorageBackend.AccountEntry::accountId).distinct().count() > 1) {
+            LOG.debugv("Refusing device certificate {0}: it is registered in more than one account", certificateId);
+            return null;
+        }
+        return registrations.stream()
+                .min(Comparator.comparing(AccountAwareStorageBackend.AccountEntry::key))
+                .map(entry -> new CertificateLocation(entry.accountId(), entry.key()))
+                .orElse(null);
     }
 
     private static String regionOfCertificateKey(String key) {
@@ -486,8 +539,8 @@ public class IotService {
     /**
      * Decides {@code iot:Connect} for a client id the way AWS IoT does on a CONNECT: the certificate
      * must be ACTIVE and within its validity dates, the policies are the default versions attached
-     * to the certificate in its own account and region, and the connection's policy variables are
-     * substituted and offered as condition keys. No policy means deny; an explicit deny wins.
+     * to the certificate in its own account and region, and the connection's policy variables go in
+     * as condition keys. No policy means deny; an explicit deny wins.
      */
     public boolean isConnectAllowed(RegisteredDevice device, String clientId, String sourceIp, String domainName) {
         IotCertificate certificate = device.certificate();
@@ -510,16 +563,24 @@ public class IotService {
                 regionResolver.getDefaultRegion(), regionResolver.getDefaultAccountId(), clientId);
     }
 
+    /**
+     * Decides {@code iot:Connect} for the client ARN against the documents as they are written,
+     * with the connection's variables offered as condition keys. The {@code ${...}} placeholders
+     * are the evaluator's to resolve, from that same context, because the developer guide gives
+     * IoT no policy language of its own: its policies "follow the same conventions as IAM
+     * policies" and "the same policy evaluation logic", and a variable is one "that can be used
+     * in AWS IoT Core policies in the Resource or Condition block", which is where that resolver
+     * substitutes and the only place AWS says a variable has meaning.
+     */
     private boolean isConnectAllowed(List<String> documents, Map<String, String> variables, String region, String accountId,
                                      String clientId) {
         if (documents.isEmpty()) {
             return false;
         }
-        List<String> resolved = documents.stream().map(document -> resolvePolicyVariables(document, variables)).toList();
         Map<String, List<String>> conditionContext = new LinkedHashMap<>();
         variables.forEach((key, value) -> conditionContext.put(key, List.of(value)));
         String clientArn = AwsArnUtils.Arn.of("iot", region, accountId, "client/" + clientId).toString();
-        return policyEvaluator.evaluate(CallerContext.of(resolved), null, "iot:Connect", clientArn, conditionContext)
+        return policyEvaluator.evaluate(CallerContext.of(documents), null, "iot:Connect", clientArn, conditionContext)
                 == IamPolicyEvaluator.Decision.ALLOW;
     }
 
@@ -575,67 +636,6 @@ public class IotService {
             variables.put("iot:DomainName", domainName);
         }
         return variables;
-    }
-
-    /**
-     * Substitutes the connection's variables into every string of the document on the parsed tree,
-     * so a client id is never read as JSON. A statement still holding a variable Floci cannot
-     * resolve matches nothing, as an unresolvable variable does on AWS, and is dropped. A document
-     * that does not parse is returned as is: the evaluator logs it and skips it.
-     */
-    private String resolvePolicyVariables(String document, Map<String, String> variables) {
-        JsonNode root;
-        try {
-            root = objectMapper.readTree(document);
-        } catch (JsonProcessingException e) {
-            return document;
-        }
-        if (!(root instanceof ObjectNode policy)) {
-            return document;
-        }
-        JsonNode statements = policy.get("Statement");
-        Iterable<JsonNode> each = statements == null ? List.of() : statements.isArray() ? statements : List.of(statements);
-        ArrayNode resolved = objectMapper.createArrayNode();
-        for (JsonNode statement : each) {
-            JsonNode substituted = substituteVariables(statement.deepCopy(), variables);
-            if (!hasUnresolvedVariable(substituted)) {
-                resolved.add(substituted);
-            }
-        }
-        policy.set("Statement", resolved);
-        return policy.toString();
-    }
-
-    private static JsonNode substituteVariables(JsonNode node, Map<String, String> variables) {
-        if (node.isTextual()) {
-            String text = node.asText();
-            for (Map.Entry<String, String> variable : variables.entrySet()) {
-                text = text.replace("${" + variable.getKey() + "}", variable.getValue());
-            }
-            return TextNode.valueOf(text);
-        }
-        if (node instanceof ObjectNode object) {
-            for (Map.Entry<String, JsonNode> property : object.properties()) {
-                property.setValue(substituteVariables(property.getValue(), variables));
-            }
-        } else if (node instanceof ArrayNode array) {
-            for (int i = 0; i < array.size(); i++) {
-                array.set(i, substituteVariables(array.get(i), variables));
-            }
-        }
-        return node;
-    }
-
-    private static boolean hasUnresolvedVariable(JsonNode node) {
-        if (node.isTextual()) {
-            return POLICY_VARIABLE.matcher(node.asText()).find();
-        }
-        for (JsonNode child : node) {
-            if (hasUnresolvedVariable(child)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private List<AccountAwareStorageBackend.AccountEntry<IotCertificate>> registeredCertificates(Predicate<String> keyFilter) {
@@ -839,6 +839,39 @@ public class IotService {
         return things;
     }
 
+    public Page<String> listThingPrincipalsV2(String thingName, String thingPrincipalType, String region,
+                                              Integer maxResults, String nextToken) {
+        validateV2PageSize(maxResults);
+        return paginate(ofThingPrincipalType(thingPrincipalType, listThingPrincipals(thingName, region)), maxResults, nextToken);
+    }
+
+    public Page<String> listPrincipalThingsV2(String principal, String thingPrincipalType, String region,
+                                              Integer maxResults, String nextToken) {
+        if (principal == null || principal.isBlank()) {
+            throw new AwsException("InvalidRequestException", "Principal is required", 400);
+        }
+        validateV2PageSize(maxResults);
+        return paginate(ofThingPrincipalType(thingPrincipalType, listPrincipalThings(principal, region)), maxResults, nextToken);
+    }
+
+    /** The V2 principal lists accept 1 to 250 results per page, as on AWS. */
+    private static void validateV2PageSize(Integer maxResults) {
+        if (maxResults != null && (maxResults < 1 || maxResults > 250)) {
+            throw new AwsException("InvalidRequestException", "maxResults must be between 1 and 250", 400);
+        }
+    }
+
+    /** Exclusive attachment is not modelled, so every attachment is {@code NON_EXCLUSIVE_THING}. */
+    private static List<String> ofThingPrincipalType(String thingPrincipalType, Set<String> attachments) {
+        if (thingPrincipalType == null || NON_EXCLUSIVE_THING.equals(thingPrincipalType)) {
+            return List.copyOf(attachments);
+        }
+        if (EXCLUSIVE_THING.equals(thingPrincipalType)) {
+            return List.of();
+        }
+        throw new AwsException("InvalidRequestException", "Unsupported thingPrincipalType: " + thingPrincipalType, 400);
+    }
+
     public List<IotPolicy> listAttachedPolicies(String target, String region) {
         String prefix = "policy-attachment:" + region + ":";
         return policyAttachmentStore.keys().stream()
@@ -855,41 +888,238 @@ public class IotService {
         return new java.util.TreeSet<>(policyAttachmentStore.get(policyAttachmentKey(region, policyName)).orElse(Set.of()));
     }
 
+    /**
+     * The shadow as AWS's GetThingShadow returns it: the stored state with the delta, when there is
+     * one, the stored metadata, the version and the current time. Publishes nothing.
+     */
     public JsonNode getThingShadow(String thingName, String shadowName, String region) {
         IotShadow shadow = shadowStore.get(shadowKey(region, thingName, shadowName))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shadow not found: " + thingName, 404));
-        return readJson(shadow.getDocument());
+                .orElseThrow(() -> shadowNotFound(thingName));
+        ObjectNode document = storedShadowDocument(shadow);
+        ObjectNode state = (ObjectNode) document.get("state");
+        ObjectNode delta = shadowDelta(state.path("desired"), state.path("reported"));
+        if (!delta.isEmpty()) {
+            state.set("delta", delta);
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("state", state);
+        response.set("metadata", document.get("metadata"));
+        response.put("version", shadow.getVersion());
+        response.put("timestamp", Instant.now().getEpochSecond());
+        return response;
     }
 
     public JsonNode updateThingShadow(String thingName, String shadowName, JsonNode request, String region) {
-        String key = shadowKey(region, thingName, shadowName);
-        IotShadow existing = shadowStore.get(key).orElse(null);
-        ObjectNode document = existing == null ? objectMapper.createObjectNode() : (ObjectNode) readJson(existing.getDocument()).deepCopy();
-        long currentVersion = existing == null ? 0 : existing.getVersion();
-        if (request.hasNonNull("version") && request.path("version").asLong() != currentVersion) {
-            throw new AwsException("VersionConflictException", "Shadow version does not match requested version", 409);
-        }
-        ObjectNode state = document.withObject("/state");
-        JsonNode requestState = request.path("state");
-        mergeObject(state, "desired", requestState.path("desired"));
-        mergeObject(state, "reported", requestState.path("reported"));
-        long version = currentVersion + 1;
-        document.put("version", version);
-        document.put("timestamp", Instant.now().getEpochSecond());
+        return updateThingShadow(thingName, shadowName, request, region, Runnable::run);
+    }
 
-        IotShadow shadow = new IotShadow();
-        shadow.setThingName(thingName);
-        shadow.setShadowName(shadowName);
-        shadow.setVersion(version);
-        shadow.setDocument(document.toString());
-        shadowStore.put(key, shadow);
-        return document;
+    /**
+     * Applies the update and returns the update/accepted document, which is also the
+     * UpdateThingShadow response, after publishing accepted, documents and, when desired and
+     * reported differ, delta, each handing its rule evaluation to {@code ruleRunner}.
+     */
+    JsonNode updateThingShadow(String thingName, String shadowName, JsonNode request, String region,
+                               Executor ruleRunner) {
+        ShadowUpdate update;
+        synchronized (shadowWriteLock) {
+            update = writeShadowUpdate(thingName, shadowName, request, region);
+        }
+        ReservedShadowTopic topics = new ReservedShadowTopic(thingName, shadowName, "update");
+        publishShadowEvent(topics.acceptedTopic(), update.accepted(), region, ruleRunner);
+        publishShadowEvent(topics.documentsTopic(), update.documents(), region, ruleRunner);
+        if (update.delta() != null) {
+            publishShadowEvent(topics.deltaTopic(), update.delta(), region, ruleRunner);
+        }
+        return update.accepted();
     }
 
     public JsonNode deleteThingShadow(String thingName, String shadowName, String region) {
-        JsonNode document = getThingShadow(thingName, shadowName, region);
-        shadowStore.delete(shadowKey(region, thingName, shadowName));
+        return deleteThingShadow(thingName, shadowName, null, region, Runnable::run);
+    }
+
+    /** Deletes the shadow and returns the delete/accepted document after publishing it. */
+    JsonNode deleteThingShadow(String thingName, String shadowName, String clientToken, String region,
+                               Executor ruleRunner) {
+        ObjectNode accepted = objectMapper.createObjectNode();
+        synchronized (shadowWriteLock) {
+            String key = shadowKey(region, thingName, shadowName);
+            IotShadow shadow = shadowStore.get(key).orElseThrow(() -> shadowNotFound(thingName));
+            shadowStore.delete(key);
+            accepted.put("version", shadow.getVersion());
+        }
+        accepted.put("timestamp", Instant.now().getEpochSecond());
+        withClientToken(accepted, clientToken);
+        publishShadowEvent(new ReservedShadowTopic(thingName, shadowName, "delete").acceptedTopic(), accepted, region,
+                ruleRunner);
+        return accepted;
+    }
+
+    /** The read-modify-write of one update; the caller holds {@link #shadowWriteLock}. */
+    private ShadowUpdate writeShadowUpdate(String thingName, String shadowName, JsonNode request, String region) {
+        String key = shadowKey(region, thingName, shadowName);
+        IotShadow existing = shadowStore.get(key).orElse(null);
+        long currentVersion = existing == null ? 0 : existing.getVersion();
+        if (request.hasNonNull("version") && request.path("version").asLong() != currentVersion) {
+            throw new AwsException("ConflictException", "Version conflict", 409);
+        }
+        long timestamp = Instant.now().getEpochSecond();
+        String clientToken = request.path("clientToken").asText(null);
+        ObjectNode document = existing == null ? emptyShadowDocument() : storedShadowDocument(existing);
+        ObjectNode previous = existing == null ? null : shadowSnapshot(document, currentVersion);
+        ObjectNode state = (ObjectNode) document.get("state");
+        ObjectNode metadata = (ObjectNode) document.get("metadata");
+        JsonNode requestState = request.path("state");
+        mergeShadowSection(state, metadata, "desired", requestState.path("desired"), timestamp);
+        mergeShadowSection(state, metadata, "reported", requestState.path("reported"), timestamp);
+        long version = currentVersion + 1;
+        document.put("version", version);
+        document.put("timestamp", timestamp);
+
+        IotShadow shadow = new IotShadow();
+        shadow.setThingName(thingName);
+        shadow.setShadowName(blankToNull(shadowName));
+        shadow.setVersion(version);
+        shadow.setDocument(document.toString());
+        shadowStore.put(key, shadow);
+
+        ObjectNode accepted = objectMapper.createObjectNode();
+        if (!requestState.isMissingNode()) {
+            accepted.set("state", requestState);
+            accepted.set("metadata", shadowMetadata(requestState, timestamp));
+        }
+        accepted.put("version", version);
+        accepted.put("timestamp", timestamp);
+        withClientToken(accepted, clientToken);
+
+        ObjectNode documents = objectMapper.createObjectNode();
+        if (previous == null) {
+            documents.putNull("previous");
+        } else {
+            documents.set("previous", previous);
+        }
+        documents.set("current", shadowSnapshot(document, version));
+        documents.put("timestamp", timestamp);
+        withClientToken(documents, clientToken);
+
+        ObjectNode deltaState = shadowDelta(state.path("desired"), state.path("reported"));
+        if (deltaState.isEmpty()) {
+            return new ShadowUpdate(accepted, documents, null);
+        }
+        ObjectNode delta = objectMapper.createObjectNode();
+        delta.put("version", version);
+        delta.put("timestamp", timestamp);
+        delta.set("state", deltaState);
+        delta.set("metadata", deltaMetadata(deltaState, metadata.path("desired")));
+        withClientToken(delta, clientToken);
+        return new ShadowUpdate(accepted, documents, delta);
+    }
+
+    private AwsException shadowNotFound(String thingName) {
+        return new AwsException("ResourceNotFoundException", "Shadow not found: " + thingName, 404);
+    }
+
+    private ObjectNode emptyShadowDocument() {
+        ObjectNode document = objectMapper.createObjectNode();
+        document.putObject("state");
+        document.putObject("metadata");
         return document;
+    }
+
+    /** The stored document with {@code state} and {@code metadata} objects; one stored before metadata was kept gets metadata stamped with its stored timestamp. */
+    private ObjectNode storedShadowDocument(IotShadow shadow) {
+        ObjectNode document = readJson(shadow.getDocument()) instanceof ObjectNode stored ? stored : objectMapper.createObjectNode();
+        if (!document.path("state").isObject()) {
+            document.putObject("state");
+        }
+        if (!document.path("metadata").isObject()) {
+            document.set("metadata", shadowMetadata(document.get("state"), document.path("timestamp").asLong()));
+        }
+        return document;
+    }
+
+    /** The {@code previous} or {@code current} member of update/documents, which carries no timestamp. */
+    private ObjectNode shadowSnapshot(ObjectNode document, long version) {
+        ObjectNode snapshot = objectMapper.createObjectNode();
+        snapshot.set("state", document.get("state").deepCopy());
+        snapshot.set("metadata", document.get("metadata").deepCopy());
+        snapshot.put("version", version);
+        return snapshot;
+    }
+
+    /** The desired values whose reported value is missing or different: nested objects compared key by key, arrays and scalars whole. */
+    private ObjectNode shadowDelta(JsonNode desired, JsonNode reported) {
+        ObjectNode delta = objectMapper.createObjectNode();
+        if (!desired.isObject()) {
+            return delta;
+        }
+        desired.fields().forEachRemaining(entry -> {
+            JsonNode desiredValue = entry.getValue();
+            JsonNode reportedValue = reported.path(entry.getKey());
+            if (desiredValue.isObject() && reportedValue.isObject()) {
+                ObjectNode nested = shadowDelta(desiredValue, reportedValue);
+                if (!nested.isEmpty()) {
+                    delta.set(entry.getKey(), nested);
+                }
+            } else if (reportedValue.isMissingNode() || !sameShadowValue(desiredValue, reportedValue)) {
+                delta.set(entry.getKey(), desiredValue);
+            }
+        });
+        return delta;
+    }
+
+    /**
+     * As on AWS, two numbers are equal when both their double and long values are; integers beyond long and
+     * anything else, arrays included, compare exactly.
+     */
+    private static boolean sameShadowValue(JsonNode desired, JsonNode reported) {
+        if (desired.isNumber() && reported.isNumber() && !desired.isBigInteger() && !reported.isBigInteger()) {
+            return desired.doubleValue() == reported.doubleValue() && desired.longValue() == reported.longValue();
+        }
+        return desired.equals(reported);
+    }
+
+    /** The stored desired metadata of exactly the values in {@code delta}, following nested objects. */
+    private ObjectNode deltaMetadata(JsonNode delta, JsonNode desiredMetadata) {
+        ObjectNode metadata = objectMapper.createObjectNode();
+        delta.fields().forEachRemaining(entry -> {
+            JsonNode valueMetadata = desiredMetadata.get(entry.getKey());
+            if (valueMetadata == null) {
+                return;
+            }
+            if (entry.getValue().isObject() && valueMetadata.isObject()) {
+                metadata.set(entry.getKey(), deltaMetadata(entry.getValue(), valueMetadata));
+            } else {
+                metadata.set(entry.getKey(), valueMetadata.deepCopy());
+            }
+        });
+        return metadata;
+    }
+
+    /** AWS's metadata mirror of a state value: every leaf, a null included, becomes the update timestamp. */
+    private JsonNode shadowMetadata(JsonNode value, long timestamp) {
+        if (value.isObject()) {
+            ObjectNode metadata = objectMapper.createObjectNode();
+            value.fields().forEachRemaining(entry -> metadata.set(entry.getKey(), shadowMetadata(entry.getValue(), timestamp)));
+            return metadata;
+        }
+        if (value.isArray()) {
+            ArrayNode metadata = objectMapper.createArrayNode();
+            value.forEach(element -> metadata.add(shadowMetadata(element, timestamp)));
+            return metadata;
+        }
+        ObjectNode leaf = objectMapper.createObjectNode();
+        leaf.put("timestamp", timestamp);
+        return leaf;
+    }
+
+    /**
+     * Publishes one shadow response: fanned out to MQTT subscribers once, recorded once and
+     * evaluated once against the topic rules of the shadow's region, as a message with no MQTT client.
+     */
+    private void publishShadowEvent(String topic, JsonNode payload, String region, Executor ruleRunner) {
+        byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
+        mqttBrokerService.publish(topic, bytes);
+        handlePublish(topic, bytes, true, region, null, ruleRunner);
     }
 
     public List<String> listNamedShadowsForThing(String thingName, String region) {
@@ -1372,28 +1602,52 @@ public class IotService {
                 .toList();
     }
 
-    void handleReservedMqttPublish(String topic, byte[] payload, BiConsumer<String, byte[]> publisher) {
+    /**
+     * Answers a device shadow request published on an MQTT reserved topic. Every response goes
+     * through {@link #publishShadowEvent}, and a failure after the request parsed keeps its clientToken.
+     */
+    void handleReservedMqttPublish(String topic, byte[] payload, Executor ruleRunner) {
         ReservedShadowTopic shadowTopic = parseReservedShadowTopic(topic);
         if (shadowTopic == null) {
             return;
         }
-
+        String region = config.defaultRegion();
+        JsonNode request;
         try {
-            JsonNode request = readJson(payload == null || payload.length == 0 ? "{}" : new String(payload, java.nio.charset.StandardCharsets.UTF_8));
-            String clientToken = request.path("clientToken").asText(null);
-            String region = config.defaultRegion();
+            request = objectMapper.readTree(payload == null || payload.length == 0 ? "{}".getBytes(StandardCharsets.UTF_8) : payload);
+        } catch (IOException e) {
+            LOG.debugv("IoT shadow request on {0} is not JSON: {1}", topic, e.getMessage());
+            publishShadowRejected(shadowTopic, 400, "Invalid JSON", null, region, ruleRunner);
+            return;
+        }
+        String clientToken = request.path("clientToken").asText(null);
+        try {
             switch (shadowTopic.operation()) {
-                case "update" -> publishShadowUpdate(shadowTopic, request, clientToken, region, publisher);
-                case "get" -> publishShadowGet(shadowTopic, clientToken, region, publisher);
-                case "delete" -> publishShadowDelete(shadowTopic, clientToken, region, publisher);
-                default -> publishRejected(shadowTopic.rejectedTopic(), "InvalidRequestException",
-                        "Unsupported shadow operation: " + shadowTopic.operation(), clientToken, publisher);
+                case "update" -> updateThingShadow(shadowTopic.thingName(), shadowTopic.shadowName(), request, region, ruleRunner);
+                case "get" -> publishShadowEvent(shadowTopic.acceptedTopic(),
+                        withClientToken(getThingShadow(shadowTopic.thingName(), shadowTopic.shadowName(), region), clientToken),
+                        region, ruleRunner);
+                case "delete" -> deleteThingShadow(shadowTopic.thingName(), shadowTopic.shadowName(), clientToken, region,
+                        ruleRunner);
+                default -> publishShadowRejected(shadowTopic, 400,
+                        "Unsupported shadow operation: " + shadowTopic.operation(), clientToken, region, ruleRunner);
             }
         } catch (AwsException e) {
-            publishRejected(shadowTopic.rejectedTopic(), e.getErrorCode(), e.getMessage(), null, publisher);
-        } catch (Exception e) {
-            publishRejected(shadowTopic.rejectedTopic(), "InvalidRequestException", e.getMessage(), null, publisher);
+            publishShadowRejected(shadowTopic, e.getHttpStatus(), e.getMessage(), clientToken, region, ruleRunner);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "IoT shadow request on {0} failed", topic);
+            publishShadowRejected(shadowTopic, 400, Objects.requireNonNullElse(e.getMessage(), e.getClass().getSimpleName()),
+                    clientToken, region, ruleRunner);
         }
+    }
+
+    private void publishShadowRejected(ReservedShadowTopic topic, int code, String message, String clientToken,
+                                       String region, Executor ruleRunner) {
+        ObjectNode rejected = objectMapper.createObjectNode();
+        rejected.put("code", code);
+        rejected.put("message", message);
+        withClientToken(rejected, clientToken);
+        publishShadowEvent(topic.rejectedTopic(), rejected, region, ruleRunner);
     }
 
     private void validateThingName(String thingName) {
@@ -1442,7 +1696,18 @@ public class IotService {
     private String policyKey(String region, String policyName) { return "policy:" + region + ":" + policyName; }
     private String policyAttachmentKey(String region, String policyName) { return "policy-attachment:" + region + ":" + policyName; }
     private String thingPrincipalKey(String region, String thingName) { return "thing-principal:" + region + ":" + thingName; }
-    private String shadowKey(String region, String thingName, String shadowName) { return "shadow:" + region + ":" + thingName + ":" + (shadowName == null ? "" : shadowName); }
+    private String shadowKey(String region, String thingName, String shadowName) {
+        if (shadowName == null || shadowName.isEmpty()) {
+            return "shadow:" + region + ":" + thingName + ":";
+        }
+        if (!SHADOW_NAME_PATTERN.matcher(shadowName).matches()) {
+            throw new AwsException("InvalidRequestException", "Bad Request", 400);
+        }
+        if (shadowName.contains("$") && !"$package".equals(shadowName)) {
+            throw new AwsException("InvalidRequestException", "Invalid shadow name : " + shadowName, 400);
+        }
+        return "shadow:" + region + ":" + thingName + ":" + shadowName;
+    }
     private String topicRuleKey(String region, String ruleName) { return "topic-rule:" + region + ":" + ruleName; }
     private String retainedMessageKey(String topic) { return "retained:" + topic; }
     private String jobKey(String region, String jobId) { return "job:" + region + ":" + jobId; }
@@ -1770,6 +2035,11 @@ public class IotService {
             return false;
         }
         String[] filterParts = filter.split("/", -1);
+        // Measured on AWS IoT: a wildcard first level matches the $aws/things shadow topics but not the lifecycle topics.
+        if (topic.startsWith(IotMqttBrokerService.PRESENCE_TOPIC_PREFIX)
+                && ("#".equals(filterParts[0]) || "+".equals(filterParts[0]))) {
+            return false;
+        }
         String[] topicParts = topic.split("/", -1);
         int i = 0;
         for (; i < filterParts.length; i++) {
@@ -1787,79 +2057,12 @@ public class IotService {
         return i == topicParts.length;
     }
 
-    private void publishShadowUpdate(ReservedShadowTopic topic, JsonNode request, String clientToken, String region,
-                                     BiConsumer<String, byte[]> publisher) {
-        JsonNode previous = shadowStore.get(shadowKey(region, topic.thingName(), topic.shadowName()))
-                .map(IotShadow::getDocument)
-                .map(this::readJson)
-                .orElse(null);
-        JsonNode current = updateThingShadow(topic.thingName(), topic.shadowName(), request, region);
-        ObjectNode accepted = withClientToken(current.deepCopy(), clientToken);
-        publishJson(topic.acceptedTopic(), accepted, publisher);
-
-        ObjectNode documents = objectMapper.createObjectNode();
-        if (previous != null) {
-            documents.set("previous", previous);
-        }
-        documents.set("current", current);
-        documents.put("timestamp", Instant.now().getEpochSecond());
-        publishJson(topic.documentsTopic(), documents, publisher);
-
-        ObjectNode deltaState = objectMapper.createObjectNode();
-        JsonNode desired = current.path("state").path("desired");
-        JsonNode reported = current.path("state").path("reported");
-        if (desired.isObject()) {
-            desired.fields().forEachRemaining(entry -> {
-                JsonNode reportedValue = reported.path(entry.getKey());
-                if (reportedValue.isMissingNode() || !reportedValue.equals(entry.getValue())) {
-                    deltaState.set(entry.getKey(), entry.getValue());
-                }
-            });
-        }
-        if (!deltaState.isEmpty()) {
-            ObjectNode delta = objectMapper.createObjectNode();
-            delta.set("state", deltaState);
-            delta.put("version", current.path("version").asLong());
-            delta.put("timestamp", Instant.now().getEpochSecond());
-            publishJson(topic.deltaTopic(), delta, publisher);
-        }
-    }
-
-    private void publishShadowGet(ReservedShadowTopic topic, String clientToken, String region, BiConsumer<String, byte[]> publisher) {
-        ObjectNode accepted = withClientToken(getThingShadow(topic.thingName(), topic.shadowName(), region).deepCopy(), clientToken);
-        publishJson(topic.acceptedTopic(), accepted, publisher);
-    }
-
-    private void publishShadowDelete(ReservedShadowTopic topic, String clientToken, String region, BiConsumer<String, byte[]> publisher) {
-        ObjectNode accepted = withClientToken(deleteThingShadow(topic.thingName(), topic.shadowName(), region).deepCopy(), clientToken);
-        publishJson(topic.acceptedTopic(), accepted, publisher);
-    }
-
     private ObjectNode withClientToken(JsonNode document, String clientToken) {
         ObjectNode node = document instanceof ObjectNode objectNode ? objectNode : objectMapper.createObjectNode();
-        if (clientToken != null && !clientToken.isBlank()) {
+        if (clientToken != null && !clientToken.isEmpty()) {
             node.put("clientToken", clientToken);
         }
         return node;
-    }
-
-    private void publishRejected(String topic, String code, String message, String clientToken, BiConsumer<String, byte[]> publisher) {
-        ObjectNode rejected = objectMapper.createObjectNode();
-        rejected.put("code", code);
-        rejected.put("message", message == null ? code : message);
-        rejected.put("timestamp", Instant.now().getEpochSecond());
-        if (clientToken != null && !clientToken.isBlank()) {
-            rejected.put("clientToken", clientToken);
-        }
-        publishJson(topic, rejected, publisher);
-    }
-
-    private void publishJson(String topic, JsonNode payload, BiConsumer<String, byte[]> publisher) {
-        try {
-            publisher.accept(topic, objectMapper.writeValueAsBytes(payload));
-        } catch (Exception e) {
-            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
-        }
     }
 
     private ReservedShadowTopic parseReservedShadowTopic(String topic) {
@@ -1870,29 +2073,38 @@ public class IotService {
         if (parts.length == 5 && "things".equals(parts[1]) && "shadow".equals(parts[3])) {
             return new ReservedShadowTopic(parts[2], null, parts[4]);
         }
-        if (parts.length == 7 && "things".equals(parts[1]) && "shadow".equals(parts[3]) && "name".equals(parts[4])) {
+        if (parts.length == 7 && "things".equals(parts[1]) && "shadow".equals(parts[3]) && "name".equals(parts[4])
+                && SHADOW_NAME_PATTERN.matcher(parts[5]).matches()) {
             return new ReservedShadowTopic(parts[2], parts[5], parts[6]);
         }
         return null;
     }
 
-    private void mergeObject(ObjectNode parent, String field, JsonNode patch) {
-        if (patch == null || patch.isMissingNode()) {
+    /**
+     * Applies one section of an update shallowly, to the state and its metadata alike: a value sets
+     * the top-level key, a null removes it, and a null section removes the whole section.
+     */
+    private void mergeShadowSection(ObjectNode state, ObjectNode metadata, String section, JsonNode patch, long timestamp) {
+        if (patch.isMissingNode()) {
             return;
         }
         if (patch.isNull()) {
-            parent.remove(field);
+            state.remove(section);
+            metadata.remove(section);
             return;
         }
         if (!patch.isObject()) {
             return;
         }
-        ObjectNode target = parent.withObject("/" + field);
+        ObjectNode stateSection = state.withObject("/" + section);
+        ObjectNode metadataSection = metadata.withObject("/" + section);
         patch.fields().forEachRemaining(entry -> {
             if (entry.getValue().isNull()) {
-                target.remove(entry.getKey());
+                stateSection.remove(entry.getKey());
+                metadataSection.remove(entry.getKey());
             } else {
-                target.set(entry.getKey(), entry.getValue());
+                stateSection.set(entry.getKey(), entry.getValue());
+                metadataSection.set(entry.getKey(), shadowMetadata(entry.getValue(), timestamp));
             }
         });
     }
@@ -2055,6 +2267,9 @@ public class IotService {
     }
 
     public record Page<T>(List<T> items, String nextToken) {
+    }
+
+    private record ShadowUpdate(ObjectNode accepted, ObjectNode documents, ObjectNode delta) {
     }
 
     private record TaggableResource(Map<String, String> tags, java.util.function.Consumer<Map<String, String>> updateTags) {

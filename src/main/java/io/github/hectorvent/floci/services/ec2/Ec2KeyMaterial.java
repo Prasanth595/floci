@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 
@@ -7,7 +8,6 @@ import java.io.IOException;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPairGenerator;
-import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.interfaces.RSAPublicKey;
 import java.util.Base64;
@@ -57,8 +57,7 @@ public final class Ec2KeyMaterial {
 
             // "The SHA-1 digest of the DER encoded private key" for a key pair AWS created.
             // (Imported keys use the MD5 of the public key instead -- see fingerprintOf.)
-            String fingerprint = colonHex(
-                    MessageDigest.getInstance("SHA-1").digest(pair.getPrivate().getEncoded()));
+            String fingerprint = colonHex(Digests.sha1(pair.getPrivate().getEncoded()));
 
             return new Generated(
                     out.toString(),
@@ -108,8 +107,7 @@ public final class Ec2KeyMaterial {
                 if (reader.readField().length != ED25519_KEY_LENGTH) {
                     return null;
                 }
-                return Base64.getEncoder().encodeToString(
-                        MessageDigest.getInstance("SHA-256").digest(blob));
+                return Base64.getEncoder().encodeToString(Digests.sha256(blob));
             }
             // EC2 documents its ssh-rsa fingerprint as the MD5 of the DER, which is not the
             // OpenSSH fingerprint of the same key. SshPublicKeys keeps the two apart on purpose.

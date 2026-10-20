@@ -1,6 +1,6 @@
 # DynamoDB
 
-**Protocol:** JSON 1.1 (`X-Amz-Target: DynamoDB_20120810.*`)
+**Protocol:** JSON 1.0 (`X-Amz-Target: DynamoDB_20120810.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
 ## Supported Actions
@@ -44,6 +44,45 @@
 | `DescribeImport` | Get import status and metadata |
 | `ListImports` | List imports, optionally filtered by table ARN |
 
+## Legacy 2011-12-05 clients
+
+The JSON 1.0 target `DynamoDB_20111205` supports `DescribeTable`, `Query` and
+`BatchWriteItem`. These operations use the selected DynamoDB backend and the
+caller's account and region. Table schemas, query conditions and continuation
+keys, batch delete keys, unprocessed writes and consumed capacity are translated
+between the two API versions. Missing tables return `ResourceNotFoundException`.
+Other operations under this legacy target return `UnknownOperationException`;
+the modern target remains the full API.
+
+The explicit Boto 2 suite in `compatibility-tests/sdk-test-python/legacy/`
+exercises table discovery, paginated key queries and
+batch deletion against the same tables used by Boto 3. The wire contracts follow
+the AWS [2011-12-05 DescribeTable](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/API_DescribeTables_v20111205.html),
+[Query](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/API_Query_v20111205.html)
+and [BatchWriteItem](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/API_BatchWriteItem_v20111205.html)
+documentation.
+
+## Legacy conditional requests
+
+The native backend accepts `KeyConditions` together with `FilterExpression`.
+For legacy `Expected` conditions it also accepts `ComparisonOperator` with a single
+`Value`, including EQ and NE, just as the live AWS service does. Supplying both
+`Value` and `AttributeValueList`, omitting a required operand, or supplying the wrong
+number of operands returns `ValidationException` without changing the item.
+`NULL` and `NOT_NULL` take no operands.
+
+These behaviors were verified against AWS in `us-east-1` on October 12, 2026:
+40 pairs of equivalent conditional writes, matching and nonmatching queries,
+and 30 operand cases for each of `PutItem`, `UpdateItem` and `DeleteItem`.
+The SDK regression cases and recorded error messages are in
+`compatibility-tests/sdk-test-python/tests/test_dynamodb_legacy_expected.py` and
+`tests/fixtures/dynamodb-legacy-expected-aws.json` within that suite.
+
+AWS's [ExpectedAttributeValue documentation](https://docs.aws.amazon.com/sdk-for-python/v4/reference/clients/dynamodb/structures/ExpectedAttributeValue/)
+describes the parameter families as incompatible more broadly. Floci preserves
+the combinations accepted by the live service; this does not make every mixture
+of legacy and expression parameters valid.
+
 ## Streams {#streams}
 
 DynamoDB Streams are supported via a separate target (`DynamoDBStreams_20120810`):
@@ -67,8 +106,29 @@ the reset.
 
 With TTL enabled, a sweep runs every 60 seconds and deletes the items whose TTL attribute holds an
 epoch time in the past. Each deletion writes a `REMOVE` record to the table's stream and is
-forwarded to an active Kinesis streaming destination. Between sweeps, reads already leave expired
-items out.
+forwarded to an active Kinesis streaming destination. Between sweeps, expired items remain visible
+to reads until they are physically deleted, as on AWS. Use a filter expression on the TTL attribute
+to exclude expired items from a Query or Scan result.
+
+As in AWS, the records of a TTL deletion carry the DynamoDB service identity, which a `DeleteItem`
+removal does not. The member names depend on where the record is read. The DynamoDB Streams API
+(`GetRecords`) capitalises them, as the SDK's `Identity` shape expects:
+
+```json
+"userIdentity": {"PrincipalId": "dynamodb.amazonaws.com", "Type": "Service"}
+```
+
+The records that Lambda event source mappings and EventBridge Pipes deliver and filter use the
+lowercase names the DynamoDB developer guide shows, and so does the Kinesis streaming destination
+record:
+
+```json
+"userIdentity": {"type": "Service", "principalId": "dynamodb.amazonaws.com"}
+```
+
+A Lambda event source mapping or an EventBridge pipe that should see only TTL deletions filters on
+it with the pattern
+`{"userIdentity": {"type": ["Service"], "principalId": ["dynamodb.amazonaws.com"]}}`.
 
 ## DynamoDB Local backend
 
@@ -128,6 +188,11 @@ region is rejected.
   `memory` storage they are lost when Floci restarts while the tables stay in DynamoDB Local.
 - **Stream consumers.** Lambda event source mappings, EventBridge Pipes and other Floci stream
   consumers read the DynamoDB Local streams through the Streams API.
+- **Time to live deletions.** DynamoDB Local deletes expired items itself and writes each deletion
+  to the stream with the event name `UNKNOWN_TO_SDK_VERSION` and no `userIdentity`. Floci's
+  `GetRecords` returns it as AWS writes it, a `REMOVE` record with the DynamoDB service
+  `userIdentity` (see [Time to Live](#time-to-live)), so every stream consumer and event filter
+  sees the AWS shape.
 
 ### Limits
 

@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.SshPublicKeyException;
 import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import io.github.hectorvent.floci.core.common.Totp;
@@ -53,6 +54,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.PrivateKey;
@@ -60,6 +62,7 @@ import java.security.SecureRandom;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.X509Certificate;
 import java.security.interfaces.RSAPublicKey;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -78,9 +81,11 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -99,11 +104,17 @@ import java.util.stream.Stream;
 @ApplicationScoped
 public class IamService implements SessionAccountLookup, ResourceProvider {
 
+    public static final String FEDERATION_TOKEN_SESSION_MESSAGE =
+            "Cannot call GetFederationToken with session credentials";
+
+    private static final int USER_INLINE_POLICY_SIZE_LIMIT = 2_048;
+    private static final int GROUP_INLINE_POLICY_SIZE_LIMIT = 5_120;
     private static final int ROLE_INLINE_POLICY_SIZE_LIMIT = 10_240;
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
     private static final String FEDERATED_USER_PREFIX = "federated-user/";
+    private static final String ASSUMED_ROLE_PREFIX = "assumed-role/";
     private static final ObjectMapper POLICY_MAPPER = new ObjectMapper();
     private static final String SCOPED_IDENTITY_SESSION_BASE_POLICY =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}";
@@ -114,6 +125,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private static final String FEDERATED_USER_SESSION_LIMITS =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":[\"iam:*\",\"sts:*\"],\"Resource\":\"*\"}]}";
+    /**
+     * What the account password policy's {@code AllowUsersToChangePassword} authorizes. The guide:
+     * the option "gives users access to the iam:ChangePassword action for only their user and to
+     * the iam:GetAccountPasswordPolicy action", and "does not attach a permissions policy to each
+     * user. Rather, IAM applies the permissions at the account-level for all users". So this is one
+     * document for the whole account, and {@code ${aws:username}} is what binds it to the caller,
+     * exactly as AWS's own {@code IAMUserChangePassword} policy writes the same grant. The second
+     * resource is that policy's second pattern, for a user under a path. A principal with no
+     * {@code aws:username}, a role session or the account root, resolves the variable to nothing
+     * and the statement then matches no user at all, which is the behaviour the guide describes for
+     * a key with no value and the reason this grant needs no principal check of its own.
+     */
+    private static final String PASSWORD_SELF_SERVICE_GRANT =
+            "{\"Version\":\"2012-10-17\",\"Statement\":["
+                    + "{\"Effect\":\"Allow\",\"Action\":\"iam:ChangePassword\","
+                    + "\"Resource\":[\"%s\",\"%s\"]},"
+                    + "{\"Effect\":\"Allow\",\"Action\":\"iam:GetAccountPasswordPolicy\","
+                    + "\"Resource\":\"*\"}]}";
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
@@ -160,12 +189,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** CSPRNG for long-term secret access keys; ordinary resource IDs keep using {@link ThreadLocalRandom}. */
     private final SecureRandom secureRandom = new SecureRandom();
 
-    private static final String SERVICE_LINKED_ROLE_PATH = "/aws-service-role/";
     /** AWSServiceName as AWS constrains it: 1-128 characters of {@code [\w+=,.@-]}. */
     private static final Pattern SERVICE_PRINCIPAL_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
     /** CustomSuffix as AWS constrains it: 1-64 characters of {@code [\w+=,.@-]}. */
     private static final Pattern CUSTOM_SUFFIX_PATTERN = Pattern.compile("[\\w+=,.@-]{1,64}");
     private static final int ROLE_NAME_MAX_LENGTH = 64;
+    /** roleNameType's character set. Excluding {@code :} is what reserves names such as {@code aws:ec2-instance} for AWS. */
+    private static final Pattern ROLE_NAME_PATTERN = Pattern.compile("[\\w+=,.@-]+");
     /** groupNameType / instanceProfileNameType: 1-128 characters of {@code [\w+=,.@-]}. */
     private static final Pattern IAM_RESOURCE_NAME_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
     /**
@@ -233,6 +263,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** The creation half of a long-term API key's alias. */
     private static final DateTimeFormatter CREDENTIAL_ALIAS_DATE =
             DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneOffset.UTC);
+    /** The credential report's timestamps, as in the User Guide's example rows: 2014-10-15T16:31:25+00:00. */
+    private static final DateTimeFormatter CREDENTIAL_REPORT_TIME =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssxxx").withZone(ZoneOffset.UTC);
     /** AWS General Reference, IAM service quotas: "SSH Public keys per user", not adjustable. */
     private static final int MAX_SSH_PUBLIC_KEYS_PER_USER = 5;
     /** publicKeyIdType is 20 to 128 of [\w]+, and AWS's own examples use the APKA prefix. */
@@ -246,9 +279,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final String CREDENTIAL_STATUS_ACTIVE = "Active";
     private static final String CREDENTIAL_STATUS_EXPIRED = "Expired";
     /**
-     * statusType's values, shared by signing certificates and SSH public keys: Active, Inactive
-     * and Expired. Each operation's prose explains only the first two, so the third is easy to
-     * reject by mistake, while the API Reference lists all three as valid.
+     * statusType's values, shared by access keys, signing certificates, SSH public keys and
+     * service-specific credentials: Active, Inactive and Expired. Each operation's prose explains
+     * only the first two, so the third is easy to reject by mistake, while the API Reference lists
+     * all three as valid on each of them.
      */
     private static final Set<String> CREDENTIAL_STATUSES =
             Set.of(CREDENTIAL_STATUS_ACTIVE, "Inactive", CREDENTIAL_STATUS_EXPIRED);
@@ -369,6 +403,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final Object sshPublicKeyLock = new Object();
     private final Object serviceCredentialLock = new Object();
     /**
+     * Guards every check-then-write on an access key, the way its three sibling credential
+     * families are guarded. Both halves of this family need it: CreateAccessKey counts a user's
+     * keys and only then stores another, so two requests racing the quota would both pass a check
+     * for two; and UpdateAccessKey reads a key, changes its status and writes it back, so an
+     * update racing a delete would store the key the delete had just removed.
+     */
+    private final Object accessKeyLock = new Object();
+    /**
      * Guards every check-then-write on an MFA device. Assignment is the reason it has to exist:
      * EnableMFADevice reads the device to confirm it is unassigned and reads the user's device
      * count to confirm it is under the quota, then writes. Two requests racing the same free
@@ -376,10 +418,23 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private final Object mfaDeviceLock = new Object();
     private final RegionResolver regionResolver;
+    private final Clock clock;
     private final boolean seedDeployerPrincipal;
     private final String seededAccountAlias;
     /** Guards case-insensitive IAM name uniqueness checks and their corresponding writes. */
     private final Object resourceNameLock = new Object();
+    // Undo handles retain their ownership keys; completed attempts leave no permanent history.
+    // Both keys and values are weak because each owner itself holds its canonical key.
+    private final Map<InlinePolicyKey, WeakReference<InlinePolicyOwner>> inlinePolicyOwners = new WeakHashMap<>();
+    /**
+     * Guards every check-then-write on a login profile. ChangePassword is the reason it has to
+     * exist: it reads the profile to compare the old password, then writes the new one, so two
+     * requests presenting the same valid old password would otherwise both pass the comparison
+     * and both report success while only the later write survived. Every writer takes it, since a
+     * guard one writer skips guarantees nothing: a racing UpdateLoginProfile would overwrite the
+     * password a ChangePassword had just been told it could set.
+     */
+    private final Object loginProfileLock = new Object();
 
     /**
      * AWS-managed policies ({@code arn:<partition>:iam::aws:policy/...}), keyed by ARN, one map
@@ -391,7 +446,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final Map<String, Map<String, IamPolicy>> awsManagedPoliciesByPartition = new ConcurrentHashMap<>();
 
     @Inject
-    public IamService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
+    public IamService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+                      Clock clock) {
         this(
             storageFactory.create("iam", "iam-users.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-groups.json", new TypeReference<>() {}),
@@ -417,7 +473,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-outbound-federation.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
-            config.services().iam().accountAlias().orElse(null)
+            config.services().iam().accountAlias().orElse(null),
+            clock
         );
     }
 
@@ -441,6 +498,20 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                StorageBackend<String, SessionCredential> sessions,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal) {
+        this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions, regionResolver,
+                seedDeployerPrincipal, Clock.systemUTC());
+    }
+
+    IamService(StorageBackend<String, IamUser> users,
+               StorageBackend<String, IamGroup> groups,
+               StorageBackend<String, IamRole> roles,
+               StorageBackend<String, IamPolicy> policies,
+               StorageBackend<String, AccessKey> accessKeys,
+               StorageBackend<String, InstanceProfile> instanceProfiles,
+               StorageBackend<String, SessionCredential> sessions,
+               RegionResolver regionResolver,
+               boolean seedDeployerPrincipal,
+               Clock clock) {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -449,7 +520,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                regionResolver, seedDeployerPrincipal, null);
+                regionResolver, seedDeployerPrincipal, null, clock);
     }
 
     // 8-backend constructor (no org-root-features): kept for existing callers/tests;
@@ -527,6 +598,39 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal,
                String seededAccountAlias) {
+        this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions, accountAliases,
+                passwordPolicies, loginProfiles, oidcProviders, serviceLinkedRoleDeletions, orgRootFeatures,
+                credentialReports, virtualMfaDevices, serverCertificates, signingCertificates, sshPublicKeys,
+                serviceCredentials, accountProperties, stsPreferences, outboundFederation,
+                regionResolver, seedDeployerPrincipal, seededAccountAlias, Clock.systemUTC());
+    }
+
+    IamService(StorageBackend<String, IamUser> users,
+               StorageBackend<String, IamGroup> groups,
+               StorageBackend<String, IamRole> roles,
+               StorageBackend<String, IamPolicy> policies,
+               StorageBackend<String, AccessKey> accessKeys,
+               StorageBackend<String, InstanceProfile> instanceProfiles,
+               StorageBackend<String, SessionCredential> sessions,
+               StorageBackend<String, String> accountAliases,
+               StorageBackend<String, AccountPasswordPolicy> passwordPolicies,
+               StorageBackend<String, LoginProfile> loginProfiles,
+               StorageBackend<String, OpenIDConnectProvider> oidcProviders,
+               StorageBackend<String, String> serviceLinkedRoleDeletions,
+               StorageBackend<String, OrganizationRootFeatures> orgRootFeatures,
+               StorageBackend<String, CredentialReport> credentialReports,
+               StorageBackend<String, VirtualMfaDevice> virtualMfaDevices,
+               StorageBackend<String, ServerCertificate> serverCertificates,
+               StorageBackend<String, SigningCertificate> signingCertificates,
+               StorageBackend<String, SshPublicKey> sshPublicKeys,
+               StorageBackend<String, ServiceSpecificCredential> serviceCredentials,
+               StorageBackend<String, String> accountProperties,
+               StorageBackend<String, String> stsPreferences,
+               StorageBackend<String, OutboundWebIdentityFederation> outboundFederation,
+               RegionResolver regionResolver,
+               boolean seedDeployerPrincipal,
+               String seededAccountAlias,
+               Clock clock) {
         this.users = users;
         this.groups = groups;
         this.roles = roles;
@@ -552,6 +656,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
         this.seededAccountAlias = seededAccountAlias;
+        this.clock = clock;
     }
 
     @PostConstruct
@@ -701,62 +806,87 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return accessKeys.get(accessKeyId).map(AccessKey::getUserName);
     }
 
+    /**
+     * The owner of a key in the calling account, for a read that is not the owner's own request.
+     * Unlike {@link #findUserNameByAccessKeyId}, this never migrates: an unprefixed
+     * pre-multi-account key belongs to the default account and is only read in place, so another
+     * account asking (even one with a same-named user) neither learns the owner nor moves the key.
+     */
+    public Optional<String> findAccessKeyOwnerInThisAccount(String accessKeyId) {
+        if (accessKeyId == null) {
+            return Optional.empty();
+        }
+        if (!(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
+            return findUserNameByAccessKeyId(accessKeyId);
+        }
+        String accountId = aware.accountId();
+        return aware.getForAccount(accountId, accessKeyId)
+                .or(() -> aware.getLegacyForAccount(accountId, accessKeyId))
+                .map(AccessKey::getUserName);
+    }
+
     public void deleteUser(String userName) {
-        IamUser user = getUser(userName);
-        if (!user.getAttachedPolicyArns().isEmpty()) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete entity, must detach all policies first.", 409);
-        }
-        if (!user.getGroupNames().isEmpty()) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete entity, must remove from all groups first.", 409);
-        }
-        if (loginProfiles.get(userName).isPresent()) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete entity, must delete login profile first.", 409);
-        }
-        if (!user.getInlinePolicies().isEmpty()) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete entity, must delete policies first.", 409);
-        }
-        if (!userAccessKeys(userName).isEmpty()) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete entity, must delete access keys first.", 409);
-        }
-        // Both locks are held across the delete rather than just the checks: UploadSigningCertificate
-        // UploadSigningCertificate and EnableMFADevice confirm the user under their own lock, so
-        // none of them can interleave into a credential owned by a deleted user. Taken in this
-        // order here and in UpdateUser, and nowhere else in more than one, so it cannot deadlock.
-        synchronized (serviceCredentialLock) {
-            // AWS lists these among the items to remove first, under their CodeCommit
-            // name: "Git credentials (DeleteServiceSpecificCredential)". Unlike the
-            // cases above it has no message of its own: AWS falls back to the generic
-            // referenced-objects wording here.
-            if (!userServiceCredentials(userName).isEmpty()) {
+        synchronized (resourceNameLock) {
+            IamUser user = getUser(userName);
+            if (!user.getAttachedPolicyArns().isEmpty()) {
                 throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must remove referenced objects first.", 409);
+                        "Cannot delete entity, must detach all policies first.", 409);
             }
-            synchronized (sshPublicKeyLock) {
-                if (!userSshPublicKeys(userName).isEmpty()) {
+            if (!user.getGroupNames().isEmpty()) {
+                throw new AwsException("DeleteConflict",
+                        "Cannot delete entity, must remove from all groups first.", 409);
+            }
+            if (loginProfiles.get(userName).isPresent()) {
+                throw new AwsException("DeleteConflict",
+                        "Cannot delete entity, must delete login profile first.", 409);
+            }
+            if (!user.getInlinePolicies().isEmpty()) {
+                throw new AwsException("DeleteConflict",
+                        "Cannot delete entity, must delete policies first.", 409);
+            }
+            // The credential locks are held across the delete rather than just the checks:
+            // CreateAccessKey, UploadSigningCertificate and EnableMFADevice each confirm the user
+            // under their own lock, so none of them can interleave into a credential owned by a
+            // user that is already gone. Access keys are the outermost of the five here, and
+            // UpdateUser takes that lock on its own rather than inside the others, so no two of
+            // them are ever held in opposite orders.
+            synchronized (accessKeyLock) {
+                if (!userAccessKeys(userName).isEmpty()) {
                     throw new AwsException("DeleteConflict",
-                            "Cannot delete entity, must delete SSH public keys first.", 409);
+                            "Cannot delete entity, must delete access keys first.", 409);
                 }
-                synchronized (signingCertificateLock) {
-                    if (!userSigningCertificates(userName).isEmpty()) {
+                synchronized (serviceCredentialLock) {
+                    // AWS lists these among the items to remove first, under their CodeCommit
+                    // name: "Git credentials (DeleteServiceSpecificCredential)". Unlike the
+                    // cases above it has no message of its own: AWS falls back to the generic
+                    // referenced-objects wording here.
+                    if (!userServiceCredentials(userName).isEmpty()) {
                         throw new AwsException("DeleteConflict",
-                                "Cannot delete entity, must delete signing certificates first.", 409);
+                                "Cannot delete entity, must remove referenced objects first.", 409);
                     }
-                    synchronized (mfaDeviceLock) {
-                        if (!mfaDevicesForUser(userName).isEmpty()) {
+                    synchronized (sshPublicKeyLock) {
+                        if (!userSshPublicKeys(userName).isEmpty()) {
                             throw new AwsException("DeleteConflict",
-                                    "Cannot delete entity, must deactivate MFA device first.", 409);
+                                    "Cannot delete entity, must delete SSH public keys first.", 409);
                         }
-                        users.delete(userName);
+                        synchronized (signingCertificateLock) {
+                            if (!userSigningCertificates(userName).isEmpty()) {
+                                throw new AwsException("DeleteConflict",
+                                        "Cannot delete entity, must delete signing certificates first.", 409);
+                            }
+                            synchronized (mfaDeviceLock) {
+                                if (!mfaDevicesForUser(userName).isEmpty()) {
+                                    throw new AwsException("DeleteConflict",
+                                            "Cannot delete entity, must deactivate MFA device first.", 409);
+                                }
+                                users.delete(userName);
+                            }
+                        }
                     }
                 }
             }
+            LOG.infov("Deleted IAM user: {0}", userName);
         }
-        LOG.infov("Deleted IAM user: {0}", userName);
     }
 
     public List<IamUser> listUsers(String pathPrefix) {
@@ -778,11 +908,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void updateUser(String userName, String newUserName, String newPath, String expectedUserId) {
         synchronized (resourceNameLock) {
             IamUser user = getUser(userName);
-            if (expectedUserId != null && !expectedUserId.equals(user.getUserId())) {
-                throw new AwsException("EntityAlreadyExists",
-                        "User " + userName + " was replaced by a different user of the same name; "
-                                + "refusing to apply an update meant for the original user.", 409);
-            }
+            requireSameUser(user, userName, expectedUserId);
             if (newUserName != null && !newUserName.equals(userName)) {
                 boolean nameTaken = resourcesInCurrentAccount(users)
                         .filter(existing -> !existing.getUserId().equals(user.getUserId()))
@@ -791,7 +917,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                     throw new AwsException("EntityAlreadyExists",
                             "User with name " + newUserName + " already exists.", 409);
                 }
-                List<AccessKey> keysToMove = userAccessKeys(userName);
                 // The rename publishes the user under its new name and moves the credentials that
                 // DeleteUser refuses to delete a user over: its MFA devices, its signing
                 // certificates and its SSH public keys. Each moves under the lock DeleteUser checks it with, because split
@@ -835,14 +960,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                                 credential.getServiceSpecificCredentialId(), credential);
                     }
                 }
-                loginProfiles.get(userName).ifPresent(profile -> {
-                    loginProfiles.delete(userName);
-                    profile.setUserName(newUserName);
-                    loginProfiles.put(newUserName, profile);
-                });
-                for (AccessKey key : keysToMove) {
-                    key.setUserName(newUserName);
-                    accessKeys.put(key.getAccessKeyId(), key);
+                synchronized (loginProfileLock) {
+                    loginProfiles.get(userName).ifPresent(profile -> {
+                        loginProfiles.delete(userName);
+                        profile.setUserName(newUserName);
+                        loginProfiles.put(newUserName, profile);
+                    });
+                }
+                synchronized (accessKeyLock) {
+                    // Read inside the lock that rewrites them, the way each credential above is
+                    // read inside its own: a DeleteAccessKey landing between a read taken earlier
+                    // and this loop would be undone, the deleted key coming back under the new
+                    // name and still authenticating.
+                    for (AccessKey key : userAccessKeys(userName)) {
+                        key.setUserName(newUserName);
+                        accessKeys.put(key.getAccessKeyId(), key);
+                    }
                 }
                 for (String groupName : user.getGroupNames()) {
                     groups.get(groupName).ifPresent(group -> {
@@ -907,6 +1040,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         "The group with name " + groupName + " cannot be found.", 404));
     }
 
+    /**
+     * Looks up a group by name in a specific account's namespace, without throwing when absent.
+     * Mirrors {@link #findUser(String, String)}, and exists for the same reason: a caller
+     * resolving a group's ARN has only the name, and the path that completes that ARN is held by
+     * the stored group.
+     */
+    public Optional<IamGroup> findGroup(String accountId, String groupName) {
+        if (groups instanceof AccountAwareStorageBackend<IamGroup> aware) {
+            return aware.getForAccount(accountId, groupName);
+        }
+        return groups.get(groupName);
+    }
+
     public void updateGroup(String groupName, String newGroupName, String newPath) {
         validateIamResourceName(groupName, "GroupName");
         if (newGroupName != null) {
@@ -949,17 +1095,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteGroup(String groupName) {
-        IamGroup group = getGroup(groupName);
-        if (!group.getAttachedPolicyArns().isEmpty() || !group.getInlinePolicies().isEmpty()) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete entity, must detach all policies first.", 409);
+        synchronized (resourceNameLock) {
+            IamGroup group = getGroup(groupName);
+            if (!group.getAttachedPolicyArns().isEmpty() || !group.getInlinePolicies().isEmpty()) {
+                throw new AwsException("DeleteConflict",
+                        "Cannot delete entity, must detach all policies first.", 409);
+            }
+            if (!group.getUserNames().isEmpty()) {
+                throw new AwsException("DeleteConflict",
+                        "Cannot delete entity, must remove all users from group first.", 409);
+            }
+            groups.delete(groupName);
+            LOG.infov("Deleted IAM group: {0}", groupName);
         }
-        if (!group.getUserNames().isEmpty()) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete entity, must remove all users from group first.", 409);
-        }
-        groups.delete(groupName);
-        LOG.infov("Deleted IAM group: {0}", groupName);
     }
 
     public List<IamGroup> listGroups(String pathPrefix) {
@@ -1010,6 +1158,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public IamRole createRole(String roleName, String path, String assumeRolePolicyDocument,
                               String description, int maxSessionDuration, Map<String, String> tags,
                               String permissionsBoundaryArn) {
+        validateRoleName(roleName);
         if (permissionsBoundaryArn != null) {
             requirePolicy(permissionsBoundaryArn); // validate before anything is created
         }
@@ -1042,6 +1191,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         "The role with name " + roleName + " cannot be found.", 404));
     }
 
+    public IamRole getValidatedRole(String roleName) {
+        validateRoleName(roleName);
+        return getRole(roleName);
+    }
+
     /**
      * Looks up a role by name in a specific account's namespace, without throwing when absent.
      *
@@ -1053,6 +1207,53 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return aware.getForAccount(accountId, roleName);
         }
         return roles.get(roleName);
+    }
+
+    /** roleNameType: 1-64 characters of {@code [\w+=,.@-]}, reported the way AWS reports a model constraint. */
+    private static void validateRoleName(String roleName) {
+        String constraint;
+        if (roleName == null) {
+            constraint = "Member must not be null";
+        } else if (roleName.isEmpty()) {
+            constraint = "Member must have length greater than or equal to 1";
+        } else if (roleName.length() > ROLE_NAME_MAX_LENGTH) {
+            constraint = "Member must have length less than or equal to " + ROLE_NAME_MAX_LENGTH;
+        } else if (!ROLE_NAME_PATTERN.matcher(roleName).matches()) {
+            constraint = "Member must satisfy regular expression pattern: " + ROLE_NAME_PATTERN.pattern();
+        } else {
+            return;
+        }
+        String value = roleName == null ? "null" : "'" + roleName + "'";
+        throw SmithyValidationErrors.validationError("Value " + value
+                + " at 'roleName' failed to satisfy constraint: " + constraint);
+    }
+
+    /**
+     * Whether {@code requestedRoleArn} names {@code role}: same account, same path and name, no region.
+     *
+     * <p>The ARN's partition only has to be well formed. One process serves several partitions but
+     * keeps one IAM namespace per account, so a role ARN from another partition resolves to the
+     * account's one role (see the partitions guide). STS AssumeRole and EKS Pod Identity both match
+     * role ARNs through here so they accept the same ARNs.
+     */
+    public static boolean roleArnMatches(String requestedRoleArn, IamRole role) {
+        if (requestedRoleArn == null || role == null || !AwsArnUtils.isArn(requestedRoleArn)) {
+            return false;
+        }
+        AwsArnUtils.Arn requested = AwsArnUtils.parse(requestedRoleArn);
+        if (!"iam".equals(requested.service())
+                || !requested.partition().matches(AwsArnUtils.PARTITION_REGEX)) {
+            return false;
+        }
+        String storedArn = role.getArn();
+        if (storedArn != null && AwsArnUtils.isArn(storedArn)) {
+            AwsArnUtils.Arn stored = AwsArnUtils.parse(storedArn);
+            return requested.accountId().equals(stored.accountId())
+                    && requested.region().equals(stored.region())
+                    && requested.resource().equals(stored.resource());
+        }
+        String expectedResource = "role" + normalizePath(role.getPath()) + role.getRoleName();
+        return requested.region().isEmpty() && requested.resource().equals(expectedResource);
     }
 
     /**
@@ -1074,18 +1275,21 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** The linked service, recovered from the {@code /aws-service-role/<principal>/} path. */
     private static String linkedServicePrincipal(IamRole role) {
         String path = role.getPath();
-        return path.substring(SERVICE_LINKED_ROLE_PATH.length(), path.length() - 1);
+        return path.substring(ServiceLinkedRoles.PATH.length(), path.length() - 1);
     }
 
     public void deleteRole(String roleName) {
-        IamRole role = getRole(roleName);
-        requireNotServiceLinked(role, roleName);
-        if (!role.getAttachedPolicyArns().isEmpty() || !role.getInlinePolicies().isEmpty()) {
-            throw new AwsException("DeleteConflict",
-                    "Cannot delete entity, must detach all policies first.", 409);
+        synchronized (resourceNameLock) {
+            validateRoleName(roleName);
+            IamRole role = getRole(roleName);
+            requireNotServiceLinked(role, roleName);
+            if (!role.getAttachedPolicyArns().isEmpty() || !role.getInlinePolicies().isEmpty()) {
+                throw new AwsException("DeleteConflict",
+                        "Cannot delete entity, must detach all policies first.", 409);
+            }
+            roles.delete(roleName);
+            LOG.infov("Deleted IAM role: {0}", roleName);
         }
-        roles.delete(roleName);
-        LOG.infov("Deleted IAM role: {0}", roleName);
     }
 
     /**
@@ -1150,7 +1354,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             String principal = ServicePrincipals.canonical(awsServiceName);
             String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                     + "\"Principal\":{\"Service\":\"" + principal + "\"},\"Action\":\"sts:AssumeRole\"}]}";
-            IamRole role = createRole(roleName, SERVICE_LINKED_ROLE_PATH + principal + "/",
+            IamRole role = createRole(roleName, ServiceLinkedRoles.PATH + principal + "/",
                     trustPolicy, description, 0, Map.of());
             role.setServiceLinkedRole(true);
             roles.put(roleName, role);
@@ -1166,6 +1370,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (roleName == null) {
             throw new AwsException("NoSuchEntity", "The request must include RoleName.", 404);
         }
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         // The path cannot classify a role — CreateRole will put an ordinary one under the
         // service-role prefix — so only roles minted here are deletable through this action. The
@@ -1180,7 +1385,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         roles.delete(roleName);
         LOG.infov("Deleted service-linked IAM role: {0}", roleName);
 
-        String deletionTaskId = "task" + SERVICE_LINKED_ROLE_PATH + servicePrincipal + "/"
+        String deletionTaskId = "task" + ServiceLinkedRoles.PATH + servicePrincipal + "/"
                 + roleName + "/" + UUID.randomUUID();
         serviceLinkedRoleDeletions.put(deletionTaskId, roleName);
         return deletionTaskId;
@@ -1198,10 +1403,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         String prefix = pathPrefix != null ? pathPrefix : "/";
         return roles.scan(k -> true).stream()
                 .filter(r -> r.getPath().startsWith(prefix))
+                .sorted(Comparator.comparing(IamRole::getRoleName))
                 .toList();
     }
 
     public void updateRole(String roleName, String description, int maxSessionDuration) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         if (description != null) role.setDescription(description);
@@ -1210,6 +1417,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateAssumeRolePolicy(String roleName, String policyDocument) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         role.setAssumeRolePolicyDocument(policyDocument);
@@ -1224,17 +1432,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * that check and this call would silently receive the update meant for the original role.
      */
     public void updateAssumeRolePolicy(String roleName, String policyDocument, String expectedRoleId) {
-        IamRole role = getRole(roleName);
-        if (expectedRoleId != null && !expectedRoleId.equals(role.getRoleId())) {
-            throw new AwsException("EntityAlreadyExists",
-                    "Role " + roleName + " was replaced by a different role of the same name; "
-                            + "refusing to apply an update meant for the original role.", 409);
+        validateRoleName(roleName);
+        synchronized (resourceNameLock) {
+            IamRole role = getRole(roleName);
+            requireSameRole(role, roleName, expectedRoleId);
+            role.setAssumeRolePolicyDocument(policyDocument);
+            roles.put(roleName, role);
         }
-        role.setAssumeRolePolicyDocument(policyDocument);
-        roles.put(roleName, role);
     }
 
     public void tagRole(String roleName, Map<String, String> newTags) {
+        validateRoleName(roleName);
         synchronized (tagLock) {
             IamRole role = getRole(roleName);
             role.setTags(mergeTagsWithinQuota(role.getTags(), newTags, "TagsPerRole", true));
@@ -1243,6 +1451,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void untagRole(String roleName, List<String> tagKeys) {
+        validateRoleName(roleName);
         synchronized (tagLock) {
             IamRole role = getRole(roleName);
             removeTagsCaseInsensitive(role.getTags(), tagKeys);
@@ -1251,6 +1460,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public Map<String, String> listRoleTags(String roleName) {
+        validateRoleName(roleName);
         return getRole(roleName).getTags();
     }
 
@@ -1418,10 +1628,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 && !"All".equalsIgnoreCase(scope)
                 && !"AWS".equalsIgnoreCase(scope)
                 && !"Local".equalsIgnoreCase(scope)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + scope + "' at 'scope' failed to "
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + scope + "' at 'scope' failed to "
                             + "satisfy constraint: Member must satisfy enum value set: "
-                            + "[All, AWS, Local]", 400);
+                            + "[All, AWS, Local]");
         }
         String prefix = pathPrefix != null ? pathPrefix : "/";
         boolean blankScope = scope == null || scope.isBlank();
@@ -1436,6 +1646,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             policies.scan(k -> true).stream()
                     .filter(p -> !AwsManagedPolicies.isManagedPolicyArn(p.getArn()))
                     .filter(p -> p.getPath().startsWith(prefix))
+                    .sorted(Comparator.comparing(IamPolicy::getPolicyName))
                     .forEach(result::add);
         }
         if (includeAws) {
@@ -1490,9 +1701,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         summary.put("AttachedPoliciesPerUserQuota", 10L);
         summary.put("AttachedPoliciesPerGroupQuota", 10L);
         summary.put("AttachedPoliciesPerRoleQuota", 20L);
-        summary.put("GroupPolicySizeQuota", 5120L);
-        summary.put("UserPolicySizeQuota", 2048L);
-        summary.put("RolePolicySizeQuota", 10240L);
+        summary.put("GroupPolicySizeQuota", (long) GROUP_INLINE_POLICY_SIZE_LIMIT);
+        summary.put("UserPolicySizeQuota", (long) USER_INLINE_POLICY_SIZE_LIMIT);
+        summary.put("RolePolicySizeQuota", (long) ROLE_INLINE_POLICY_SIZE_LIMIT);
         summary.put("AccessKeysPerUserQuota", 2L);
         summary.put("SigningCertificatesPerUserQuota", 2L);
         summary.put("ServerCertificates", (long) serverCertificates.scan(k -> true).size());
@@ -1707,6 +1918,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public void attachRolePolicy(String roleName, String policyArn) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         IamPolicy policy = requirePolicy(policyArn);
@@ -1718,6 +1930,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void detachRolePolicy(String roleName, String policyArn) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         if (!role.getAttachedPolicyArns().remove(policyArn)) {
@@ -1729,6 +1942,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public List<IamPolicy> listAttachedRolePolicies(String roleName, String pathPrefix) {
+        validateRoleName(roleName);
         return getRole(roleName).getAttachedPolicyArns().stream()
                 .flatMap(arn -> resolvePolicy(arn).stream())
                 .filter(p -> pathPrefix == null || p.getPath().startsWith(pathPrefix))
@@ -1740,9 +1954,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public void putUserPolicy(String userName, String policyName, String policyDocument) {
-        IamUser user = getUser(userName);
-        user.getInlinePolicies().put(policyName, policyDocument);
-        users.put(userName, user);
+        synchronized (resourceNameLock) {
+            IamUser user = getUser(userName);
+            Map<String, String> inlinePolicies = user.getInlinePolicies();
+            synchronized (inlinePolicies) {
+                checkInlinePolicyQuota(inlinePolicies, policyName, policyDocument,
+                        USER_INLINE_POLICY_SIZE_LIMIT, "user " + userName);
+                inlinePolicies.put(policyName, policyDocument);
+                invalidateInlinePolicyOwner("User", user.getUserId(), policyName);
+                users.put(userName, user);
+            }
+        }
     }
 
     public String getUserPolicy(String userName, String policyName) {
@@ -1756,12 +1978,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteUserPolicy(String userName, String policyName) {
-        IamUser user = getUser(userName);
-        if (user.getInlinePolicies().remove(policyName) == null) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy " + policyName + " not found for user " + userName + ".", 404);
+        synchronized (resourceNameLock) {
+            IamUser user = getUser(userName);
+            if (user.getInlinePolicies().remove(policyName) == null) {
+                throw new AwsException("NoSuchEntity",
+                        "Policy " + policyName + " not found for user " + userName + ".", 404);
+            }
+            invalidateInlinePolicyOwner("User", user.getUserId(), policyName);
+            users.put(userName, user);
         }
-        users.put(userName, user);
     }
 
     public List<String> listUserPolicies(String userName) {
@@ -1773,9 +1998,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public void putGroupPolicy(String groupName, String policyName, String policyDocument) {
-        IamGroup group = getGroup(groupName);
-        group.getInlinePolicies().put(policyName, policyDocument);
-        groups.put(groupName, group);
+        synchronized (resourceNameLock) {
+            IamGroup group = getGroup(groupName);
+            Map<String, String> inlinePolicies = group.getInlinePolicies();
+            synchronized (inlinePolicies) {
+                checkInlinePolicyQuota(inlinePolicies, policyName, policyDocument,
+                        GROUP_INLINE_POLICY_SIZE_LIMIT, "group " + groupName);
+                inlinePolicies.put(policyName, policyDocument);
+                invalidateInlinePolicyOwner("Group", group.getGroupId(), policyName);
+                groups.put(groupName, group);
+            }
+        }
     }
 
     public String getGroupPolicy(String groupName, String policyName) {
@@ -1789,12 +2022,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteGroupPolicy(String groupName, String policyName) {
-        IamGroup group = getGroup(groupName);
-        if (group.getInlinePolicies().remove(policyName) == null) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy " + policyName + " not found for group " + groupName + ".", 404);
+        synchronized (resourceNameLock) {
+            IamGroup group = getGroup(groupName);
+            if (group.getInlinePolicies().remove(policyName) == null) {
+                throw new AwsException("NoSuchEntity",
+                        "Policy " + policyName + " not found for group " + groupName + ".", 404);
+            }
+            invalidateInlinePolicyOwner("Group", group.getGroupId(), policyName);
+            groups.put(groupName, group);
         }
-        groups.put(groupName, group);
     }
 
     public List<String> listGroupPolicies(String groupName) {
@@ -1806,21 +2042,165 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public void putRolePolicy(String roleName, String policyName, String policyDocument) {
-        IamRole role = getRole(roleName);
-        requireNotServiceLinked(role, roleName);
-        Map<String, String> inlinePolicies = role.getInlinePolicies();
-        synchronized (inlinePolicies) {
-            long aggregateSize = inlinePolicies.entrySet().stream()
-                    .filter(entry -> !entry.getKey().equals(policyName))
-                    .mapToLong(entry -> nonWhitespaceLength(entry.getValue()))
-                    .sum() + nonWhitespaceLength(policyDocument);
-            if (aggregateSize > ROLE_INLINE_POLICY_SIZE_LIMIT) {
-                throw new AwsException("LimitExceeded",
-                        "Maximum policy size of 10240 bytes exceeded for role " + roleName, 409);
+        synchronized (resourceNameLock) {
+            validateRoleName(roleName);
+            IamRole role = getRole(roleName);
+            requireNotServiceLinked(role, roleName);
+            Map<String, String> inlinePolicies = role.getInlinePolicies();
+            synchronized (inlinePolicies) {
+                checkInlinePolicyQuota(inlinePolicies, policyName, policyDocument,
+                        ROLE_INLINE_POLICY_SIZE_LIMIT, "role " + roleName);
+                inlinePolicies.put(policyName, policyDocument);
+                invalidateInlinePolicyOwner("Role", role.getRoleId(), policyName);
+                roles.put(roleName, role);
             }
-            inlinePolicies.put(policyName, policyDocument);
-            roles.put(roleName, role);
         }
+    }
+
+    /**
+     * CloudFormation compensation captures the stored document with the write. The returned
+     * operation can restore that exact historical value, including policies saved before quotas
+     * were enforced; it cannot admit a caller-supplied oversized replacement.
+     */
+    public InlinePolicyChange putUserPolicyWithRollback(String userName, String policyName, String document) {
+        return changeInlinePolicy(users, "User", userName, policyName, () -> getUser(userName),
+                IamUser::getUserId,
+                IamUser::getInlinePolicies, () -> putUserPolicy(userName, policyName, document),
+                document, USER_INLINE_POLICY_SIZE_LIMIT);
+    }
+
+    public InlinePolicyChange deleteUserPolicyWithRollback(String userName, String policyName) {
+        return changeInlinePolicy(users, "User", userName, policyName, () -> getUser(userName),
+                IamUser::getUserId,
+                IamUser::getInlinePolicies, () -> deleteUserPolicy(userName, policyName),
+                null, USER_INLINE_POLICY_SIZE_LIMIT);
+    }
+
+    public InlinePolicyChange putGroupPolicyWithRollback(String groupName, String policyName, String document) {
+        return changeInlinePolicy(groups, "Group", groupName, policyName, () -> getGroup(groupName),
+                IamGroup::getGroupId,
+                IamGroup::getInlinePolicies, () -> putGroupPolicy(groupName, policyName, document),
+                document, GROUP_INLINE_POLICY_SIZE_LIMIT);
+    }
+
+    public InlinePolicyChange deleteGroupPolicyWithRollback(String groupName, String policyName) {
+        return changeInlinePolicy(groups, "Group", groupName, policyName, () -> getGroup(groupName),
+                IamGroup::getGroupId,
+                IamGroup::getInlinePolicies, () -> deleteGroupPolicy(groupName, policyName),
+                null, GROUP_INLINE_POLICY_SIZE_LIMIT);
+    }
+
+    public InlinePolicyChange putRolePolicyWithRollback(String roleName, String policyName, String document) {
+        return changeInlinePolicy(roles, "Role", roleName, policyName, () -> getValidatedRole(roleName),
+                IamRole::getRoleId,
+                IamRole::getInlinePolicies, () -> putRolePolicy(roleName, policyName, document),
+                document, ROLE_INLINE_POLICY_SIZE_LIMIT);
+    }
+
+    public InlinePolicyChange deleteRolePolicyWithRollback(String roleName, String policyName) {
+        return changeInlinePolicy(roles, "Role", roleName, policyName, () -> getValidatedRole(roleName),
+                IamRole::getRoleId,
+                IamRole::getInlinePolicies, () -> deleteRolePolicy(roleName, policyName),
+                null, ROLE_INLINE_POLICY_SIZE_LIMIT);
+    }
+
+    private <T> InlinePolicyChange changeInlinePolicy(StorageBackend<String, T> store, String kind, String principal,
+                                                       String policyName, Supplier<T> lookup, Function<T, String> identity,
+                                                       Function<T, Map<String, String>> policies,
+                                                       Runnable change, String expectedDocument, int limit) {
+        synchronized (resourceNameLock) {
+            T original = lookup.get();
+            String account = regionResolver.getAccountId();
+            String principalId = identity.apply(original);
+            Map<String, String> inlinePolicies = policies.apply(original);
+            synchronized (inlinePolicies) {
+                String previousDocument = inlinePolicies.get(policyName);
+                Map<String, String> previousSiblings = new LinkedHashMap<>(inlinePolicies);
+                previousSiblings.remove(policyName);
+                InlinePolicyKey candidateKey = new InlinePolicyKey(account, kind, principalId, policyName);
+                InlinePolicyOwner previousOwner = inlinePolicyOwner(candidateKey);
+                InlinePolicyKey key = previousOwner == null ? candidateKey : previousOwner.key();
+                change.run();
+                // Remove an equal stale weak key before installing a new canonical key.
+                inlinePolicyOwners.remove(key);
+                InlinePolicyOwner owner = new InlinePolicyOwner(key);
+                inlinePolicyOwners.put(key, new WeakReference<>(owner));
+                return new InlinePolicyChange(previousDocument, () -> {
+                    synchronized (resourceNameLock) {
+                        if (!account.equals(regionResolver.getAccountId())) {
+                            throw inlinePolicyRollbackConflict(principal, policyName);
+                        }
+                        T current = store.get(principal).orElseThrow(() ->
+                                inlinePolicyRollbackConflict(principal, policyName));
+                        if (!Objects.equals(principalId, identity.apply(current))) {
+                            throw inlinePolicyRollbackConflict(principal, policyName);
+                        }
+                        Map<String, String> currentPolicies = policies.apply(current);
+                        synchronized (currentPolicies) {
+                            if (inlinePolicyOwner(key) != owner
+                                    || !Objects.equals(expectedDocument, currentPolicies.get(policyName))) {
+                                throw inlinePolicyRollbackConflict(principal, policyName);
+                            }
+                            if (previousDocument != null
+                                    && inlinePolicySize(currentPolicies, policyName, previousDocument) > limit) {
+                                Map<String, String> currentSiblings = new LinkedHashMap<>(currentPolicies);
+                                currentSiblings.remove(policyName);
+                                if (!previousSiblings.equals(currentSiblings)) {
+                                    throw inlinePolicyRollbackConflict(principal, policyName);
+                                }
+                            }
+                            if (previousDocument == null) {
+                                currentPolicies.remove(policyName);
+                            } else {
+                                currentPolicies.put(policyName, previousDocument);
+                            }
+                            store.put(principal, current);
+                            inlinePolicyOwners.remove(key);
+                            if (previousOwner != null) {
+                                inlinePolicyOwners.put(previousOwner.key(), new WeakReference<>(previousOwner));
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    private record InlinePolicyKey(String account, String kind, String principalId, String policyName) {}
+
+    private record InlinePolicyOwner(InlinePolicyKey key) {}
+
+    private InlinePolicyOwner inlinePolicyOwner(InlinePolicyKey key) {
+        WeakReference<InlinePolicyOwner> owner = inlinePolicyOwners.get(key);
+        return owner == null ? null : owner.get();
+    }
+
+    private void invalidateInlinePolicyOwner(String kind, String principalId, String policyName) {
+        inlinePolicyOwners.remove(new InlinePolicyKey(regionResolver.getAccountId(), kind, principalId, policyName));
+    }
+
+    public record InlinePolicyChange(String previousDocument, Runnable rollback) {}
+
+    private static AwsException inlinePolicyRollbackConflict(String principal, String policyName) {
+        return new AwsException("ConcurrentModification",
+                "Cannot restore inline policy " + policyName + " on " + principal
+                        + " because its rollback ownership or state changed after the update.", 409);
+    }
+
+    private static void checkInlinePolicyQuota(Map<String, String> inlinePolicies, String policyName,
+                                               String policyDocument, int limit, String principal) {
+        long aggregateSize = inlinePolicySize(inlinePolicies, policyName, policyDocument);
+        if (aggregateSize > limit) {
+            throw new AwsException("LimitExceeded",
+                    "Maximum policy size of " + limit + " bytes exceeded for " + principal, 409);
+        }
+    }
+
+    private static long inlinePolicySize(Map<String, String> policies, String name, String document) {
+        return policies.entrySet().stream()
+                .filter(entry -> !entry.getKey().equals(name))
+                .mapToLong(entry -> nonWhitespaceLength(entry.getValue()))
+                .sum() + nonWhitespaceLength(document);
     }
 
     private static int nonWhitespaceLength(String policyDocument) {
@@ -1835,6 +2215,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public String getRolePolicy(String roleName, String policyName) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         String doc = role.getInlinePolicies().get(policyName);
         if (doc == null) {
@@ -1845,16 +2226,21 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteRolePolicy(String roleName, String policyName) {
-        IamRole role = getRole(roleName);
-        requireNotServiceLinked(role, roleName);
-        if (role.getInlinePolicies().remove(policyName) == null) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy " + policyName + " not found for role " + roleName + ".", 404);
+        synchronized (resourceNameLock) {
+            validateRoleName(roleName);
+            IamRole role = getRole(roleName);
+            requireNotServiceLinked(role, roleName);
+            if (role.getInlinePolicies().remove(policyName) == null) {
+                throw new AwsException("NoSuchEntity",
+                        "Policy " + policyName + " not found for role " + roleName + ".", 404);
+            }
+            invalidateInlinePolicyOwner("Role", role.getRoleId(), policyName);
+            roles.put(roleName, role);
         }
-        roles.put(roleName, role);
     }
 
     public List<String> listRolePolicies(String roleName) {
+        validateRoleName(roleName);
         return new ArrayList<>(getRole(roleName).getInlinePolicies().keySet());
     }
 
@@ -1863,31 +2249,30 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public AccessKey createAccessKey(String userName) {
-        getUser(userName); // validates existence
-        long existingCount = accessKeys.scan(k -> true).stream()
-                .filter(ak -> userName.equals(ak.getUserName()))
-                .count();
-        if (existingCount >= 2) {
-            throw new AwsException("LimitExceeded",
-                    "Cannot exceed quota for AccessKeysPerUser: 2", 409);
+        synchronized (accessKeyLock) {
+            // Confirmed under the lock, not before it, the way UploadSigningCertificate confirms
+            // its own: DeleteUser checks for access keys holding this same lock, so the two cannot
+            // interleave into a key owned by a user that no longer exists.
+            getUser(userName);
+            long existingCount = userAccessKeys(userName).size();
+            if (existingCount >= 2) {
+                throw new AwsException("LimitExceeded",
+                        "Cannot exceed quota for AccessKeysPerUser: 2", 409);
+            }
+            String keyId = "AKIA" + randomId(16);
+            String secretKey = randomSecret(40);
+            AccessKey key = new AccessKey(keyId, secretKey, userName);
+            accessKeys.put(keyId, key);
+            LOG.infov("Created access key for user: {0}", userName);
+            return key;
         }
-        String keyId = "AKIA" + randomId(16);
-        String secretKey = randomSecret(40);
-        AccessKey key = new AccessKey(keyId, secretKey, userName);
-        accessKeys.put(keyId, key);
-        LOG.infov("Created access key for user: {0}", userName);
-        return key;
     }
 
     public void deleteAccessKey(String userName, String accessKeyId) {
-        AccessKey key = accessKeys.get(accessKeyId)
-                .orElseThrow(() -> new AwsException("NoSuchEntity",
-                        "Access key " + accessKeyId + " not found.", 404));
-        if (!key.getUserName().equals(userName)) {
-            throw new AwsException("NoSuchEntity",
-                    "Access key " + accessKeyId + " does not belong to user " + userName + ".", 404);
+        synchronized (accessKeyLock) {
+            AccessKey key = userAccessKey(userName, accessKeyId);
+            accessKeys.delete(key.getAccessKeyId());
         }
-        accessKeys.delete(accessKeyId);
     }
 
     public List<AccessKey> listAccessKeys(String userName) {
@@ -1901,7 +2286,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .toList();
     }
 
+    /**
+     * Sets an access key's status, validated before the key is looked up the way the other three
+     * {@code statusType} operations validate theirs: a status outside the enum is answered for the
+     * status whether or not the key exists.
+     */
     public void updateAccessKey(String userName, String accessKeyId, String status) {
+        requireStatusFromEnum(status);
+        synchronized (accessKeyLock) {
+            AccessKey key = userAccessKey(userName, accessKeyId);
+            key.setStatus(status);
+            accessKeys.put(accessKeyId, key);
+        }
+    }
+
+    /** The user's key with this id, or the NoSuchEntity each of these operations answers. */
+    private AccessKey userAccessKey(String userName, String accessKeyId) {
         AccessKey key = accessKeys.get(accessKeyId)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
                         "Access key " + accessKeyId + " not found.", 404));
@@ -1909,12 +2309,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             throw new AwsException("NoSuchEntity",
                     "Access key " + accessKeyId + " does not belong to user " + userName + ".", 404);
         }
-        if (!"Active".equals(status) && !"Inactive".equals(status)) {
-            throw new AwsException("ValidationError",
-                    "Status must be Active or Inactive.", 400);
-        }
-        key.setStatus(status);
-        accessKeys.put(accessKeyId, key);
+        return key;
     }
 
     // =========================================================================
@@ -2013,6 +2408,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void addRoleToInstanceProfile(String instanceProfileName, String roleName) {
+        validateRoleName(roleName);
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
         requireNotServiceLinked(getRole(roleName), roleName);
         List<String> roleNames = profile.getRoleNames();
@@ -2029,6 +2425,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void removeRoleFromInstanceProfile(String instanceProfileName, String roleName) {
+        validateRoleName(roleName);
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
         // Tolerates an already-deleted role, so guard only what is still there.
         roles.get(roleName).ifPresent(role -> requireNotServiceLinked(role, roleName));
@@ -2037,6 +2434,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public List<InstanceProfile> listInstanceProfilesForRole(String roleName) {
+        validateRoleName(roleName);
         getRole(roleName); // validates existence
         return instanceProfiles.scan(k -> true).stream()
                 .filter(p -> p.getRoleNames().contains(roleName))
@@ -2201,13 +2599,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** A user holds at most one login profile: creating a second is EntityAlreadyExists. */
     public LoginProfile createLoginProfile(String userName, String password, boolean passwordResetRequired) {
         getUser(userName);
-        if (loginProfiles.get(userName).isPresent()) {
-            throw new AwsException("EntityAlreadyExists",
-                    "Login Profile for User " + userName + " already exists.", 409);
+        LoginProfile profile;
+        synchronized (loginProfileLock) {
+            if (loginProfiles.get(userName).isPresent()) {
+                throw new AwsException("EntityAlreadyExists",
+                        "Login Profile for User " + userName + " already exists.", 409);
+            }
+            validatePassword(password, "password");
+            // No profile to pass: a password being set for the first time replaces nothing, and a
+            // profile deleted and recreated takes its history with it.
+            checkPasswordPolicy(password, null);
+            profile = new LoginProfile(userName, password, passwordResetRequired);
+            loginProfiles.put(userName, profile);
         }
-        validateLoginProfilePassword(password);
-        LoginProfile profile = new LoginProfile(userName, password, passwordResetRequired);
-        loginProfiles.put(userName, profile);
         LOG.infov("Created IAM login profile for user: {0}", userName);
         return profile;
     }
@@ -2227,42 +2631,166 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * clear the reset-required flag, and vice versa.
      */
     public void updateLoginProfile(String userName, String password, Boolean passwordResetRequired) {
-        LoginProfile profile = getLoginProfile(userName);
-        if (password != null) {
-            validateLoginProfilePassword(password);
-            profile.setPassword(password);
-            profile.setPasswordLastChanged(Instant.now());
+        synchronized (loginProfileLock) {
+            LoginProfile profile = getLoginProfile(userName);
+            if (password != null) {
+                validatePassword(password, "password");
+                checkPasswordPolicy(password, profile);
+                recordSupersededPassword(profile);
+                profile.setPassword(password);
+                profile.setPasswordLastChanged(Instant.now());
+            }
+            if (passwordResetRequired != null) {
+                profile.setPasswordResetRequired(passwordResetRequired);
+            }
+            loginProfiles.put(userName, profile);
         }
-        if (passwordResetRequired != null) {
-            profile.setPasswordResetRequired(passwordResetRequired);
-        }
-        loginProfiles.put(userName, profile);
         LOG.infov("Updated IAM login profile for user: {0}", userName);
     }
 
     public void deleteLoginProfile(String userName) {
         getUser(userName);
-        if (loginProfiles.get(userName).isEmpty()) {
-            throw new AwsException("NoSuchEntity",
-                    "Login Profile for User " + userName + " cannot be found.", 404);
+        synchronized (loginProfileLock) {
+            if (loginProfiles.get(userName).isEmpty()) {
+                throw new AwsException("NoSuchEntity",
+                        "Login Profile for User " + userName + " cannot be found.", 404);
+            }
+            loginProfiles.delete(userName);
         }
-        loginProfiles.delete(userName);
         LOG.infov("Deleted IAM login profile for user: {0}", userName);
     }
 
     /**
-     * Base wire validation shared by Create/UpdateLoginProfile, then, only when the account has
-     * ever set one (matching {@link #getAccountPasswordPolicy}'s own NoSuchEntity-by-default
-     * semantics), the account's password policy.
+     * Changes the password of the IAM user who is calling, which is the only user
+     * {@code ChangePassword} can act on: the reference says it "changes the password of the IAM
+     * user who is calling this operation" and that "the AWS account root user password is not
+     * affected by this operation". The caller is resolved from the signing access key before this
+     * is reached, so the user name here is already that user.
+     *
+     * <p>The old password is checked before the new one is held to the account's policy, so a
+     * caller who cannot prove the current password is refused on that alone and learns nothing
+     * about what the policy would have required.
+     *
+     * <p>The comparison and the write are one step under {@code loginProfileLock}, which is what
+     * makes the refusal above mean anything: read apart from the write, two requests presenting
+     * the same valid old password would both pass the comparison and both be told they had set
+     * the password, while only the later write survived.
+     *
+     * <p>A successful change clears {@code PasswordResetRequired}. The user guide's own reason for
+     * the "Password expiration requires administrator reset" option is that it stops users
+     * updating their own password through the console, and says that even then "IAM users with
+     * iam:ChangePassword permission and active access keys can reset their own IAM user console
+     * password programmatically", which is only true if the change itself clears the state the
+     * reset left behind.
+     *
+     * <p>An old password that does not match is the one refusal the reference leaves unnamed:
+     * every error it publishes for this operation describes something else, and the error it
+     * documents for a caller that is not an IAM user is {@code InvalidUserType}, raised by the
+     * handler. The common error types are additive per action, so this answers
+     * {@code InvalidParameterValue}, which is the published one for a parameter value the service
+     * cannot accept, with the same 400 as the operation's other sender faults.
      */
-    private void validateLoginProfilePassword(String password) {
-        if (password == null || !LOGIN_PROFILE_PASSWORD_PATTERN.matcher(password).matches()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'password' failed to satisfy constraint: "
-                            + "Member must have length less than or equal to 128 and greater than or "
-                            + "equal to 1", 400);
+    public void changePassword(String userName, String oldPassword, String newPassword) {
+        validatePassword(oldPassword, "oldPassword");
+        validatePassword(newPassword, "newPassword");
+        synchronized (loginProfileLock) {
+            LoginProfile profile = getLoginProfile(userName);
+            if (!oldPassword.equals(profile.getPassword())) {
+                throw new AwsException("InvalidParameterValue",
+                        "The old password supplied is not the current password for user "
+                                + userName + ".", 400);
+            }
+            checkPasswordPolicy(newPassword, profile);
+            recordSupersededPassword(profile);
+            profile.setPassword(newPassword);
+            profile.setPasswordLastChanged(Instant.now());
+            profile.setPasswordResetRequired(false);
+            loginProfiles.put(userName, profile);
         }
-        getAccountPasswordPolicy().ifPresent(policy -> checkPasswordAgainstPolicy(password, policy));
+        LOG.infov("Changed the IAM console password of user: {0}", userName);
+    }
+
+    /**
+     * The account's password policy applied to a password about to be stored, and only when the
+     * account has ever set one, matching {@link #getAccountPasswordPolicy}'s own
+     * NoSuchEntity-by-default semantics. {@code replacing} is the profile the password is being
+     * written over, or null when there is none to reuse a password from.
+     */
+    private void checkPasswordPolicy(String password, LoginProfile replacing) {
+        getAccountPasswordPolicy().ifPresent(policy -> {
+            checkPasswordAgainstPolicy(password, policy);
+            if (replacing != null) {
+                checkPasswordNotReused(replacing, password, policy);
+            }
+        });
+    }
+
+    /**
+     * Refuses a password the account's reuse window still holds. The reference defines
+     * {@code PasswordReusePrevention} as "the number of previous passwords that IAM users are
+     * prevented from reusing", with no value meaning "IAM users are not prevented from reusing
+     * previous passwords", so the window is that many superseded passwords.
+     *
+     * <p>The password the profile currently holds is refused alongside them, which the reference
+     * does not spell out. Reading it the other way makes a window of 1 refuse nothing a user
+     * would attempt: it would leave setting a password to the value it already has allowed, and
+     * that is reuse in the only sense the setting exists to stop. Counting the current password
+     * first is also what makes the A to B and back to A case refusable at the smallest window the
+     * policy accepts.
+     */
+    private static void checkPasswordNotReused(LoginProfile profile, String password,
+                                               AccountPasswordPolicy policy) {
+        Integer window = policy.getPasswordReusePrevention();
+        if (window == null) {
+            return;
+        }
+        List<String> held = profile.getPreviousPasswords();
+        List<String> refused = new ArrayList<>();
+        refused.add(profile.getPassword());
+        refused.addAll(held.subList(0, Math.min(window, held.size())));
+        if (refused.contains(password)) {
+            throw new AwsException("PasswordPolicyViolation",
+                    "Password does not conform to the account password policy. It must not be the "
+                            + "current password or one of the previous " + window
+                            + " passwords.", 400);
+        }
+    }
+
+    /**
+     * Moves the password a profile is about to lose into its history, newest first. Bounded at the
+     * largest window {@code PasswordReusePrevention} accepts, since nothing can be asked about a
+     * password further back than that.
+     */
+    private static void recordSupersededPassword(LoginProfile profile) {
+        List<String> held = profile.getPreviousPasswords();
+        held.add(0, profile.getPassword());
+        while (held.size() > PASSWORD_REUSE_PREVENTION_CEILING) {
+            held.remove(held.size() - 1);
+        }
+    }
+
+    /**
+     * {@code passwordType}, which every password member on every one of these operations shares.
+     * The member is named so the message is the one AWS gives for the parameter that failed:
+     * {@code ChangePassword} has two of them, and a caller told that 'password' failed has to
+     * guess which.
+     *
+     * <p>An absent member and an empty one are different answers. The pattern requires at least
+     * one character, so an empty value fails the constraint, where an absent one was never
+     * supplied at all.
+     */
+    private static void validatePassword(String password, String member) {
+        if (password == null) {
+            throw SmithyValidationErrors.validationError(
+                    "Value null at '" + member
+                            + "' failed to satisfy constraint: Member must not be null");
+        }
+        if (!LOGIN_PROFILE_PASSWORD_PATTERN.matcher(password).matches()) {
+            throw SmithyValidationErrors.validationError(
+                    "Value at '" + member
+                            + "' failed to satisfy constraint: Member must have length less than "
+                            + "or equal to 128 and greater than or equal to 1");
+        }
     }
 
     private void checkPasswordAgainstPolicy(String password, AccountPasswordPolicy policy) {
@@ -2327,9 +2855,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value null at 'properties' failed to "
-                            + "satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value null at 'properties' failed to "
+                            + "satisfy constraint: Member must not be null");
         }
         String namespace = null;
         for (Map.Entry<String, String> entry : properties.entrySet()) {
@@ -2365,13 +2893,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private String validateAccountPropertyKey(String key) {
         if (key == null || key.isEmpty() || key.length() > MAX_ACCOUNT_PROPERTY_KEY_LENGTH
                 || !ACCOUNT_PROPERTY_KEY_PATTERN.matcher(key).matches()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + key + "' at 'properties' failed "
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + key + "' at 'properties' failed "
                             + "to satisfy constraint: Map keys "
                             + "must satisfy constraint: [Member must have length less than or "
                             + "equal to " + MAX_ACCOUNT_PROPERTY_KEY_LENGTH + ", Member must "
                             + "satisfy regular expression pattern: "
-                            + ACCOUNT_PROPERTY_KEY_PATTERN.pattern() + "]", 400);
+                            + ACCOUNT_PROPERTY_KEY_PATTERN.pattern() + "]");
         }
         int separator = key.indexOf('/');
         if (separator <= 0 || separator != key.lastIndexOf('/') || separator == key.length() - 1) {
@@ -2386,10 +2914,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private void validateAccountPropertyValue(String key, String value) {
         if (value == null || value.isEmpty()
                 || value.length() > MAX_ACCOUNT_PROPERTY_VALUE_LENGTH) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'properties." + key + "' failed to "
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'properties." + key + "' failed to "
                             + "satisfy constraint: Member must have length between 1 and "
-                            + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH, 400);
+                            + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH);
         }
     }
 
@@ -2397,11 +2925,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void setSecurityTokenServicePreferences(String globalEndpointTokenVersion) {
         if (globalEndpointTokenVersion == null
                 || !GLOBAL_ENDPOINT_TOKEN_VERSIONS.contains(globalEndpointTokenVersion)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + globalEndpointTokenVersion
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + globalEndpointTokenVersion
                             + "' at 'globalEndpointTokenVersion' failed to satisfy constraint: "
                             + "Member must satisfy enum value set: ["
-                            + String.join(", ", GLOBAL_ENDPOINT_TOKEN_VERSIONS) + "]", 400);
+                            + String.join(", ", GLOBAL_ENDPOINT_TOKEN_VERSIONS) + "]");
         }
         stsPreferences.put(STS_PREFERENCES_KEY, globalEndpointTokenVersion);
         LOG.infov("Set the global endpoint token version to {0}", globalEndpointTokenVersion);
@@ -2526,9 +3054,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // parsed, which is what makes a whitespace-only chain a malformed certificate rather
             // than silently storing no chain at all.
             if (certificateChain.isEmpty()) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value at 'CertificateChain' failed to satisfy "
-                                + "constraint: Member must have length greater than or equal to 1", 400);
+                throw SmithyValidationErrors.validationError(
+                        "Value at 'CertificateChain' failed to satisfy "
+                                + "constraint: Member must have length greater than or equal to 1");
             }
             parseUploadedChain(certificateChain);
         }
@@ -2586,10 +3114,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     private void checkMaterialLength(String value, String paramName, int limit) {
         if (value != null && value.length() > limit) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at '" + paramName
+            throw SmithyValidationErrors.validationError(
+                    "Value at '" + paramName
                             + "' failed to satisfy constraint: Member must have length less than "
-                            + "or equal to " + limit, 400);
+                            + "or equal to " + limit);
         }
     }
 
@@ -2699,6 +3227,32 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
+     * Runs an action that checks a server certificate and then records a reference to it, holding
+     * the lock {@link #deleteServerCertificate} takes so the certificate cannot be deleted in
+     * between. Without it the check and the write straddle the delete: the delete sees no
+     * reference because the referring resource is not saved yet, removes the certificate, and the
+     * resource is then saved pointing at something that is gone.
+     *
+     * <p>Safe to call from inside a provider's own monitor, because the ordering only ever runs
+     * one way. {@code deleteServerCertificate} holds this lock while calling
+     * {@link ServerCertificateReferenceProvider#serverCertificateReferences()} on each provider,
+     * and those are plain reads over the provider's own store that take no provider monitor, so
+     * IAM never waits on a provider while a provider waits on IAM.
+     */
+    public <T> T supplyWithServerCertificatesHeld(Supplier<T> action) {
+        synchronized (serverCertificateLock) {
+            return action.get();
+        }
+    }
+
+    /** {@link #supplyWithServerCertificatesHeld} for an action with no result. */
+    public void runWithServerCertificatesHeld(Runnable action) {
+        synchronized (serverCertificateLock) {
+            action.run();
+        }
+    }
+
+    /**
      * Deletes a server certificate unless one of the providers reports it in use, in which case
      * AWS answers {@code DeleteConflict} and the certificate stays.
      */
@@ -2757,21 +3311,21 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return getServerCertificate(name).getTags();
     }
 
-    // Credential status, shared by the three operations that take statusType
+    // Credential status, shared by the four operations that take statusType
     // =========================================================================
 
     /**
-     * {@code statusType}, shared by UpdateSigningCertificate, UpdateSSHPublicKey and
-     * UpdateServiceSpecificCredential. One rendering serves all three because one front end
+     * {@code statusType}, shared by UpdateAccessKey, UpdateSigningCertificate, UpdateSSHPublicKey
+     * and UpdateServiceSpecificCredential. One rendering serves all four because one front end
      * validates one shape: the recording is of UpdateServiceSpecificCredential, and AWS names
      * neither the offending value nor the permitted set, unlike this message elsewhere in the
      * tree. Matched rather than made uniform.
      */
     private void requireStatusFromEnum(String status) {
         if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'status' failed to satisfy "
-                            + "constraint: Member must satisfy enum value set", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'status' failed to satisfy "
+                            + "constraint: Member must satisfy enum value set");
         }
     }
 
@@ -3097,11 +3651,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             }
             if (credentialAgeDays < MIN_CREDENTIAL_AGE_DAYS
                     || credentialAgeDays > MAX_CREDENTIAL_AGE_DAYS) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value '" + credentialAgeDays
+                throw SmithyValidationErrors.validationError(
+                        "Value '" + credentialAgeDays
                                 + "' at 'credentialAgeDays' failed to satisfy constraint: "
                                 + "Member must be between " + MIN_CREDENTIAL_AGE_DAYS + " and "
-                                + MAX_CREDENTIAL_AGE_DAYS, 400);
+                                + MAX_CREDENTIAL_AGE_DAYS);
             }
         }
         synchronized (serviceCredentialLock) {
@@ -3127,7 +3681,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             credential.setServiceSpecificCredentialId(
                     "ACCA" + randomId(SERVICE_CREDENTIAL_ID_SUFFIX_LENGTH));
             credential.setStatus(CREDENTIAL_STATUS_ACTIVE);
-            credential.setCreateDate(Instant.now());
+            credential.setCreateDate(clock.instant());
             int version = freeCredentialVersion(
                     all, userName, longTermKey, credential.getCreateDate());
             if (longTermKey) {
@@ -3242,7 +3796,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public String reportedStatus(ServiceSpecificCredential credential) {
         Instant expiry = credential.getExpirationDate();
-        if (expiry != null && !expiry.isAfter(Instant.now())) {
+        if (expiry != null && !expiry.isAfter(clock.instant())) {
             return CREDENTIAL_STATUS_EXPIRED;
         }
         return credential.getStatus();
@@ -3313,7 +3867,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * <p>The API Reference publishes a length of 20 to 128 as well as the pattern, so both are
      * checked, and both are reported when both are broken, in the order it prints them. The
      * pattern message is the one recorded against AWS; the length wording is the form AWS uses for
-     * a member carrying both bounds, which {@link #validateLoginProfilePassword} spells the same
+     * a member carrying both bounds, which {@link #validatePassword} spells the same
      * way.
      */
     private void requireCredentialIdFormat(String credentialId) {
@@ -3331,18 +3885,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (violations.isEmpty()) {
             return;
         }
-        StringBuilder message = new StringBuilder()
-                .append(violations.size())
-                .append(violations.size() == 1 ? " validation error detected: "
-                                               : " validation errors detected: ");
-        for (int i = 0; i < violations.size(); i++) {
-            if (i > 0) {
-                message.append("; ");
-            }
-            message.append("Value at 'serviceSpecificCredentialId' failed to satisfy constraint: ")
-                    .append(violations.get(i));
-        }
-        throw new AwsException("ValidationError", message.toString(), 400);
+        throw SmithyValidationErrors.validationError(violations.stream()
+                .map(violation -> "Value at 'serviceSpecificCredentialId' failed to satisfy constraint: " + violation)
+                .toList());
     }
 
     /** AWS's wording for an id that matches the pattern and no credential. */
@@ -3426,10 +3971,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public List<VirtualMfaDevice> listVirtualMfaDevices(String assignmentStatus) {
         String status = assignmentStatus == null || assignmentStatus.isBlank() ? "Any" : assignmentStatus;
         if (!status.equals("Any") && !status.equals("Assigned") && !status.equals("Unassigned")) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + assignmentStatus
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + assignmentStatus
                             + "' at 'assignmentStatus' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [Any, Unassigned, Assigned]", 400);
+                            + "Member must satisfy enum value set: [Any, Unassigned, Assigned]");
         }
         return virtualMfaDevices.scan(k -> true).stream()
                 .filter(d -> switch (status) {
@@ -3842,6 +4387,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
+     * Whether this temporary access key and session token are those of a session that has expired
+     * on the injected clock but is still stored, which {@link #findSecretKey(String, String)} finds
+     * no secret for. AWS answers such a credential as expired, not as a key it does not know. The
+     * token has to match, so a caller that does not hold the credential learns nothing about it.
+     */
+    public boolean isExpiredSessionToken(String accessKeyId, String sessionToken) {
+        return findSessionAnyAccount(accessKeyId)
+                .filter(session -> isExpired(session, clock.instant()))
+                .filter(session -> hasMatchingSessionToken(session, sessionToken))
+                .isPresent();
+    }
+
+    /**
      * The session token issued alongside a temporary credential, for callers that must tell a
      * missing token apart from one that does not match.
      *
@@ -3912,8 +4470,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private Optional<SessionCredential> currentSession(String accessKeyId) {
-        return findSessionAnyAccount(accessKeyId)
-                .filter(session -> session.getExpiration() == null || Instant.now().isBefore(session.getExpiration()));
+        return findSessionAnyAccount(accessKeyId).filter(session -> !isExpired(session, clock.instant()));
+    }
+
+    /**
+     * Whether {@code session} has expired as of {@code now}: from the instant its expiration names.
+     * Every lookup, the enforcement check and the sweep share this boundary.
+     */
+    private static boolean isExpired(SessionCredential session, Instant now) {
+        return session.getExpiration() != null && !session.getExpiration().isAfter(now);
     }
 
     private static boolean hasMatchingSessionToken(SessionCredential session, String sessionToken) {
@@ -4040,6 +4605,32 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         } else if (issuingAccessKeyId == null || !holdsKey(issuingAccessKeyId)) {
             session.setIssuerArn(regionResolver.buildGlobalArn("iam", originAccountId, "root"));
         }
+        sessions.put(sessionAccessKeyId, session);
+    }
+
+    /**
+     * Stores the session GetDelegatedAccessToken exchanges a released token for. It acts in the
+     * customer's account as the identity that approved the delegation request: accepting one
+     * "records the details and the state of the identity that called this API", and "this is the
+     * identity that gets mapped to the delegated credential".
+     *
+     * <p>The approver is held in its own field rather than in the role ARN slot
+     * {@link #registerIssuedSession} fills for a federated user. That slot is read by name: an
+     * approver named like a role would borrow that role's permissions, and one named like no role
+     * at all would borrow none.
+     *
+     * <p>The account is the owner's either way. A request is visible only from the account that
+     * claimed it, so whatever identity accepted it is an identity in that same account.
+     *
+     * <p>No issuing key is recorded. The permissions come from the customer's side of the
+     * delegation, so the partner key that redeemed the token must not bound the session.
+     */
+    public void registerDelegatedSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
+                                         String delegatedApproverArn, Instant expiration,
+                                         String sessionPolicyDocument, String ownerAccountId) {
+        SessionCredential session = new SessionCredential(sessionAccessKeyId, secretAccessKey, sessionToken,
+                null, expiration, sessionPolicyDocument, ownerAccountId);
+        session.setDelegatedApproverArn(delegatedApproverArn);
         sessions.put(sessionAccessKeyId, session);
     }
 
@@ -4221,16 +4812,23 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return removed;
     }
 
-    /** Removes expired temporary sessions, including those left in persistent storage after a restart. */
-    public int sweepExpiredSessions(Instant now) {
+    /**
+     * Removes temporary sessions expired on the injected clock, including those left in persistent
+     * storage after a restart.
+     */
+    public int sweepExpiredSessions() {
+        return sweepExpiredSessions(clock.instant());
+    }
+
+    /** {@link #sweepExpiredSessions()} as of {@code now}. */
+    int sweepExpiredSessions(Instant now) {
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
-            return aware.deleteAllAccountsMatching(session ->
-                    session.getExpiration() != null && !session.getExpiration().isAfter(now));
+            return aware.deleteAllAccountsMatching(session -> isExpired(session, now));
         }
         List<SessionCredential> storedSessions = sessions.scan(key -> true);
         int removed = 0;
         for (SessionCredential session : storedSessions) {
-            if (session.getExpiration() == null || session.getExpiration().isAfter(now)) {
+            if (!isExpired(session, now)) {
                 continue;
             }
             deleteSession(session.getAccessKeyId(), session);
@@ -4255,7 +4853,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return Optional.empty();
         }
         SessionCredential session = sessionOpt.get();
-        if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
+        if (isExpired(session, clock.instant())) {
             return Optional.empty();
         }
         String account = AwsArnUtils.accountOrDefault(session.getRoleArn(), session.getOriginAccountId());
@@ -4297,8 +4895,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * issuer was recorded), or its user has since been deleted or recreated under the same name.
      * Such a session is no credential at all, so that neither a resource policy nor a fallback to the
      * account root can act on its behalf.
+     *
+     * <p>A delegated session is not one of these. It records its approver rather than an issuer,
+     * by design, so it would read as orphaned on the issuer being absent and stop routing to the
+     * account it acts in. An approver that has since gone is answered where the session's
+     * permissions are resolved, which grants it nothing.
      */
     private boolean isOrphanedIssuedSession(SessionCredential session) {
+        if (session.getDelegatedApproverArn() != null) {
+            return false;
+        }
         boolean issued = isFederatedUserSession(session)
                 || (session.getRoleArn() == null && session.getPresignedAction() == null);
         return issued && !issuedByRoot(session) && issuingUser(session).isEmpty();
@@ -4339,7 +4945,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return CallerContext.of(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY));
         }
         return issuingUser(session)
-                .map(user -> new CallerContext(collectUserPolicies(user.getUserName()), null,
+                .map(user -> new CallerContext(userIdentityPolicies(user.getUserName()), null,
                         resolveUserBoundaryDocument(user.getUserName())))
                 .orElse(CallerContext.of(List.of()));
     }
@@ -4379,6 +4985,90 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return new CallerContext(identityPolicies, context.sessionPolicyDocument(), context.boundaryPolicyDocument());
     }
 
+    /**
+     * Delegated credentials carry the permissions of the identity that approved the request,
+     * within the request's permission policy wherever it holds one. AWS renders that policy from
+     * the partner's registered template, which no API registers here, so the approver's own
+     * permissions are the whole of the bound today, which is also how the user guide reads it: "if
+     * you don't have access to the requested services and actions, the product provider does not
+     * receive these permissions when you approve the request". An approver that no longer exists
+     * hands over nothing.
+     */
+    private CallerContext delegatedApproverContext(SessionCredential session) {
+        String approverArn = session.getDelegatedApproverArn();
+        String sessionPolicy = session.getSessionPolicyDocument();
+        if (isAccountRootArn(approverArn)) {
+            return new CallerContext(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY), sessionPolicy, null);
+        }
+        Optional<IamUser> approver = delegatedApproverUser(approverArn);
+        if (approver.isPresent()) {
+            return new CallerContext(userIdentityPolicies(approver.get().getUserName()), sessionPolicy,
+                    resolveUserBoundaryDocument(approver.get().getUserName()));
+        }
+        return delegatedApproverRole(approverArn)
+                .map(role -> new CallerContext(collectRolePolicies(role.getArn()), sessionPolicy,
+                        resolveRoleBoundaryDocument(role.getArn())))
+                .orElse(CallerContext.of(List.of()));
+    }
+
+    /**
+     * The identity delegated credentials report, read off the approver ARN the request recorded:
+     * an IAM user answers as itself, with the {@code aws:username} only a user has, and an account
+     * root as the account. It is the same ARN GetDelegatedAccessToken answered as its
+     * {@code AssumedPrincipal}.
+     */
+    private Optional<CallerArns> delegatedApproverArns(SessionCredential session) {
+        String approverArn = session.getDelegatedApproverArn();
+        if (isAccountRootArn(approverArn)) {
+            return Optional.of(CallerArns.accountRoot(approverArn,
+                    AwsArnUtils.accountOrDefault(approverArn, regionResolver.getAccountId())));
+        }
+        Optional<IamUser> approver = delegatedApproverUser(approverArn);
+        if (approver.isPresent()) {
+            return Optional.of(callerForUser(approver.get()));
+        }
+        return delegatedApproverRole(approverArn)
+                .map(role -> new CallerArns(approverArn, role.getArn(), CallerArns.TYPE_ASSUMED_ROLE,
+                        null, null, role.getPermissionsBoundaryArn() != null));
+    }
+
+    /** The {@code aws:userid} of delegated credentials: the approver's, in the approver's shape. */
+    private Optional<String> delegatedApproverUserId(String approverArn) {
+        if (isAccountRootArn(approverArn)) {
+            return Optional.of(AwsArnUtils.accountOrDefault(approverArn, regionResolver.getAccountId()));
+        }
+        return delegatedApproverUser(approverArn).map(IamUser::getUserId);
+    }
+
+    /** The IAM user an approver ARN names, and only where it names one at all. */
+    private Optional<IamUser> delegatedApproverUser(String approverArn) {
+        return approverArn != null && AwsArnUtils.parse(approverArn).resource().startsWith("user/")
+                ? userFromArnOrName(approverArn) : Optional.empty();
+    }
+
+    /**
+     * The role an approver ARN names, whether it names the role itself or a session assumed from
+     * it. An assumed-role ARN carries the role's name in the middle of its resource, the last
+     * segment being the session's name, so a lookup by last segment would miss the role entirely.
+     */
+    private Optional<IamRole> delegatedApproverRole(String approverArn) {
+        if (approverArn == null) {
+            return Optional.empty();
+        }
+        String resource = AwsArnUtils.parse(approverArn).resource();
+        if (resource.startsWith(ASSUMED_ROLE_PREFIX)) {
+            String[] parts = resource.split("/");
+            return parts.length < 2 ? Optional.empty()
+                    : findRole(AwsArnUtils.accountOrDefault(approverArn, regionResolver.getAccountId()), parts[1]);
+        }
+        return resource.startsWith("role/") ? roleFromArnOrName(approverArn) : Optional.empty();
+    }
+
+    /** Whether an ARN names an account root, the one principal whose resource is a bare word. */
+    private static boolean isAccountRootArn(String arn) {
+        return arn != null && "root".equals(AwsArnUtils.parse(arn).resource());
+    }
+
     /** One policy document holding only the Deny statements of a user's policies and boundary. */
     private String denyStatementsOf(String userName) {
         List<String> documents = new ArrayList<>();
@@ -4416,11 +5106,20 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * <p>Returns {@code null} if the access key is unknown (bypass — backward-compatible).
      */
     public CallerContext resolveCallerContext(String accessKeyId) {
+        return resolveCallerContext(accessKeyId, clock.instant());
+    }
+
+    /**
+     * {@link #resolveCallerContext(String)} as of {@code now}. Enforcement passes the moment it
+     * asked {@link #isExpiredSession} about, so a session that expires between the two calls is
+     * neither deleted here nor then answered as a key that exists nowhere.
+     */
+    public CallerContext resolveCallerContext(String accessKeyId, Instant now) {
         // Check user access keys
         Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
         if (akOpt.isPresent()) {
             String userName = akOpt.get().getUserName();
-            List<String> identityPolicies = collectUserPolicies(userName);
+            List<String> identityPolicies = userIdentityPolicies(userName);
             String boundaryDoc = resolveUserBoundaryDocument(userName);
             return new CallerContext(identityPolicies, null, boundaryDoc);
         }
@@ -4430,11 +5129,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
-            if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
+            if (isExpired(session, now)) {
                 deleteSession(accessKeyId, session);
                 return null; // expired — unknown key → bypass
             }
 
+            if (session.getDelegatedApproverArn() != null) {
+                return delegatedApproverContext(session);
+            }
             if (isFederatedUserSession(session)) {
                 return withFederatedUserLimits(federatedUserContext(session));
             }
@@ -4465,6 +5167,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * an unauthenticated caller, so enforcement needs to tell them apart. The lookup spans every
      * account deliberately: a key belonging to another account is a real credential, and denying
      * it here would be a false rejection rather than a closed hole.
+     *
+     * <p>An inactive key counts too. {@link #registerIssuedSession} relies on that, so a session
+     * minted with an inactive key has no issuer rather than acting as the account root, and
+     * enforcement refuses the key itself through {@link #isInactiveAccessKey}.
      */
     public boolean isKnownAccessKey(String accessKeyId) {
         if (accessKeyId == null || accessKeyId.isBlank()) {
@@ -4478,6 +5184,42 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         return accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware
                 && !aware.scanAllAccountEntries(accessKeyId::equals).isEmpty();
+    }
+
+    /**
+     * True when this is an IAM user's long-term access key, in any account, that is not Active. An
+     * inactive key can't be used for API calls (IAM User Guide, "Manage access keys for IAM
+     * users"), so enforcement refuses it as it refuses a key that exists nowhere, rather than
+     * letting {@link #isKnownAccessKey}, which counts it as a credential, wave it through.
+     */
+    public boolean isInactiveAccessKey(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank() || isTemporaryAccessKey(accessKeyId)) {
+            return false;
+        }
+        // Routing sends an active key to its own account, so the usual case is answered here
+        // without scanning the others. An inactive key lands in the default account instead.
+        Optional<AccessKey> routed = accessKeys.get(accessKeyId);
+        if (routed.isPresent()) {
+            return !"Active".equals(routed.get().getStatus());
+        }
+        return accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware
+                && aware.scanAllAccountEntries(accessKeyId::equals).stream()
+                        .anyMatch(entry -> !"Active".equals(entry.value().getStatus()));
+    }
+
+    /**
+     * True when this temporary access key belongs to a session that had expired by {@code now} but
+     * is still stored. AWS answers its use with {@code ExpiredTokenException} rather than as a key
+     * it does not know, so enforcement asks before {@link #resolveCallerContext(String, Instant)},
+     * which deletes such a session and leaves nothing to tell the two apart.
+     */
+    public boolean isExpiredSession(String accessKeyId, Instant now) {
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return false;
+        }
+        return findSessionForCallerContext(accessKeyId)
+                .filter(session -> isExpired(session, now))
+                .isPresent();
     }
 
     private Optional<SessionCredential> findSessionForCallerContext(String accessKeyId) {
@@ -4515,12 +5257,121 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /**
      * The two ARNs a caller's access key stands for, read from one lookup of the key.
      *
-     * @param callerArn    the identity the caller acts as: the user's ARN, or for a role session its
-     *                     {@code assumed-role} session ARN, as {@link #resolveCallerArn} returns it
-     * @param principalArn the request's {@code aws:PrincipalArn}: the user's ARN, or for a role
-     *                     session the ARN of the role that was assumed, path included
+     * @param callerArn     the identity the caller acts as: the user's ARN, or for a role session
+     *                      its {@code assumed-role} session ARN, as {@link #resolveCallerArn}
+     *                      returns it
+     * @param principalArn  the request's {@code aws:PrincipalArn}: the user's ARN, or for a role
+     *                      session the ARN of the role that was assumed, path included
+     * @param principalType the request's {@code aws:PrincipalType}
+     * @param userId        the request's {@code aws:userid}, in the shape the guide gives for this
+     *                      kind of principal, or null when it publishes none
+     * @param userName      the request's {@code aws:username}, which only an IAM user has
+     * @param permissionsBoundary whether a permissions boundary is attached to the user, or to the
+     *                      role a session assumed, which a Deny's {@code NotPrincipal} never spares
      */
-    public record CallerArns(String callerArn, String principalArn) {}
+    public record CallerArns(String callerArn, String principalArn, String principalType,
+                             String userId, String userName, boolean permissionsBoundary) {
+
+        /**
+         * The {@code aws:PrincipalType} values, from the IAM User Guide's principal key values
+         * list. The guide renders the role-session value both as {@code AssumedRole} and, twice,
+         * as "Assumed role"; the unspaced form is the one that fits the vocabulary the rest of the
+         * list uses, every other value there being a single word or CamelCase, and it is the form
+         * AWS publishes machine-side, as CloudTrail's {@code userIdentity.type} does.
+         */
+        public static final String TYPE_ACCOUNT = "Account";
+        public static final String TYPE_USER = "User";
+        public static final String TYPE_FEDERATED_USER = "FederatedUser";
+        public static final String TYPE_ASSUMED_ROLE = "AssumedRole";
+
+        /** The two ARNs alone, for a caller whose principal keys the site cannot derive. */
+        public CallerArns(String callerArn, String principalArn) {
+            this(callerArn, principalArn, null, null, null);
+        }
+
+        /**
+         * Floci's account-root principal, for a credential that names no IAM identity. The
+         * guide's principal key values give the root user the account id as its
+         * {@code aws:userid}, {@code Account} as its {@code aws:PrincipalType} and no
+         * {@code aws:username}.
+         */
+        public static CallerArns accountRoot(String rootArn, String accountId) {
+            return new CallerArns(rootArn, rootArn, TYPE_ACCOUNT, accountId, null);
+        }
+
+        /** A caller with no permissions boundary attached. */
+        public CallerArns(String callerArn, String principalArn, String principalType, String userId,
+                          String userName) {
+            this(callerArn, principalArn, principalType, userId, userName, false);
+        }
+
+        /**
+         * Writes the condition keys that say who is calling onto a request context, so every
+         * context a request is evaluated against sees the same principal: the enforcement
+         * filter's, one per resource the request names, and the one S3 builds when it evaluates a
+         * bucket policy itself.
+         *
+         * <p>{@code aws:PrincipalType} and {@code aws:userid} are published for every principal,
+         * the guide saying both are "included in the request context for all requests, including
+         * anonymous requests". {@code aws:username} is not: it is "always included in the request
+         * context for IAM users" while "requests that are made using the AWS account root user or
+         * IAM roles do not include this key", so it is only put here when the caller is a user. A
+         * key left absent is what makes a policy that matches on it fail to match, which is the
+         * behaviour AWS documents for a key with no value, so omitting it is the enforcement, not
+         * a gap in it.
+         */
+        public void putPrincipalKeys(Map<String, List<String>> context) {
+            context.put("aws:PrincipalArn", List.of(principalArn));
+            if (principalType != null) {
+                context.put("aws:PrincipalType", List.of(principalType));
+            }
+            if (userId != null) {
+                context.put("aws:userid", List.of(userId));
+            }
+            if (userName != null) {
+                context.put("aws:username", List.of(userName));
+            }
+        }
+    }
+
+    /**
+     * An IAM user acting as itself, whether it signed with its own access key or with a session
+     * token it minted: the guide gives this principal, and only this one, an
+     * {@code aws:username}, and its {@code aws:userid} is the user's own unique id rather than
+     * anything derivable from the ARN.
+     */
+    private static CallerArns callerForUser(IamUser user) {
+        return new CallerArns(user.getArn(), user.getArn(), CallerArns.TYPE_USER,
+                user.getUserId(), user.getUserName(), user.getPermissionsBoundaryArn() != null);
+    }
+
+
+    /**
+     * The principal keys a policy simulation starts with, for the identity named by a
+     * {@code PolicySourceArn}. The simulator does not ask a caller for these: the guide lists
+     * {@code aws:PrincipalAccount}, {@code aws:PrincipalId}, {@code aws:PrincipalType},
+     * {@code aws:Type}, {@code aws:UserId} and {@code aws:UserName} as "populated for you", and
+     * says the caller provides "the values for all other condition keys".
+     *
+     * <p>What a simulation gets here is the principal half of the request context, the same
+     * {@link CallerArns#putPrincipalKeys} the enforcement filter writes, so a policy simulates the
+     * way it is enforced: {@code aws:PrincipalArn}, {@code aws:PrincipalType},
+     * {@code aws:username} and {@code aws:userid}, with the account added by the caller of this
+     * method. The guide's {@code aws:PrincipalId} and {@code aws:Type} are not in that context on
+     * any request path, so populating them in a simulation alone would answer for keys an
+     * enforced request cannot, and they stay absent here too.
+     *
+     * <p>Only a user source answers here. A role named as a policy source is not a session, so
+     * there is no session name to put in an {@code aws:userid} and no documented value for its
+     * {@code aws:PrincipalType} in a simulation; those keys stay absent, and a policy that matches
+     * on one does not match, which is what an absent key means everywhere else.
+     */
+    public Optional<CallerArns> simulationPrincipalKeys(String principalArn) {
+        if (principalArn == null || !principalArn.contains(":user/")) {
+            return Optional.empty();
+        }
+        return userFromArnOrName(principalArn).map(IamService::callerForUser);
+    }
 
     /**
      * Both of the caller's ARNs from a single lookup, so they always describe the same credential:
@@ -4533,27 +5384,39 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
         Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
         if (akOpt.isPresent()) {
-            String userName = akOpt.get().getUserName();
-            return users.get(userName).map(IamUser::getArn).map(arn -> new CallerArns(arn, arn));
+            return users.get(akOpt.get().getUserName()).map(IamService::callerForUser);
         }
 
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
-            if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
+            if (isExpired(session, clock.instant())) {
                 deleteSession(accessKeyId, session);
                 return Optional.empty();
             }
+            if (session.getDelegatedApproverArn() != null) {
+                return delegatedApproverArns(session);
+            }
             if (isFederatedUserSession(session)) {
-                return Optional.of(new CallerArns(session.getRoleArn(), session.getRoleArn()));
+                // A federated user has no aws:username at all, only the account:name userid.
+                String federatedArn = session.getRoleArn();
+                return Optional.of(new CallerArns(federatedArn, federatedArn,
+                        CallerArns.TYPE_FEDERATED_USER,
+                        sessionUserId(session).orElse(null), null));
             }
             String roleArn = session.getRoleArn();
             if (roleArn == null) {
                 // GetSessionToken credentials act as the identity that minted them.
                 if (issuedByRoot(session)) {
-                    return Optional.of(new CallerArns(session.getIssuerArn(), session.getIssuerArn()));
+                    // The account root's aws:userid is the account id, and it has no
+                    // aws:username: the guide lists it as not present for this principal.
+                    String issuerArn = session.getIssuerArn();
+                    return Optional.of(new CallerArns(issuerArn, issuerArn,
+                            CallerArns.TYPE_ACCOUNT,
+                            AwsArnUtils.accountOrDefault(issuerArn, regionResolver.getAccountId()),
+                            null));
                 }
-                return issuingUser(session).map(user -> new CallerArns(user.getArn(), user.getArn()));
+                return issuingUser(session).map(IamService::callerForUser);
             }
             String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
             String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
@@ -4567,7 +5430,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             String partition = AwsArnUtils.partitionOrDefault(roleArn, regionResolver.getPartition());
             String sessionArn = AwsArnUtils.Arn.global(partition, "sts", accountId,
                     "assumed-role/" + roleName + "/" + sessionName).toString();
-            return Optional.of(new CallerArns(sessionArn, roleArn));
+            return Optional.of(new CallerArns(sessionArn, roleArn, CallerArns.TYPE_ASSUMED_ROLE,
+                    sessionUserId(session).orElse(null), null,
+                    roleFromArnOrName(roleArn).map(IamRole::getPermissionsBoundaryArn).isPresent()));
         }
 
         return Optional.empty();
@@ -4603,7 +5468,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
-            if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
+            if (isExpired(session, clock.instant())) {
                 deleteSession(accessKeyId, session);
                 return Optional.empty();
             }
@@ -4611,43 +5476,58 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                     && !hasMatchingSessionToken(session, sessionToken)) {
                 return Optional.empty();
             }
-            if (isFederatedUserSession(session)) {
-                // account:caller-specified-name, the aws:userid of a federated user.
-                AwsArnUtils.Arn federatedUser = AwsArnUtils.parse(session.getRoleArn());
-                return Optional.of(federatedUser.accountId() + ":"
-                        + federatedUser.resource().substring(FEDERATED_USER_PREFIX.length()));
+            return sessionUserId(session);
+        }
+
+        return Optional.empty();
+    }
+
+    /**
+     * The {@code aws:userid} of a session, in the shape the IAM User Guide's principal key values
+     * list gives the kind of principal that holds it. Shared with {@link #resolveCallerArns}, which
+     * reports the same key for the same credential and must not derive it a second way.
+     */
+    private Optional<String> sessionUserId(SessionCredential session) {
+        if (session.getDelegatedApproverArn() != null) {
+            return delegatedApproverUserId(session.getDelegatedApproverArn());
+        }
+        if (isFederatedUserSession(session)) {
+            // account:caller-specified-name, the aws:userid of a federated user.
+            AwsArnUtils.Arn federatedUser = AwsArnUtils.parse(session.getRoleArn());
+            return Optional.of(federatedUser.accountId() + ":"
+                    + federatedUser.resource().substring(FEDERATED_USER_PREFIX.length()));
+        }
+        if (session.getRoleArn() == null) {
+            Optional<IamUser> issuingUser = issuingUser(session);
+            if (issuingUser.isPresent()) {
+                return Optional.of(issuingUser.get().getUserId());
             }
-            if (session.getRoleArn() == null) {
-                Optional<IamUser> issuingUser = issuingUser(session);
-                if (issuingUser.isPresent()) {
-                    return Optional.of(issuingUser.get().getUserId());
-                }
-            }
-            if (session.getAssumedRoleId() != null) {
-                return Optional.of(session.getAssumedRoleId());
-            } else if (session.getEc2RoleId() != null && session.getEc2InstanceId() != null) {
-                return Optional.of(session.getEc2RoleId() + ":" + session.getEc2InstanceId());
-            } else if (session.getRoleArn() != null) {
-                String roleArn = session.getRoleArn();
-                String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
-                String accountId = AwsArnUtils.accountOrDefault(roleArn,
-                        session.getOriginAccountId() != null ? session.getOriginAccountId() : regionResolver.getAccountId());
-                Optional<IamRole> roleOpt = findRole(accountId, roleName);
-                String roleId = roleOpt.map(IamRole::getRoleId).filter(id -> !id.isBlank()).orElse(null);
-                if (roleId != null) {
-                    String sessionName = session.getRoleSessionName();
-                    if (sessionName == null || sessionName.isBlank()) {
-                        if (session.getEc2InstanceId() != null) {
-                            sessionName = session.getEc2InstanceId();
-                        } else if (session.getEcsTaskArn() != null) {
-                            String taskArn = session.getEcsTaskArn();
-                            sessionName = taskArn.contains("/") ? taskArn.substring(taskArn.lastIndexOf('/') + 1) : taskArn;
-                        } else {
-                            sessionName = "floci-session";
-                        }
+        }
+        if (session.getAssumedRoleId() != null) {
+            return Optional.of(session.getAssumedRoleId());
+        } else if (session.getEc2RoleId() != null && session.getEc2InstanceId() != null) {
+            return Optional.of(session.getEc2RoleId() + ":" + session.getEc2InstanceId());
+        } else if (session.getRoleArn() != null) {
+            String roleArn = session.getRoleArn();
+            String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
+            String fallbackAccount = session.getOriginAccountId() != null
+                    ? session.getOriginAccountId() : regionResolver.getAccountId();
+            String accountId = AwsArnUtils.accountOrDefault(roleArn, fallbackAccount);
+            Optional<IamRole> roleOpt = findRole(accountId, roleName);
+            String roleId = roleOpt.map(IamRole::getRoleId).filter(id -> !id.isBlank()).orElse(null);
+            if (roleId != null) {
+                String sessionName = session.getRoleSessionName();
+                if (sessionName == null || sessionName.isBlank()) {
+                    if (session.getEc2InstanceId() != null) {
+                        sessionName = session.getEc2InstanceId();
+                    } else if (session.getEcsTaskArn() != null) {
+                        String taskArn = session.getEcsTaskArn();
+                        sessionName = taskArn.contains("/") ? taskArn.substring(taskArn.lastIndexOf('/') + 1) : taskArn;
+                    } else {
+                        sessionName = "floci-session";
                     }
-                    return Optional.of(roleId + ":" + sessionName);
                 }
+                return Optional.of(roleId + ":" + sessionName);
             }
         }
 
@@ -4670,12 +5550,30 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public CallerContext resolvePrincipalContext(String principalArn) {
+        return principalContext(principalArn, true);
+    }
+
+    /**
+     * The same context without the account-level grants that apply to an identity without being
+     * attached to it, for {@code GetContextKeysForPrincipalPolicy}: AWS scopes that answer to "the
+     * identity-based policies attached to the specified entity, and any additional policies that
+     * you provide", so the key {@link #PASSWORD_SELF_SERVICE_GRANT} references is not one the
+     * caller has to supply. A simulation does evaluate with the grant, the way the request path
+     * does, and stays on {@link #resolvePrincipalContext}.
+     */
+    public CallerContext resolveAttachedPrincipalContext(String principalArn) {
+        return principalContext(principalArn, false);
+    }
+
+    private CallerContext principalContext(String principalArn, boolean withAccountGrants) {
         if (principalArn == null || principalArn.isBlank()) {
             throw new AwsException("ValidationError", "PolicySourceArn is required.", 400);
         }
         if (principalArn.contains(":user/")) {
             String userName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
-            List<String> identityPolicies = collectUserPolicies(principalArn);
+            List<String> identityPolicies = withAccountGrants
+                    ? userIdentityPolicies(principalArn)
+                    : collectUserPolicies(principalArn);
             if (identityPolicies == null) {
                 throw new AwsException("NoSuchEntity", "User " + userName + " cannot be found.", 404);
             }
@@ -4716,43 +5614,101 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public void putUserPermissionsBoundary(String userName, String permissionsBoundaryArn) {
+        putUserPermissionsBoundary(userName, permissionsBoundaryArn, null);
+    }
+
+    /**
+     * Same as {@link #putUserPermissionsBoundary(String, String)}, but refuses the write if the user
+     * named here is no longer the one with {@code expectedUserId}, like
+     * {@link #updateUser(String, String, String, String)}. A null ID skips the check.
+     */
+    public void putUserPermissionsBoundary(String userName, String permissionsBoundaryArn, String expectedUserId) {
         requirePolicy(permissionsBoundaryArn); // validate policy exists
-        IamUser user = getUser(userName);
-        user.setPermissionsBoundaryArn(permissionsBoundaryArn);
-        users.put(userName, user);
+        synchronized (resourceNameLock) {
+            IamUser user = getUser(userName);
+            requireSameUser(user, userName, expectedUserId);
+            user.setPermissionsBoundaryArn(permissionsBoundaryArn);
+            users.put(userName, user);
+        }
         LOG.infov("Set permissions boundary for user {0}: {1}", userName, permissionsBoundaryArn);
     }
 
     public void deleteUserPermissionsBoundary(String userName) {
-        IamUser user = getUser(userName);
-        if (user.getPermissionsBoundaryArn() == null) {
-            throw new AwsException("NoSuchEntity",
-                    "User " + userName + " does not have a permissions boundary.", 404);
+        deleteUserPermissionsBoundary(userName, null);
+    }
+
+    /** ID-verified like {@link #putUserPermissionsBoundary(String, String, String)}. */
+    public void deleteUserPermissionsBoundary(String userName, String expectedUserId) {
+        synchronized (resourceNameLock) {
+            IamUser user = getUser(userName);
+            requireSameUser(user, userName, expectedUserId);
+            if (user.getPermissionsBoundaryArn() == null) {
+                throw new AwsException("NoSuchEntity",
+                        "User " + userName + " does not have a permissions boundary.", 404);
+            }
+            user.setPermissionsBoundaryArn(null);
+            users.put(userName, user);
         }
-        user.setPermissionsBoundaryArn(null);
-        users.put(userName, user);
         LOG.infov("Deleted permissions boundary for user: {0}", userName);
     }
 
     public void putRolePermissionsBoundary(String roleName, String permissionsBoundaryArn) {
-        IamRole role = getRole(roleName);
-        requireNotServiceLinked(role, roleName);
-        requirePolicy(permissionsBoundaryArn); // validate policy exists
-        role.setPermissionsBoundaryArn(permissionsBoundaryArn);
-        roles.put(roleName, role);
+        putRolePermissionsBoundary(roleName, permissionsBoundaryArn, null);
+    }
+
+    /**
+     * Same as {@link #putRolePermissionsBoundary(String, String)}, but refuses the write if the role
+     * named here is no longer the one with {@code expectedRoleId}, like
+     * {@link #updateAssumeRolePolicy(String, String, String)}. A null ID skips the check.
+     */
+    public void putRolePermissionsBoundary(String roleName, String permissionsBoundaryArn, String expectedRoleId) {
+        validateRoleName(roleName);
+        synchronized (resourceNameLock) {
+            IamRole role = getRole(roleName);
+            requireSameRole(role, roleName, expectedRoleId);
+            requireNotServiceLinked(role, roleName);
+            requirePolicy(permissionsBoundaryArn); // validate policy exists
+            role.setPermissionsBoundaryArn(permissionsBoundaryArn);
+            roles.put(roleName, role);
+        }
         LOG.infov("Set permissions boundary for role {0}: {1}", roleName, permissionsBoundaryArn);
     }
 
     public void deleteRolePermissionsBoundary(String roleName) {
-        IamRole role = getRole(roleName);
-        requireNotServiceLinked(role, roleName);
-        if (role.getPermissionsBoundaryArn() == null) {
-            throw new AwsException("NoSuchEntity",
-                    "Role " + roleName + " does not have a permissions boundary.", 404);
+        deleteRolePermissionsBoundary(roleName, null);
+    }
+
+    /** ID-verified like {@link #putRolePermissionsBoundary(String, String, String)}. */
+    public void deleteRolePermissionsBoundary(String roleName, String expectedRoleId) {
+        validateRoleName(roleName);
+        synchronized (resourceNameLock) {
+            IamRole role = getRole(roleName);
+            requireSameRole(role, roleName, expectedRoleId);
+            requireNotServiceLinked(role, roleName);
+            if (role.getPermissionsBoundaryArn() == null) {
+                throw new AwsException("NoSuchEntity",
+                        "Role " + roleName + " does not have a permissions boundary.", 404);
+            }
+            role.setPermissionsBoundaryArn(null);
+            roles.put(roleName, role);
         }
-        role.setPermissionsBoundaryArn(null);
-        roles.put(roleName, role);
         LOG.infov("Deleted permissions boundary for role: {0}", roleName);
+    }
+
+    private static void requireSameUser(IamUser user, String userName, String expectedUserId) {
+        if (expectedUserId != null && !expectedUserId.equals(user.getUserId())) {
+            throw new AwsException("EntityAlreadyExists",
+                    "User " + userName + " was replaced by a different user of the same name; "
+                            + "refusing to apply an update meant for the original user.", 409);
+        }
+    }
+
+    private static void requireSameRole(IamRole role, String roleName, String expectedRoleId) {
+        if (expectedRoleId != null && !expectedRoleId.equals(role.getRoleId())) {
+            throw new AwsException("EntityAlreadyExists",
+                    "Role " + roleName + " was replaced by a different role of the same name; "
+                            + "refusing to apply an update meant for the original role.", 409);
+        }
     }
 
     /**
@@ -4782,6 +5738,82 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         String roleName = roleArnOrName.substring(roleArnOrName.lastIndexOf('/') + 1);
         return findRole(AwsArnUtils.accountOrDefault(roleArnOrName, regionResolver.getAccountId()), roleName);
+    }
+
+    /**
+     * The policies an IAM user is evaluated with: its own and its groups', plus the account-level
+     * grant {@link #PASSWORD_SELF_SERVICE_GRANT} carries when the account password policy allows
+     * users to change their own password.
+     *
+     * <p>{@link #collectUserPolicies} stays the user's own set, which is what the guide means by
+     * applying the permissions at the account level rather than attaching a policy: an answer AWS
+     * scopes to the policies attached to a user reads the attached set, so the grant is in no
+     * policy listing and in no context-key answer. It is in this set, the one authorization is
+     * decided from, and in {@link #accountLevelUserGrants}, which a report of what a user can
+     * reach adds on top of the attached set.
+     */
+    private List<String> userIdentityPolicies(String userArnOrName) {
+        List<String> docs = collectUserPolicies(userArnOrName);
+        if (docs == null) {
+            return null;
+        }
+        // The flag that answers is the user's own account's, which is the account the lookup above
+        // resolved them in: a PolicySourceArn may name another account's user, and that user
+        // carries whatever their own account's password policy says, never this one's.
+        Optional<String> grant = passwordSelfServiceGrant(
+                AwsArnUtils.accountOrDefault(userArnOrName, regionResolver.getAccountId()));
+        if (grant.isEmpty()) {
+            return docs;
+        }
+        List<String> withGrant = new ArrayList<>(docs);
+        withGrant.add(grant.get());
+        return withGrant;
+    }
+
+    /**
+     * The account-level grants an IAM user of {@code accountId} is authorized by without holding a
+     * policy of its own, which today is the password self-service grant alone. Separate from
+     * {@link #userIdentityPolicies} because a caller reporting on a user needs these without the
+     * user's own documents, and because "the policies attached to a user" and "what the user can
+     * reach" are different questions that AWS answers from different sets.
+     */
+    public List<String> accountLevelUserGrants(String accountId) {
+        return passwordSelfServiceGrant(accountId).map(List::of).orElseGet(List::of);
+    }
+
+    /**
+     * An account's password self-service grant, present only while that account's password policy
+     * sets {@code AllowUsersToChangePassword}. One document for every user in the account, its
+     * resource ARNs minted for that same account in the request's partition, with
+     * {@code ${aws:username}} left for the evaluator to resolve per caller.
+     */
+    private Optional<String> passwordSelfServiceGrant(String accountId) {
+        boolean allowed = accountPasswordPolicy(accountId)
+                .map(AccountPasswordPolicy::isAllowUsersToChangePassword)
+                .orElse(false);
+        if (!allowed) {
+            return Optional.empty();
+        }
+        return Optional.of(PASSWORD_SELF_SERVICE_GRANT.formatted(
+                regionResolver.buildGlobalArn("iam", accountId, "user/${aws:username}"),
+                regionResolver.buildGlobalArn("iam", accountId, "user/*/${aws:username}")));
+    }
+
+    /**
+     * The password policy of a named account rather than the request's own, for a user that
+     * resolved in another one. Mirrors {@link #findUser(String, String)}: the store is
+     * account-namespaced, and the request's own account goes through
+     * {@link #getAccountPasswordPolicy()}, which also picks up a policy persisted before the
+     * store was namespaced.
+     */
+    private Optional<AccountPasswordPolicy> accountPasswordPolicy(String accountId) {
+        if (accountId.equals(regionResolver.getAccountId())) {
+            return getAccountPasswordPolicy();
+        }
+        if (passwordPolicies instanceof AccountAwareStorageBackend<AccountPasswordPolicy> aware) {
+            return aware.getForAccount(accountId, ACCOUNT_PASSWORD_POLICY_KEY);
+        }
+        return passwordPolicies.get(ACCOUNT_PASSWORD_POLICY_KEY);
     }
 
     private List<String> collectUserPolicies(String userArnOrName) {
@@ -5231,6 +6263,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private String isoDate(Instant instant) {
-        return instant == null ? "" : DateTimeFormatter.ISO_INSTANT.format(instant);
+        return instant == null ? "" : CREDENTIAL_REPORT_TIME.format(instant);
     }
 }

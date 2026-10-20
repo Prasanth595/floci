@@ -55,13 +55,16 @@ Log group deletion protection defaults to disabled and is persisted with the log
 enabled, `DeleteLogGroup` returns `ValidationException` until protection is explicitly disabled
 with `PutLogGroupDeletionProtection`.
 
-Two actions are currently simplified:
+One action is currently simplified:
 
 - **`GetDataProtectionPolicy`** does not model data-protection policies. It returns
   HTTP 200 with the resolved `logGroupIdentifier` and no `policyDocument`, including for
   a log group that does not exist, where real AWS returns `ResourceNotFoundException`.
-- **`FilterLogEvents`** matches `filterPattern` as a plain substring of the message. The full
-  filter pattern syntax described below is applied by metric filters and subscription filters.
+
+`FilterLogEvents` reads `filterPattern` with the filter pattern syntax described below, the one
+metric filters and subscription filters use: terms, quoted phrases, `?` alternatives, `-`
+exclusions, JSON and space-delimited patterns. An invalid pattern is refused with
+`InvalidParameterException`.
 
 ### Subscription filters {#subscription-filters}
 
@@ -200,6 +203,15 @@ scenarios tagged **Verified on Live AWS**, the recorded fixtures and their evide
 
 ### Logs Insights {#logs-insights}
 
+`StartQuery` accepts log group names and canonical log group ARNs in `logGroupIdentifiers`.
+Floci also accepts the `:*` suffix and the bare trailing `:` produced when Grafana removes
+the `*` from `DescribeLogGroups.arn`. Equivalent identifiers scan the group only once.
+The bare-colon tolerance applies only to `logGroupIdentifiers`, requires a complete Logs ARN,
+and does not rewrite values supplied through `logGroupName` or `logGroupNames`.
+The bare-colon spelling is a client-compatibility tolerance: the
+[AWS reference](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_StartQuery.html#CWL-StartQuery-request-logGroupIdentifiers)
+documents the canonical ARN, not that spelling. This tolerance does not change other APIs' ARN handling.
+
 `StartQuery` / `GetQueryResults` / `StopQuery` run a **subset** of the Logs Insights
 query language. Supported commands:
 
@@ -233,9 +245,8 @@ When a `Complete` result set looks narrower or wider than intended, check the qu
 compound `filter` or a stray `=` first: those cases produce neither a failure nor a warning. The
 only log line is the usual INFO summary, `Logs Insights query <id>: scanned ... -> <n> row(s)`.
 
-For simple substring matching, `FilterLogEvents` is the more predictable option today. Note that
-Floci matches `--filter-pattern` as a plain substring of the message; the real filter-pattern
-syntax (`?ERROR ?WARN`, `{ $.level = "ERROR" }`, and so on) is not parsed.
+For matching events by a pattern, `FilterLogEvents` is the more predictable option today: it
+applies the filter pattern syntax (`?ERROR ?WARN`, `{ $.level = "ERROR" }`, and so on) as AWS does.
 
 ### Reading events past the limit
 
@@ -330,8 +341,24 @@ aws logs put-retention-policy \
 
 ## CloudWatch Metrics {#metrics}
 
-**Protocol:** Query (XML) and JSON 1.1 (both supported)
-**Endpoint:** `POST http://localhost:4566/`
+**Protocol:** Query (XML) and JSON 1.0 (both supported)
+
+CloudWatch Query operations accept form-encoded POST requests and root GET requests with
+URL query parameters. GET uses the existing handlers, signature validation and IAM policy checks. A `monitoring`
+credential in the Authorization header or presigned URL selects CloudWatch, including
+requests with browser Accept headers or unrelated target headers. Unsigned GET requests
+select it only for unambiguous supported actions; ordinary S3, SNS and browser requests
+retain their existing routing. Only a Query protocol claim can dispatch a CloudWatch GET;
+an unclaimed request cannot perform a CloudWatch operation. Header-signed and presigned
+requests use the account and region in their credential scope.
+`Action` takes precedence over `Operation`.
+
+Use `Version=2010-08-01` for current GET operations. Omitting the version selects the
+legacy `2009-05-15` API, which supports only `ListMetrics` and `GetMetricStatistics`.
+An invalid version or action returns HTTP 404 `InvalidAction`; an absent action returns
+HTTP 404 `UnknownOperationException`. IAM policies use the `cloudwatch` action prefix.
+
+**Endpoint:** `http://localhost:4566/`. Query: GET or POST; JSON: POST.
 
 ### Supported Actions
 
@@ -361,6 +388,14 @@ aws logs put-retention-policy \
 
 Metric streams are stored as definitions with their `running` or `stopped` state. Floci never
 delivers metrics to the Firehose delivery stream a metric stream names.
+
+### SNS alarm actions
+
+State transitions publish to same-account standard SNS topics in `AlarmActions`, `OKActions`, or
+`InsufficientDataActions`, including transitions from `SetAlarmState`. Unchanged states and
+`ActionsEnabled=false` suppress notifications. Scaling action retries remain independent.
+Failures are logged per target without blocking other targets. Notifications include a
+single-metric `Trigger`; durable retries, FIFO topics, and metric-math payloads are not covered.
 
 ### Metric-math alarm definitions
 

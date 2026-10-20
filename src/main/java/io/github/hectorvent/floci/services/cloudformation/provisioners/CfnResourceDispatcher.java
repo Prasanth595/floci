@@ -51,6 +51,14 @@ public class CfnResourceDispatcher {
     }
 
     /**
+     * Whether the generic custom-resource handler serves a type, as the registry routes it; see
+     * {@link CloudFormationResourceRegistry#isCustomResourceType}.
+     */
+    public boolean isCustomResourceType(String resourceType) {
+        return registry.isCustomResourceType(resourceType);
+    }
+
+    /**
      * Provisions a single resource and returns the populated StackResource (physical id and
      * attributes set).
      *
@@ -72,13 +80,18 @@ public class CfnResourceDispatcher {
                                    String stackName, String existingPhysicalId,
                                    Map<String, String> existingAttributes) {
         return provision(logicalId, resourceType, properties, engine, region, accountId, stackName,
-                existingPhysicalId, existingAttributes, event -> {});
+                existingPhysicalId, existingAttributes, event -> {}, null);
     }
 
+    /**
+     * {@code priorProperties} are the resource's properties in the previous template, unresolved,
+     * or null when there is none; see {@link ProvisionContext#previouslyDeclared(String)}.
+     */
     public StackResource provision(String logicalId, String resourceType, JsonNode properties,
                                    CloudFormationTemplateEngine engine, String region, String accountId,
                                    String stackName, String existingPhysicalId,
-                                   Map<String, String> existingAttributes, Consumer<StackEvent> progress) {
+                                   Map<String, String> existingAttributes, Consumer<StackEvent> progress,
+                                   JsonNode priorProperties) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
         resource.setResourceType(resourceType);
@@ -89,7 +102,8 @@ public class CfnResourceDispatcher {
             CfnResourceProvisioner owner = registry.forType(resourceType).orElse(null);
             if (owner != null) {
                 owner.provision(resource, properties,
-                        new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress));
+                        new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress,
+                                priorProperties));
                 // A provisioner that migrated a stub without writing its own Arn would leave the
                 // stub's, and the real resource would read as a stub on its next update.
                 String arn = resource.getAttributes().get("Arn");
@@ -238,6 +252,19 @@ public class CfnResourceDispatcher {
                 .orElseGet(UpdateCleanupResult::notApplicable);
     }
 
+    /** Cleanup owed by an unfinished update while deleting the enclosing stack. */
+    public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
+        return registry.forType(resource.getResourceType())
+                .map(owner -> owner.completeDeleteCleanup(resource))
+                .filter(UpdateCleanupResult::applicable)
+                .orElseGet(UpdateCleanupResult::notApplicable);
+    }
+
+    /** Clears completed replacement cleanup without assuming a stack update committed. */
+    public void clearDeleteCleanup(StackResource resource) {
+        registry.forType(resource.getResourceType()).ifPresent(owner -> owner.clearDeleteCleanup(resource));
+    }
+
     /**
      * The physical id this update displaced, announced as DELETE_IN_PROGRESS before the stack
      * update closes. A type whose {@code UpdateReplacePolicy} is {@code Retain} owes no cleanup.
@@ -258,11 +285,31 @@ public class CfnResourceDispatcher {
                 .orElse(false);
     }
 
+    public boolean requiresUpdateRecovery(StackResource resource) {
+        return registry.forType(resource.getResourceType())
+                .map(owner -> owner.requiresUpdateRecovery(resource))
+                .orElse(false);
+    }
+
     /** Whether this update replaced the resource's physical entity, so the stack has cleanup pending. */
     public boolean hasReplacementUpdate(StackResource resource) {
         return registry.forType(resource.getResourceType())
                 .map(owner -> owner.hasReplacementUpdate(resource))
                 .orElse(false);
+    }
+
+    /** Whether the owner of a type says it takes its parent's physical id; see the provisioner hook. */
+    public boolean takesParentPhysicalId(String resourceType) {
+        return registry.forType(resourceType)
+                .map(owner -> owner.takesParentPhysicalId(resourceType))
+                .orElse(false);
+    }
+
+    /** Whether the owner of a type says a prefix of its id can name its parent; see the provisioner hook. */
+    public boolean idPrefixCanNameParent(String resourceType) {
+        return registry.forType(resourceType)
+                .map(owner -> owner.idPrefixCanNameParent(resourceType))
+                .orElse(true);
     }
 
     /** Drops the cleanup bookkeeping this update left on the resource. */

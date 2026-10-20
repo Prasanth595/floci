@@ -23,203 +23,41 @@ import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.Context;
-import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Generic dispatcher for all AWS services that use the Query Protocol (form-encoded POST, XML response).
  * Routes requests to the appropriate service handler based on the service name extracted from the
- * Authorization header's credential scope, falling back to action-name matching when no auth header
- * is present.
- *
- * <p>Currently supported services:
- * <ul>
- *   <li>SQS — form-encoded query protocol</li>
- *   <li>SNS — form-encoded query protocol</li>
- *   <li>IAM — form-encoded query protocol (global service)</li>
- *   <li>STS — form-encoded query protocol (global service)</li>
- * </ul>
+ * Authorization header's credential scope. When there is no such header, or its scope names no
+ * service that speaks the Query protocol, the action name and the {@code Version} the request
+ * declares decide instead, as {@link #inferServiceFromAction} describes.
  *
  * @see AwsJsonController
  */
 @Path("/")
 public class AwsQueryController {
 
+    static final String QUERY_GET_PATH = "/_query";
+
     private static final Logger LOG = Logger.getLogger(AwsQueryController.class);
-
-    private static final Set<String> STS_ACTIONS = Set.of(
-            "AssumeRole", "AssumeRoleWithWebIdentity", "AssumeRoleWithSAML",
-            "GetCallerIdentity", "GetSessionToken", "GetFederationToken",
-            "DecodeAuthorizationMessage"
-    );
-
-    private static final Set<String> SNS_ACTIONS = Set.of(
-            "CreateTopic", "DeleteTopic", "ListTopics", "GetTopicAttributes", "SetTopicAttributes",
-            "Subscribe", "Unsubscribe", "ListSubscriptions", "ListSubscriptionsByTopic",
-            "Publish", "PublishBatch", "TagResource", "UntagResource", "ListTagsForResource",
-            "CreatePlatformApplication", "DeletePlatformApplication", "GetPlatformApplicationAttributes",
-            "SetPlatformApplicationAttributes", "ListPlatformApplications",
-            "CreatePlatformEndpoint", "DeleteEndpoint", "GetEndpointAttributes",
-            "SetEndpointAttributes", "ListEndpointsByPlatformApplication",
-            "CheckIfPhoneNumberIsOptedOut", "ListPhoneNumbersOptedOut",
-            "OptInPhoneNumber", "SetSMSAttributes", "GetSMSAttributes",
-            "GetSubscriptionAttributes", "SetSubscriptionAttributes", "ConfirmSubscription",
-            "CreateSMSSandboxPhoneNumber", "DeleteSMSSandboxPhoneNumber",
-            "GetSMSSandboxAccountStatus", "ListSMSSandboxPhoneNumbers",
-            "VerifySMSSandboxPhoneNumber", "AddPermission", "RemovePermission"
-    );
-
-    private static final Set<String> IAM_ACTIONS = Set.of(
-            "CreateUser", "GetUser", "DeleteUser", "ListUsers", "UpdateUser",
-            "CreateGroup", "GetGroup", "DeleteGroup", "ListGroups",
-            "AddUserToGroup", "RemoveUserFromGroup", "ListGroupsForUser",
-            "CreateRole", "GetRole", "DeleteRole", "ListRoles", "UpdateRole",
-            "CreateServiceLinkedRole", "DeleteServiceLinkedRole", "GetServiceLinkedRoleDeletionStatus",
-            "CreatePolicy", "GetPolicy", "DeletePolicy", "ListPolicies", "ListEntitiesForPolicy",
-            "CreatePolicyVersion", "GetPolicyVersion", "DeletePolicyVersion",
-            "ListPolicyVersions", "SetDefaultPolicyVersion",
-            "AttachUserPolicy", "DetachUserPolicy", "ListAttachedUserPolicies",
-            "AttachGroupPolicy", "DetachGroupPolicy", "ListAttachedGroupPolicies",
-            "AttachRolePolicy", "DetachRolePolicy", "ListAttachedRolePolicies",
-            "PutUserPolicy", "GetUserPolicy", "DeleteUserPolicy", "ListUserPolicies",
-            "PutRolePolicy", "GetRolePolicy", "DeleteRolePolicy", "ListRolePolicies",
-            "PutGroupPolicy", "GetGroupPolicy", "DeleteGroupPolicy", "ListGroupPolicies",
-            "CreateAccessKey", "DeleteAccessKey", "ListAccessKeys", "UpdateAccessKey",
-            "CreateInstanceProfile", "GetInstanceProfile", "DeleteInstanceProfile",
-            "ListInstanceProfiles", "AddRoleToInstanceProfile",
-            "RemoveRoleFromInstanceProfile", "ListInstanceProfilesForRole",
-            "TagUser", "UntagUser", "ListUserTags",
-            "TagRole", "UntagRole", "ListRoleTags",
-            "TagPolicy", "UntagPolicy", "ListPolicyTags",
-            "TagInstanceProfile", "UntagInstanceProfile", "ListInstanceProfileTags",
-            "CreateLoginProfile", "GetLoginProfile", "DeleteLoginProfile", "UpdateLoginProfile",
-            "GenerateCredentialReport", "GetCredentialReport",
-            "GetAccountSummary", "GetAccountAuthorizationDetails",
-            "SimulatePrincipalPolicy", "SimulateCustomPolicy",
-            "GetContextKeysForCustomPolicy", "GetContextKeysForPrincipalPolicy",
-            "ListSAMLProviders", "CreateSAMLProvider", "GetSAMLProvider",
-            "UpdateSAMLProvider", "DeleteSAMLProvider",
-            "TagSAMLProvider", "UntagSAMLProvider", "ListSAMLProviderTags",
-            "GenerateServiceLastAccessedDetails", "GetServiceLastAccessedDetails",
-            "GetServiceLastAccessedDetailsWithEntities", "ListPoliciesGrantingServiceAccess",
-            "UploadServerCertificate", "GetServerCertificate", "UpdateServerCertificate",
-            "DeleteServerCertificate", "ListServerCertificates",
-            "TagServerCertificate", "UntagServerCertificate", "ListServerCertificateTags",
-            "CreateVirtualMFADevice", "DeleteVirtualMFADevice", "ListVirtualMFADevices",
-            "EnableMFADevice", "DeactivateMFADevice", "ResyncMFADevice", "ListMFADevices",
-            "TagMFADevice", "UntagMFADevice", "ListMFADeviceTags",
-            "GetAccountProperties", "PutAccountProperties",
-            "SetSecurityTokenServicePreferences", "EnableOutboundWebIdentityFederation",
-            "DisableOutboundWebIdentityFederation", "GetOutboundWebIdentityFederationInfo",
-            "CreateServiceSpecificCredential", "ListServiceSpecificCredentials",
-            "UpdateServiceSpecificCredential", "ResetServiceSpecificCredential",
-            "DeleteServiceSpecificCredential",
-            "UploadSSHPublicKey", "GetSSHPublicKey", "ListSSHPublicKeys",
-            "UpdateSSHPublicKey", "DeleteSSHPublicKey",
-            "UploadSigningCertificate", "ListSigningCertificates",
-            "UpdateSigningCertificate", "DeleteSigningCertificate",
-            "CreateAccountAlias", "DeleteAccountAlias", "ListAccountAliases",
-            "GetAccountPasswordPolicy", "UpdateAccountPasswordPolicy", "DeleteAccountPasswordPolicy",
-            "GetAccessKeyLastUsed", "UpdateGroup", "UpdateAssumeRolePolicy",
-            "PutUserPermissionsBoundary", "DeleteUserPermissionsBoundary",
-            "PutRolePermissionsBoundary", "DeleteRolePermissionsBoundary",
-            "CreateOpenIDConnectProvider", "GetOpenIDConnectProvider",
-            "ListOpenIDConnectProviders", "DeleteOpenIDConnectProvider",
-            "AddClientIDToOpenIDConnectProvider", "RemoveClientIDFromOpenIDConnectProvider",
-            "UpdateOpenIDConnectProviderThumbprint", "TagOpenIDConnectProvider",
-            "UntagOpenIDConnectProvider", "ListOpenIDConnectProviderTags",
-            "ListOrganizationsFeatures",
-            "EnableOrganizationsRootCredentialsManagement",
-            "DisableOrganizationsRootCredentialsManagement",
-            "EnableOrganizationsRootSessions", "DisableOrganizationsRootSessions"
-    );
-
-    private static final Set<String> AUTOSCALING_ACTIONS = Set.of(
-            "CreateLaunchConfiguration", "DescribeLaunchConfigurations", "DeleteLaunchConfiguration",
-            "CreateAutoScalingGroup", "UpdateAutoScalingGroup", "DeleteAutoScalingGroup",
-            "DescribeAutoScalingGroups", "SetDesiredCapacity",
-            "StartInstanceRefresh", "DescribeInstanceRefreshes",
-            "CreateOrUpdateTags", "DeleteTags",
-            "DescribeAutoScalingInstances", "AttachInstances", "DetachInstances",
-            "TerminateInstanceInAutoScalingGroup",
-            "AttachLoadBalancerTargetGroups", "DetachLoadBalancerTargetGroups",
-            "DescribeLoadBalancerTargetGroups", "AttachLoadBalancers", "DetachLoadBalancers",
-            "PutLifecycleHook", "DeleteLifecycleHook", "DescribeLifecycleHooks",
-            "CompleteLifecycleAction", "RecordLifecycleActionHeartbeat",
-            "PutScalingPolicy", "DeletePolicy", "DescribePolicies",
-            "DescribeScalingActivities",
-            "DescribeAutoScalingNotificationTypes", "DescribeTerminationPolicyTypes",
-            "DescribeAdjustmentTypes", "DescribeAccountLimits",
-            "DescribeLifecycleHookTypes", "DescribeMetricCollectionTypes"
-    );
-
-    private static final Set<String> ELB_V2_ACTIONS = Set.of(
-            "CreateLoadBalancer", "DescribeLoadBalancers", "DeleteLoadBalancer",
-            "ModifyLoadBalancerAttributes", "DescribeLoadBalancerAttributes",
-            "SetSecurityGroups", "SetSubnets", "SetIpAddressType",
-            "CreateTargetGroup", "DescribeTargetGroups", "ModifyTargetGroup", "DeleteTargetGroup",
-            "ModifyTargetGroupAttributes", "DescribeTargetGroupAttributes",
-            "RegisterTargets", "DeregisterTargets", "DescribeTargetHealth",
-            "CreateListener", "DescribeListeners", "ModifyListener", "DeleteListener",
-            "AddListenerCertificates", "RemoveListenerCertificates", "DescribeListenerCertificates",
-            "CreateRule", "DescribeRules", "ModifyRule", "DeleteRule", "SetRulePriorities",
-            "AddTags", "RemoveTags", "DescribeTags",
-            "DescribeSSLPolicies", "DescribeAccountLimits"
-    );
-
-    private static final Set<String> EC2_ACTIONS = Set.of(
-            "RunInstances", "CreateFleet", "DescribeInstances", "TerminateInstances", "StartInstances", "StopInstances",
-            "RebootInstances", "DescribeInstanceStatus", "DescribeInstanceAttribute", "ModifyInstanceAttribute",
-            "CreateVpc", "DescribeVpcs", "DeleteVpc", "ModifyVpcAttribute", "DescribeVpcAttribute",
-            "DescribeVpcEndpointServices", "CreateVpcEndpoint", "DescribeVpcEndpoints", "DeleteVpcEndpoints",
-            "DescribePrefixLists",
-            "CreateDefaultVpc", "AssociateVpcCidrBlock", "DisassociateVpcCidrBlock",
-            "CreateSubnet", "DescribeSubnets", "DeleteSubnet", "ModifySubnetAttribute",
-            "CreateSecurityGroup", "DescribeSecurityGroups", "DeleteSecurityGroup",
-            "AuthorizeSecurityGroupIngress", "AuthorizeSecurityGroupEgress",
-            "RevokeSecurityGroupIngress", "RevokeSecurityGroupEgress",
-            "DescribeSecurityGroupRules", "ModifySecurityGroupRules",
-            "UpdateSecurityGroupRuleDescriptionsIngress", "UpdateSecurityGroupRuleDescriptionsEgress",
-            "CreateKeyPair", "DescribeKeyPairs", "DeleteKeyPair", "ImportKeyPair",
-            "DescribeImages", "RegisterImage", "DeregisterImage", "CreateImage", "CopyImage",
-            "DescribeSnapshots",
-            "EnableSnapshotBlockPublicAccess", "DisableSnapshotBlockPublicAccess",
-            "GetSnapshotBlockPublicAccessState",
-            "CreateTags", "DeleteTags", "DescribeTags",
-            "CreateInternetGateway", "DescribeInternetGateways", "DeleteInternetGateway",
-            "AttachInternetGateway", "DetachInternetGateway",
-            "CreateRouteTable", "DescribeRouteTables", "DeleteRouteTable",
-            "AssociateRouteTable", "DisassociateRouteTable", "CreateRoute", "ReplaceRoute", "DeleteRoute",
-            "CreateNetworkAcl", "DescribeNetworkAcls", "DeleteNetworkAcl",
-            "CreateNetworkAclEntry", "ReplaceNetworkAclEntry", "DeleteNetworkAclEntry",
-            "ReplaceNetworkAclAssociation",
-            "CreateNatGateway", "DescribeNatGateways", "DeleteNatGateway",
-            "CreateTransitGatewayPeeringAttachment", "AcceptTransitGatewayPeeringAttachment",
-            "DeleteTransitGatewayPeeringAttachment", "DescribeTransitGatewayPeeringAttachments",
-            "CreateCapacityReservation", "DescribeCapacityReservations",
-            "ModifyCapacityReservation", "CancelCapacityReservation",
-            "AllocateAddress", "AssociateAddress", "DisassociateAddress", "ReleaseAddress", "DescribeAddresses",
-            "DescribeAddressesAttribute",
-            "DescribeIamInstanceProfileAssociations",
-            "DescribeAvailabilityZones", "DescribeRegions", "DescribeAccountAttributes",
-            "DescribeInstanceTypes", "DescribeInstanceTypeOfferings", "DescribeSpotPriceHistory",
-            "CreateLaunchTemplate", "CreateLaunchTemplateVersion", "DescribeLaunchTemplates", "DescribeLaunchTemplateVersions",
-            "ModifyLaunchTemplate", "DeleteLaunchTemplate",
-            "DescribeNetworkInterfaces",
-            "CreateFlowLogs", "DescribeFlowLogs", "DeleteFlowLogs",
-            "CreateVolume", "DescribeVolumes", "DeleteVolume", "AttachVolume", "DetachVolume"
-    );
 
     private final CloudFormationQueryHandler cloudFormationQueryHandler;
     private final ElastiCacheQueryHandler elastiCacheQueryHandler;
@@ -299,7 +137,6 @@ public class AwsQueryController {
     @Produces(MediaType.APPLICATION_XML)
     public Response dispatch(
             @HeaderParam("Authorization") String authorization,
-            @Context HttpHeaders httpHeaders,
             MultivaluedMap<String, String> formParams) {
 
         String action = AwsQueryServiceResolver.action(formParams);
@@ -308,10 +145,10 @@ public class AwsQueryController {
                     "The request must contain the parameter Action", 400);
         }
 
-        String service = serviceResolver.resolve(authorization, action);
+        String service = serviceResolver.resolve(authorization, action, formParams.getFirst("Version"));
         LOG.debugv("Query protocol service={0} action={1}", service, action);
 
-        String region = regionResolver.resolveRegion(httpHeaders);
+        String region = regionResolver.resolveRegionFromAuth(authorization);
 
         try {
             return dispatchToHandler(service, action, formParams, authorization, region);
@@ -527,103 +364,7 @@ public class AwsQueryController {
         return Response.status(400).entity(xml).type(MediaType.APPLICATION_XML).build();
     }
 
-    /**
-     * Determines the target AWS service. Prefers the service name embedded in the
-     * Authorization header credential scope. Falls back to action-name lookup when
-     * the header is absent (e.g. raw HTTP testing without AWS SDK auth).
-     */
-    private static final Set<String> ELASTICACHE_ACTIONS = Set.of(
-            "ValidateIamAuthToken",
-            "CreateReplicationGroup", "DescribeReplicationGroups", "ModifyReplicationGroup", "DeleteReplicationGroup",
-            "CreateUser", "DescribeUsers", "ModifyUser", "DeleteUser",
-            "CreateUserGroup", "DescribeUserGroups", "ModifyUserGroup", "DeleteUserGroup"
-    );
-
-    private static final Set<String> CLOUDWATCH_ACTIONS = Set.of(
-            "PutMetricData", "ListMetrics", "GetMetricStatistics", "GetMetricData",
-            "PutMetricAlarm", "DescribeAlarms", "DeleteAlarms", "SetAlarmState",
-            "ListTagsForResource", "TagResource", "UntagResource",
-            "PutDashboard", "GetDashboard", "ListDashboards", "DeleteDashboards",
-            "PutMetricStream", "GetMetricStream", "ListMetricStreams", "DeleteMetricStream",
-            "StartMetricStreams", "StopMetricStreams"
-    );
-
-    private static final Set<String> ELASTIC_BEANSTALK_ACTIONS = Set.of(
-            "CreateApplication", "DescribeApplications", "UpdateApplication", "DeleteApplication",
-            "CreateApplicationVersion", "DescribeApplicationVersions", "DeleteApplicationVersion",
-            "CreateEnvironment", "DescribeEnvironments", "UpdateEnvironment", "TerminateEnvironment",
-            "DescribeConfigurationSettings", "CheckDNSAvailability", "ListAvailableSolutionStacks"
-    );
-
-    private static final Set<String> RDS_ACTIONS = Set.of(
-            "CreateDBInstance", "DescribeDBInstances", "DeleteDBInstance",
-            "ModifyDBInstance", "RebootDBInstance",
-            "DescribeOrderableDBInstanceOptions",
-            "CreateDBSubnetGroup", "DescribeDBSubnetGroups", "ModifyDBSubnetGroup", "DeleteDBSubnetGroup",
-            "AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource",
-            "CreateDBCluster", "DescribeDBClusters", "DeleteDBCluster", "ModifyDBCluster",
-            "AddRoleToDBCluster", "RemoveRoleFromDBCluster",
-            "DescribeGlobalClusters",
-            "CreateDBParameterGroup", "DescribeDBParameterGroups",
-            "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters",
-            "DescribeDBProxies", "CreateDBProxy", "ModifyDBProxy", "DeleteDBProxy",
-            "RegisterDBProxyTargets", "DeregisterDBProxyTargets",
-            "DescribeDBProxyTargetGroups", "ModifyDBProxyTargetGroup", "DescribeDBProxyTargets",
-            "CreateDBClusterParameterGroup", "DescribeDBClusterParameterGroups",
-            "ModifyDBClusterParameterGroup", "DeleteDBClusterParameterGroup",
-            "DescribeDBClusterParameters",
-            "CreateOptionGroup", "DescribeOptionGroups", "ModifyOptionGroup", "DeleteOptionGroup",
-            "DescribeDBSnapshots", "DescribeDBClusterSnapshots"
-    );
-
-    private static final Set<String> CLOUDFORMATION_ACTIONS = Set.of(
-            "CreateStack", "DeleteStack", "UpdateStack", "DescribeStacks", "UpdateTerminationProtection",
-            "ListStacks", "ListExports", "GetTemplate", "GetTemplateSummary", "ValidateTemplate",
-            "CreateChangeSet", "DeleteChangeSet", "DescribeChangeSet", "ExecuteChangeSet", "ListChangeSets",
-            "DescribeStackEvents", "DescribeStackResources", "ListStackResources", "DescribeStackResource",
-            "SetStackPolicy", "GetStackPolicy",
-            "ListStackSets", "DescribeStackSet", "CreateStackSet", "UpdateStackSet", "DeleteStackSet",
-            "CreateStackInstances", "ListStackInstances", "DescribeStackInstance", "DeleteStackInstances",
-            "ListStackSetOperations", "DescribeStackSetOperation"
-    );
-
-    private static final Set<String> SES_ACTIONS = Set.of(
-            "VerifyEmailIdentity", "VerifyEmailAddress", "VerifyDomainIdentity",
-            "DeleteIdentity", "ListIdentities", "GetIdentityVerificationAttributes",
-            "SendEmail", "SendRawEmail", "GetSendQuota", "GetSendStatistics",
-            "GetAccountSendingEnabled", "ListVerifiedEmailAddresses", "DeleteVerifiedEmailAddress",
-            "SetIdentityNotificationTopic", "GetIdentityNotificationAttributes",
-            "SetIdentityFeedbackForwardingEnabled",
-            "SetIdentityDkimEnabled",
-            "VerifyDomainDkim",
-            "SetIdentityHeadersInNotificationsEnabled",
-            "SetIdentityMailFromDomain", "GetIdentityMailFromDomainAttributes",
-            "GetIdentityDkimAttributes",
-            "PutIdentityPolicy", "GetIdentityPolicies", "ListIdentityPolicies", "DeleteIdentityPolicy",
-            "CreateTemplate", "UpdateTemplate", "GetTemplate", "DeleteTemplate",
-            "ListTemplates", "SendTemplatedEmail", "SendBulkTemplatedEmail",
-            "TestRenderTemplate",
-            "CreateCustomVerificationEmailTemplate", "GetCustomVerificationEmailTemplate",
-            "ListCustomVerificationEmailTemplates", "UpdateCustomVerificationEmailTemplate",
-            "DeleteCustomVerificationEmailTemplate", "SendCustomVerificationEmail",
-            "CreateConfigurationSet", "DescribeConfigurationSet",
-            "ListConfigurationSets", "DeleteConfigurationSet",
-            "CreateConfigurationSetEventDestination",
-            "UpdateConfigurationSetEventDestination",
-            "DeleteConfigurationSetEventDestination",
-            "UpdateConfigurationSetSendingEnabled",
-            "CreateConfigurationSetTrackingOptions",
-            "UpdateConfigurationSetTrackingOptions",
-            "DeleteConfigurationSetTrackingOptions",
-            "UpdateConfigurationSetReputationMetricsEnabled",
-            "PutConfigurationSetDeliveryOptions",
-            "CreateReceiptRuleSet", "DescribeReceiptRuleSet", "ListReceiptRuleSets",
-            "DeleteReceiptRuleSet", "SetActiveReceiptRuleSet", "DescribeActiveReceiptRuleSet",
-            "ReorderReceiptRuleSet", "CloneReceiptRuleSet",
-            "CreateReceiptRule", "DescribeReceiptRule", "UpdateReceiptRule",
-            "DeleteReceiptRule", "SetReceiptRulePosition",
-            "CreateReceiptFilter", "ListReceiptFilters", "DeleteReceiptFilter"
-    );
+    private static final String CLOUDWATCH_API_VERSION = "2010-08-01";
 
     private static final Set<String> COGNITO_ACTIONS = Set.of(
             "AdminCreateUser", "AdminGetUser", "AdminDeleteUser", "AdminSetUserPassword",
@@ -638,65 +379,141 @@ public class AwsQueryController {
             "AdminAddUserToGroup", "AdminRemoveUserFromGroup", "AdminListGroupsForUser"
     );
 
-    private static final Set<String> REDSHIFT_ACTIONS = Set.of(
-            "CreateCluster", "DescribeClusters", "DeleteCluster",
-            "CreateClusterSnapshot", "DescribeClusterSnapshots", "DeleteClusterSnapshot", "RestoreFromClusterSnapshot",
-            "ModifyCluster", "RebootCluster",
-            "CreateClusterParameterGroup", "DescribeClusterParameterGroups", "DescribeClusterParameters", "DeleteClusterParameterGroup",
-            "ModifyClusterParameterGroup",
-            "CreateClusterSubnetGroup", "DescribeClusterSubnetGroups", "ModifyClusterSubnetGroup", "DeleteClusterSubnetGroup",
-            "CreateSnapshotCopyGrant", "DescribeSnapshotCopyGrants", "DeleteSnapshotCopyGrant",
-            "CreateTags", "DeleteTags", "DescribeTags",
-            "GetClusterCredentials", "GetClusterCredentialsWithIAM"
-    );
+    @GET
+    @Path(QUERY_GET_PATH)
+    @Produces({MediaType.APPLICATION_XML, MediaType.TEXT_HTML})
+    public Response dispatchQueryGet(@HeaderParam("Authorization") String authorization,
+                                               @Context UriInfo uriInfo,
+                                               @Context ContainerRequestContext request) {
+        // Only the pre-matching Query claim may select this internal route.
+        if (!(request.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim)
+                || claim.protocol() != WireProtocol.AWS_QUERY) {
+            return Response.status(404).build();
+        }
+        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+        String action = AwsQueryServiceResolver.action(queryParams);
+        String auth = IamEnforcementFilter.requestAuthorization(authorization, queryParams);
+        String service = serviceResolver.resolve(auth, action, queryParams.getFirst("Version"));
+        if (!"monitoring".equals(service)) {
+            return dispatch(auth, queryParams);
+        }
+        if (action == null) {
+            return Response.status(404).type(MediaType.APPLICATION_XML)
+                    .entity("<UnknownOperationException/>").build();
+        }
+        String version = queryParams.getFirst("Version");
+        version = version == null ? "2009-05-15" : version;
+        Set<String> actions = switch (version) {
+            case "2009-05-15" -> Set.of("ListMetrics", "GetMetricStatistics");
+            case CLOUDWATCH_API_VERSION -> QueryServiceModels.of("monitoring").operations();
+            default -> Set.of();
+        };
+        if (!actions.contains(action)) {
+            return xmlErrorResponse("InvalidAction", "Could not find operation " + action + " for version "
+                    + version, 404);
+        }
+        return dispatch(IamEnforcementFilter.requestAuthorization(authorization, queryParams), queryParams);
+    }
 
-    static String inferServiceFromAction(String action) {
-        if (STS_ACTIONS.contains(action)) {
-            return "sts";
+    /** A Query service, the API versions its clients declare, and the action names it serves. */
+    private record QueryService(String name, Set<String> apiVersions, Set<String> actions) {
+
+        /**
+         * A service as its botocore models define it (see {@link QueryServiceModels}), plus any
+         * action Floci serves that no model defines.
+         */
+        static QueryService modeled(String name, String... floci) {
+            QueryServiceModels.ServiceModel model = QueryServiceModels.of(name);
+            return new QueryService(name, model.apiVersions(),
+                    Stream.concat(model.operations().stream(), Stream.of(floci))
+                            .collect(Collectors.toUnmodifiableSet()));
         }
-        if (IAM_ACTIONS.contains(action)) {
-            return "iam";
+    }
+
+    /**
+     * Every Query service, in the order they are tried when the action name alone has to decide:
+     * where two services define the same name, the earlier one takes it, unless
+     * {@link #UNVERSIONED_OWNERS} names another.
+     *
+     * <p>Each service's versions and actions are those of its botocore models, so a name a service
+     * defines reaches it whether Floci implements it or not. SES and Elastic Beanstalk publish the
+     * same version and share no action name, so the action settles which of the two a request is
+     * for. Both Elastic Load Balancing APIs lead to one service here and {@link #isElbClassicRequest}
+     * splits them on the same field, and DocumentDB and Neptune publish RDS's version and are split
+     * from it in the {@code rds} case. {@code ValidateIamAuthToken} is Floci's own ElastiCache
+     * action. Cognito's model is JSON only, so it has no Query model and no Query client declares a
+     * version for it; its names are listed by hand. SQS is tried last, so by name alone it takes only
+     * what no other service defines, and its {@code Version} wins back the two names SNS also
+     * defines.
+     */
+    private static final List<QueryService> QUERY_SERVICES = List.of(
+            QueryService.modeled("sts"),
+            QueryService.modeled("iam"),
+            QueryService.modeled("sns"),
+            QueryService.modeled("elasticache", "ValidateIamAuthToken"),
+            QueryService.modeled("rds"),
+            QueryService.modeled("monitoring"),
+            QueryService.modeled("cloudformation"),
+            QueryService.modeled("email"),
+            new QueryService("cognito-idp", Set.of(), COGNITO_ACTIONS),
+            QueryService.modeled("ec2"),
+            QueryService.modeled("elasticloadbalancing"),
+            QueryService.modeled("autoscaling"),
+            QueryService.modeled("elasticbeanstalk"),
+            QueryService.modeled("redshift"),
+            QueryService.modeled("sqs"));
+
+    /**
+     * Where a name several services define goes when the request's {@code Version} does not decide:
+     * the service that serves it here, where the order would pick an earlier one that does not.
+     * {@code AwsQueryActionRoutingParityTest} fails when a name some service serves reaches one that
+     * does not.
+     */
+    static final Map<String, String> UNVERSIONED_OWNERS = Map.ofEntries(
+            Map.entry("AddTagsToResource", "rds"),
+            Map.entry("RemoveTagsFromResource", "rds"),
+            Map.entry("DescribeEngineDefaultParameters", "rds"),
+            Map.entry("DescribeEvents", "rds"),
+            Map.entry("DescribeAccountAttributes", "ec2"),
+            Map.entry("DescribeSnapshots", "ec2"),
+            Map.entry("DescribeAccountLimits", "elasticloadbalancing"),
+            Map.entry("CreateIntegration", "redshift"),
+            Map.entry("DeleteIntegration", "redshift"),
+            Map.entry("DescribeIntegrations", "redshift"));
+
+    /**
+     * The service a Query request goes to when its credential scope does not name one.
+     *
+     * <p>The action name alone is ambiguous wherever two services define it, and then the earlier
+     * one in {@link #QUERY_SERVICES} wins, or the one {@link #UNVERSIONED_OWNERS} names. The
+     * {@code Version} every Query client sends is what
+     * tells them apart, as {@link #isElbClassicRequest} already uses it for the two Elastic Load
+     * Balancing APIs: {@code CreateUser} under IAM's version is IAM's, and under ElastiCache's it
+     * is ElastiCache's.
+     *
+     * <p>{@code Version} only chooses among the services that define the name. One that names a
+     * service without it, or none at all, leaves the name to decide, as it does for a hand-rolled
+     * request that omits the field.
+     */
+    static String inferServiceFromAction(String action, String version) {
+        String byName = null;
+        for (QueryService service : QUERY_SERVICES) {
+            if (!service.actions().contains(action)) {
+                continue;
+            }
+            if (version != null && service.apiVersions().contains(version)) {
+                return service.name();
+            }
+            if (byName == null) {
+                byName = service.name();
+            }
         }
-        if (SNS_ACTIONS.contains(action)) {
-            return "sns";
+        if (byName != null && UNVERSIONED_OWNERS.containsKey(action)) {
+            return UNVERSIONED_OWNERS.get(action);
         }
-        if (ELASTICACHE_ACTIONS.contains(action)) {
-            return "elasticache";
-        }
-        if (RDS_ACTIONS.contains(action)) {
-            return "rds";
-        }
-        if (CLOUDWATCH_ACTIONS.contains(action)) {
-            return "monitoring";
-        }
-        if (CLOUDFORMATION_ACTIONS.contains(action)) {
-            return "cloudformation";
-        }
-        if (SES_ACTIONS.contains(action)) {
-            return "email";
-        }
-        if (COGNITO_ACTIONS.contains(action)) {
-            return "cognito-idp";
-        }
-        if (EC2_ACTIONS.contains(action)) {
-            return "ec2";
-        }
-        if (ELB_V2_ACTIONS.contains(action)
-                || ElbClassicQueryHandler.CLASSIC_ONLY_ACTIONS.contains(action)) {
-            return "elasticloadbalancing";
-        }
-        if (AUTOSCALING_ACTIONS.contains(action)) {
-            return "autoscaling";
-        }
-        if (ELASTIC_BEANSTALK_ACTIONS.contains(action)) {
-            return "elasticbeanstalk";
-        }
-        if (REDSHIFT_ACTIONS.contains(action)) {
-            return "redshift";
-        }
-        // SQS actions are numerous and not enumerated — fall back to sqs only for
-        // requests that arrived without an Authorization header (raw/test clients)
-        return "sqs";
+        // A name no service defines goes to SQS, which is how a raw SQS request without an
+        // Authorization header gets there.
+        return byName != null ? byName : "sqs";
     }
 
     private Response xmlErrorResponse(String code, String message, int status) {

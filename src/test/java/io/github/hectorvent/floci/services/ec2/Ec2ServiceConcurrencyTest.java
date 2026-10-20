@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -229,6 +230,33 @@ class Ec2ServiceConcurrencyTest {
         }
     }
 
+    @Test
+    void concurrentCreateTagsNeverPassTheFiftyTagLimit() throws Exception {
+        for (int trial = 0; trial < TRIALS; trial++) {
+            String region = "race-tag-limit-" + trial;
+            Ec2Service service = newService();
+            String vpcId = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
+            List<Tag> fortyNine = new ArrayList<>();
+            for (int i = 0; i < 49; i++) {
+                fortyNine.add(new Tag("k" + i, "v"));
+            }
+            service.createTags(region, List.of(vpcId), fortyNine);
+            AtomicInteger accepted = new AtomicInteger();
+
+            runRaceAllowing(i -> {
+                try {
+                    service.createTags(region, List.of(vpcId), List.of(new Tag("race" + i, "v")));
+                    accepted.incrementAndGet();
+                } catch (AwsException e) {
+                    assertEquals("TagLimitExceeded", e.getErrorCode());
+                }
+            });
+
+            assertEquals(1, accepted.get(), "trial " + trial + ": only one writer takes the fiftieth tag");
+            assertEquals(50, service.resourceTags(region, vpcId).size(), "trial " + trial + ": tags stored");
+        }
+    }
+
     /** Runs N concurrent invocations of the same op; the op absorbs its own expected failures. */
     private static void runRaceAllowing(java.util.function.IntConsumer op) throws Exception {
         ExecutorService pool = Executors.newFixedThreadPool(THREADS);
@@ -280,6 +308,7 @@ class Ec2ServiceConcurrencyTest {
         when(config.services()).thenReturn(services);
         when(services.ec2()).thenReturn(ec2);
         when(ec2.mock()).thenReturn(true);
+        when(ec2.mockPublicAddresses()).thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.NONE);
         return config;
     }
 

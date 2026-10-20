@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.Matcher;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -496,5 +497,188 @@ class S3VersioningIntegrationTest {
                 .formParam("QueueUrl", queueUrl)
                 .post("/");
         }
+    }
+
+    @Test
+    @Order(21)
+    void deleteBucketRejectsVersionsBehindDeleteMarker() {
+        String bucket = "versioned-delete-bucket-test";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        String versionId = given().body("data").when().put("/" + bucket + "/key")
+                .then().statusCode(200).extract().header("x-amz-version-id");
+        String markerId = given().when().delete("/" + bucket + "/key")
+                .then().statusCode(204).extract().header("x-amz-version-id");
+
+        given().when().delete("/" + bucket).then().statusCode(409)
+                .body(containsString("<Code>BucketNotEmpty</Code>"));
+
+        given().when().delete("/" + bucket + "/key?versionId=" + markerId).then().statusCode(204);
+        given().when().delete("/" + bucket + "/key?versionId=" + versionId).then().statusCode(204);
+        given().when().delete("/" + bucket).then().statusCode(204);
+    }
+
+    @Test
+    @Order(22)
+    void taggingActsOnTheVersionNamed() {
+        String bucket = "versioned-tagging-test";
+        given().when().put("/" + bucket).then().statusCode(200);
+        // Written before versioning, "old" is the null version, which has no version id to report.
+        given().body("v0").when().put("/" + bucket + "/old").then().statusCode(200);
+        given().body(tagging("unversioned")).when().put("/" + bucket + "/old?tagging")
+                .then().statusCode(200).header("x-amz-version-id", nullValue());
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        String v1 = given().body("v1").when().put("/" + bucket + "/key")
+                .then().statusCode(200).extract().header("x-amz-version-id");
+        String v2 = given().body("v2").when().put("/" + bucket + "/key")
+                .then().statusCode(200).extract().header("x-amz-version-id");
+
+        given().body(tagging("first")).when().put("/" + bucket + "/key?tagging&versionId=" + v1)
+                .then().statusCode(200).header("x-amz-version-id", v1);
+        given().when().get("/" + bucket + "/key?tagging&versionId=" + v1)
+                .then().statusCode(200).header("x-amz-version-id", v1)
+                .body(containsString("<Value>first</Value>"));
+        given().when().get("/" + bucket + "/key?tagging")
+                .then().statusCode(200).header("x-amz-version-id", v2)
+                .body(not(containsString("<Tag>")));
+        given().when().delete("/" + bucket + "/key?tagging&versionId=" + v1)
+                .then().statusCode(204).header("x-amz-version-id", v1);
+        given().when().get("/" + bucket + "/key?tagging&versionId=" + v1)
+                .then().statusCode(200).body(not(containsString("<Tag>")));
+
+        // versionId=null names the null version only: "key" was written with versioning on.
+        given().when().get("/" + bucket + "/old?tagging&versionId=null")
+                .then().statusCode(200).body(containsString("<Value>unversioned</Value>"));
+        given().body(tagging("other")).when().put("/" + bucket + "/key?tagging&versionId=null")
+                .then().statusCode(404).body(containsString("<Code>NoSuchVersion</Code>"));
+        given().when().get("/" + bucket + "/key?tagging")
+                .then().statusCode(200).body(not(containsString("<Value>other</Value>")));
+    }
+
+    @Test
+    @Order(23)
+    void taggingADeleteMarkerIsNotAllowed() {
+        String bucket = "versioned-tagging-marker-test";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        given().body("data").when().put("/" + bucket + "/key").then().statusCode(200);
+        String markerId = given().when().delete("/" + bucket + "/key")
+                .then().statusCode(204).extract().header("x-amz-version-id");
+
+        // Refused whether the request names the marker or the marker is the current version.
+        String key = "/" + bucket + "/key?tagging";
+        for (String path : List.of(key, key + "&versionId=" + markerId)) {
+            given().body(tagging("v")).when().put(path)
+                    .then().statusCode(405).header("x-amz-delete-marker", "true")
+                    .body(deleteMarkerRefused("PUT"));
+            given().when().get(path)
+                    .then().statusCode(405).header("x-amz-delete-marker", "true")
+                    .body(deleteMarkerRefused("GET"));
+            given().when().delete(path)
+                    .then().statusCode(405).header("x-amz-delete-marker", "true")
+                    .body(deleteMarkerRefused("DELETE"));
+        }
+    }
+
+    @Test
+    @Order(24)
+    void versionIdNullNamesOnlyTheNullVersionOnEveryObjectOperation() {
+        String bucket = "versioned-null-version-test";
+        given().when().put("/" + bucket).then().statusCode(200);
+        // ACLs enabled, so the ACL requests below reach the version they name.
+        given().body("<OwnershipControls><Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>")
+                .when().put("/" + bucket + "?ownershipControls").then().statusCode(200);
+        given().body("old").when().put("/" + bucket + "/old").then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        given().body("new").when().put("/" + bucket + "/new").then().statusCode(200);
+
+        // "old", written before versioning, is the null version.
+        String old = "/" + bucket + "/old";
+        given().queryParam("versionId", "null").when().get(old).then().statusCode(200).body(equalTo("old"));
+        given().queryParam("versionId", "null").when().head(old).then().statusCode(200);
+        given().queryParam("versionId", "null").header("x-amz-object-attributes", "ObjectSize")
+                .when().get(old + "?attributes").then().statusCode(200)
+                .body(containsString("<ObjectSize>3</ObjectSize>"));
+        given().queryParam("versionId", "null").when().get(old + "?acl").then().statusCode(200);
+        given().queryParam("versionId", "null").header("x-amz-acl", "private")
+                .when().put(old + "?acl").then().statusCode(200);
+        given().queryParam("versionId", "null").queryParam("annotationName", "labels").body("x")
+                .when().put(old + "?annotation").then().statusCode(200);
+        given().queryParam("versionId", "null").queryParam("annotationName", "labels")
+                .when().get(old + "?annotation").then().statusCode(200);
+        given().header("x-amz-copy-source", "/" + bucket + "/old?versionId=null")
+                .when().put("/" + bucket + "/copy").then().statusCode(200);
+        given().when().get("/" + bucket + "/copy").then().statusCode(200).body(equalTo("old"));
+
+        // "new", written with versioning on, has no null version, and its current version is not
+        // one: each request naming the null version fails as for any missing version.
+        String added = "/" + bucket + "/new";
+        Matcher<String> noSuchVersion = containsString("<Code>NoSuchVersion</Code>");
+        given().queryParam("versionId", "null").when().get(added).then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").when().head(added).then().statusCode(404);
+        given().queryParam("versionId", "null").header("x-amz-object-attributes", "ObjectSize")
+                .when().get(added + "?attributes").then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").when().get(added + "?acl").then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").header("x-amz-acl", "private")
+                .when().put(added + "?acl").then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").queryParam("annotationName", "labels").body("x")
+                .when().put(added + "?annotation").then().statusCode(404)
+                .body(containsString("<Code>NoSuchKey</Code>"));
+        given().header("x-amz-copy-source", "/" + bucket + "/new?versionId=null")
+                .when().put("/" + bucket + "/copy-of-new").then().statusCode(404).body(noSuchVersion);
+        given().when().get(added).then().statusCode(200).body(equalTo("new"));
+    }
+
+    @Test
+    @Order(25)
+    void retentionAndLegalHoldFindTheNullVersion() {
+        // Object Lock enabled on a bucket that already holds a null version, which keeps it.
+        String bucket = "versioned-null-version-lock-test";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("old").when().put("/" + bucket + "/old").then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        given().body("<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>")
+                .when().put("/" + bucket + "?object-lock").then().statusCode(200);
+        given().body("new").when().put("/" + bucket + "/new").then().statusCode(200);
+        String retention = "<Retention><Mode>GOVERNANCE</Mode>"
+                + "<RetainUntilDate>2031-01-01T00:00:00Z</RetainUntilDate></Retention>";
+        String legalHold = "<LegalHold><Status>OFF</Status></LegalHold>";
+
+        String old = "/" + bucket + "/old";
+        given().queryParam("versionId", "null").body(retention).when().put(old + "?retention").then().statusCode(200);
+        given().queryParam("versionId", "null").when().get(old + "?retention")
+                .then().statusCode(200).body(containsString("<Mode>GOVERNANCE</Mode>"));
+        given().queryParam("versionId", "null").body(legalHold).when().put(old + "?legal-hold").then().statusCode(200);
+        given().queryParam("versionId", "null").when().get(old + "?legal-hold")
+                .then().statusCode(200).body(containsString("<Status>OFF</Status>"));
+
+        String added = "/" + bucket + "/new";
+        Matcher<String> noSuchVersion = containsString("<Code>NoSuchVersion</Code>");
+        given().queryParam("versionId", "null").body(retention).when().put(added + "?retention")
+                .then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").when().get(added + "?retention")
+                .then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").body(legalHold).when().put(added + "?legal-hold")
+                .then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").when().get(added + "?legal-hold")
+                .then().statusCode(404).body(noSuchVersion);
+
+        given().queryParam("versionId", "null").header("x-amz-bypass-governance-retention", "true")
+                .when().delete(old).then().statusCode(204);
+    }
+
+    private static String tagging(String value) {
+        return "<Tagging><TagSet><Tag><Key>version</Key><Value>" + value + "</Value></Tag></TagSet></Tagging>";
+    }
+
+    private static Matcher<String> deleteMarkerRefused(String method) {
+        return allOf(containsString("<Code>MethodNotAllowed</Code>"),
+                containsString("<Method>" + method + "</Method>"),
+                containsString("<ResourceType>DeleteMarker</ResourceType>"));
     }
 }

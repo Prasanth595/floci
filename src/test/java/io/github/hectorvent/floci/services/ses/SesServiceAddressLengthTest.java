@@ -28,10 +28,14 @@ class SesServiceAddressLengthTest {
             new EmailContent.Simple("Subject", "body", null, List.of());
 
     private SesService service;
+    private SesIdentityService identityService;
 
     @BeforeEach
     void setUp() {
-        service = SesServiceTestBuilder.create().build();
+        SesServiceTestBuilder builder = SesServiceTestBuilder.create();
+        service = builder.build();
+        identityService = builder.identityService();
+        identityService.verifyEmailIdentity(SENDER, REGION);
     }
 
     @Test
@@ -135,6 +139,22 @@ class SesServiceAddressLengthTest {
     }
 
     @Test
+    void v2RawSend_fromHeaderIsNotMeasuredWhenSenderIsGiven() {
+        String from = address(321, 'c');
+
+        assertDoesNotThrow(() -> service.sendEmail(request(SENDER)
+                .content(new EmailContent.Raw(raw(from, TO, "").data(), true)).build()));
+    }
+
+    @Test
+    void v2RawSend_fromHeaderIsMeasuredWithoutSender() {
+        String from = address(321, 'c');
+
+        assertRejects(from, () -> service.sendEmail(request(null)
+                .content(new EmailContent.Raw(raw(from, TO, "").data(), true)).build()));
+    }
+
+    @Test
     void rawSend_destinationsAreReportedBeforeToHeader() {
         String destination = address(500, 'd');
 
@@ -202,6 +222,8 @@ class SesServiceAddressLengthTest {
     @Test
     void rawSend_otherAddressHeadersAreNotChecked() {
         String tooLong = address(330, 'a');
+        // Sender is a sending address, so it must be verified to reach the send.
+        identityService.verifyEmailIdentity(tooLong, REGION);
 
         assertDoesNotThrow(() -> service.sendEmail(request(SENDER).content(raw(SENDER, TO,
                 "Sender: " + tooLong + "\r\nResent-To: " + tooLong + "\r\n")).build()));

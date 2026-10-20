@@ -93,6 +93,28 @@ public class AwsJsonController {
         this.timestreamInfluxDbJsonHandler = timestreamInfluxDbJsonHandler;
     }
 
+    /**
+     * Accept plain JSON only for catalog descriptors declaring that format.
+     * Keep the wire headers intact and delegate to the same JSON handler.
+     */
+    @POST
+    @Consumes("application/json")
+    @Produces("application/json")
+    public Response handlePlainJsonRequest(
+            @HeaderParam("X-Amz-Target") String target,
+            @Context HttpHeaders httpHeaders,
+            String body) {
+        if (target == null) {
+            return JsonErrorResponseUtils.createMissingTargetErrorResponse();
+        }
+        if (catalog.matchPlainJsonTarget(target).isEmpty()) {
+            return JsonErrorResponseUtils.createUnknownOperationErrorResponse(target);
+        }
+        return Response.fromResponse(handleJsonRequest(target, httpHeaders, body))
+                .type("application/json")
+                .build();
+    }
+
     @POST
     @Consumes(CONTENT_TYPE_AWS_JSON_1_0)
     @Produces(CONTENT_TYPE_AWS_JSON_1_0)
@@ -138,6 +160,9 @@ public class AwsJsonController {
                     if (targetMatch.prefix().startsWith("DynamoDBStreams_")) {
                         yield dynamoDbStreamsJsonHandler.handle(action, request, region);
                     }
+                    if (targetMatch.jsonOnly()) {
+                        yield dynamoDbJsonHandler.handleLegacy(action, request, region);
+                    }
                     DynamoDbRequestShapes.check(action, request);
                     yield dynamoDbJsonHandler.handle(action, request, region);
                 }
@@ -175,6 +200,9 @@ public class AwsJsonController {
         // boundary so other callers of DynamoDbJsonHandler (CBOR, API Gateway proxy,
         // Step Functions tasks) keep their original ObjectNode entity.
         if ("dynamodb".equals(serviceKey)) {
+            if (targetMatch.jsonOnly()) {
+                response = DynamoDbResponses.withLegacyErrorNamespace(response, objectMapper);
+            }
             return DynamoDbResponses.withCrc32(response, objectMapper);
         }
         return response;

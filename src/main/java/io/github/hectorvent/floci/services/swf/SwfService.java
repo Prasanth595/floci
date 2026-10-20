@@ -548,6 +548,7 @@ public class SwfService implements Resettable {
             }
 
             task.setState(SwfDecisionTask.STATE_STARTED);
+            execution.setDecisionNeeded(false);
             task.setIdentity(identity);
             task.setStartedTimestamp(now());
             SwfHistoryEvent started = appendEvent(execution, "DecisionTaskStarted");
@@ -614,7 +615,7 @@ public class SwfService implements Resettable {
 
             applyDecisions(execution, decisions, queued, decisionEventId);
 
-            if (execution.isOpen() && (execution.isDecisionNeeded() || hasNothingPending(execution))) {
+            if (execution.isOpen() && execution.isDecisionNeeded()) {
                 execution.setDecisionNeeded(false);
                 scheduleDecisionTask(execution);
             }
@@ -1036,6 +1037,7 @@ public class SwfService implements Resettable {
                 .attr("workflowExecution", Map.of("workflowId", target.getWorkflowId(),
                         "runId", target.getRunId()))
                 .attr("initiatedEventId", initiated.getEventId());
+        execution.setDecisionNeeded(true);
     }
 
     private void cancelExternal(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
@@ -1067,6 +1069,7 @@ public class SwfService implements Resettable {
                 .attr("workflowExecution", Map.of("workflowId", target.getWorkflowId(),
                         "runId", target.getRunId()))
                 .attr("initiatedEventId", initiated.getEventId());
+        execution.setDecisionNeeded(true);
     }
 
     private void startChild(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
@@ -1273,11 +1276,7 @@ public class SwfService implements Resettable {
                     .attr("reason", reason)
                     .attr("details", details)
                     .attr("result", result);
-            if (hasNothingPending(execution)) {
-                scheduleDecisionTask(execution);
-            } else {
-                execution.setDecisionNeeded(true);
-            }
+            scheduleDecisionTaskIfIdle(execution);
             executionStore.put(pending.executionKey(), execution);
         }
     }
@@ -1895,13 +1894,6 @@ public class SwfService implements Resettable {
                 .isPresent());
     }
 
-    /**
-     * True when nothing is pending, so the decider gets another decision task rather than
-     * an execution stalled with no outstanding work and no scheduled decision.
-     */
-    private boolean hasNothingPending(SwfWorkflowExecution execution) {
-        return !hasOpenWork(execution);
-    }
 
     public int openActivityCount(SwfWorkflowExecution execution) {
         return (int) execution.getActivities().values().stream().filter(SwfActivityTask::isOpen).count();

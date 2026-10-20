@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.storage.StorageOperations;
 import io.github.hectorvent.floci.services.apigatewayv2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -159,6 +160,10 @@ public class ApiGatewayV2Service {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API id specified", 404));
     }
 
+    public boolean hasApi(String region, String apiId) {
+        return apiStore.get(apiKey(region, apiId)).isPresent();
+    }
+
     /** Persists an Api the caller already holds — used to attach OpenAPI import diagnostics. */
     public void putApi(String region, Api api) {
         apiStore.put(apiKey(region, api.getApiId()), api);
@@ -219,19 +224,15 @@ public class ApiGatewayV2Service {
         // Cascade-delete every child resource keyed under region::apiId::*.
         // VpcLink is region-scoped (region::vpcLinkId, shared across APIs) and excluded.
         String prefix = region + "::" + apiId + "::";
-        deleteByPrefix(routeStore, prefix);
-        deleteByPrefix(integrationStore, prefix);
-        deleteByPrefix(authorizerStore, prefix);
-        deleteByPrefix(deploymentStore, prefix);
-        deleteByPrefix(stageStore, prefix);
-        deleteByPrefix(modelStore, prefix);
-        deleteByPrefix(routeResponseStore, prefix);
-        deleteByPrefix(integrationResponseStore, prefix);
+        StorageOperations.deleteByPrefix(routeStore, prefix);
+        StorageOperations.deleteByPrefix(integrationStore, prefix);
+        StorageOperations.deleteByPrefix(authorizerStore, prefix);
+        StorageOperations.deleteByPrefix(deploymentStore, prefix);
+        StorageOperations.deleteByPrefix(stageStore, prefix);
+        StorageOperations.deleteByPrefix(modelStore, prefix);
+        StorageOperations.deleteByPrefix(routeResponseStore, prefix);
+        StorageOperations.deleteByPrefix(integrationResponseStore, prefix);
         LOG.infov("Deleted HTTP API: {0} in {1}", apiId, region);
-    }
-
-    private static void deleteByPrefix(StorageBackend<String, ?> store, String prefix) {
-        store.keys().stream().filter(k -> k.startsWith(prefix)).forEach(store::delete);
     }
 
     public Api updateApi(String region, String apiId, Map<String, Object> request) {
@@ -830,6 +831,12 @@ public class ApiGatewayV2Service {
     public Stage getStage(String region, String apiId, String stageName) {
         return stageStore.get(stageKey(region, apiId, stageName))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Stage not found", 404));
+    }
+
+    public Map<String, String> getStageVariables(String region, String apiId, String stageName) {
+        return stageStore.get(stageKey(region, apiId, stageName))
+                .map(Stage::getStageVariables)
+                .orElse(Map.of());
     }
 
     public List<Stage> getStages(String region, String apiId) {

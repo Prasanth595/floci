@@ -472,6 +472,29 @@ for the integration that raised it: `StepFunctions.ExecutionAlreadyExistsExcepti
 `aws-sdk:sfn:startExecution`. An Express child starts a new execution instead, so the same `Name`
 never fails it.
 
+## Lambda tasks under IAM enforcement
+
+A Lambda task, given a function ARN as its `Resource` or as the `FunctionName` of
+`arn:aws:states:::lambda:invoke`, runs the function in the account and Region the ARN names. With
+[IAM enforcement](iam.md#resource-based-policies) on, the task invokes the function as the state
+machine's execution role, as on AWS. In the role's own account, the role's policies or the
+function's policy can allow `lambda:InvokeFunction`. For a function in another account, both have
+to: the role's policies, and the function's policy through, for example, `AddPermission` naming the
+role or its account. The role's permissions boundary and its account's service control policies
+apply too, and a Deny in any of them refuses the call. A task that names a version or alias is
+authorized against that version or alias. A refused task fails with `Lambda.AccessDeniedException`,
+whose cause names the role's session and the kind of policy that refused it.
+
+A task whose `Credentials` name a role invokes the function as that role instead, once the
+execution role has assumed it. The role's trust policy has to allow the execution role, and Step
+Functions passes the state machine's ARN as `sts:ExternalId`, which the trust policy can require.
+The execution role's own policies have to allow `sts:AssumeRole` on the role too when the role is in
+another account, or when the trust policy names only the execution role's account. `RoleArn` is
+read the way the task's `Parameters` or `Arguments` are: as written, through a path or an intrinsic
+function as `RoleArn.$`, or through JSONata. A role the execution role cannot assume fails the task
+with `States.Permissions`, whose cause names the execution role's session and `sts:AssumeRole` on
+the role.
+
 ## AWS SDK task integrations
 
 A resource of the form `arn:aws:states:::aws-sdk:<service>:<action>` calls the service's API and
@@ -493,10 +516,18 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 | `arn:aws:states:::aws-sdk:sfn:sendTaskSuccess` | `{}` | `Sfn.InvalidTokenException` when no task is waiting on the token |
 | `arn:aws:states:::aws-sdk:sfn:sendTaskFailure` | `{}` | `Sfn.InvalidTokenException` |
 | `arn:aws:states:::aws-sdk:rdsdata:executeStatement` | RDS Data statement result | `RdsData.BadRequestException` for an invalid request |
+| `arn:aws:states:::aws-sdk:redshiftdata:executeStatement` | Data API statement handle (`Id`, `CreatedAt`, ...) | `RedshiftData.ValidationException` for an invalid request |
+| `arn:aws:states:::aws-sdk:redshiftdata:describeStatement` | statement status, `ResultRows` | `RedshiftData.ResourceNotFoundException` for an unknown `Id` |
 | `arn:aws:states:::aws-sdk:scheduler:createSchedule` | `{ScheduleArn}` | `Scheduler.ConflictException` when the name is taken |
 | `arn:aws:states:::aws-sdk:scheduler:updateSchedule` | `{ScheduleArn}` | `Scheduler.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:scheduler:deleteSchedule` | `{}` | `Scheduler.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:sns:publish` | `{MessageId}` | `Sns.NotFoundException` when the topic does not exist |
+
+Redshift Data API execution returns a statement `Id` before SQL completes. Follow the
+`executeStatement` task with `describeStatement`, a Choice on `Status`, and a Wait state
+before polling again. Read results only after `FINISHED`; route `FAILED` and `ABORTED`
+to the workflow's failure path. `WithEvent=true` can also route the terminal status
+through EventBridge.
 
 Scheduler create and update tasks accept `StartDate` and `EndDate` as RFC 3339 strings, including
 offsets and fractional seconds. The direct Scheduler API continues to use numeric epoch seconds.
@@ -511,6 +542,15 @@ happened.
 PascalCase names such as `ResourceArn`, `SecretArn`, `Sql` and `Parameters`; the adapter translates
 them to the direct API shape and returns a recursively PascalCase result. Other RDS Data actions are
 not routed through Step Functions yet.
+
+Every Redshift Data API action Floci implements is reachable as `aws-sdk:redshiftdata:<action>`
+(`executeStatement`, `batchExecuteStatement`, `describeStatement`, `getStatementResult`,
+`getStatementResultV2`, `listStatements`, `cancelStatement`, `listDatabases`, `listSchemas`,
+`listTables`, `describeTable`). Arguments and results keep the Data API's PascalCase names, and
+`CreatedAt` and `UpdatedAt` are ISO-8601 strings. Use `ClusterIdentifier` for a provisioned cluster
+or `WorkgroupName` for a Serverless workgroup. A statement that fails in SQL is not a task failure:
+`executeStatement` succeeds and `describeStatement` reports `Status: FAILED`, as on AWS. There is no
+`.sync` variant, as on AWS.
 
 ## Publishing to SNS
 
@@ -682,6 +722,23 @@ Local, the execution starts and fails with `States.Runtime` only if the state th
 it is entered. This keeps a generated mock file usable when the collection it was built
 from is empty and the state is never reached.
 
+## HTTP Task request bodies
+
+For `arn:aws:states:::http:invoke`, `Transform.RequestBodyEncoding: URL_ENCODED` sends
+an object body as form data. Set `Headers.Content-Type` to
+`application/x-www-form-urlencoded`. Nested objects use bracketed keys, and text is
+percent-encoded as UTF-8. `RequestEncodingOptions.ArrayFormat` supports `INDICES`
+(the default), `REPEAT`, `COMMAS`, and `BRACKETS`, following the
+[AWS HTTP Task encoding options](https://docs.aws.amazon.com/step-functions/latest/dg/call-https-apis.html#connect-http-task-url-encoding).
+`NONE` keeps the JSON-body path unchanged.
+
+Floci currently supports object roots and scalar `COMMAS` arrays. Non-object roots
+(other than an absent or null body) and `COMMAS` arrays containing objects or arrays
+fail explicitly instead of being silently coerced. These are Floci limitations,
+not documented AWS restrictions; their exact AWS behavior has not been verified.
+EventBridge connection lookup and connection-level parameter merging are not
+implemented by the HTTP Task.
+
 ## Executions abandoned by a restart
 
 An execution runs in the Floci process. When Floci restarts while an execution is `RUNNING`,
@@ -699,6 +756,41 @@ shutdown flushes the current execution state before the emulator stops. On resta
 history is retained, and a previously running execution is marked `ABORTED` with one
 `ExecutionAborted` event appended. After a further restart, the execution is already terminal, so
 no additional event is written.
+
+## Execution status change events
+
+Floci publishes AWS-shaped `Step Functions Execution Status Change` events to the **default**
+EventBridge bus (`source: aws.states`, `resources: [executionArn]`) for every status a STANDARD
+execution enters. Rules that match `aws.states`, for example on `detail.stateMachineArn` or
+`detail.status`, fire as they do on AWS. EXPRESS executions emit no events, as on AWS.
+
+| `detail.status` | When |
+|---|---|
+| `RUNNING` | `StartExecution` creates the execution, including a nested `states:startExecution` |
+| `SUCCEEDED` | the execution reaches a terminal state without failing |
+| `FAILED` | a `Fail` state, an unhandled error, or a runtime error ends the execution |
+| `TIMED_OUT` | the state machine's `TimeoutSeconds` elapses |
+| `ABORTED` | `StopExecution` stops the execution |
+
+The `detail` carries every key of AWS's documented event, null when it does not apply:
+`executionArn`, `stateMachineArn`, `name`, `status`, `startDate` and `stopDate` (epoch
+milliseconds, `stopDate` null while `RUNNING`), `input`, `inputDetails`, `output` and
+`outputDetails` (set only on `SUCCEEDED`), `stateMachineVersionArn` and `stateMachineAliasArn`
+(null unless the execution was started through one), `error`, `cause`, and the redrive fields.
+
+- A `TIMED_OUT` event names `States.Timeout` as its `error`.
+- `FAILED` and `TIMED_OUT` report `redriveStatus` `REDRIVABLE` with the reason
+  `Execution is <status> and is redrivable`. Every other status reports `NOT_REDRIVABLE` with
+  `Execution is <status> and cannot be redriven`.
+- As on AWS, when the escaped `input` and escaped `output` together exceed 248 KiB, `input` is
+  left out and `inputDetails.included` is `false`. When the escaped `output` alone exceeds
+  248 KiB, `output` is left out and `outputDetails.included` is `false`.
+  `DescribeExecution` still returns both in full.
+
+Known differences from AWS:
+
+- Executions aborted by the startup sweep described above emit no `ABORTED` event.
+- Floci does not implement redrive, so `redriveCount` is always `0` and `redriveDate` is null.
 
 ## Partitions
 

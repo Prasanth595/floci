@@ -1,10 +1,16 @@
 package io.github.hectorvent.floci.services.servicequotas;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.ServiceQuotasStartupValidator;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -14,6 +20,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 
@@ -24,9 +31,10 @@ import java.util.zip.CRC32;
  * quota codes where tooling depends on them (CodeBuild's {@code L-2DC20C30}
  * "Concurrently running builds", Lambda's {@code L-B99A9384} "Concurrent
  * executions"), plus a deterministic generic set for any other service code.
- * All values are deliberately generous so local pipelines that gate on quota
- * headroom (for example Landing Zone Accelerator) never stall on a limit the
- * emulator does not enforce. Applied and default quotas return the same data.
+ * Unmodeled values are deliberately generous so local pipelines that gate on
+ * quota headroom never stall on a limit the emulator does not enforce.
+ * Applied EC2 Standard On-Demand vCPU values use local configuration; AWS defaults
+ * retain the catalog value.
  *
  * @see <a href="https://docs.aws.amazon.com/servicequotas/2019-06-24/apireference/Welcome.html">Service Quotas API</a>
  */
@@ -61,6 +69,9 @@ public class ServiceQuotasService {
                     new QuotaDefinition("L-B99A9384", "Concurrent executions", GENERIC_QUOTA_VALUE, false)),
             "organizations", List.of(
                     new QuotaDefinition("L-E619E033", "Maximum number of accounts", 50.0, true)),
+            "ec2", List.of(
+                    new QuotaDefinition("L-1216C47A",
+                            "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances", 5.0, false)),
             // AWS default values: tooling such as Terraform's aws_servicequotas_service_quota
             // compares its desired value against these before requesting an increase.
             "vpc", List.of(
@@ -73,25 +84,43 @@ public class ServiceQuotasService {
             "Concurrent operations");
 
     private final ObjectMapper objectMapper;
+    private final int standardOnDemandVcpus;
+    private final StorageBackend<String, ObjectNode> requestedQuotaStore;
+    private final Object openRequestLock = new Object();
 
     @Inject
-    public ServiceQuotasService(ObjectMapper objectMapper) {
+    public ServiceQuotasService(StorageFactory storageFactory, ObjectMapper objectMapper, EmulatorConfig config) {
         this.objectMapper = objectMapper;
+        this.standardOnDemandVcpus = config.services().servicequotas().standardOnDemandVcpus();
+        ServiceQuotasStartupValidator.validateStandardOnDemandVcpus(standardOnDemandVcpus);
+        this.requestedQuotaStore = storageFactory.create("servicequotas",
+                "servicequotas-requested-changes.json",
+                new TypeReference<Map<String, ObjectNode>>() {});
     }
 
     public ObjectNode listServiceQuotas(String serviceCode, String quotaCodeFilter, String nextToken,
                                         Integer maxResults, String region, String accountId) {
+        return listQuotas(serviceCode, quotaCodeFilter, nextToken, maxResults, region, accountId, true);
+    }
+
+    public ObjectNode listAwsDefaultServiceQuotas(String serviceCode, String quotaCodeFilter, String nextToken,
+                                                  Integer maxResults, String region, String accountId) {
+        return listQuotas(serviceCode, quotaCodeFilter, nextToken, maxResults, region, accountId, false);
+    }
+
+    private ObjectNode listQuotas(String serviceCode, String quotaCodeFilter, String nextToken,
+                                  Integer maxResults, String region, String accountId, boolean applied) {
         requireServiceCode(serviceCode);
         List<QuotaDefinition> quotas = quotasFor(serviceCode);
         if (quotaCodeFilter != null && !quotaCodeFilter.isEmpty()) {
             quotas = quotas.stream().filter(q -> q.quotaCode().equals(quotaCodeFilter)).toList();
         }
-        Page page = paginate(quotas, nextToken, maxResults);
+        Page<QuotaDefinition> page = paginate(quotas, nextToken, maxResults);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("Quotas");
         for (QuotaDefinition quota : page.items()) {
-            array.add(quotaNode(serviceCode, quota, region, accountId));
+            array.add(quotaNode(serviceCode, quota, region, accountId, applied));
         }
         if (page.nextToken() != null) {
             response.put("NextToken", page.nextToken());
@@ -100,6 +129,14 @@ public class ServiceQuotasService {
     }
 
     public ObjectNode getServiceQuota(String serviceCode, String quotaCode, String region, String accountId) {
+        return getQuota(serviceCode, quotaCode, region, accountId, true);
+    }
+
+    public ObjectNode getAwsDefaultServiceQuota(String serviceCode, String quotaCode, String region, String accountId) {
+        return getQuota(serviceCode, quotaCode, region, accountId, false);
+    }
+
+    private ObjectNode getQuota(String serviceCode, String quotaCode, String region, String accountId, boolean applied) {
         requireServiceCode(serviceCode);
         if (quotaCode == null || quotaCode.isEmpty()) {
             throw new AwsException("IllegalArgumentException",
@@ -111,7 +148,7 @@ public class ServiceQuotasService {
                 .orElseThrow(() -> new AwsException("NoSuchResourceException",
                         "The request failed because the specified service quota does not exist.", 400));
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Quota", quotaNode(serviceCode, quota, region, accountId));
+        response.set("Quota", quotaNode(serviceCode, quota, region, accountId, applied));
         return response;
     }
 
@@ -135,7 +172,8 @@ public class ServiceQuotasService {
         return "L-%08X".formatted(crc.getValue());
     }
 
-    private ObjectNode quotaNode(String serviceCode, QuotaDefinition quota, String region, String accountId) {
+    private ObjectNode quotaNode(String serviceCode, QuotaDefinition quota, String region, String accountId,
+                                  boolean applied) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("ServiceCode", serviceCode);
         node.put("ServiceName", SERVICE_NAMES.getOrDefault(serviceCode, serviceCode));
@@ -143,7 +181,9 @@ public class ServiceQuotasService {
                 serviceCode + "/" + quota.quotaCode()).toString());
         node.put("QuotaCode", quota.quotaCode());
         node.put("QuotaName", quota.quotaName());
-        node.put("Value", quota.value());
+        double value = applied && "ec2".equals(serviceCode) && "L-1216C47A".equals(quota.quotaCode())
+                ? standardOnDemandVcpus : quota.value();
+        node.put("Value", value);
         node.put("Unit", "None");
         node.put("Adjustable", true);
         node.put("GlobalQuota", quota.globalQuota());
@@ -170,7 +210,7 @@ public class ServiceQuotasService {
         }
     }
 
-    private static Page paginate(List<QuotaDefinition> items, String nextToken, Integer maxResults) {
+    private static <T> Page<T> paginate(List<T> items, String nextToken, Integer maxResults) {
         if (maxResults != null && (maxResults < 1 || maxResults > 100)) {
             throw new AwsException("IllegalArgumentException",
                     "Invalid input: MaxResults must be between 1 and 100.", 400);
@@ -185,8 +225,7 @@ public class ServiceQuotasService {
     }
 
     private static String encodeToken(int offset) {
-        return Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(Integer.toString(offset).getBytes(StandardCharsets.UTF_8));
+        return Base64Url.encode(Integer.toString(offset));
     }
 
     private static int decodeToken(String token) {
@@ -202,7 +241,8 @@ public class ServiceQuotasService {
     }
 
     public ObjectNode listRequestedServiceQuotaChangeHistoryByQuota(String serviceCode, String quotaCode,
-                                                                    String nextToken, Integer maxResults) {
+                                                                    String nextToken, Integer maxResults,
+                                                                    String region) {
         requireServiceCode(serviceCode);
         if (quotaCode == null || quotaCode.isBlank()) {
             throw new AwsException("IllegalArgumentException", "Invalid input: QuotaCode must not be empty.", 400);
@@ -212,21 +252,29 @@ public class ServiceQuotasService {
             throw new AwsException("NoSuchResourceException",
                     "The request failed because the specified service quota does not exist.", 400);
         }
-        if (maxResults != null && (maxResults < 1 || maxResults > 100)) {
-            throw new AwsException("IllegalArgumentException", "Invalid input: MaxResults must be between 1 and 100.", 400);
+        List<ObjectNode> matching = new ArrayList<>();
+        for (ObjectNode requested : requestedQuotaStore.scan(key -> key.startsWith(region + "/"))) {
+            if (serviceCode.equals(requested.path("ServiceCode").asText())
+                    && quotaCode.equals(requested.path("QuotaCode").asText())) {
+                matching.add(requested);
+            }
         }
-        if (nextToken != null && !nextToken.isEmpty()) {
-            throw new AwsException("InvalidPaginationTokenException", "Invalid NextToken.", 400);
-        }
+        Page<ObjectNode> page = paginate(matching, nextToken, maxResults);
         ObjectNode response = objectMapper.createObjectNode();
-        response.putArray("RequestedQuotas");
+        ArrayNode array = response.putArray("RequestedQuotas");
+        for (ObjectNode requested : page.items()) {
+            array.add(requested.deepCopy());
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
         return response;
     }
 
     record QuotaDefinition(String quotaCode, String quotaName, double value, boolean globalQuota) {
     }
 
-    private record Page(List<QuotaDefinition> items, String nextToken) {
+    private record Page<T>(List<T> items, String nextToken) {
     }
 
     public ObjectNode requestServiceQuotaIncrease(String serviceCode, String quotaCode, Double desiredValue,
@@ -250,9 +298,7 @@ public class ServiceQuotasService {
                 .orElseThrow(() -> new AwsException("NoSuchResourceException",
                         "The request failed because the specified service quota does not exist.", 400));
 
-        CRC32 crc = new CRC32();
-        crc.update((serviceCode + "/" + quotaCode).getBytes(StandardCharsets.UTF_8));
-        String id = "%08X".formatted(crc.getValue());
+        String id = UUID.randomUUID().toString();
 
         long now = Instant.now().getEpochSecond();
 
@@ -279,8 +325,43 @@ public class ServiceQuotasService {
             requestedQuota.set("QuotaContext", context);
         }
 
+        storeOpenRequest(region, serviceCode, quotaCode, id, requestedQuota);
+
         ObjectNode response = objectMapper.createObjectNode();
         response.set("RequestedQuota", requestedQuota);
+        return response;
+    }
+
+    /**
+     * AWS allows only one open increase request per quota, so the duplicate check and the
+     * write must stand or fall as a unit: concurrent callers for the same quota must not
+     * both pass the check.
+     */
+    private void storeOpenRequest(String region, String serviceCode, String quotaCode, String id,
+                                  ObjectNode requestedQuota) {
+        synchronized (openRequestLock) {
+            boolean hasOpen = requestedQuotaStore.scan(key -> key.startsWith(region + "/")).stream()
+                    .anyMatch(r -> serviceCode.equals(r.path("ServiceCode").asText())
+                            && quotaCode.equals(r.path("QuotaCode").asText())
+                            && "PENDING".equals(r.path("Status").asText()));
+            if (hasOpen) {
+                throw new AwsException("ResourceAlreadyExistsException",
+                        "Only one open service quota increase request is allowed per quota.", 400);
+            }
+            requestedQuotaStore.put(region + "/" + id, requestedQuota.deepCopy());
+        }
+    }
+
+    public ObjectNode getRequestedServiceQuotaChange(String requestId, String region) {
+        if (requestId == null || requestId.isEmpty()) {
+            throw new AwsException("IllegalArgumentException",
+                    "Invalid input: RequestId must not be empty.", 400);
+        }
+        ObjectNode requestedQuota = requestedQuotaStore.get(region + "/" + requestId)
+                .orElseThrow(() -> new AwsException("NoSuchResourceException",
+                        "The request failed because the specified request ID does not exist.", 400));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("RequestedQuota", requestedQuota.deepCopy());
         return response;
     }
 }

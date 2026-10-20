@@ -66,31 +66,12 @@ class DynamoDbPartiQLHandler {
                     "Strongly consistent read is not supported on Global Secondary Indexes", 400);
         }
 
-        // A GSI-qualified statement can only select attributes the index
-        // projects; the message preserves statement order (characterised on
-        // real AWS, eu-west-1, 2026-09-02). An LSI read reaches the co-located
-        // base item, so non-projected columns stay legal there.
-        if (accessPath.isGlobalSecondaryIndex() && !"ALL".equals(accessPath.projectionType())
-                && !stmt.columns().isEmpty()) {
-            Set<String> projected = accessPath.projectedAttributeNames(table);
-            List<String> unprojected = stmt.columns().stream()
-                    .map(Path::root)
-                    .filter(c -> !"*".equals(c))
-                    .filter(c -> !projected.contains(c))
-                    .toList();
-            if (!unprojected.isEmpty()) {
-                throw new AwsException("ValidationException",
-                        "One or more parameter values were invalid: Global secondary index "
-                                + accessPath.indexName() + " does not project ["
-                                + String.join(", ", unprojected) + "]", 400);
-            }
-        }
-
         DynamoDbPartiQLKeyPlan keys = new DynamoDbPartiQLKeyPlan(stmt.where(), accessPath, table);
         keys.requireKeyTypesMatchSchema();
         keys.requireNoOverlap();
         keys.requireReadsWithinLimit();
         requireFilterAttributesProjected(keys, accessPath, table);
+        requireColumnsProjected(stmt, accessPath, table);
 
         Routing routing = routingOf(stmt.where(), keys, accessPath.partitionKeyName(), accessPath.sortKeyName());
         Supplier<JsonNode> startKey = () -> decodeNextToken(ctx.nextToken(), ctx.tokenBinding());
@@ -216,7 +197,7 @@ class DynamoDbPartiQLHandler {
             boolean partialProjection = !"ALL".equals(accessPath.projectionType());
             String fe = partialProjection ? null : buildFe(scanFilters, eav, ean);
             JsonNode exclusiveStartKey = startKey.get();
-            DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, true);
+            DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath);
             DynamoDbService.ScanResult result = service.scan(stmt.table(), fe,
                     ean.isEmpty() ? null : ean.toNode(mapper),
                     eav.isEmpty() ? null : eav.toNode(mapper),
@@ -241,7 +222,7 @@ class DynamoDbPartiQLHandler {
         String kce = buildKce(pkEq, skCond, pkName, skName, eav, ean);
         String fe = buildFe(filterConds, eav, ean);
         JsonNode exclusiveStartKey = startKey.get();
-        DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, false);
+        DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath);
         DynamoDbService.QueryResult result = service.query(
                 stmt.table(), null, eav.toNode(mapper), kce, fe,
                 limit, null, accessPath.indexName(), exclusiveStartKey,
@@ -255,7 +236,7 @@ class DynamoDbPartiQLHandler {
         ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
         String kce = ean.alias(accessPath.partitionKeyName()) + " = " + eav.add(toTypedNode(routing.partition()));
         JsonNode exclusiveStartKey = startKey.get();
-        DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, false);
+        DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath);
         DynamoDbService.QueryResult result = service.query(stmt.table(), null, eav.toNode(mapper), kce, null,
                 limit, null, accessPath.indexName(), exclusiveStartKey, ean.toNode(mapper), region);
         List<JsonNode> matching = matchingIndexView(result.items(), routing.filterConds(), accessPath, table);
@@ -500,6 +481,25 @@ class DynamoDbPartiQLHandler {
                             + accessPath.indexName()
                             + " does not project one or more filter attributes: ["
                             + String.join(", ", unprojected) + "]", 400);
+        }
+    }
+
+    // An LSI read reaches the co-located base item, so non-projected columns stay legal there.
+    // AWS lists each root once, in an order of its own that is not the statement order.
+    private static void requireColumnsProjected(Stmt.Select stmt, DynamoDbAccessPath accessPath,
+                                                TableDefinition table) {
+        if (!accessPath.isGlobalSecondaryIndex() || "ALL".equals(accessPath.projectionType())) {
+            return;
+        }
+        Set<String> projected = accessPath.projectedAttributeNames(table);
+        List<String> unprojected = stmt.columns().stream()
+                .map(Path::root)
+                .filter(c -> !"*".equals(c))
+                .filter(c -> !projected.contains(c))
+                .distinct()
+                .toList();
+        if (!unprojected.isEmpty()) {
+            throw DynamoDbAccessPathValidator.unprojectedGsiAttributes(accessPath.indexName(), unprojected);
         }
     }
 

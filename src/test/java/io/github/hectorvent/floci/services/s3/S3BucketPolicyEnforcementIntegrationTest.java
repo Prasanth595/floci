@@ -242,6 +242,39 @@ class S3BucketPolicyEnforcementIntegrationTest {
     }
 
     @Test
+    void aBucketPolicyReadsTheCallersPrincipalKeys() {
+        // S3 evaluates the bucket policy itself under s3.enforce-auth, so the keys that say who is
+        // calling belong on the context it builds too: an inverted Condition on one of them matches
+        // a caller the key is absent for, which fires a Deny the policy meant to leave alone. Each
+        // key is read through the principal the guide publishes it for, aws:username being the one
+        // an IAM user has and a role session does not.
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "bp-principal-keys-" + suffix;
+        String userName = "bp-keys-user-" + suffix;
+        createBucket(bucket);
+        putObject(bucket, "userid/x.txt", "userid");
+        putObject(bucket, "type/x.txt", "type");
+        putObject(bucket, "username/x.txt", "username");
+        S3RequestSigner session = sessionOfRoleUnderTeamPath("bp-keys-role-" + suffix, "000000000000");
+        S3RequestSigner user = createAccountAdmin(userName, "000000000000").signer();
+        putBucketPolicy(bucket, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/userid/*",
+                   "Condition":{"StringNotLike":{"aws:userid":"AROA*:s"}}},
+                  {"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/type/*",
+                   "Condition":{"StringNotEquals":{"aws:PrincipalType":"AssumedRole"}}},
+                  {"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/username/*",
+                   "Condition":{"StringNotEquals":{"aws:username":"%2$s"}}}]}""".formatted(bucket, userName));
+
+        given().filter(session).when().get("/" + bucket + "/userid/x.txt")
+                .then().statusCode(200).body(equalTo("userid"));
+        given().filter(session).when().get("/" + bucket + "/type/x.txt")
+                .then().statusCode(200).body(equalTo("type"));
+        given().filter(user).when().get("/" + bucket + "/username/x.txt")
+                .then().statusCode(200).body(equalTo("username"));
+    }
+
+    @Test
     void aBucketPolicyNamingTheCallersAccountGrantsACrossAccountCopy() {
         // The CopyObject source check matched a bucket policy's Principal against the caller's ARN as
         // a string, so a grant to the caller's account let it read the object but not copy it.
@@ -484,6 +517,71 @@ class S3BucketPolicyEnforcementIntegrationTest {
         .then()
                 .statusCode(200)
                 .body(equalTo(content));
+    }
+
+    @Test
+    void bucketOwnerPrivateMultipartCanBeCompletedByAuthorizedOtherAccount() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "cross-private-multipart-" + suffix;
+        String key = "object.txt";
+        String body = "completed by another account";
+
+        Credentials owner = createAccountAdmin("private-owner-" + suffix, ACCOUNT_A);
+        createBucketAs(bucket, owner.signer());
+        Credentials writer = createUser("private-writer-" + suffix, ACCOUNT_B);
+        putUserPolicy("private-writer-" + suffix, "WriteCrossBucket", """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "Allow",
+                    "Action": "s3:PutObject",
+                    "Resource": "arn:aws:s3:::%s/*"
+                  }]
+                }""".formatted(bucket), ACCOUNT_B);
+        putBucketPolicyAs(bucket, """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"AWS": "%s"},
+                    "Action": "s3:PutObject",
+                    "Resource": "arn:aws:s3:::%s/*"
+                  }]
+                }""".formatted(writer.userArn(), bucket), owner.signer());
+
+        String uploadId = given()
+                .filter(owner.signer())
+                .header("x-amz-acl", "private")
+        .when()
+                .post("/" + bucket + "/" + key + "?uploads")
+        .then()
+                .statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        String partETag = given()
+                .filter(owner.signer())
+                .body(body)
+        .when()
+                .put("/" + bucket + "/" + key + "?partNumber=1&uploadId=" + uploadId)
+        .then()
+                .statusCode(200)
+                .extract().header("ETag");
+
+        given()
+                .filter(writer.signer())
+                .contentType("application/xml")
+                .body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"
+                        + partETag + "</ETag></Part></CompleteMultipartUpload>")
+        .when()
+                .post("/" + bucket + "/" + key + "?uploadId=" + uploadId)
+        .then()
+                .statusCode(200);
+        given()
+                .filter(owner.signer())
+        .when()
+                .get("/" + bucket + "/" + key)
+        .then()
+                .statusCode(200)
+                .body(equalTo(body));
     }
 
     @Test

@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.cloudfront;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.LocalStackParity;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -48,6 +50,7 @@ import java.util.SequencedSet;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -61,6 +64,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             Set.of("s3", "mediastore", "mediapackagev2", "lambda");
     private static final Set<String> OAC_SIGNING_BEHAVIORS =
             Set.of("always", "never", "no-override");
+    private static final Set<String> FUNCTION_RUNTIMES = Set.of("cloudfront-js-1.0", "cloudfront-js-2.0");
     private static final int MAX_ORIGIN_CUSTOM_HEADERS = 30;
     private static final int MAX_CUSTOM_HEADER_NAME_LENGTH = 256;
     private static final int MAX_CUSTOM_HEADER_VALUE_LENGTH = 1_783;
@@ -124,7 +128,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private final String accountId;
     private final RegionResolver regionResolver;
     private final IamService iamService;
-    private final String domainSuffix;
+    private final String configuredDomainSuffix;
     /**
      * Host suffixes under which every distribution is served as {@code <id><suffix>}, whatever
      * {@code floci.services.cloudfront.domain-suffix} makes the assigned domain name. They carry the
@@ -180,7 +184,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                 new TypeReference<Map<String, MonitoringSubscription>>() {});
         this.accountId = config.defaultAccountId();
         this.regionResolver = regionResolver;
-        this.domainSuffix = config.services().cloudfront().domainSuffix();
+        this.configuredDomainSuffix = config.services().cloudfront().domainSuffix().orElse(null);
         this.localDeliverySuffixes = localDeliverySuffixes(config);
     }
 
@@ -191,20 +195,22 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateOriginCustomHeaders(dist.getConfig());
         validateResponseHeadersPolicyReferences(dist.getConfig(), null);
         validateTrustedKeyGroups(dist.getConfig());
-        validateViewerCertificate(dist.getConfig());
-        String id = generateDistributionId();
-        dist.setId(id);
-        dist.setArn(arn("distribution/" + id));
-        dist.setDomainName(domainNameFor(id));
-        dist.setStatus("Deployed");
-        dist.setLastModifiedTime(Instant.now());
-        dist.setEtag(UUID.randomUUID().toString());
-        if (tags != null && !tags.isEmpty()) {
-            dist.setTags(tags);
-            tagStore.put("distribution/" + id, tags);
-        }
-        distStore.put(id, dist);
-        return dist;
+        return whileCertificatesHeld(dist.getConfig(), () -> {
+            validateViewerCertificate(dist.getConfig());
+            String id = generateDistributionId();
+            dist.setId(id);
+            dist.setArn(arn("distribution/" + id));
+            dist.setDomainName(domainNameFor(id));
+            dist.setStatus("Deployed");
+            dist.setLastModifiedTime(Instant.now());
+            dist.setEtag(UUID.randomUUID().toString());
+            if (tags != null && !tags.isEmpty()) {
+                dist.setTags(tags);
+                tagStore.put("distribution/" + id, tags);
+            }
+            distStore.put(id, dist);
+            return dist;
+        });
     }
 
     public Distribution getDistribution(String id) {
@@ -222,16 +228,18 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateOriginCustomHeaders(updated.getConfig());
         validateResponseHeadersPolicyReferences(updated.getConfig(), id);
         validateTrustedKeyGroups(updated.getConfig());
-        validateViewerCertificate(updated.getConfig());
-        updated.setId(id);
-        updated.setArn(existing.getArn());
-        updated.setDomainName(existing.getDomainName());
-        updated.setStatus("Deployed");
-        updated.setLastModifiedTime(Instant.now());
-        updated.setEtag(UUID.randomUUID().toString());
-        updated.setTags(existing.getTags());
-        distStore.put(id, updated);
-        return updated;
+        return whileCertificatesHeld(updated.getConfig(), () -> {
+            validateViewerCertificate(updated.getConfig());
+            updated.setId(id);
+            updated.setArn(existing.getArn());
+            updated.setDomainName(existing.getDomainName());
+            updated.setStatus("Deployed");
+            updated.setLastModifiedTime(Instant.now());
+            updated.setEtag(UUID.randomUUID().toString());
+            updated.setTags(existing.getTags());
+            distStore.put(id, updated);
+            return updated;
+        });
     }
 
     @Override
@@ -262,6 +270,24 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     "The specified SSL certificate doesn't exist, isn't valid, "
                             + "or doesn't include a valid certificate chain.", 400);
         }
+    }
+
+    /**
+     * Runs a write that may record an IAM server certificate reference while IAM holds the lock
+     * {@code DeleteServerCertificate} takes, so the certificate cannot be deleted between
+     * {@link #validateViewerCertificate} and the store write. Without the guard the delete sees no
+     * reference, because the distribution is not saved yet, and the distribution is left holding a
+     * certificate that is gone.
+     */
+    private <T> T whileCertificatesHeld(DistributionConfig config, Supplier<T> action) {
+        if (iamService == null || iamCertificateId(config) == null) {
+            // Nothing to order. A distribution that names no IAM certificate cannot be left
+            // holding one, and the scan reads a copy of the store rather than a live collection,
+            // so this write cannot disturb it either. Taking the lock anyway would make every
+            // distribution write wait on a certificate delete, and the other way round.
+            return action.get();
+        }
+        return iamService.supplyWithServerCertificatesHeld(action);
     }
 
     private static void validateOriginCustomHeaders(DistributionConfig config) {
@@ -435,10 +461,12 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     /**
      * The domain name a new distribution is served under. AWS assigns a lower-case host, and a
      * browser lower-cases the authority it sends, so an upper-case id in the host would never match
-     * the resource a signed URL was signed for.
+     * the resource a signed URL was signed for. The suffix is the request partition's unless one
+     * is configured.
      */
     private String domainNameFor(String id) {
-        return id.toLowerCase(Locale.ROOT) + "." + domainSuffix;
+        return id.toLowerCase(Locale.ROOT) + "."
+                + CloudFrontEdgeDomain.domainSuffix(configuredDomainSuffix, regionResolver.getPartition());
     }
 
     private static List<String> localDeliverySuffixes(EmulatorConfig config) {
@@ -446,7 +474,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         endpointHosts.add("localhost");
         EmbeddedDnsServer.BUILTIN_SUFFIXES.forEach(endpointHosts::add);
         config.hostname().ifPresent(endpointHosts::add);
-        config.dns().extraSuffixes().ifPresent(endpointHosts::addAll);
+        LocalStackParity.withDnsSuffixes(config.dns().extraSuffixes()).ifPresent(endpointHosts::addAll);
         return endpointHosts.stream()
                 .map(host -> ".cloudfront." + host.toLowerCase(Locale.ROOT))
                 .toList();
@@ -1270,6 +1298,14 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     // ── CloudFront Functions ──────────────────────────────────────────────────
 
     public synchronized CloudFrontFunction createFunction(CloudFrontFunction fn) {
+        validateFunctionRuntime(fn.getRuntime());
+        // The bare name holds the DEVELOPMENT stage, and the LIVE stage of releases before
+        // stage-aware keys.
+        if (functionStore.get(fn.getName()).isPresent()
+                || functionStore.get(functionKey(fn.getName(), "LIVE")).isPresent()) {
+            throw new AwsException("FunctionAlreadyExists",
+                    "A function with the same name already exists in this AWS account.", 409);
+        }
         fn.setStage("DEVELOPMENT");
         fn.setStatus("UNPUBLISHED");
         fn.setEtag(UUID.randomUUID().toString());
@@ -1294,6 +1330,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     public synchronized CloudFrontFunction updateFunction(String name, String ifMatch,
                                                           CloudFrontFunction updated) {
+        validateFunctionRuntime(updated.getRuntime());
         CloudFrontFunction existing = describeFunction(name, null);
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
@@ -1364,6 +1401,13 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             throw invalidFunctionStage(effectiveStage);
         }
         return effectiveStage;
+    }
+
+    private static void validateFunctionRuntime(String runtime) {
+        if (runtime != null && !FUNCTION_RUNTIMES.contains(runtime)) {
+            throw new AwsException("InvalidArgument",
+                    "The parameter Runtime must be cloudfront-js-1.0 or cloudfront-js-2.0.", 400);
+        }
     }
 
     private static AwsException invalidFunctionStage(String stage) {

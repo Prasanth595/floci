@@ -4,7 +4,8 @@ Floci serves every AWS partition, not only the commercial one. A partition is th
 segment of every ARN (`arn:aws-cn:...`), the DNS suffix of every endpoint
 (`amazonaws.com.cn`), and the set of services and regions AWS publishes there. Floci reads
 all of it from AWS's own partition metadata (botocore's `partitions.json` and
-`endpoints.json`, vendored as `aws/partitions.json` and refreshed with `make aws-data-sync`).
+`endpoints.json`, vendored as `aws/partitions.json` and refreshed with `make aws-data-sync`,
+which also regenerates the AWS managed-policy catalog).
 
 | Partition | DNS suffix | Regions | Example |
 |---|---|---|---|
@@ -64,6 +65,12 @@ was started with `us-east-1`, so one process can serve several partitions at onc
 without a credential, and background work (pollers, schedulers, startup hooks), use the
 deployment's partition.
 
+JSON 1.1 service dispatch uses the region selected for the request, including a presigned
+`X-Amz-Credential` query scope when the request filter accepts it. An applicable
+`Authorization` header takes precedence over query credentials; requests without an admitted
+credential scope use the configured default region. Authorization and execution therefore use
+the same regional namespace.
+
 The scope region of a global service is its *signing* region, not a place to put regional
 resources: China IAM always signs `cn-north-1` even from Ningxia, GovCloud IAM signs
 `us-gov-west-1`. Floci uses it to pick the partition and nothing else. The
@@ -81,10 +88,14 @@ A scope region that no partition publishes or admits by its region pattern, such
 The pattern rule is the AWS SDKs' own, so a region AWS launches after the vendored data was
 refreshed (`eu-south-9`, say) is still served; it is looser than S3's `LocationConstraint` enum,
 which stays published-only. Set `FLOCI_PARTITIONS_ALLOW_UNKNOWN_REGIONS=true`
-(`floci.partitions.allow-unknown-regions`) to serve any label with its own namespace, as Floci
-did before. Such a label belongs to the deployment's partition. ARNs minted through Floci's
-shared region resolver use that partition too; services that build their ARNs directly still fall
-back to `aws` for a label no partition publishes.
+(`floci.partitions.allow-unknown-regions`) to serve custom labels with their own namespaces.
+Such a label belongs to the deployment's partition. ARNs minted through Floci's shared region
+resolver use that partition too; services that build their ARNs directly still fall back to
+`aws` for a label no partition publishes.
+
+A region label containing `:` is always refused because the colon separates ARN fields and
+storage identities. This also applies to `FLOCI_DEFAULT_REGION`; Floci refuses to start with
+a colon in that setting. Existing stored namespaces are not migrated or deleted by this check.
 
 ## What changes per partition
 
@@ -106,16 +117,38 @@ back to `aws` for a label no partition publishes.
   (`IllegalLocationConstraintException` otherwise). A China or GovCloud client must send the
   constraint, which the AWS SDKs do; `GetBucketLocation` still answers an empty constraint only
   for `us-east-1`, in every partition.
+- **AWS Sign-In**: the cross-device login redirect is accepted on the Sign-In host of the
+  deployment's partition (`<region>.signin.amazonaws.cn` in China,
+  `<region>.signin.amazonaws-us-gov.com` in GovCloud), read from botocore's `signin` endpoint
+  ruleset into `aws/partitions.json`, and on Floci's own endpoint. The device-authorization client
+  ids are the same literal in every partition, as the Sign-In model spells them.
 - **Hosted zones and console URLs**: load balancer and S3 website hosted zone ids come from a
   per-region table (`aws/region-facts.json`, generated from the Terraform provider and the CDK,
-  which transcribe the AWS General Reference); Network load balancers have their own zone,
-  distinct from the Application/Classic one. The CloudFront hosted zone is published for `aws`
-  and `aws-cn`; the SAML sign-on URL for five partitions. The ISO and EUSC regions have no load
+  which transcribe the AWS General Reference, and from the China and GovCloud user guides); Network
+  load balancers have their own zone, distinct from the Application/Classic one. The CloudFront
+  hosted zone is published for `aws` and `aws-cn`; the SAML sign-on URL for five partitions. The console link in a CodePipeline
+  approval notification uses the console host of the pipeline's partition (`console.amazonaws.cn`
+  in China, `console.amazonaws-us-gov.com` in GovCloud), as the China and GovCloud user guides
+  state it; the path after the host is the commercial console's. A generated CloudFront
+  distribution domain name ends in `cloudfront.cn` in China, as the China guide names the default
+  CloudFront domain, unless `floci.services.cloudfront.domain-suffix` is set. A regional API Gateway
+  custom domain reports the regional hosted zone the GovCloud guide states for `us-gov-west-1` and
+  `us-gov-east-1`. The ISO and EUSC regions have no load
   balancer hosted zones, and only the two ISO-F regions have an S3 website zone; where a table has
-  no row the field is omitted rather than guessed. An `EDGE` API Gateway custom domain is refused
-  outside the commercial partition (`BadRequestException`): GovCloud and ISO have no CloudFront,
-  and China has no edge-optimized API Gateway
+  no row the field is omitted rather than guessed. An `EDGE` API Gateway REST API or custom domain is
+  refused outside the commercial partition (`BadRequestException`): GovCloud, EUSC and ISO have no
+  CloudFront, and China has no edge-optimized API Gateway
   ([China API Gateway](https://docs.amazonaws.cn/en_us/aws/latest/userguide/api-gateway.html)).
+  A Lambda function URL is refused in GovCloud and China (`InvalidParameterValueException` on
+  `CreateFunctionUrlConfig`), where the
+  [GovCloud](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html) and
+  [China](https://docs.amazonaws.cn/en_us/aws/latest/userguide/lambda.html) guides list function URLs
+  as not available.
+  A Cognito user pool custom domain (`CustomDomainConfig`) is refused in GovCloud and EUSC
+  (`InvalidParameterException`), where the
+  [GovCloud](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-cog.html) and
+  [EUSC](https://docs.aws.eu/esc/latest/userguide/cognito.html) guides list custom domains as not
+  available; prefix domains work there.
 - **VPC endpoint service names**: interface endpoints (as `DescribeVpcEndpointServices` lists them)
   are `com.amazonaws.<region>.<service>` everywhere, except the (region, service) pairs the CDK
   lists for China, ISO and EUSC, which reverse the DNS suffix (`cn.com.amazonaws.cn-north-1.lambda`).
@@ -191,13 +224,13 @@ partition.
 
 - **The partition rules themselves** (partition and region lookup, ARN minting, hostnames,
   service principals, managed-policy rewriting, STS) have unit tests over all eight partitions.
-- **Through the emulator**, IAM ARNs and Step Functions run in all eight partitions, and a smoke
-  test creates one resource in every non-commercial partition for SNS, Kinesis, Firehose, API
-  Gateway V2, ELBv2, Glue, IoT, ACM, CodeBuild, Batch and EFS and checks its ARN or host. A new
-  service that mints ARNs or hosts needs a case there or a recorded exemption. Most other
-  partition-dependent behaviour (S3 bucket rules, EC2 regions and DNS names, hosted zones, VPC
-  endpoint names, Lambda layers, CloudFormation pseudo-parameters, strict mode) is tested in one or
-  two partitions, nearly always China.
+- **Through the emulator**, IAM ARNs run in all eight partitions, and a smoke test creates one
+  resource per service in every non-commercial partition that publishes the service and checks
+  its ARN or host. It covers every service that mints ARNs or hosts; the few without a case are
+  listed with the reason in `src/test/resources/partition/smoke-exemptions.tsv`, and a new
+  service needs a case there or a recorded exemption. Most other partition-dependent behaviour
+  (EC2 regions and DNS names, hosted zones, VPC endpoint names, Lambda layers, Step Functions
+  integration ids, strict mode) is tested in one or two partitions, nearly always China.
 - **End to end**, the nightly Partition Compatibility workflow runs the Java SDK compatibility
   suite against a Floci deployed with `FLOCI_DEFAULT_REGION=cn-north-1`, with the SDK clients
   signing for `cn-north-1`, so the SDK's own China partition handling has to round-trip. Its list
@@ -211,7 +244,9 @@ partition.
   namespace, and `ListBuckets` lists buckets created from every partition; IAM, Organizations,
   Route 53, CloudFront and the IAM Identity Center instance keep one set of resources per account,
   whichever partition a request is signed for. AWS keeps them per partition. A deployment that serves one partition is
-  unaffected.
+  unaffected. For the same reason, STS `AssumeRole`, EKS Pod Identity and EKS add-ons accept a role ARN from
+  any partition and resolve it to the account's role of that path and name; the session is named
+  with the role's own ARN.
 - **AWS managed policies** are the commercial catalog in every partition, with their ARNs and
   regional hosts rewritten; AWS publishes no per-partition list.
 - **Client tooling** that computes partition values itself (CDK bootstrap and
@@ -223,15 +258,19 @@ partition.
 These values have no published source Floci can cite, so it does not guess them; they keep
 the commercial value or Floci's own base host until sourced:
 
-- the China CloudFront distribution domain suffix (only the API host is published);
-- the console device-authorization client ids (`arn:aws:signin:::devtools/...`) outside the
-  commercial partition;
 - the STS web-identity audience outside the commercial partition;
 - the EKS Pod Identity token audience (`pods.eks.amazonaws.com`) outside the commercial partition;
-- the Lambda function-URL host outside the commercial partition;
+- the Lambda function-URL host in the ISO and EUSC partitions (function URLs are refused in GovCloud
+  and China, where the partition guides list them as not available);
 - whether AWS managed policy documents differ in content in China or GovCloud;
-- the API Gateway regional hosted zone per region;
+- the API Gateway regional hosted zone per region outside GovCloud: only the two GovCloud zones
+  are sourced, and every other region reports one placeholder zone id;
+- the availability-zone id prefix of the ISO and EUSC regions: zone ids there keep the whole region
+  (`us-iso-east-1-az1`), where the other partitions get AWS's short prefix (`use1-az1`, `usgw1-az1`,
+  `cnn1-az1`);
 - S3 `LocationConstraint` enum values and Route 53 hosted zones for the ISO and EUSC regions;
+- the management console host in the ISO and EUSC partitions, where a CodePipeline approval
+  notification keeps linking to the commercial `console.aws.amazon.com`;
 - the SAML sign-on URL in `aws-iso-e`, `aws-iso-f` and `aws-eusc`, where assertions keep being
   checked against the commercial `https://signin.aws.amazon.com/saml`;
 - the exact error AWS WAF returns for the `CLOUDFRONT` scope in a partition without CloudFront

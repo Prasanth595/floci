@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AvailabilityZoneIds;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -566,12 +568,13 @@ public class FlowLogService {
         }
     }
 
-    private static String bucketFromArn(String arn) {
+    static String bucketFromArn(String arn) {
         if (arn == null) {
             return null;
         }
-        // arn:aws:s3:::bucket-name[/optional/prefix]  OR a bare bucket name.
-        String name = arn.startsWith("arn:") ? arn.substring(arn.lastIndexOf(':') + 1) : arn;
+        // arn:aws:s3:::bucket-name[/optional/prefix] OR a bare bucket name. The prefix may itself
+        // contain ':', so the resource is everything after the ARN's fifth ':', not its last.
+        String name = AwsArnUtils.resourceIfArnFor(arn, "s3").orElse(arn);
         int slash = name.indexOf('/');
         return slash >= 0 ? name.substring(0, slash) : name;
     }
@@ -595,11 +598,11 @@ public class FlowLogService {
 
     /**
      * The zone id of the ENI's zone, derived exactly as subnets and DescribeAvailabilityZones
-     * derive it ({@link Ec2Service#zoneIdForZoneName}), so a record's {@code az-id} matches the
+     * derive it ({@link AvailabilityZoneIds}), so a record's {@code az-id} matches the
      * {@code AvailabilityZoneId} of the subnet it came from, in every region and partition.
      */
     private static String azId(String region, String az) {
-        return region == null ? null : Ec2Service.zoneIdForZoneName(region, az);
+        return region == null ? null : AvailabilityZoneIds.forZoneName(region, az);
     }
 
     private static String nz(String s) {

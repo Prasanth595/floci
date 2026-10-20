@@ -49,6 +49,12 @@ public class EcsCapacityCfnProvisioner implements CfnResourceProvisioner {
         return Set.of(CAPACITY_PROVIDER, ASSOCIATIONS);
     }
 
+    /** A cluster's associations are named by the {@code Cluster} they are given, its name when given by name. */
+    @Override
+    public boolean takesParentPhysicalId(String resourceType) {
+        return ASSOCIATIONS.equals(resourceType);
+    }
+
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         switch (r.getResourceType()) {

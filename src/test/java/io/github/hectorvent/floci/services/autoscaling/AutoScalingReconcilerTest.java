@@ -19,19 +19,28 @@ import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
 import io.github.hectorvent.floci.services.ssm.SsmCommandService;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyBoolean;
 import static org.mockito.Mockito.anyList;
 import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -39,6 +48,16 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class AutoScalingReconcilerTest {
+
+    private static AutoScalingService scalingService() {
+        AutoScalingService service = mock(AutoScalingService.class);
+        doAnswer(invocation -> {
+            Runnable adjustment = invocation.getArgument(1);
+            adjustment.run();
+            return null;
+        }).when(service).reconcileIfPresent(any(), any());
+        return service;
+    }
 
     @Test
     void pendingInstancesCountAsActiveCapacity() {
@@ -54,7 +73,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void stopTerminatesReconcilerThread() throws Exception {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
@@ -73,7 +92,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void reconcileCompletesSettledInstanceRefreshes() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
@@ -89,14 +108,54 @@ class AutoScalingReconcilerTest {
     }
 
     @Test
-    void scaleOutUsesRequestedLaunchTemplateVersionData() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+    void malformedSavedConfigurationDoesNotSkipGroupPersistenceOrRefreshCheck() {
+        AutoScalingService service = scalingService();
+        Ec2Service ec2 = mock(Ec2Service.class);
+        AutoScalingGroup group = new AutoScalingGroup();
+        group.setRegion("us-east-1");
+        group.setAutoScalingGroupName("bad-data");
+        group.setDesiredCapacity(1);
+        group.setLaunchConfigurationName("saved-bad-data");
+        LaunchConfiguration configuration = new LaunchConfiguration();
+        configuration.setImageId("ami-test");
+        configuration.setInstanceType("t3.micro");
+        configuration.setUserData("not base64!");
+        configuration.setUserDataBase64Encoded(true);
+        when(service.describeLaunchConfigurations("us-east-1", List.of("saved-bad-data")))
+                .thenReturn(List.of(configuration));
+        when(service.saveAutoScalingGroupIfPresent(group)).thenReturn(true);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(service, ec2, mock(ElbV2Service.class));
+        assertDoesNotThrow(() -> reconciler.reconcile(group));
+        assertEquals(0, group.getInstances().size());
+        verify(service).saveAutoScalingGroupIfPresent(group);
+        verify(service).completeInstanceRefreshIfSettled("us-east-1", "bad-data");
+        verify(ec2, never()).runInstances(any(), any(), any(), any(Integer.class), any(Integer.class), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(Integer.class), any(), any(), any(), any(),
+                anyBoolean(), isNull(), isNull(), any());
+    }
+
+    static Stream<Arguments> templateUserData() {
+        return Stream.of(
+                Arguments.of(null, "IyEvYmluL2Jhc2gKZWNobyBoaQo=", "#!/bin/bash\necho hi\n",
+                        "IyEvYmluL2Jhc2gKZWNobyBoaQo="),
+                Arguments.of("legacy text", null, "legacy text", "bGVnYWN5IHRleHQ="),
+                Arguments.of("YQ==", null, "YQ==", "WVE9PQ=="),
+                Arguments.of(null, null, null, null),
+                Arguments.of(null, "", null, ""));
+    }
+
+    @ParameterizedTest
+    @MethodSource("templateUserData")
+    void scaleOutUsesRequestedLaunchTemplateVersionData(String storedText, String storedEncoding,
+                                                        String expectedText, String expectedEncoding) {
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
         AutoScalingGroup asg = new AutoScalingGroup();
         asg.setRegion("us-east-1");
         asg.setAutoScalingGroupName("app-asg");
+        when(asgService.saveAutoScalingGroupIfPresent(asg)).thenReturn(true);
         asg.setDesiredCapacity(1);
         asg.setLaunchTemplateId("lt-123");
         asg.setLaunchTemplateVersion("1");
@@ -111,7 +170,13 @@ class AutoScalingReconcilerTest {
         version.setLatestVersionNumber("1");
         version.getData().setImageId("ami-version-1");
         version.getData().setInstanceType("t3.micro");
-        version.getData().setEncodedUserData("IyEvYmluL2Jhc2gKZWNobyBoaQo=");
+        version.getData().setUserData(storedText);
+        version.getData().setEncodedUserData(storedEncoding);
+        LaunchTemplateData.MetadataOptions metadata = new LaunchTemplateData.MetadataOptions();
+        metadata.setHttpTokens("required");
+        metadata.setHttpEndpoint("enabled");
+        metadata.setHttpPutResponseHopLimit(2);
+        version.getData().setMetadataOptions(metadata);
         version.getData().setIamInstanceProfile(new LaunchTemplateData.IamInstanceProfile(
                 "arn:aws:iam::000000000000:instance-profile/app-profile", null));
         when(ec2Service.iamInstanceProfileArn(version.getData()))
@@ -130,8 +195,10 @@ class AutoScalingReconcilerTest {
         reservation.setInstances(List.of(ec2Instance));
         when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                anyList(), eq("#!/bin/bash\necho hi\n"),
-                eq("arn:aws:iam::000000000000:instance-profile/app-profile"), eq(null))).thenReturn(reservation);
+                anyList(), eq(expectedText),
+                eq("arn:aws:iam::000000000000:instance-profile/app-profile"), eq(null),
+                isNull(), eq(0), isNull(), eq(metadata), isNull(), eq(expectedEncoding),
+                anyBoolean(), isNull(), isNull(), any())).thenReturn(reservation);
 
         reconciler.reconcile(asg);
 
@@ -142,9 +209,12 @@ class AutoScalingReconcilerTest {
         ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.captor();
         verify(ec2Service).runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                tags.capture(), eq("#!/bin/bash\necho hi\n"),
-                eq("arn:aws:iam::000000000000:instance-profile/app-profile"), eq(null));
-        assertNull(version.getData().getUserData());
+                tags.capture(), eq(expectedText),
+                eq("arn:aws:iam::000000000000:instance-profile/app-profile"), eq(null),
+                isNull(), eq(0), isNull(), eq(metadata), isNull(), eq(expectedEncoding),
+                anyBoolean(), isNull(), isNull(), any());
+        assertEquals(storedText, version.getData().getUserData());
+        assertEquals(storedEncoding, version.getData().getEncodedUserData());
         assertEquals(propagatedTags.size(), tags.getValue().size());
         assertEquals("app.ClusterId", tags.getValue().get(0).getKey());
         assertEquals("development", tags.getValue().get(0).getValue());
@@ -154,7 +224,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void scaleOutTerminatesInstancesWhenGroupDisappears() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
@@ -168,7 +238,9 @@ class AutoScalingReconcilerTest {
         reservation.setInstances(List.of(ec2Instance));
         when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null), eq(List.of()),
-                eq(null), eq(null), eq(null))).thenReturn(reservation);
+                eq(null), eq(null), eq(null),
+                isNull(), eq(0), isNull(), isNull(), isNull(), any(),
+                anyBoolean(), isNull(), isNull(), any())).thenReturn(reservation);
 
         reconciler.reconcile(asg);
 
@@ -177,8 +249,40 @@ class AutoScalingReconcilerTest {
     }
 
     @Test
+    void scaleOutPassesTheLaunchTemplateBlockDeviceMappings() {
+        AutoScalingService asgService = scalingService();
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, mock(ElbV2Service.class));
+        AutoScalingGroup asg = launchTemplateAsg();
+        stubLaunchTemplate(ec2Service, "ami-version-1", "t3.micro");
+        LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+        ebs.setVolumeType("gp3");
+        LaunchTemplateData.BlockDeviceMapping root = new LaunchTemplateData.BlockDeviceMapping();
+        root.setDeviceName("/dev/xvda");
+        root.setEbs(ebs);
+        ec2Service.describeLaunchTemplateVersions("us-east-1", "lt-123", null, List.of("1"))
+                .getFirst().getData().setBlockDeviceMappings(List.of(root));
+        when(asgService.saveAutoScalingGroupIfPresent(asg)).thenReturn(true);
+        Instance ec2Instance = new Instance();
+        ec2Instance.setInstanceId("i-gp3");
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(ec2Instance));
+        when(ec2Service.runInstances(any(), any(), any(), any(Integer.class), any(Integer.class), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(Integer.class), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any())).thenReturn(reservation);
+
+        reconciler.reconcile(asg);
+
+        ArgumentCaptor<List<LaunchTemplateData.BlockDeviceMapping>> mappings = ArgumentCaptor.captor();
+        verify(ec2Service).runInstances(any(), any(), any(), any(Integer.class), any(Integer.class), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(Integer.class), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), mappings.capture());
+        assertEquals(List.of(root), mappings.getValue());
+    }
+
+    @Test
     void scaleOutPersistsInstancesWhenGroupStillExists() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
@@ -192,7 +296,9 @@ class AutoScalingReconcilerTest {
         reservation.setInstances(List.of(ec2Instance));
         when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null), eq(List.of()),
-                eq(null), eq(null), eq(null))).thenReturn(reservation);
+                eq(null), eq(null), eq(null),
+                isNull(), eq(0), isNull(), isNull(), isNull(), any(),
+                anyBoolean(), isNull(), isNull(), any())).thenReturn(reservation);
 
         reconciler.reconcile(asg);
 
@@ -211,7 +317,7 @@ class AutoScalingReconcilerTest {
     }
 
     private void assertLaunchConfigurationForwards(Boolean associatePublicIp) {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
@@ -236,24 +342,28 @@ class AutoScalingReconcilerTest {
         reservation.setInstances(List.of(ec2Instance));
         when(ec2Service.runInstances(eq("us-east-1"), eq("ami-lc"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), anyList(), eq(null), eq(null),
-                anyList(), eq(null), eq(null), eq(associatePublicIp))).thenReturn(reservation);
+                anyList(), eq(null), eq(null), eq(associatePublicIp),
+                isNull(), eq(0), isNull(), isNull(), isNull(), any(),
+                anyBoolean(), isNull(), isNull(), any())).thenReturn(reservation);
 
         reconciler.reconcile(asg);
 
         verify(ec2Service).runInstances(eq("us-east-1"), eq("ami-lc"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), anyList(), eq(null), eq(null),
-                anyList(), eq(null), eq(null), eq(associatePublicIp));
+                anyList(), eq(null), eq(null), eq(associatePublicIp),
+                isNull(), eq(0), isNull(), isNull(), isNull(), any(), anyBoolean(), isNull(), isNull(), any());
     }
 
     @Test
     void scaleOutStoresResolvedLaunchTemplateVersionForAliases() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
         AutoScalingGroup asg = new AutoScalingGroup();
         asg.setRegion("us-east-1");
         asg.setAutoScalingGroupName("app-asg");
+        when(asgService.saveAutoScalingGroupIfPresent(asg)).thenReturn(true);
         asg.setDesiredCapacity(1);
         asg.setLaunchTemplateId("lt-123");
         asg.setLaunchTemplateVersion("$Latest");
@@ -274,7 +384,9 @@ class AutoScalingReconcilerTest {
         reservation.setInstances(List.of(ec2Instance));
         when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-7"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                eq(List.of()), eq(null), eq(null), eq(null))).thenReturn(reservation);
+                eq(List.of()), eq(null), eq(null), eq(null),
+                isNull(), eq(0), isNull(), isNull(), isNull(), any(),
+                anyBoolean(), isNull(), isNull(), any())).thenReturn(reservation);
 
         reconciler.reconcile(asg);
 
@@ -284,13 +396,14 @@ class AutoScalingReconcilerTest {
 
     @Test
     void scaleOutUsesMixedInstancesLaunchTemplateSpecification() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
         AutoScalingGroup asg = new AutoScalingGroup();
         asg.setRegion("us-east-1");
         asg.setAutoScalingGroupName("app-asg");
+        when(asgService.saveAutoScalingGroupIfPresent(asg)).thenReturn(true);
         asg.setDesiredCapacity(1);
         MixedInstancesPolicy policy = new MixedInstancesPolicy();
         MixedInstancesPolicy.LaunchTemplate launchTemplatePolicy =
@@ -314,6 +427,11 @@ class AutoScalingReconcilerTest {
         version.getData().setImageId("ami-version-3");
         version.getData().setInstanceType("t3.micro");
         version.getData().setEncodedUserData("IyEvYmluL2Jhc2gKZWNobyBoaQo=");
+        LaunchTemplateData.MetadataOptions metadata = new LaunchTemplateData.MetadataOptions();
+        metadata.setHttpTokens("required");
+        metadata.setHttpEndpoint("enabled");
+        metadata.setHttpPutResponseHopLimit(2);
+        version.getData().setMetadataOptions(metadata);
         when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
                 .thenReturn(List.of(launchTemplate));
         when(ec2Service.describeLaunchTemplateVersions("us-east-1", "lt-123", null, List.of("3")))
@@ -324,7 +442,9 @@ class AutoScalingReconcilerTest {
         reservation.setInstances(List.of(ec2Instance));
         when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-3"), eq("t3.small"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                eq(List.of()), eq("#!/bin/bash\necho hi\n"), eq(null), eq(null))).thenReturn(reservation);
+                eq(List.of()), eq("#!/bin/bash\necho hi\n"), eq(null), eq(null),
+                isNull(), eq(0), isNull(), eq(metadata), isNull(), any(),
+                anyBoolean(), isNull(), isNull(), any())).thenReturn(reservation);
 
         reconciler.reconcile(asg);
 
@@ -335,13 +455,14 @@ class AutoScalingReconcilerTest {
         assertEquals("t3.small", asg.getInstances().getFirst().getInstanceType());
         verify(ec2Service).runInstances(eq("us-east-1"), eq("ami-version-3"), eq("t3.small"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                eq(List.of()), eq("#!/bin/bash\necho hi\n"), eq(null), eq(null));
+                eq(List.of()), eq("#!/bin/bash\necho hi\n"), eq(null), eq(null),
+                isNull(), eq(0), isNull(), eq(metadata), isNull(), any(), anyBoolean(), isNull(), isNull(), any());
         assertNull(version.getData().getUserData());
     }
 
     @Test
     void reconcileDeregistersTargetsThatAreNotActiveAsgInstances() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
@@ -370,7 +491,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void reconcileKeepsPendingInstancesWhileContainerLaunchIsStillInFlight() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
@@ -406,12 +527,17 @@ class AutoScalingReconcilerTest {
                 org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(),
+                isNull(), eq(0), isNull(), isNull(), isNull(), any(),
+                org.mockito.ArgumentMatchers.anyBoolean(),
+                org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.isNull(),
                 org.mockito.ArgumentMatchers.any());
     }
 
     @Test
     void reconcilePrunesPendingInstancesWhenEc2InstanceIsTerminal() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
@@ -442,7 +568,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void reconcileFailsActiveSsmInvocationsBeforePruningStaleInstance() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         SsmCommandService ssmCommandService = mock(SsmCommandService.class);
@@ -472,7 +598,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void reconcileDeregistersStaleInstanceFromClassicLoadBalancerBeforePruning() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         ElbClassicService elbClassicService = mock(ElbClassicService.class);
@@ -495,7 +621,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void reconcilePromotesPendingAsgInstanceWhenEc2InstanceIsRunning() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
@@ -529,7 +655,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void deletedLaunchTemplateDoesNotAbortTheReconcilePass() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         AutoScalingGroup asg = asgWhoseLaunchTemplateLookupFails(ec2Service,
                 new AwsException("InvalidLaunchTemplateName.NotFoundException",
@@ -546,7 +672,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void otherLaunchTemplateErrorsSurfaceRatherThanSilentlySkippingScaling() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         AutoScalingGroup asg = asgWhoseLaunchTemplateLookupFails(ec2Service,
                 new AwsException("RequestLimitExceeded", "Request limit exceeded.", 503));
@@ -560,7 +686,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void scaleInTerminationFailureKeepsMembershipAndRecordsFailedActivity() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         stubActivityRecording(asgService);
@@ -592,7 +718,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void repeatedTerminationFailureIsRecordedOnce() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         stubActivityRecording(asgService);
@@ -620,7 +746,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void scaleInTerminatesAndRemovesTheInstanceOnSuccess() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
@@ -648,7 +774,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void terminatingInstanceTerminationFailureKeepsMembershipAndRecordsFailedActivity() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         stubActivityRecording(asgService);
@@ -684,7 +810,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void terminatingInstanceWithMissingEc2RecordIsPrunedAsStale() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
@@ -722,7 +848,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void terminatingStoppedInstanceIsRetriedRatherThanPrunedAsStale() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         stubActivityRecording(asgService);
@@ -757,7 +883,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void pendingStoppedInstanceIsStillPrunedAsStale() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
@@ -782,7 +908,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void repeatedTerminationFailureIsRecordedOnceWhenOtherActivitiesFollowIt() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         stubActivityRecording(asgService);
@@ -812,7 +938,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void terminationFailureWithADifferentErrorIsRecordedAgain() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         stubActivityRecording(asgService);
         when(asgService.describeScalingActivities("us-east-1", "app-asg"))
@@ -841,7 +967,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void failedActivityStatusMessageIsCappedAt255Characters() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         stubActivityRecording(asgService);
         AutoScalingReconciler reconciler =
@@ -862,7 +988,7 @@ class AutoScalingReconcilerTest {
 
     @Test
     void failedActivityWithoutAnErrorMessageNamesTheException() {
-        AutoScalingService asgService = mock(AutoScalingService.class);
+        AutoScalingService asgService = scalingService();
         Ec2Service ec2Service = mock(Ec2Service.class);
         stubActivityRecording(asgService);
         AutoScalingReconciler reconciler =

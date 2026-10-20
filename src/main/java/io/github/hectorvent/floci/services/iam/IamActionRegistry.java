@@ -1,6 +1,10 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.core.common.AwsProtocolClaimFilter;
 import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
+import io.github.hectorvent.floci.core.common.ProtocolClaim;
+import io.github.hectorvent.floci.core.common.WireProtocol;
+import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
@@ -25,7 +29,20 @@ public class IamActionRegistry {
 
     private static final Logger LOG = Logger.getLogger(IamActionRegistry.class);
 
-    private record ActionRule(String service, String method, Pattern pathPattern, String action) {}
+    /**
+     * A route and the action it is checked as. A rule naming a query parameter matches only a request
+     * carrying it with that value, as {@code GET /layers?find=LayerVersion} is GetLayerVersionByArn
+     * where {@code GET /layers} is ListLayers.
+     */
+    private record ActionRule(String service, String method, Pattern pathPattern, String queryParameter,
+                              String queryValue, String action) {
+
+        boolean matches(String scope, String requestMethod, String path, ContainerRequestContext ctx) {
+            return service.equals(scope) && method.equals(requestMethod) && pathPattern.matcher(path).find()
+                    && (queryParameter == null
+                    || queryValue.equals(ctx.getUriInfo().getQueryParameters().getFirst(queryParameter)));
+        }
+    }
 
     private static final List<ActionRule> RULES = List.of(
         // ── S3 ─────────────────────────────────────────────────────────────────
@@ -74,6 +91,32 @@ public class IamActionRegistry {
         rule("lambda", "POST",   ".*/durable-execution-callbacks/.+/heartbeat$",
                 "lambda:SendDurableExecutionCallbackHeartbeat"),
 
+        // ── Lambda Web Functions (/2025-03-07, signs as lambda) ─────────────────
+        rule("lambda", "PUT",    "^/2025-03-07/web-functions$",                       "lambda:CreateWebFunction"),
+        rule("lambda", "POST",   "^/2025-03-07/web-functions$",                       "lambda:ListWebFunctions"),
+        rule("lambda", "GET",    "^/2025-03-07/web-functions/[^/]+$",                 "lambda:GetWebFunction"),
+        rule("lambda", "DELETE", "^/2025-03-07/web-functions/[^/]+$",                 "lambda:DeleteWebFunction"),
+        rule("lambda", "POST",   "^/2025-03-07/web-functions/[^/]+/revisions$",       "lambda:CreateWebFunctionRevision"),
+        rule("lambda", "POST",   "^/2025-03-07/web-functions/[^/]+/list-revisions$",  "lambda:ListWebFunctionRevisions"),
+        rule("lambda", "GET",    "^/2025-03-07/web-functions/[^/]+/revisions/[^/]+$", "lambda:GetWebFunctionRevision"),
+        rule("lambda", "DELETE", "^/2025-03-07/web-functions/[^/]+/revisions/[^/]+$", "lambda:DeleteWebFunctionRevision"),
+        rule("lambda", "PUT",    "^/2025-03-07/web-functions/[^/]+/endpoints$",       "lambda:CreateWebFunctionEndpoint"),
+        rule("lambda", "POST",   "^/2025-03-07/web-functions/[^/]+/list-endpoints$",  "lambda:ListWebFunctionEndpoints"),
+        rule("lambda", "GET",    "^/2025-03-07/web-functions/[^/]+/endpoints/[^/]+$", "lambda:GetWebFunctionEndpoint"),
+        rule("lambda", "PATCH",  "^/2025-03-07/web-functions/[^/]+/endpoints/[^/]+$", "lambda:UpdateWebFunctionEndpoint"),
+        rule("lambda", "DELETE", "^/2025-03-07/web-functions/[^/]+/endpoints/[^/]+$", "lambda:DeleteWebFunctionEndpoint"),
+        rule("lambda", "GET",    "^/2025-03-07/web-account-settings$",                "lambda:GetWebAccountSettings"),
+        rule("lambda", "GET",    "^/2025-03-07/tags/.+",                              "lambda:ListTags"),
+        rule("lambda", "POST",   "^/2025-03-07/tags/.+",                              "lambda:TagResource"),
+        rule("lambda", "DELETE", "^/2025-03-07/tags/.+",                              "lambda:UntagResource"),
+        rule("lambda", "PUT",    "^/2025-03-07/resource-policy/.+",                   "lambda:PutResourcePolicy"),
+        rule("lambda", "GET",    "^/2025-03-07/resource-policy/.+",                   "lambda:GetResourcePolicy"),
+        rule("lambda", "DELETE", "^/2025-03-07/resource-policy/.+",                   "lambda:DeleteResourcePolicy"),
+        // InvokeWithResponseStream and GetLayerVersionByArn are authorized as the action they share with
+        // Invoke and GetLayerVersion (iam-authorized-actions.json).
+        rule("lambda", "POST",   ".*/functions/[^/]+/response-streaming-invocations$", "lambda:InvokeFunction"),
+        rule("lambda", "GET",    "^/2018-10-31/layers$", "find", "LayerVersion",     "lambda:GetLayerVersion"),
+
         // ── DynamoDB (JSON 1.1, action from X-Amz-Target handled separately) ──
         // Handled via Query-style action extraction in the filter
 
@@ -86,15 +129,17 @@ public class IamActionRegistry {
         rule("rds-data", "POST", "^/RollbackTransaction/?$",  "rds-data:RollbackTransaction"),
 
         // ── API Gateway ────────────────────────────────────────────────────────
-        rule("apigateway", "GET",    ".*/account$",                       "apigateway:GET"),
-        rule("apigateway", "PATCH",  ".*/account$",                       "apigateway:PATCH"),
-        rule("apigateway", "GET",    ".*/restapis$",                        "apigateway:GET"),
-        rule("apigateway", "POST",   ".*/restapis$",                        "apigateway:POST"),
-        rule("apigateway", "GET",    ".*/restapis/.+",                      "apigateway:GET"),
-        rule("apigateway", "PUT",    ".*/restapis/.+",                      "apigateway:PUT"),
-        rule("apigateway", "PATCH",  ".*/restapis/.+",                      "apigateway:PATCH"),
-        rule("apigateway", "DELETE", ".*/restapis/.+",                      "apigateway:DELETE"),
-        rule("apigateway", "POST",   ".*/restapis/.+",                      "apigateway:POST"),
+        // The management API, v1 and v2, is authorized by HTTP method on the resource path:
+        // apigateway:GET, POST, PUT, PATCH or DELETE. Two operations have an action of their own. The
+        // others AWS authorizes only by an action of their own name, the v2 routing rules, portals and
+        // portal products, are not served by Floci and need their own rules when they are.
+        rule("apigateway", "POST",   "^/rejectdomainnameaccessassociations$",       "apigateway:RejectAccessAssociation"),
+        rule("apigateway", "PUT",    "^/v2/domainnames/[^/]+/routingrules/[^/]+$",  "apigateway:UpdateRoutingRule"),
+        rule("apigateway", "GET",    ".*",                                          "apigateway:GET"),
+        rule("apigateway", "POST",   ".*",                                          "apigateway:POST"),
+        rule("apigateway", "PUT",    ".*",                                          "apigateway:PUT"),
+        rule("apigateway", "PATCH",  ".*",                                          "apigateway:PATCH"),
+        rule("apigateway", "DELETE", ".*",                                          "apigateway:DELETE"),
 
         // ── SES v2 ─────────────────────────────────────────────────────────────
         // SES v1 is a Query API and resolves from its Action like any other; v2 is REST-JSON under
@@ -224,12 +269,25 @@ public class IamActionRegistry {
         rule("ses", "POST",  "^/v2/email/update-configuration-sets/?$",                              "ses:UpdateConfigurationSet"),
         rule("ses", "POST",  "^/v2/email/vdm/recommendations/?$",                                    "ses:ListRecommendations"),
 
+        // ── Resource Groups ─────────────────────────────────────────────────────
+        rule("resource-groups", "POST", "^/_rg/groups/?$", "resource-groups:CreateGroup"),
+        rule("resource-groups", "POST", "^/_rg/get-group/?$", "resource-groups:GetGroup"),
+        rule("resource-groups", "POST", "^/_rg/delete-group/?$", "resource-groups:DeleteGroup"),
+        rule("resource-groups", "POST", "^/_rg/group-resources/?$", "resource-groups:GroupResources"),
+        rule("resource-groups", "POST", "^/_rg/list-group-resources/?$", "resource-groups:ListGroupResources"),
+
         // ── Kinesis ────────────────────────────────────────────────────────────
         rule("kinesis", "POST", ".*", "kinesis:*")
     );
 
     private static ActionRule rule(String service, String method, String path, String action) {
-        return new ActionRule(service, method, Pattern.compile(path, Pattern.CASE_INSENSITIVE), action);
+        return rule(service, method, path, null, null, action);
+    }
+
+    private static ActionRule rule(String service, String method, String path, String queryParameter,
+                                   String queryValue, String action) {
+        return new ActionRule(service, method, Pattern.compile(path, Pattern.CASE_INSENSITIVE), queryParameter,
+                queryValue, action);
     }
 
     /**
@@ -251,15 +309,15 @@ public class IamActionRegistry {
         if (isQueryRequest(ctx)) {
             String queryAction = queryAction(ctx);
             if (queryAction != null && !queryAction.isBlank()) {
-                return credentialScope + ":" + queryAction;
+                return IamAuthorizedActions.actionFor(credentialScope, queryAction);
             }
         }
 
-        // JSON 1.1: X-Amz-Target → service:OperationName
+        // JSON 1.1: X-Amz-Target → the action AWS checks for the operation it names
         String target = ctx.getHeaderString("X-Amz-Target");
         if (target != null && target.contains(".")) {
             String operationName = target.substring(target.lastIndexOf('.') + 1);
-            return credentialScope + ":" + operationName;
+            return IamAuthorizedActions.actionFor(credentialScope, operationName);
         }
 
         return resolveRoute(credentialScope, ctx);
@@ -293,9 +351,7 @@ public class IamActionRegistry {
         }
 
         for (ActionRule rule : RULES) {
-            if (rule.service().equals(credentialScope)
-                    && rule.method().equals(method)
-                    && rule.pathPattern().matcher(path).find()) {
+            if (rule.matches(credentialScope, method, path, ctx)) {
                 return rule.action();
             }
         }
@@ -318,24 +374,42 @@ public class IamActionRegistry {
     }
 
     /**
-     * Returns the Query-protocol action from the form body while preserving the entity stream for
-     * the controller. The controller dispatches only the form body, using the same Action-first,
-     * Operation-second rule. A URL Action must not override the operation that will execute.
+     * Returns the Query action from GET query parameters or the POST form body, preserving the
+     * entity stream. Both use the controller's Action-first, Operation-second rule; a POST URL
+     * Action must not override the form operation that will execute.
      */
     public String queryAction(ContainerRequestContext ctx) {
+        if ("GET".equalsIgnoreCase(ctx.getMethod())) {
+            return AwsQueryServiceResolver.action(ctx.getUriInfo().getQueryParameters());
+        }
         return AwsQueryServiceResolver.action(
                 RequestBodyReader.formField(ctx, "Action"),
                 RequestBodyReader.formField(ctx, "Operation"));
     }
 
-    /** The same form POST at the root that the Query controller dispatches. */
+    /** Returns the API version from the same Query input that the controller dispatches. */
+    public String queryVersion(ContainerRequestContext ctx) {
+        if ("GET".equalsIgnoreCase(ctx.getMethod())) {
+            return ctx.getUriInfo().getQueryParameters().getFirst("Version");
+        }
+        return RequestBodyReader.formField(ctx, "Version");
+    }
+
+    /** The root form POST or CloudWatch GET that the Query controller dispatches. */
     public static boolean isQueryRequest(ContainerRequestContext ctx) {
-        if (!"POST".equalsIgnoreCase(ctx.getMethod()) || ctx.getUriInfo() == null) {
+        if ("GET".equalsIgnoreCase(ctx.getMethod())) {
+            return ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
+                    && claim.protocol() == WireProtocol.AWS_QUERY;
+        }
+        if (ctx.getUriInfo() == null) {
             return false;
         }
         String path = ctx.getUriInfo().getPath();
+        if (path != null && !path.isEmpty() && !"/".equals(path)) {
+            return false;
+        }
         MediaType mediaType = ctx.getMediaType();
-        return (path == null || path.isEmpty() || "/".equals(path))
+        return "POST".equalsIgnoreCase(ctx.getMethod())
                 && mediaType != null
                 && "application".equalsIgnoreCase(mediaType.getType())
                 && "x-www-form-urlencoded".equalsIgnoreCase(mediaType.getSubtype());
@@ -368,7 +442,10 @@ public class IamActionRegistry {
             sub("requestPayment",    "s3:GetBucketRequestPayment"),
             sub("accelerate",        "s3:GetAccelerateConfiguration"),
             sub("replication",       "s3:GetReplicationConfiguration"),
-            sub("metrics",           "s3:GetMetricsConfiguration"));
+            sub("metrics",           "s3:GetMetricsConfiguration"),
+            sub("intelligent-tiering", "s3:GetIntelligentTieringConfiguration"),
+            sub("analytics",         "s3:GetAnalyticsConfiguration"),
+            sub("inventory",         "s3:GetInventoryConfiguration"));
 
     private static final List<SubResourceAction> PUT_BUCKET_SUBRESOURCES = List.of(
             sub("notification",      "s3:PutBucketNotification"),
@@ -387,13 +464,16 @@ public class IamActionRegistry {
             sub("requestPayment",    "s3:PutBucketRequestPayment"),
             sub("accelerate",        "s3:PutAccelerateConfiguration"),
             sub("replication",       "s3:PutReplicationConfiguration"),
-            sub("metrics",           "s3:PutMetricsConfiguration"));
+            sub("metrics",           "s3:PutMetricsConfiguration"),
+            sub("intelligent-tiering", "s3:PutIntelligentTieringConfiguration"),
+            sub("analytics",         "s3:PutAnalyticsConfiguration"),
+            sub("inventory",         "s3:PutInventoryConfiguration"));
 
     // AWS gives only DeleteBucketPolicy and DeleteBucketWebsite their own action; removing any other
     // sub-resource is authorised by the same Put* action that sets it. ?accelerate is absent because
     // S3Controller rejects DELETE on it with 405, so no mapping should claim the request.
     private static final List<SubResourceAction> DELETE_BUCKET_SUBRESOURCES = List.of(
-            sub("tagging",           "s3:DeleteBucketTagging"),
+            sub("tagging",           "s3:PutBucketTagging"),
             sub("website",           "s3:DeleteBucketWebsite"),
             sub("policy",            "s3:DeleteBucketPolicy"),
             sub("cors",              "s3:PutBucketCORS"),
@@ -402,7 +482,10 @@ public class IamActionRegistry {
             sub("publicAccessBlock", "s3:PutBucketPublicAccessBlock"),
             sub("ownershipControls", "s3:PutBucketOwnershipControls"),
             sub("replication",       "s3:PutReplicationConfiguration"),
-            sub("metrics",           "s3:PutMetricsConfiguration"));
+            sub("metrics",           "s3:PutMetricsConfiguration"),
+            sub("intelligent-tiering", "s3:PutIntelligentTieringConfiguration"),
+            sub("analytics",         "s3:PutAnalyticsConfiguration"),
+            sub("inventory",         "s3:PutInventoryConfiguration"));
 
     private static String resolveS3SubResourceAction(String method, ContainerRequestContext ctx) {
         MultivaluedMap<String, String> params = ctx.getUriInfo().getQueryParameters();
@@ -430,23 +513,95 @@ public class IamActionRegistry {
         return null;
     }
 
+    /**
+     * The operation an object sub-resource selects, checked in the order S3Controller dispatches
+     * them: a request naming several runs the first, so it is checked as that one. A
+     * {@code versionId} selects the version action AWS checks in place of an action that has one
+     * (see {@link S3ObjectActions#forVersion}). Null where the controller falls through to the plain
+     * object operation on the current version, which the rules check.
+     */
     private static String objectSubResourceAction(String method, MultivaluedMap<String, String> params) {
-        if (params.containsKey("acl")) {
-            return switch (method) {
-                case "GET" -> "s3:GetObjectAcl";
-                case "PUT" -> "s3:PutObjectAcl";
-                default -> null;
-            };
-        }
-        if (params.containsKey("tagging")) {
-            return switch (method) {
-                case "GET" -> "s3:GetObjectTagging";
-                case "PUT" -> "s3:PutObjectTagging";
-                case "DELETE" -> "s3:DeleteObjectTagging";
-                default -> null;
-            };
-        }
-        return null;
+        String versionId = params.getFirst("versionId");
+        return switch (method) {
+            case "GET" -> {
+                if (params.containsKey("uploadId")) {
+                    yield "s3:ListMultipartUploadParts";
+                }
+                if (params.containsKey("tagging")) {
+                    yield S3ObjectActions.forVersion("s3:GetObjectTagging", versionId);
+                }
+                if (params.containsKey("annotation")) {
+                    yield S3ObjectActions.forVersion(annotationReadAction(params), versionId);
+                }
+                if (params.containsKey("retention")) {
+                    yield "s3:GetObjectRetention";
+                }
+                if (params.containsKey("legal-hold")) {
+                    yield "s3:GetObjectLegalHold";
+                }
+                if (params.containsKey("acl")) {
+                    yield S3ObjectActions.forVersion("s3:GetObjectAcl", versionId);
+                }
+                yield versionId != null ? "s3:GetObjectVersion" : null;
+            }
+            case "HEAD" -> {
+                if (params.containsKey("annotation")) {
+                    yield S3ObjectActions.forVersion(annotationReadAction(params), versionId);
+                }
+                yield versionId != null ? "s3:GetObjectVersion" : null;
+            }
+            case "PUT" -> {
+                if (params.containsKey("tagging")) {
+                    yield S3ObjectActions.forVersion("s3:PutObjectTagging", versionId);
+                }
+                if (params.containsKey("retention")) {
+                    yield "s3:PutObjectRetention";
+                }
+                if (params.containsKey("legal-hold")) {
+                    yield "s3:PutObjectLegalHold";
+                }
+                if (params.containsKey("acl")) {
+                    yield S3ObjectActions.forVersion("s3:PutObjectAcl", versionId);
+                }
+                // A PUT naming an uploadId and a partNumber is UploadPart, which the rules check as
+                // s3:PutObject, as they do PutObject and CopyObject.
+                yield params.containsKey("annotation")
+                        ? S3ObjectActions.forVersion("s3:PutObjectAnnotation", versionId)
+                        : null;
+            }
+            case "DELETE" -> {
+                if (params.containsKey("tagging")) {
+                    yield S3ObjectActions.forVersion("s3:DeleteObjectTagging", versionId);
+                }
+                if (params.containsKey("annotation")) {
+                    yield S3ObjectActions.forVersion("s3:DeleteObjectAnnotation", versionId);
+                }
+                if (params.containsKey("uploadId")) {
+                    yield "s3:AbortMultipartUpload";
+                }
+                yield versionId != null ? "s3:DeleteObjectVersion" : null;
+            }
+            case "POST" -> {
+                if (params.containsKey("uploads")) {
+                    yield "s3:PutObject";
+                }
+                if (params.containsKey("restore")) {
+                    yield "s3:RestoreObject";
+                }
+                if (params.containsKey("select")) {
+                    // S3Controller selects from the version a versionId names.
+                    yield S3ObjectActions.forVersion("s3:GetObject", versionId);
+                }
+                yield params.containsKey("uploadId") ? "s3:PutObject" : null;
+            }
+            default -> null;
+        };
+    }
+
+    /** A named annotation is GetObjectAnnotation; an empty or absent name lists them, as S3Controller does. */
+    private static String annotationReadAction(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("annotationName");
+        return name != null && !name.isEmpty() ? "s3:GetObjectAnnotation" : "s3:ListObjectAnnotations";
     }
 
 }

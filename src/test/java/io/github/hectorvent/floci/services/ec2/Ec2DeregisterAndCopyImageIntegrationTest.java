@@ -224,6 +224,18 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
     }
 
     @Test
+    void aSnapshotDeletedWithItsImageTakesItsTags() {
+        Image image = service.registerImage(EAST, uniqueName("floci-tagged-snapshot"), null,
+                "x86_64", "/dev/xvda", List.of(mapping("/dev/xvda", "snap-" + hex())));
+        String snapshotId = snapshotIdOf(image);
+        service.createTags(EAST, List.of(snapshotId), List.of(new Tag("Team", "snapshots")));
+
+        service.deregisterImage(EAST, image.getImageId(), true);
+
+        assertTrue(service.describeTags(EAST, Map.of("resource-id", List.of(snapshotId))).isEmpty());
+    }
+
+    @Test
     void aSnapshotSharedWithAnotherAmiIsSkippedRatherThanDeleted() {
         // "if a snapshot is associated with multiple AMIs, it won't be deleted even if specified
         // for deletion, although the AMI will still be deregistered."

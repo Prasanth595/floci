@@ -3,28 +3,34 @@ package io.github.hectorvent.floci.services.secretsmanager;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.Response;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
+import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayDeque;
-import java.util.Deque;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
@@ -50,8 +56,11 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
     @InjectMock
     LambdaService lambdaService;
 
-    /** How to delete each thing the test created, pushed as it is created and run newest first. */
-    private final Deque<Runnable> cleanup = new ArrayDeque<>();
+    @TestHTTPResource("/")
+    static URI baseUri;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -60,22 +69,10 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
 
     @BeforeEach
     void stubLambda() {
-        Mockito.when(lambdaService.getFunction(anyString(), anyString())).thenReturn(new LambdaFunction());
+        Mockito.when(lambdaService.getFunctionByArn(anyString())).thenReturn(new LambdaFunction());
         InvokeResult ok = new InvokeResult();
         ok.setStatusCode(200);
         Mockito.when(lambdaService.invoke(any(), any(), any(), any())).thenReturn(ok);
-    }
-
-    /**
-     * Deletes what the test created, newest first: a secret before the user that made it, and a
-     * user's access key and inline policy before the user, as DeleteUser requires. A test whose
-     * setup stopped partway deletes only what it got to create.
-     */
-    @AfterEach
-    void deleteWhatTheTestCreated() {
-        while (!cleanup.isEmpty()) {
-            cleanup.pop().run();
-        }
     }
 
     @Test
@@ -98,8 +95,9 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
         Mockito.verify(lambdaService, Mockito.never()).invoke(any(), eq(functionArn), any(), any());
     }
 
-    @Test
-    void presignedRotateSecretIsCheckedLikeASignedOne() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void presignedRotateSecretIsCheckedLikeASignedOne(boolean blankHeader) {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String functionArn = "arn:aws:lambda:" + REGION + ":" + ACCOUNT_ID + ":function:rotator-" + suffix;
         String accessKeyId = createUserWithPolicy("sm-presigned-" + suffix, """
@@ -111,7 +109,7 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
         deleteSecretAfterwards(secretName);
 
         String amzDate = AMZ_DATE_FMT.format(Instant.now());
-        given()
+        RequestSpecification request = given()
                 .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
                 .queryParam("X-Amz-Credential",
                         accessKeyId + "/" + amzDate.substring(0, 8) + "/" + REGION + "/secretsmanager/aws4_request")
@@ -121,11 +119,15 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
                 .queryParam("X-Amz-Signature", "abc")
                 .header("X-Amz-Target", "secretsmanager.RotateSecret")
                 .contentType(SM_CONTENT_TYPE)
-                .body("{\"SecretId\":\"" + secretName + "\",\"RotationLambdaARN\":\"" + functionArn + "\"}")
-        .when()
-                .post("/")
-        .then()
-                .statusCode(400)
+                .body("{\"SecretId\":\"" + secretName + "\",\"RotationLambdaARN\":\"" + functionArn + "\"}");
+        if (blankHeader) {
+            request.header("Authorization", "");
+        }
+        Response response = request.when().post("/");
+        if (response.statusCode() == 200) {
+            awaitRotationFinished(secretName);
+        }
+        response.then().statusCode(400)
                 .body("__type", equalTo("AccessDeniedException"));
 
         Mockito.verify(lambdaService, Mockito.never()).invoke(any(), eq(functionArn), any(), any());
@@ -180,7 +182,7 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
 
     private static ValidatableResponse secretsManager(String accessKeyId, String operation, String body) {
         return given()
-                .header("Authorization", authorization(accessKeyId, "secretsmanager"))
+                .header("Authorization", auth(accessKeyId, "secretsmanager"))
                 .header("X-Amz-Target", "secretsmanager." + operation)
                 .contentType(SM_CONTENT_TYPE)
                 .body(body)
@@ -199,30 +201,27 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
     }
 
     private void deleteSecretAfterwards(String secretName) {
-        cleanup.push(() -> secretsManager(ACCOUNT_ID, "DeleteSecret",
-                "{\"SecretId\":\"" + secretName + "\",\"ForceDeleteWithoutRecovery\":true}").statusCode(200));
+        cleanup.register(() -> given().port(baseUri.getPort())
+                .header("Authorization", auth(ACCOUNT_ID, "secretsmanager"))
+                .header("X-Amz-Target", "secretsmanager.DeleteSecret")
+                .contentType(SM_CONTENT_TYPE)
+                .body("{\"SecretId\":\"" + secretName + "\",\"ForceDeleteWithoutRecovery\":true}")
+                .when().post("/").then().statusCode(200));
     }
 
     private String createUserWithPolicy(String userName, String policyDocument) {
-        adminIam("CreateUser", Map.of("UserName", userName)).statusCode(200);
-        cleanup.push(() -> adminIam("DeleteUser", Map.of("UserName", userName)).statusCode(200));
+        String accessKeyId = EnforcementFixtures.createUser(cleanup, baseUri.getPort(),
+                auth(ACCOUNT_ID, "iam"), userName).accessKeyId();
         adminIam("PutUserPolicy", Map.of(
                 "UserName", userName,
                 "PolicyName", "inline",
                 "PolicyDocument", policyDocument)).statusCode(200);
-        cleanup.push(() -> adminIam("DeleteUserPolicy",
-                Map.of("UserName", userName, "PolicyName", "inline")).statusCode(200));
-        String accessKeyId = adminIam("CreateAccessKey", Map.of("UserName", userName))
-                .statusCode(200)
-                .extract().path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
-        cleanup.push(() -> adminIam("DeleteAccessKey",
-                Map.of("UserName", userName, "AccessKeyId", accessKeyId)).statusCode(200));
         return accessKeyId;
     }
 
     private static ValidatableResponse adminIam(String action, Map<String, String> params) {
         RequestSpecification spec = given()
-                .header("Authorization", authorization(ACCOUNT_ID, "iam"))
+                .header("Authorization", auth(ACCOUNT_ID, "iam"))
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", action)
                 .formParam("Version", "2010-05-08");
@@ -230,8 +229,4 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
         return spec.when().post("/").then();
     }
 
-    private static String authorization(String accessKeyId, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260929/" + REGION + "/" + service
-                + "/aws4_request, SignedHeaders=host, Signature=abc";
-    }
 }

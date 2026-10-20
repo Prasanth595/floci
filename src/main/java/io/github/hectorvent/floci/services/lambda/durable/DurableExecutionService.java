@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -1063,10 +1064,10 @@ public class DurableExecutionService implements Resettable {
     static ArnParts parseArn(String executionArn) {
         Matcher matcher = executionArn == null ? null : LambdaArnUtils.DURABLE_EXECUTION_ARN.matcher(executionArn);
         if (matcher == null || !matcher.matches()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + executionArn + "' at 'durableExecutionArn' failed to "
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + executionArn + "' at 'durableExecutionArn' failed to "
                             + "satisfy constraint: Member must satisfy regular expression pattern: "
-                            + LambdaArnUtils.DURABLE_EXECUTION_ARN.pattern(), 400);
+                            + LambdaArnUtils.DURABLE_EXECUTION_ARN.pattern());
         }
         return new ArnParts(executionArn, matcher.group(3), matcher.group(2), matcher.group(4), matcher.group(5),
                 matcher.group(6), matcher.group(7));
@@ -1121,9 +1122,7 @@ public class DurableExecutionService implements Resettable {
 
     /** AWS reports every invalid member of a request in one ValidationException. */
     static AwsException validationError(List<String> violations) {
-        String count = violations.size() == 1 ? "1 validation error detected: "
-                : violations.size() + " validation errors detected: ";
-        return new AwsException("ValidationException", count + String.join("; ", violations), 400);
+        return SmithyValidationErrors.validationException(violations);
     }
 
     private static AwsException invalidMarker() {

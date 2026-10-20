@@ -57,9 +57,11 @@ public class IotCustomAuthorizer {
     /**
      * What a WebSocket upgrade carried: the header names lower-cased, the raw query without its
      * {@code ?} ({@code ""} when there was none), the server name, null unless it came over TLS, and
-     * the client's IP address, as the broker sees only the bridge's loopback socket.
+     * the client's IP address and port ({@code -1} when unknown), as the broker sees only the
+     * bridge's loopback socket.
      */
-    record WebSocketUpgrade(Map<String, String> headers, String queryString, String serverName, String sourceIp) {
+    record WebSocketUpgrade(Map<String, String> headers, String queryString, String serverName, String sourceIp,
+                            int sourcePort) {
     }
 
     @Inject

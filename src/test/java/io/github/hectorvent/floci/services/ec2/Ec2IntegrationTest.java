@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.zip.GZIPOutputStream;
 
@@ -161,8 +162,293 @@ class Ec2IntegrationTest {
                     startsWith("us-east-1"));
     }
 
+    // DescribeAvailabilityZones parameter validation and filtering
     @Test
     @Order(5)
+    void describeAvailabilityZonesWithZoneName() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("ZoneName.1", "us-east-1a")
+            .formParam("ZoneName.2", "us-east-1c")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(2))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.zoneName",
+                    hasItems("us-east-1a", "us-east-1c"));
+    }
+
+    @Test
+    @Order(6)
+    void describeAvailabilityZonesWithZoneId() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("ZoneId.1", "use1-az1")
+            .formParam("ZoneId.2", "use1-az3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(2))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.zoneId",
+                    hasItems("use1-az1", "use1-az3"));
+    }
+
+    @Test
+    @Order(7)
+    void describeAvailabilityZonesRejectsUnknownZoneName() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("ZoneName.1", "us-east-1aa")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
+            .body("Response.Errors.Error.Message", equalTo("Invalid availability zone: [us-east-1aa]"));
+    }
+
+    @Test
+    @Order(7)
+    void describeAvailabilityZonesRejectsUnknownZoneId() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("ZoneId.1", "use1-az99")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    @Test
+    @Order(8)
+    void describeAvailabilityZonesWithZoneNameAndZoneIdTogether() {
+        // Terraform's aws_availability_zone data source sends ZoneIds and ZoneNames together,
+        // so the pair is narrowed to their intersection rather than refused.
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("ZoneName.1", "us-east-1a")
+            .formParam("ZoneName.2", "us-east-1b")
+            .formParam("ZoneId.1", "use1-az1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(1))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].zoneName",
+                    equalTo("us-east-1a"));
+    }
+
+    @Test
+    @Order(9)
+    void describeAvailabilityZonesFilterByZoneName() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Filter.1.Name", "zone-name")
+            .formParam("Filter.1.Value.1", "us-east-1a")
+            .formParam("Filter.1.Value.2", "us-east-1b")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(2))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.zoneName",
+                    hasItems("us-east-1a", "us-east-1b"));
+    }
+
+    @Test
+    @Order(10)
+    void describeAvailabilityZonesFilterByZoneId() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Filter.1.Name", "zone-id")
+            .formParam("Filter.1.Value.1", "use1-az2")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(1))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.zoneId",
+                    equalTo("use1-az2"));
+    }
+
+    @Test
+    @Order(11)
+    void describeAvailabilityZonesFilterByState() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Filter.1.Name", "state")
+            .formParam("Filter.1.Value.1", "available")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(3));
+    }
+
+    @Test
+    @Order(12)
+    void describeAvailabilityZonesFilterByRegionName() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Filter.1.Name", "region-name")
+            .formParam("Filter.1.Value.1", "us-east-1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(3));
+    }
+
+    @Test
+    @Order(13)
+    void describeAvailabilityZonesFilterByZoneType() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Filter.1.Name", "zone-type")
+            .formParam("Filter.1.Value.1", "availability-zone")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(3));
+    }
+
+    @Test
+    @Order(14)
+    void describeAvailabilityZonesFilterByMessage() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Filter.1.Name", "message")
+            .formParam("Filter.1.Value.1", "any")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(15)
+    void describeAvailabilityZonesFilterByOptInStatus() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Filter.1.Name", "opt-in-status")
+            .formParam("Filter.1.Value.1", "opt-in-not-required")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(3))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].optInStatus",
+                    equalTo("opt-in-not-required"));
+    }
+
+    @Test
+    @Order(16)
+    void describeAvailabilityZonesFilterByGroupName() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Filter.1.Name", "group-name")
+            .formParam("Filter.1.Value.1", "us-east-1-zg-1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(3))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].groupName",
+                    equalTo("us-east-1-zg-1"));
+    }
+
+    @Test
+    @Order(16)
+    void describeAvailabilityZonesFilterByGroupLongName() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Filter.1.Name", "group-long-name")
+            .formParam("Filter.1.Value.1", "US East (N. Virginia) 1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(3))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].groupLongName",
+                    equalTo("US East (N. Virginia) 1"));
+    }
+
+    @Test
+    @Order(17)
+    void describeAvailabilityZonesRejectsInvalidFilterName() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Filter.1.Name", "invalid-filter")
+            .formParam("Filter.1.Value.1", "any")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
+            .body("Response.Errors.Error.Message",
+                    containsString("The filter 'invalid-filter' is invalid"));
+    }
+
+    @Test
+    @Order(18)
+    void describeAvailabilityZonesMultipleFiltersAndSemantics() {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Filter.1.Name", "zone-name")
+            .formParam("Filter.1.Value.1", "us-east-1a")
+            .formParam("Filter.1.Value.2", "us-east-1b")
+            .formParam("Filter.2.Name", "state")
+            .formParam("Filter.2.Value.1", "available")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(2))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.zoneName",
+                    hasItems("us-east-1a", "us-east-1b"));
+    }
+
+    @Test
+    @Order(19)
+    void describeAvailabilityZonesMultipleSameNameFiltersAndSemantics() {
+        // Two zone-name filters - should AND them
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Filter.1.Name", "zone-name")
+            .formParam("Filter.1.Value.1", "us-east-1a")
+            .formParam("Filter.2.Name", "zone-name")
+            .formParam("Filter.2.Value.1", "us-east-1b")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(20)
     void describeRegions() {
         given()
             .formParam("Action", "DescribeRegions")
@@ -870,6 +1156,72 @@ class Ec2IntegrationTest {
                     everyItem(equalTo("3")))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.processorInfo.supportedArchitectures.item",
                     everyItem(equalTo("arm64")));
+    }
+
+    @Test
+    void describeEbsOnlyGravitonInstanceType() {
+        given()
+            .formParam("Action", "DescribeInstanceTypes")
+            .formParam("InstanceType.1", "m6g.large")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.size()", equalTo(1))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.vCpuInfo.defaultVCpus", equalTo("2"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.memoryInfo.sizeInMiB", equalTo("8192"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.processorInfo.supportedArchitectures.item",
+                    equalTo("arm64"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageSupported", equalTo("false"));
+    }
+
+    @Test
+    void describeEbsOnlyGravitonOfferingsWithLocationFilters() {
+        for (String zone : List.of("us-east-1a", "us-east-1b", "us-east-1c")) {
+            given()
+                .formParam("Action", "DescribeInstanceTypeOfferings")
+                .formParam("LocationType", "availability-zone")
+                .formParam("Filter.1.Name", "location")
+                .formParam("Filter.1.Value.1", zone)
+                .formParam("MaxResults", "1000")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.instanceType",
+                        hasItems("m6g.large", "m5.large"))
+                .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.location", everyItem(equalTo(zone)));
+        }
+        given()
+            .formParam("Action", "DescribeInstanceTypeOfferings")
+            .formParam("LocationType", "region")
+            .formParam("Filter.1.Name", "instance-type")
+            .formParam("Filter.1.Value.1", "m6g.large")
+            .formParam("Filter.2.Name", "location")
+            .formParam("Filter.2.Value.1", "us-east-1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(1))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.instanceType", equalTo("m6g.large"))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.location", equalTo("us-east-1"));
+        given()
+            .formParam("Action", "DescribeInstanceTypeOfferings")
+            .formParam("LocationType", "availability-zone")
+            .formParam("Filter.1.Name", "instance-type")
+            .formParam("Filter.1.Value.1", "m6g.large")
+            .formParam("Filter.2.Name", "location")
+            .formParam("Filter.2.Value.1", "other-zone")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(0));
     }
 
     @Test
@@ -1924,15 +2276,15 @@ class Ec2IntegrationTest {
             .body("DescribeAddressesResponse.addressesSet.item.size()", equalTo(1))
             .body("DescribeAddressesResponse.addressesSet.item.allocationId", equalTo(targetAllocationId));
 
-        // Negative, resource-specific field filter: floci's synthesized public IPs always
-        // start with "54." (Ec2Service.allocateAddress), so an RFC 5737 TEST-NET-3 address is
+        // Negative, resource-specific field filter: floci allocates Elastic IPs only from
+        // 203.0.113.0/24 (Ec2Service.allocateAddress), so an RFC 5737 TEST-NET-2 address is
         // guaranteed not to match anything this test (or any other) could have allocated.
         given()
             .formParam("Action", "DescribeAddresses")
             .formParam("Filter.1.Name", "tag:Suite")
             .formParam("Filter.1.Value.1", suiteTag)
             .formParam("Filter.2.Name", "public-ip")
-            .formParam("Filter.2.Value.1", "203.0.113.99")
+            .formParam("Filter.2.Value.1", "198.51.100.99")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -2797,6 +3149,7 @@ class Ec2IntegrationTest {
             .formParam("VpcId", vpcId)
             .formParam("ServiceName", "com.amazonaws.us-east-1.s3")
             .formParam("VpcEndpointType", "Gateway")
+            .formParam("IpAddressType", "ipv4")
             .formParam("RouteTableId.1", routeTableId)
             .formParam("TagSpecification.1.ResourceType", "vpc-endpoint")
             .formParam("TagSpecification.1.Tag.1.Key", "Name")
@@ -2808,6 +3161,7 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .body("CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId", startsWith("vpce-"))
             .body("CreateVpcEndpointResponse.vpcEndpoint.vpcId", equalTo(vpcId))
+            .body("CreateVpcEndpointResponse.vpcEndpoint.ipAddressType", equalTo("ipv4"))
             .body("CreateVpcEndpointResponse.vpcEndpoint.routeTableIdSet.item",
                     equalTo(routeTableId))
             .extract().path("CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId");
@@ -2827,7 +3181,9 @@ class Ec2IntegrationTest {
             .body("DescribeVpcEndpointsResponse.vpcEndpointSet.item.vpcEndpointId",
                     equalTo(vpcEndpointId))
             .body("DescribeVpcEndpointsResponse.vpcEndpointSet.item.serviceName",
-                    equalTo("com.amazonaws.us-east-1.s3"));
+                    equalTo("com.amazonaws.us-east-1.s3"))
+            .body("DescribeVpcEndpointsResponse.vpcEndpointSet.item.ipAddressType",
+                    equalTo("ipv4"));
     }
 
     @Test
@@ -3930,7 +4286,11 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeVolumesResponse.volumeSet.item.volumeType", equalTo("gp2"));
+            // Earlier tests launch from gp2-rooted catalog AMIs, so the result holds their root
+            // volumes too: assert the filter, not a count.
+            .body("DescribeVolumesResponse.volumeSet.item.findAll { it.volumeType != 'gp2' }.size()", equalTo(0))
+            .body("DescribeVolumesResponse.volumeSet.item.findAll { it.volumeId == '" + volumeId + "' }.size()",
+                    equalTo(1));
     }
 
     @Test
@@ -5286,5 +5646,196 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+    }
+
+    @Test
+    @Order(329)
+    void runInstancesRootBlockDeviceMappingOverridesAmiRootVolumeType() {
+        // ami-0abcdef1234567890 is gp2-rooted at /dev/xvda; a root mapping overrides it.
+        assertEquals("gp3", rootVolumeType(launch(Map.of(
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.Ebs.VolumeSize", "8",
+            "BlockDeviceMapping.1.Ebs.VolumeType", "gp3"))));
+        assertEquals("gp2", rootVolumeType(launch(Map.of())));
+    }
+
+    @Test
+    @Order(330)
+    void runInstancesLaunchTemplateRootMappingOverridesAmiAndYieldsToRequest() {
+        String templateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "gp3-root-template")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        assertEquals("gp3", rootVolumeType(launch(Map.of("LaunchTemplate.LaunchTemplateId", templateId))));
+        // A request mapping for the same device wins over the template's.
+        assertEquals("io1", rootVolumeType(launch(Map.of(
+            "LaunchTemplate.LaunchTemplateId", templateId,
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.Ebs.VolumeType", "io1"))));
+    }
+
+    @Test
+    @Order(331)
+    void runInstancesRejectsAnUnknownBlockDeviceMappingVolumeType() {
+        given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-0abcdef1234567890")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("BlockDeviceMapping.1.Ebs.VolumeType", "gp9")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidParameterValue</Code>"))
+            .body(containsString("Value (gp9) for parameter volumeType is invalid. Unknown volume type."));
+    }
+
+    @Test
+    @Order(332)
+    void runInstancesKeepsTemplateDevicesTheRequestDoesNotName() {
+        String templateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "gp3-root-data-request-template")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        // The request maps only a data device, so the template's root mapping still applies.
+        assertEquals("gp3", rootVolumeType(launch(Map.of(
+            "LaunchTemplate.LaunchTemplateId", templateId,
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvdb",
+            "BlockDeviceMapping.1.Ebs.VolumeSize", "10",
+            "BlockDeviceMapping.1.Ebs.VolumeType", "io1"))));
+    }
+
+    @Test
+    @Order(334)
+    void runInstancesRequestEntryForATemplateDeviceChangesOnlyWhatItSets() {
+        String templateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "gp3-root-size-override-template")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        // The request resizes the root but names no type, so the template's gp3 stands.
+        assertEquals("gp3", rootVolumeType(launch(Map.of(
+            "LaunchTemplate.LaunchTemplateId", templateId,
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.Ebs.VolumeSize", "20"))));
+    }
+
+    @Test
+    @Order(333)
+    void launchTemplateWithAnUnknownVolumeTypeIsStoredButFailsAtLaunch() {
+        String templateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "unknown-volume-type-template")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvdb")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp9")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-0abcdef1234567890")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("LaunchTemplate.LaunchTemplateId", templateId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidParameterValue</Code>"))
+            .body(containsString("Value (gp9) for parameter volumeType is invalid. Unknown volume type."));
+    }
+
+    @Test
+    @Order(335)
+    void runInstancesNoDeviceRootMappingFallsBackToAmiRootVolumeType() {
+        String templateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "gp3-root-nodevice-template")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        // NoDevice removes the template's root mapping, so the AMI's gp2 root applies.
+        assertEquals("gp2", rootVolumeType(launch(Map.of(
+            "LaunchTemplate.LaunchTemplateId", templateId,
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.NoDevice", ""))));
+    }
+
+    @Test
+    @Order(336)
+    void runInstancesIgnoresVolumeTypeOnANoDeviceMapping() {
+        // The device is removed regardless of the assigned value, so gp9 is never validated.
+        assertEquals("gp2", rootVolumeType(launch(Map.of(
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.NoDevice", "",
+            "BlockDeviceMapping.1.Ebs.VolumeType", "gp9"))));
+    }
+
+    private String launch(Map<String, String> params) {
+        return given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-0abcdef1234567890")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParams(params)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+    }
+
+    private String rootVolumeType(String instanceId) {
+        return given()
+            .formParam("Action", "DescribeVolumes")
+            .formParam("Filter.1.Name", "attachment.instance-id")
+            .formParam("Filter.1.Value.1", instanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("DescribeVolumesResponse.volumeSet.item.volumeType");
     }
 }

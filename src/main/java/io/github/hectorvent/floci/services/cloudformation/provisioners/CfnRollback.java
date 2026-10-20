@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import org.jboss.logging.Logger;
 
 /**
@@ -42,6 +43,14 @@ public final class CfnRollback {
     public static final String PIPE_UPDATE_SNAPSHOT_ATTR = "__FlociPipeUpdateSnapshot";
 
     /**
+     * Holds the subnets a kept ELBv2 load balancer had before the update in flight moved it,
+     * comma-joined, so a failed stack update can move it back. Written by
+     * {@code ElbV2CfnProvisioner} after its SetSubnets and spent by its {@code rollbackUpdate},
+     * retained across a failed move back.
+     */
+    public static final String LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR = "__FlociLoadBalancerSubnetsUpdateSnapshot";
+
+    /**
      * Holds the targets an EventBridge rule carried before the update in flight reconciled them,
      * with the rule name, bus and region needed to address them again, so a failed stack update can
      * put them back. Written by {@code EventsCfnProvisioner} before its first target call and spent
@@ -71,12 +80,22 @@ public final class CfnRollback {
     public static final String EVENT_INVOKE_CONFIG_SNAPSHOT_ATTR = "__FlociEventInvokeConfigSnapshot";
 
     /**
+     * Holds what a custom resource had before an update sent its handler an {@code Update}: the
+     * physical id, the old and the attempted properties, the region and the {@code Data} attributes,
+     * so a failed stack update can send the handler the old properties back, whether the handler
+     * applied the update or failed it. Written by {@code CustomResourceCfnProvisioner} before the
+     * invoke and spent by its {@code rollbackUpdate}.
+     */
+    public static final String CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR = "__FlociCustomResourceUpdateSnapshot";
+
+    /**
      * Holds the body and tags a dashboard carried before an in-place update changed them, or the
      * fact that it did not exist, so a failed stack update can put it back. Written by
      * {@code CloudWatchDashboardCfnProvisioner} before its first mutating call and spent by its
      * {@code rollbackUpdate}.
      */
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
+    public static final String S3_BUCKET_UPDATE_SNAPSHOT_ATTR = "__FlociS3BucketUpdateSnapshot";
 
     /**
      * Holds the description, event pattern and retention an EventBridge archive carried before an
@@ -103,6 +122,14 @@ public final class CfnRollback {
     public static final String REST_API_UPDATE_SNAPSHOT_ATTR = "__FlociRestApiUpdateSnapshot";
 
     /**
+     * Holds the tags a web function or the mutable configuration a web function endpoint carried
+     * before the in-place update in flight changed it, so a failed stack update can put it back.
+     * Written by {@code LambdaWebCfnProvisioner} before its update call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR = "__FlociLambdaWebUpdateSnapshot";
+
+    /**
      * Holds the function ARN, status, caching flag, token settings and tags an IoT authorizer
      * carried before an in-place update changed them, so a failed stack update can put them back.
      * Written by {@code IotAuthorizerCfnProvisioner} before its update call and spent by its
@@ -120,6 +147,15 @@ public final class CfnRollback {
     public static final String API_KEY_UPDATE_SNAPSHOT_ATTR = "__FlociApiKeyUpdateSnapshot";
 
     /**
+     * Holds the role, object prefixes, tagging action and tags a GuardDuty Malware Protection plan
+     * carried before an in-place update changed them, or the plan an update created because the one
+     * the stack held was gone, so a failed stack update can put the plan back or delete the created
+     * one. Written by {@code GuardDutyMalwareProtectionPlanCfnProvisioner} before its first mutating
+     * call or right after that creation, and spent by its {@code rollbackUpdate}.
+     */
+    public static final String GUARDDUTY_PLAN_UPDATE_SNAPSHOT_ATTR = "__FlociGuardDutyPlanUpdateSnapshot";
+
+    /**
      * Holds the name and tags an API Gateway V2 VPC link carried before an in-place update changed
      * them, so a failed stack update can put them back. Written by {@code ApiGatewayV2CfnProvisioner}
      * before its update call and spent by its {@code rollbackUpdate}.
@@ -133,6 +169,22 @@ public final class CfnRollback {
      * spent by its {@code rollbackUpdate}.
      */
     public static final String INTEGRATION_CONNECTION_SNAPSHOT_ATTR = "__FlociIntegrationConnectionSnapshot";
+
+    /**
+     * Holds the certificate, security policy, endpoint type and tags an API Gateway v2 custom domain
+     * carried before an in-place update changed them, so a failed stack update can put them back.
+     * Written by {@code ApiGatewayV2DomainCfnProvisioner} before its first mutating call and spent
+     * by its {@code rollbackUpdate}.
+     */
+    public static final String API_GATEWAY_V2_DOMAIN_UPDATE_SNAPSHOT_ATTR = "__FlociApiGatewayV2DomainUpdateSnapshot";
+
+    /**
+     * Holds the key, API and stage an API Gateway v2 API mapping carried before an in-place update
+     * changed them, with the domain that addresses it, so a failed stack update can put them back.
+     * Written by {@code ApiGatewayV2DomainCfnProvisioner} before its update call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String API_MAPPING_UPDATE_SNAPSHOT_ATTR = "__FlociApiMappingUpdateSnapshot";
 
     /**
      * Holds the complete prior metric filter, identity, name mode and per-address mutation outcomes
@@ -162,10 +214,36 @@ public final class CfnRollback {
     public static final String REPLACEMENT_CLEANUP_ATTR = "__FlociReplacementCleanup";
 
     /**
+     * Prefixes attributes that name, by physical id, a resource this one uses where none of its
+     * public attributes does, such as a NAT gateway's subnet and Elastic IP, or the resources a
+     * custom resource's or nested stack's definition named. {@code CloudFormationService} reads the
+     * attribute values of a resource the template no longer names to delete it before what it uses;
+     * these keep {@code Fn::GetAtt} to what AWS resolves, and count even for a custom resource or
+     * nested stack, whose other attributes are outputs.
+     */
+    public static final String USES_ATTR_PREFIX = "__FlociUses";
+
+    /**
+     * Holds the tags, stream setting and time-to-live setting a DynamoDB table carried before an
+     * in-place update changed them, with the account and region that address it, so a failed
+     * stack update can put all three back. Written by {@code DynamoDbCfnProvisioner} before its
+     * first mutating call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR = "__FlociDynamoDbTableUpdateSnapshot";
+
+    /**
      * Holds the attributes and tags a queue carried before an in-place update changed them,
      * so a failed stack update can restore them.
      */
     public static final String SQS_UPDATE_SNAPSHOT_ATTR = "__FlociSqsUpdateSnapshot";
+
+    /**
+     * Holds the value, settings and managed tags an SSM parameter carried before an in-place
+     * update changed them, with the resource's attributes from before, so a failed stack update
+     * can put them back. Written by {@code SsmCfnProvisioner} before its put and spent by its
+     * {@code rollbackUpdate}; a rename leaves its rollback to {@link #REPLACEMENT_CLEANUP_ATTR}.
+     */
+    public static final String SSM_PARAMETER_UPDATE_SNAPSHOT_ATTR = "__FlociSsmParameterUpdateSnapshot";
 
     /**
      * Holds the settings a Cognito user pool or user pool client had before an in-place update
@@ -173,6 +251,13 @@ public final class CfnRollback {
      * {@code CognitoCfnProvisioner} before its update call and spent by its {@code rollbackUpdate}.
      */
     public static final String COGNITO_UPDATE_SNAPSHOT_ATTR = "__FlociCognitoUpdateSnapshot";
+
+    /**
+     * Holds the settings and tags a serverless cache had before an in-place update changed them,
+     * so a failed stack update can put them back. Written by {@code ElastiCacheServerlessCfnProvisioner}
+     * before its modify call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String SERVERLESS_CACHE_UPDATE_SNAPSHOT_ATTR = "__FlociServerlessCacheUpdateSnapshot";
 
     /**
      * Holds the configuration an Auto Scaling group carried before an in-place update changed it,
@@ -217,6 +302,63 @@ public final class CfnRollback {
             LOG.warnv("IAM rollback cleanup failed while attempting to {0}: {1}",
                     description, cleanupFailure.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * Runs the steps that follow a create or change a reused entity in place. If one of them
+     * throws, what this provision did is undone before the failure propagates: a created entity is
+     * deleted again by {@code undoCreate}, a reused one is put back by {@code undoInPlace}, which
+     * restores the provisioner's snapshot and is a no-op when there is none. The engine only removes
+     * a failed create it can see, and on a failed update it restores the previous resource metadata
+     * and discards the attempted one, snapshot included, so the undo has to happen here.
+     *
+     * <p>A compensation that fails is reported, never hidden. A created entity carries
+     * {@link #ROLLBACK_OWNED_ATTR} while the steps run, so the engine's create rollback deletes it
+     * (and reports that failing) if the undo here could not, and during an update the entity is
+     * also listed in the cleanup record, which the engine carries onto the restored resource and
+     * runs before the next committed update or the stack delete; a reused entity keeps its snapshot
+     * and the reason lands in {@link #UPDATE_ROLLBACK_FAILURE_ATTR}, which the engine copies onto
+     * the committed resource so the rollback walker reports UPDATE_ROLLBACK_FAILED instead of
+     * claiming the prior state is live.
+     */
+    public static void guarded(StackResource r, ProvisionContext ctx, boolean created, Runnable undoCreate,
+                               Runnable undoInPlace, Runnable steps) {
+        if (created) {
+            r.getAttributes().put(ROLLBACK_OWNED_ATTR, "true");
+        }
+        try {
+            steps.run();
+            r.getAttributes().remove(ROLLBACK_OWNED_ATTR);
+        } catch (RuntimeException e) {
+            if (created) {
+                try {
+                    undoCreate.run();
+                    r.getAttributes().remove(ROLLBACK_OWNED_ATTR);
+                } catch (RuntimeException undo) {
+                    e.addSuppressed(undo);
+                    String reason = "Could not remove " + r.getPhysicalId() + ", created for " + r.getLogicalId()
+                            + " by a failed update: " + undo.getMessage();
+                    LOG.warn(reason);
+                    r.getAttributes().put(UPDATE_ROLLBACK_FAILURE_ATTR, reason);
+                    if (ctx.isUpdate()) {
+                        // The engine restores the previous resource and keeps only what the cleanup
+                        // record carries, so the replacement is listed there for the next cleanup.
+                        ReplacementCleanup.recordOrphan(r, r.getPhysicalId(), r.getResourceType(), ctx.region());
+                    }
+                }
+            } else {
+                try {
+                    undoInPlace.run();
+                } catch (RuntimeException undo) {
+                    e.addSuppressed(undo);
+                    String reason = "Could not restore " + r.getPhysicalId() + " for " + r.getLogicalId()
+                            + " after a failed update: " + undo.getMessage();
+                    LOG.warn(reason);
+                    r.getAttributes().put(UPDATE_ROLLBACK_FAILURE_ATTR, reason);
+                }
+            }
+            throw e;
         }
     }
 }

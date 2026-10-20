@@ -6,8 +6,11 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.vertx.core.Vertx;
+import io.vertx.core.buffer.Buffer;
+import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.Router;
@@ -23,6 +26,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.Base64;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -47,6 +51,7 @@ public class Ec2MetadataServer {
             .withZone(ZoneOffset.UTC);
     /** IMDSv2 tokens live from one second up to six hours. */
     private static final int MAX_TOKEN_TTL_SECONDS = 21_600;
+    private static final String IDENTITY_ROLE = "ec2-instance";
     private static final String INSTANCE_TAGS_PREFIX = "/latest/meta-data/tags/instance/";
 
     private final Vertx vertx;
@@ -58,6 +63,8 @@ public class Ec2MetadataServer {
     private final Map<String, SessionToken> tokens = new ConcurrentHashMap<>();
     /** IMDSv1 fallback: container bridge IP → Instance */
     private final Map<String, Instance> containerIpToInstance = new ConcurrentHashMap<>();
+    /** Cluster nodes whose instance-profile identity their registrar synthesizes rather than IAM holding it. */
+    private final Set<Instance> synthesizedProfiles = ConcurrentHashMap.newKeySet();
 
     private volatile HttpServer httpServer;
 
@@ -98,8 +105,19 @@ public class Ec2MetadataServer {
                 entry.getValue() == instance && !addresses.contains(entry.getKey()));
     }
 
+    /**
+     * Registers a cluster node that another service synthesizes instead of EC2 launching it. Its
+     * instance-profile ARN and ID are the registrar's own, so {@code iam/info} reports them while IAM
+     * holds no such profile.
+     */
+    public void reconcileClusterNodeAddresses(Set<String> addresses, Instance instance) {
+        synthesizedProfiles.add(instance);
+        reconcileContainerAddresses(addresses, instance);
+    }
+
     public void unregisterInstance(Instance instance) {
         if (instance != null) {
+            synthesizedProfiles.remove(instance);
             credentials.unregister(instance);
             tokens.values().removeIf(token -> token.instance() == instance);
             containerIpToInstance.entrySet().removeIf(entry -> entry.getValue() == instance);
@@ -119,6 +137,10 @@ public class Ec2MetadataServer {
 
         Router router = Router.router(vertx);
         router.route().handler(BodyHandler.create());
+        // Ahead of every route, so a path IMDS does not serve also answers 401 when the instance
+        // requires tokens, as on AWS. A method-free route, so methods IMDS does not serve keep the
+        // router's own answers rather than all becoming 405.
+        router.route().handler(this::refuseTokenlessReadsWhenTokensAreRequired);
 
         // IMDSv2 token endpoint
         router.put("/latest/api/token").handler(this::handleToken);
@@ -142,6 +164,17 @@ public class Ec2MetadataServer {
         router.get("/latest/meta-data/iam/info").handler(ctx -> handleIamInfo(ctx));
         router.get("/latest/meta-data/iam/security-credentials/").handler(ctx -> handleCredentialsList(ctx));
         router.get("/latest/meta-data/iam/security-credentials/:role").handler(ctx -> handleCredentials(ctx));
+        router.get("/latest/meta-data/identity-credentials").handler(ctx -> handleListing(ctx, "ec2/"));
+        router.get("/latest/meta-data/identity-credentials/").handler(ctx -> handleListing(ctx, "ec2/"));
+        router.get("/latest/meta-data/identity-credentials/ec2").handler(ctx -> handleListing(ctx, "info\nsecurity-credentials/"));
+        router.get("/latest/meta-data/identity-credentials/ec2/").handler(ctx -> handleListing(ctx, "info\nsecurity-credentials/"));
+        router.get("/latest/meta-data/identity-credentials/ec2/info").handler(ctx -> handleIdentityInfo(ctx));
+        router.get("/latest/meta-data/identity-credentials/ec2/security-credentials")
+                .handler(ctx -> handleListing(ctx, IDENTITY_ROLE));
+        router.get("/latest/meta-data/identity-credentials/ec2/security-credentials/")
+                .handler(ctx -> handleListing(ctx, IDENTITY_ROLE));
+        router.get("/latest/meta-data/identity-credentials/ec2/security-credentials/" + IDENTITY_ROLE)
+                .handler(ctx -> handleIdentityCredentials(ctx));
         router.get("/latest/meta-data/tags/instance").handler(ctx -> handleInstanceTagKeys(ctx));
         router.get("/latest/meta-data/tags/instance/").handler(ctx -> handleInstanceTagKeys(ctx));
         router.getWithRegex("/latest/meta-data/tags/instance/.+").handler(ctx -> handleInstanceTagValue(ctx));
@@ -165,6 +198,7 @@ public class Ec2MetadataServer {
         credentials.clear();
         tokens.clear();
         containerIpToInstance.clear();
+        synthesizedProfiles.clear();
         if (httpServer != null) {
             httpServer.close();
             httpServer = null;
@@ -276,18 +310,25 @@ public class Ec2MetadataServer {
         if (inst == null) {
             return;
         }
-        String profileArn = inst.getIamInstanceProfileArn();
-        if (profileArn == null) {
+        Optional<InstanceProfile> resolved = credentials.profile(inst);
+        String profileArn;
+        String profileId;
+        if (resolved.isPresent()) {
+            profileArn = resolved.get().getArn();
+            profileId = resolved.get().getInstanceProfileId();
+        } else if (synthesizedProfiles.contains(inst) && inst.getIamInstanceProfileArn() != null
+                && !credentials.holdsProfile(inst)) {
+            profileArn = inst.getIamInstanceProfileArn();
+            profileId = inst.getIamInstanceProfileId();
+        } else {
             ctx.response().setStatusCode(404).end("{}");
             return;
         }
-        String profileId = "AIPA" + inst.getInstanceId().toUpperCase().substring(2, 16);
-        String body = "{\"Code\":\"Success\",\"LastUpdated\":\"" + now() + "\","
-                + "\"InstanceProfileArn\":\"" + profileArn + "\","
-                + "\"InstanceProfileId\":\"" + profileId + "\"}";
         ctx.response().setStatusCode(200)
                 .putHeader("content-type", "application/json")
-                .end(body);
+                .end(new JsonObject().put("Code", "Success").put("LastUpdated", now())
+                        .put("InstanceProfileArn", profileArn)
+                        .put("InstanceProfileId", profileId).encode());
     }
 
     private void handleCredentialsList(RoutingContext ctx) {
@@ -314,14 +355,55 @@ public class Ec2MetadataServer {
             return;
         }
         SessionCredential session = result.get();
+        ctx.response().putHeader("content-type", "application/json").end(credentialsJson(session));
+    }
+
+    private void handleListing(RoutingContext ctx, String entries) {
+        Instance inst = resolveInstance(ctx);
+        if (inst == null) {
+            return;
+        }
+        ctx.response().setStatusCode(200).putHeader("content-type", "text/plain").end(entries);
+    }
+
+    private void handleIdentityInfo(RoutingContext ctx) {
+        Instance inst = resolveInstance(ctx);
+        if (inst == null) {
+            return;
+        }
         ctx.response().putHeader("content-type", "application/json").end(new JsonObject()
+                .put("Code", "Success")
+                .put("LastUpdated", ISO.format(clock.instant()))
+                .put("AccountId", ownerAccount(inst)).encode());
+    }
+
+    private void handleIdentityCredentials(RoutingContext ctx) {
+        Instance inst = resolveInstance(ctx);
+        if (inst == null) {
+            return;
+        }
+        Optional<SessionCredential> result = credentials.identity(inst, ownerAccount(inst), clock.instant());
+        if (result.isEmpty()) {
+            ctx.response().setStatusCode(404).end();
+            return;
+        }
+        ctx.response().putHeader("content-type", "application/json").end(credentialsJson(result.get()));
+    }
+
+    /** The account that launched the instance; instances persisted before it was recorded belong to the default one. */
+    private String ownerAccount(Instance inst) {
+        return inst.getOwnerId() != null ? inst.getOwnerId() : config.defaultAccountId();
+    }
+
+    private static String credentialsJson(SessionCredential session) {
+        return new JsonObject()
                 .put("Code", "Success")
                 .put("LastUpdated", ISO.format(session.getExpiration().minusSeconds(3600)))
                 .put("Type", "AWS-HMAC")
                 .put("AccessKeyId", session.getAccessKeyId())
                 .put("SecretAccessKey", session.getSecretAccessKey())
                 .put("Token", session.getSessionToken())
-                .put("Expiration", ISO.format(session.getExpiration())).encode());
+                .put("Expiration", ISO.format(session.getExpiration())).encode();
     }
 
     private void handleInstanceTagKeys(RoutingContext ctx) {
@@ -359,14 +441,25 @@ public class Ec2MetadataServer {
         if (inst == null) {
             return;
         }
-        String userData = inst.getUserData();
-        if (userData == null || userData.isBlank()) {
+        String encoded = inst.getEncodedUserData();
+        byte[] userData;
+        if (encoded != null) {
+            try {
+                userData = encoded.isBlank() ? null : Base64.getDecoder().decode(encoded);
+            } catch (IllegalArgumentException e) {
+                LOG.warnv("Ignoring malformed saved user-data encoding for instance {0}", inst.getInstanceId());
+                userData = inst.getUserData() == null ? null : inst.getUserData().getBytes(StandardCharsets.UTF_8);
+            }
+        } else {
+            userData = inst.getUserData() == null ? null : inst.getUserData().getBytes(StandardCharsets.UTF_8);
+        }
+        if (userData == null || userData.length == 0) {
             ctx.response().setStatusCode(404).end();
             return;
         }
         ctx.response().setStatusCode(200)
-                .putHeader("content-type", "text/plain")
-                .end(userData);
+                .putHeader("content-type", "application/octet-stream")
+                .end(Buffer.buffer(userData));
     }
 
     private void handleIdentityDocument(RoutingContext ctx) {
@@ -374,7 +467,7 @@ public class Ec2MetadataServer {
         if (inst == null) {
             return;
         }
-        String body = instanceIdentityDocument(inst, config.defaultAccountId(), config.defaultAvailabilityZone());
+        String body = instanceIdentityDocument(inst, ownerAccount(inst), config.defaultAvailabilityZone());
         ctx.response().setStatusCode(200)
                 .putHeader("content-type", "application/json")
                 .end(body);
@@ -408,6 +501,24 @@ public class Ec2MetadataServer {
         return containerIpToInstance.get(remoteIp);
     }
 
+    /**
+     * An instance whose HttpTokens is required refuses IMDSv1: as AWS does, a GET or HEAD without a
+     * token gets 401 before any data is looked up, whatever the path. (No route serves HEAD, so one
+     * with a token gets the router's answer: 405 on a path a GET route serves, 404 elsewhere.)
+     */
+    private void refuseTokenlessReadsWhenTokensAreRequired(RoutingContext ctx) {
+        HttpMethod method = ctx.request().method();
+        String token = ctx.request().getHeader("x-aws-ec2-metadata-token");
+        if ((HttpMethod.GET.equals(method) || HttpMethod.HEAD.equals(method)) && (token == null || token.isBlank())) {
+            Instance inst = resolveInstanceByIp(ctx);
+            if (inst != null && "required".equals(inst.effectiveMetadataOptions().getHttpTokens())) {
+                ctx.response().setStatusCode(401).end();
+                return;
+            }
+        }
+        ctx.next();
+    }
+
     private Instance resolveInstance(RoutingContext ctx) {
         String remoteIp = ctx.request().remoteAddress().host();
         Instance inst = containerIpToInstance.get(remoteIp);
@@ -415,7 +526,8 @@ public class Ec2MetadataServer {
         // IMDSv2: a presented token must be valid; an invalid or expired one gets 401 so the
         // caller fetches a new token. A token is not valid on another instance, so a caller whose
         // IP maps to a different instance also gets 401; an unregistered IP defers to the token.
-        // Requests without a token fall back to IMDSv1.
+        // Requests without a token fall back to IMDSv1; one whose instance requires tokens has
+        // already been refused before routing.
         String token = ctx.request().getHeader("x-aws-ec2-metadata-token");
         if (token != null && !token.isBlank()) {
             SessionToken session = tokens.get(token);

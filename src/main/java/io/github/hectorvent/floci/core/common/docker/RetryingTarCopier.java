@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.exception.DockerClientException;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
@@ -30,8 +31,8 @@ public final class RetryingTarCopier {
 
     private static final Logger LOG = Logger.getLogger(RetryingTarCopier.class);
 
-    static final int DEFAULT_MAX_ATTEMPTS = 6;
-    static final long DEFAULT_BACKOFF_MS = 500L;
+    public static final int DEFAULT_MAX_ATTEMPTS = 6;
+    public static final long DEFAULT_BACKOFF_MS = 500L;
 
     /**
      * Buffer for the tar-streaming pipe. The default {@link PipedInputStream} buffer is only 1KB,
@@ -154,11 +155,22 @@ public final class RetryingTarCopier {
 
     public static void copyHostResource(DockerClient docker, String containerId, String remotePath,
                                         String hostPath, int maxAttempts, long backoffMillis) {
-        retry(hostPath, containerId, maxAttempts, backoffMillis, () ->
+        retry(hostPath, containerId, maxAttempts, backoffMillis, () -> {
+            try {
                 docker.copyArchiveToContainerCmd(containerId)
                         .withHostResource(hostPath)
                         .withRemotePath(remotePath)
-                        .exec());
+                        .exec();
+            } catch (DockerClientException e) {
+                // These docker-java wrappers identify local archive preparation and temporary-file I/O.
+                String message = e.getMessage();
+                if (message != null && (message.startsWith("Unable to perform tar on host resource ")
+                        || message.startsWith("Unable to read temp file "))) {
+                    throw new DockerRetry.LocalFailure(message, e);
+                }
+                throw e;
+            }
+        });
     }
 
     /** Single-entry tar bytes, reusable across attempts and callers. */

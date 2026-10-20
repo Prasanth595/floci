@@ -14,12 +14,15 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -27,8 +30,10 @@ import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -55,8 +60,12 @@ class DynamoDbLocalBackendIntegrationTest {
 
     private record Caller(String account, String region) {
         String authorization() {
+            return authorization("dynamodb");
+        }
+
+        String authorization(String service) {
             return "AWS4-HMAC-SHA256 Credential=" + account + "/20260215/" + region
-                    + "/dynamodb/aws4_request, SignedHeaders=host, Signature=abc";
+                    + "/" + service + "/aws4_request, SignedHeaders=host, Signature=abc";
         }
     }
 
@@ -204,6 +213,38 @@ class DynamoDbLocalBackendIntegrationTest {
     }
 
     @Test
+    void aTtlDeletionReadsAsRemoveByTheDynamoDbService() {
+        String table = tableName("ttl");
+        String streamArn = createTable(A_WEST, table, STREAMED)
+            .statusCode(200)
+            .extract().path("TableDescription.LatestStreamArn");
+        dynamoDb(A_WEST, "UpdateTimeToLive", "{\"TableName\": \"" + table
+                + "\", \"TimeToLiveSpecification\": {\"Enabled\": true, \"AttributeName\": \"expireAt\"}}")
+            .statusCode(200);
+        long past = Instant.now().getEpochSecond() - 3600;
+        dynamoDb(A_WEST, "PutItem", "{\"TableName\": \"" + table + "\", \"Item\": {\"pk\": {\"S\": \"expired\"}, "
+                + "\"expireAt\": {\"N\": \"" + past + "\"}}}")
+            .statusCode(200);
+        String shardId = streams(A_WEST, "DescribeStream", "{\"StreamArn\": \"" + streamArn + "\"}")
+            .statusCode(200)
+            .extract().path("StreamDescription.Shards[0].ShardId");
+
+        // DynamoDB Local deleted an expired item within about 15 seconds when measured.
+        await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
+            String iterator = streams(A_WEST, "GetShardIterator", "{\"StreamArn\": \"" + streamArn
+                    + "\", \"ShardId\": \"" + shardId + "\", \"ShardIteratorType\": \"TRIM_HORIZON\"}")
+                .statusCode(200)
+                .extract().path("ShardIterator");
+            streams(A_WEST, "GetRecords", "{\"ShardIterator\": \"" + iterator + "\"}")
+                .statusCode(200)
+                .body("Records.eventName", contains("INSERT", "REMOVE"))
+                .body("Records[1].dynamodb.Keys.pk.S", equalTo("expired"))
+                .body("Records[1].userIdentity.Type", equalTo("Service"))
+                .body("Records[1].userIdentity.PrincipalId", equalTo("dynamodb.amazonaws.com"));
+        });
+    }
+
+    @Test
     void theDirectDeleteRemovesAProtectedTable() {
         String table = tableName("protected");
         createTable(A_WEST, table, ", \"DeletionProtectionEnabled\": true").statusCode(200);
@@ -215,6 +256,39 @@ class DynamoDbLocalBackendIntegrationTest {
         dynamoDb(A_WEST, "DescribeTable", "{\"TableName\": \"" + table + "\"}")
             .statusCode(400)
             .body("__type", endsWith("ResourceNotFoundException"));
+    }
+
+    @Test
+    void theTimeToLiveAStackEnablesIsWhatLocalReports() {
+        String table = tableName("ttl");
+        String stack = "local-it-ttl-" + UUID.randomUUID();
+        String template = """
+            {
+                "Resources": {
+                    "Orders": {
+                        "Type": "AWS::DynamoDB::Table",
+                        "Properties": {
+                            "TableName": "%s",
+                            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                            "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                            "BillingMode": "PAY_PER_REQUEST",
+                            "TimeToLiveSpecification": {"AttributeName": "expiresAt", "Enabled": true}
+                        }
+                    }
+                }
+            }
+            """.formatted(table);
+
+        cloudFormation(A_EAST, "CreateStack", stack, template);
+        // The stack stays in Floci; its table is removed from Local with the others.
+        created.add(new CreatedTable(A_EAST, table));
+        cloudFormation(A_EAST, "DescribeStacks", stack, null)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        dynamoDb(A_EAST, "DescribeTimeToLive", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(200)
+            .body("TimeToLiveDescription.TimeToLiveStatus", equalTo("ENABLED"))
+            .body("TimeToLiveDescription.AttributeName", equalTo("expiresAt"));
     }
 
     @Test
@@ -259,6 +333,18 @@ class DynamoDbLocalBackendIntegrationTest {
 
     private static ValidatableResponse scanCount(Caller caller, String table) {
         return dynamoDb(caller, "Scan", "{\"TableName\": \"" + table + "\"}").statusCode(200);
+    }
+
+    private static ValidatableResponse cloudFormation(Caller caller, String action, String stack, String template) {
+        RequestSpecification request = given()
+            .header("Authorization", caller.authorization("cloudformation"))
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", action)
+            .formParam("StackName", stack);
+        if (template != null) {
+            request.formParam("TemplateBody", template);
+        }
+        return request.when().post("/").then().statusCode(200);
     }
 
     private static ValidatableResponse dynamoDb(Caller caller, String action, String body) {

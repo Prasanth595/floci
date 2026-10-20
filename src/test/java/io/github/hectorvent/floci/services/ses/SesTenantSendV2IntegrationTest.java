@@ -6,6 +6,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
@@ -56,8 +59,8 @@ class SesTenantSendV2IntegrationTest {
     void setup_tenantAndResources() {
         v2().body("{\"TenantName\":\"" + TENANT + "\"}")
                 .when().post("/v2/email/tenants").then().statusCode(200);
-        v2().body("{\"EmailIdentity\":\"" + DOMAIN + "\"}")
-                .when().post("/v2/email/identities").then().statusCode(200);
+        // Verified, so the addresses under it may send once the tenant gate lets them through.
+        SesDomainIdentityTestHelper.createVerified(DOMAIN, AUTH);
         v2().body("{\"ConfigurationSetName\":\"" + CONFIG_SET + "\"}")
                 .when().post("/v2/email/configuration-sets").then().statusCode(200);
         v2().body("{\"TemplateName\":\"" + TEMPLATE + "\",\"TemplateContent\":{\"Subject\":\"s\",\"Text\":\"t\"}}")
@@ -194,6 +197,21 @@ class SesTenantSendV2IntegrationTest {
                 .when().post("/v2/email/outbound-emails").then().statusCode(403)
                 .body("message", equalTo("Tenant not associated with resources ["
                         + ARN_PREFIX + "identity/floci-raw.example.com]."));
+
+        // A message with no recipients anywhere is reported after the tenant lookup but ahead of
+        // the association gate (probe-confirmed).
+        String noRecipients = Base64.getEncoder().encodeToString(
+                "From: probe@floci-raw.example.com\r\nSubject: s\r\n\r\nbody".getBytes(StandardCharsets.UTF_8));
+        v2().body("{\"TenantName\":\"" + TENANT + "\","
+                        + "\"Content\":{\"Raw\":{\"Data\":\"" + noRecipients + "\"}}}")
+                .when().post("/v2/email/outbound-emails").then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("Missing required header 'To'."));
+        v2().body("{\"TenantName\":\"ghost-tenant\","
+                        + "\"Content\":{\"Raw\":{\"Data\":\"" + noRecipients + "\"}}}")
+                .when().post("/v2/email/outbound-emails").then().statusCode(404)
+                .body("message", equalTo(
+                        "Tenant ghost-tenant for AwsAccountId 000000000000 not found."));
     }
 
     @Test

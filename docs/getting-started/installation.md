@@ -58,6 +58,7 @@ Standard and compat have identical startup time (~24 ms) and memory footprint (~
 - Java 25+
 - Maven 3.9+
 - (Optional) GraalVM Mandrel for native compilation
+- (Optional) Docker Engine 25.0+ to build the Docker images
 
 ### Clone and run
 
@@ -91,7 +92,7 @@ To run Floci as a plain binary on your machine, install GraalVM or Mandrel with 
 ```bash
 make native-host     # target/floci-<version>-runner for this machine, no Docker
 make run-native      # start it on port 4566, state under ./data
-make native-install  # copy it to ~/.local/bin/floci (PREFIX=/usr/local to change)
+make native-install  # copy it to ~/.local/bin/floci-aws (PREFIX=/usr/local to change)
 ```
 
 On Mandrel 25.0.4 and later the build needs `-H:-AOTSingleCallsiteInline`: Quarkus 3.39 turns

@@ -7,6 +7,8 @@
  */
 package io.github.hectorvent.floci.core.common.docker;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.transport.DockerHttpClient;
 import com.github.dockerjava.transport.NamedPipeSocket;
 import com.github.dockerjava.transport.SSLConfig;
@@ -62,13 +64,27 @@ import java.util.stream.Stream;
  * {@code ApacheDockerHttpClient} builds, owned here so Floci can set what that builder does not
  * expose (idle-connection validation and eviction, the connection-lease timeout). It applies
  * docker-java's settings (npipe and tcp hosts, TLS from the SSL config, a pool of
- * {@code maxConnections} for one route, no socket read timeout on the pool, no stale-connection
- * validation, hijacked exec/attach upgrades through {@link HijackingHttpRequestExecutor}) with two
- * differences: a {@code unix://} host connects through {@link UnixDomainSocket}, which honours read
- * timeouts where docker-java's socket ignored them, and requests that hold a stream open get no
- * response timeout ({@link #isLongLivedStream}), while every other call keeps it.
+ * {@code maxConnections} for one route, no socket read timeout on the pool, hijacked exec/attach
+ * upgrades through {@link HijackingHttpRequestExecutor}), validates a pooled connection idle over a
+ * second before reuse on transports that honour socket read timeouts, and evicts idle ones, where
+ * docker-java disabled both. A {@code unix://} host connects through {@link UnixDomainSocket},
+ * which honours read timeouts where docker-java's socket ignored them. Named pipes skip stale
+ * validation because docker-java's {@link NamedPipeSocket} read can block despite the 1 ms timeout
+ * used by httpclient5's validation check. Requests that hold a stream open get no response timeout
+ * ({@link #isLongLivedStream}), while every other call keeps it.
  */
 public final class FlociDockerHttpClient implements DockerHttpClient {
+
+    private static final ObjectMapper EXEC_CONFIG_MAPPER = new ObjectMapper();
+
+    /**
+     * A pooled connection idle this long is checked before it is leased again, so a socket the daemon
+     * (or Podman) already closed is replaced instead of failing on its next write. The check reads with
+     * a 1 ms timeout, which {@link UnixDomainSocket} honours.
+     */
+    static final TimeValue VALIDATE_AFTER_INACTIVITY = TimeValue.ofSeconds(1);
+    /** Idle pooled connections are closed in the background after this long. */
+    static final TimeValue EVICT_IDLE_AFTER = TimeValue.ofSeconds(30);
 
     private final CloseableHttpClient httpClient;
     private final HttpHost host;
@@ -107,11 +123,12 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
                 .build());
         connectionManager.setMaxTotal(maxConnections);
         connectionManager.setDefaultMaxPerRoute(maxConnections);
-        connectionManager.setDefaultConnectionConfig(ConnectionConfig.custom()
-                .setValidateAfterInactivity(TimeValue.NEG_ONE_SECOND)
+        ConnectionConfig connectionConfig = ConnectionConfig.custom()
+                .setValidateAfterInactivity(staleConnectionValidationFor(dockerHost))
                 .setConnectTimeout(connectionTimeout != null
                         ? Timeout.of(connectionTimeout.toNanos(), TimeUnit.NANOSECONDS) : null)
-                .build());
+                .build();
+        connectionManager.setDefaultConnectionConfig(connectionConfig);
 
         RequestConfig requestConfig = RequestConfig.custom()
                 .setResponseTimeout(responseTimeout != null
@@ -124,6 +141,7 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
                 .setRequestExecutor(new HijackingHttpRequestExecutor(null))
                 .setConnectionManager(connectionManager)
                 .setDefaultRequestConfig(requestConfig)
+                .evictIdleConnections(EVICT_IDLE_AFTER)
                 .disableConnectionState()
                 .build();
     }
@@ -157,6 +175,12 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
                 name -> "https".equalsIgnoreCase(name) ? tlsSocketStrategy : null);
     }
 
+    /** Selects stale validation only when the socket honours its short read timeout. */
+    static TimeValue staleConnectionValidationFor(URI dockerHost) {
+        return "npipe".equalsIgnoreCase(dockerHost.getScheme())
+                ? TimeValue.NEG_ONE_MILLISECOND : VALIDATE_AFTER_INACTIVITY;
+    }
+
     @Override
     public Response execute(Request request) {
         HttpContext context = new HttpCoreContext();
@@ -185,8 +209,9 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         }
 
         try {
+            boolean ttyExec = isTtyExec(request);
             ClassicHttpResponse response = httpClient.executeOpen(host, httpRequest, context);
-            return new FlociResponse(httpRequest, response);
+            return new FlociResponse(httpRequest, response, ttyExec && response.getCode() == 200);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -195,6 +220,16 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
     @Override
     public void close() throws IOException {
         httpClient.close();
+    }
+
+    private static boolean isTtyExec(Request request) throws IOException {
+        String route = request.path().split("\\?", 2)[0];
+        if (!"POST".equals(request.method()) || !route.contains("/exec/") || !route.endsWith("/start")
+                || request.bodyBytes() == null) {
+            return false;
+        }
+        JsonNode config = EXEC_CONFIG_MAPPER.readTree(request.bodyBytes());
+        return config != null && config.path("Tty").asBoolean() && !config.path("Detach").asBoolean();
     }
 
     /**
@@ -291,10 +326,13 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
 
         private final HttpUriRequestBase request;
         private final ClassicHttpResponse response;
+        private final boolean ttyExec;
+        private InputStream body;
 
-        FlociResponse(HttpUriRequestBase request, ClassicHttpResponse response) {
+        FlociResponse(HttpUriRequestBase request, ClassicHttpResponse response, boolean ttyExec) {
             this.request = request;
             this.response = response;
+            this.ttyExec = ttyExec;
         }
 
         @Override
@@ -318,7 +356,12 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         @Override
         public InputStream getBody() {
             try {
-                return response.getEntity() != null ? response.getEntity().getContent() : EmptyInputStream.INSTANCE;
+                if (body == null) {
+                    InputStream content = response.getEntity() != null
+                            ? response.getEntity().getContent() : EmptyInputStream.INSTANCE;
+                    body = ttyExec ? new TtyFramingInputStream(content) : content;
+                }
+                return body;
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }

@@ -180,7 +180,8 @@ class CloudFormationRoute53RecordSetIntegrationTest {
             // AWS sends CREATE for a record the stack does not own yet, so the name being taken
             // fails the create and the rollback leaves the other owner's record alone.
             assertEquals("ROLLBACK_COMPLETE", state.status(), state.reason());
-            assertTrue(state.reason().contains("already exists"), state.reason());
+            String failure = CfnStackWaits.failedResourceReason(stackName);
+            assertTrue(failure.contains("already exists"), failure);
             String afterCreate = listResourceRecordSets(zoneId);
             assertTrue(afterCreate.contains("192.0.2.10"), "API record overwritten: " + afterCreate);
             assertFalse(afterCreate.contains("192.0.2.20"), "stack value written: " + afterCreate);

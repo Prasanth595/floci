@@ -122,10 +122,12 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
     /**
      * A replacement is undone through the cleanup record: the displaced entity was never touched.
      * A reused entity that an update changed in place (tags, a subnet's MapPublicIpOnLaunch, a
-     * route's target) is put back from the snapshot taken before the change. Without either, the
-     * update changed nothing about the entity. A provision that fails mid-way restores its own
-     * snapshot before the failure propagates (see {@link #guarded}), so the previous metadata the
-     * engine restores for that resource matches the entity again.
+     * route's target) is put back from the snapshot taken before the change; the snapshot is
+     * removed only after the restore succeeds, so a restore that throws keeps it for a
+     * ContinueUpdateRollback retry. Without either, the update changed nothing about the entity.
+     * A provision that fails mid-way restores its own snapshot before the failure propagates (see
+     * {@link #guarded}), so the previous metadata the engine restores for that resource matches
+     * the entity again.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
@@ -133,10 +135,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             resource.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
             return true;
         }
-        String snapshot = resource.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
-        if (snapshot != null) {
-            restoreInPlace(resource, snapshot);
-        }
+        undoInPlace(resource);
         return true;
     }
 
@@ -151,10 +150,14 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         String entityId = prior.path("entityId").asText();
         if (prior.has("tags")) {
             Map<String, String> priorTags = new LinkedHashMap<>();
-            prior.get("tags").fields().forEachRemaining(f -> priorTags.put(f.getKey(), f.getValue().asText()));
+            prior.get("tags").fields().forEachRemaining(f -> {
+                if (!Ec2Service.isAwsTagKey(f.getKey())) {
+                    priorTags.put(f.getKey(), f.getValue().asText());
+                }
+            });
             List<Tag> added = new ArrayList<>();
             prior.path("appliedKeys").forEach(key -> {
-                if (!priorTags.containsKey(key.asText())) {
+                if (!Ec2Service.isAwsTagKey(key.asText()) && !priorTags.containsKey(key.asText())) {
                     added.add(new Tag(key.asText(), null));
                 }
             });
@@ -176,7 +179,8 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             String prefixList = text(target, "destinationPrefixListId");
             String egressOnly = text(target, "egressOnlyInternetGatewayId");
             if (egressOnly != null) {
-                ec2Service.deleteRoute(region, routeTableId, cidr, ipv6, prefixList);
+                CfnDeletes.safeDelete("route", routeTableId, () -> ec2Service.deleteRoute(region, routeTableId, cidr,
+                        ipv6, prefixList), "InvalidRoute.NotFound");
                 ec2Service.createRoute(region, routeTableId, cidr, ipv6, prefixList, null, null, egressOnly, null);
             } else {
                 ec2Service.replaceRoute(region, routeTableId, cidr, ipv6, prefixList,
@@ -279,7 +283,9 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> desired = ctx.resolveTags(props, "Tags");
         Map<String, String> currentTags = new LinkedHashMap<>();
         for (Tag tag : current == null ? List.<Tag>of() : current) {
-            currentTags.put(tag.getKey(), tag.getValue());
+            if (!Ec2Service.isAwsTagKey(tag.getKey())) {
+                currentTags.put(tag.getKey(), tag.getValue());
+            }
         }
         List<String> stale = ProvisionContext.staleTagKeys(currentTags, desired);
         if (reused && ctx.isUpdate() && (!stale.isEmpty() || !desired.equals(currentTags))) {
@@ -411,7 +417,8 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("SubnetId", subnet.getSubnetId());
         r.getAttributes().put("VpcId", subnet.getVpcId());
         r.getAttributes().put("AvailabilityZone", subnet.getAvailabilityZone());
-        guarded(r, ctx, !reuse, () -> ec2Service.deleteSubnet(ctx.region(), subnet.getSubnetId()), () -> {
+        CfnRollback.guarded(r, ctx, !reuse, () -> ec2Service.deleteSubnet(ctx.region(), subnet.getSubnetId()),
+                () -> undoInPlace(r), () -> {
             applyTags(r, reuse, subnet.getSubnetId(), reuse ? existing.getTags() : List.of(), props, ctx);
             if (mapPublicIpOnLaunch != null) {
                 if (reuse && ctx.isUpdate() && existing.isMapPublicIpOnLaunch() != Boolean.parseBoolean(mapPublicIpOnLaunch)) {
@@ -425,61 +432,15 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Runs the steps that follow an EC2 create or change a reused entity in place. If one of them
-     * throws, what this provision did is undone before the failure propagates: a created entity is
-     * deleted again, a reused one is put back from its snapshot. The engine only removes a failed
-     * create it can see, and on a failed update it restores the previous resource metadata and
-     * discards the attempted one, snapshot included, so the undo has to happen here.
-     *
-     * <p>A compensation that fails is reported, never hidden. A created entity carries
-     * {@link CfnRollback#ROLLBACK_OWNED_ATTR} while the steps run, so the engine's create rollback
-     * deletes it (and reports that failing) if the undo here could not, and during an update the
-     * entity is also listed in the cleanup record, which the engine carries onto the restored
-     * resource and runs before the next committed update or the stack delete; a reused entity keeps its
-     * snapshot and the reason lands in {@link CfnRollback#UPDATE_ROLLBACK_FAILURE_ATTR}, which the
-     * engine copies onto the committed resource so the rollback walker reports
-     * UPDATE_ROLLBACK_FAILED instead of claiming the prior state is live.
+     * The in-place undo handed to {@link CfnRollback#guarded}: puts a reused entity back from its
+     * snapshot and spends it, leaving it in place when the restore fails so the next rollback can
+     * retry.
      */
-    private void guarded(StackResource r, ProvisionContext ctx, boolean created, Runnable undoCreate, Runnable steps) {
-        if (created) {
-            r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
-        }
-        try {
-            steps.run();
-            r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
-        } catch (RuntimeException e) {
-            if (created) {
-                try {
-                    undoCreate.run();
-                    r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
-                } catch (RuntimeException undo) {
-                    e.addSuppressed(undo);
-                    String reason = "Could not remove " + r.getPhysicalId() + ", created for " + r.getLogicalId()
-                            + " by a failed update: " + undo.getMessage();
-                    LOG.warn(reason);
-                    r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
-                    if (ctx.isUpdate()) {
-                        // The engine restores the previous resource and keeps only what the cleanup
-                        // record carries, so the replacement is listed there for the next cleanup.
-                        ReplacementCleanup.recordOrphan(r, r.getPhysicalId(), r.getResourceType(), ctx.region());
-                    }
-                }
-            } else {
-                String snapshot = r.getAttributes().get(IN_PLACE_PRIOR_ATTR);
-                if (snapshot != null) {
-                    try {
-                        restoreInPlace(r, snapshot);
-                        r.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
-                    } catch (RuntimeException undo) {
-                        e.addSuppressed(undo);
-                        String reason = "Could not restore " + r.getPhysicalId() + " for " + r.getLogicalId()
-                                + " after a failed update: " + undo.getMessage();
-                        LOG.warn(reason);
-                        r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
-                    }
-                }
-            }
-            throw e;
+    private void undoInPlace(StackResource r) {
+        String snapshot = r.getAttributes().get(IN_PLACE_PRIOR_ATTR);
+        if (snapshot != null) {
+            restoreInPlace(r, snapshot);
+            r.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
         }
     }
 
@@ -488,7 +449,8 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         InternetGateway igw = existing != null ? existing : ec2Service.createInternetGateway(ctx.region());
         r.setPhysicalId(igw.getInternetGatewayId());
         r.getAttributes().put("InternetGatewayId", igw.getInternetGatewayId());
-        guarded(r, ctx, existing == null, () -> ec2Service.deleteInternetGateway(ctx.region(), igw.getInternetGatewayId()),
+        CfnRollback.guarded(r, ctx, existing == null,
+                () -> ec2Service.deleteInternetGateway(ctx.region(), igw.getInternetGatewayId()), () -> undoInPlace(r),
                 () -> applyTags(r, existing != null, igw.getInternetGatewayId(), existing != null ? existing.getTags() : List.of(), props, ctx));
     }
 
@@ -501,7 +463,8 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         RouteTable rt = reuse ? existing : ec2Service.createRouteTable(ctx.region(), vpcId);
         r.setPhysicalId(rt.getRouteTableId());
         r.getAttributes().put("RouteTableId", rt.getRouteTableId());
-        guarded(r, ctx, !reuse, () -> ec2Service.deleteRouteTable(ctx.region(), rt.getRouteTableId()),
+        CfnRollback.guarded(r, ctx, !reuse, () -> ec2Service.deleteRouteTable(ctx.region(), rt.getRouteTableId()),
+                () -> undoInPlace(r),
                 () -> applyTags(r, reuse, rt.getRouteTableId(), reuse ? existing.getTags() : List.of(), props, ctx));
     }
 
@@ -569,7 +532,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             target.put("egressOnlyInternetGatewayId", current.getEgressOnlyInternetGatewayId());
             target.put("vpcPeeringConnectionId", current.getVpcPeeringConnectionId());
             writeInPlacePrior(r, prior);
-            guarded(r, ctx, false, () -> { }, () -> {
+            CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> {
                 if (egressOnlyInternetGatewayId != null) {
                     // ReplaceRoute has no egress-only target; re-creating the route is the same outcome.
                     ec2Service.deleteRoute(ctx.region(), routeTableId, destinationCidr, destinationIpv6Cidr, destinationPrefixListId);
@@ -610,11 +573,27 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
                 && connectivityType.equalsIgnoreCase(existing.getConnectivityType() == null ? "public" : existing.getConnectivityType());
         NatGateway nat = reuse ? existing
                 : ec2Service.createNatGateway(ctx.region(), subnetId, allocationId, connectivityType, tagList(props, ctx));
+        if ("failed".equals(nat.getState())) {
+            // The resource fails and its failed gateway is not left behind.
+            ec2Service.deleteNatGateway(ctx.region(), nat.getNatGatewayId());
+            throw new AwsException(nat.getFailureCode(), nat.getFailureMessage(), 400);
+        }
         if (reuse) {
-            guarded(r, ctx, false, () -> { }, () -> applyTags(r, true, nat.getNatGatewayId(), existing.getTags(), props, ctx));
+            CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> applyTags(r, true, nat.getNatGatewayId(), existing.getTags(), props, ctx));
         }
         r.setPhysicalId(nat.getNatGatewayId());
         r.getAttributes().put("NatGatewayId", nat.getNatGatewayId());
+        // The gateway holds its subnet and Elastic IP until it is deleted; an EIP's physical id is
+        // its public IP.
+        if (nat.getSubnetId() != null) {
+            r.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "SubnetId", nat.getSubnetId());
+        }
+        Address eip = allocationId == null || allocationId.isBlank() ? null : findAddress(allocationId, null, ctx.region());
+        if (eip != null && eip.getPublicIp() != null) {
+            r.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "PublicIp", eip.getPublicIp());
+        } else {
+            r.getAttributes().remove(CfnRollback.USES_ATTR_PREFIX + "PublicIp");
+        }
     }
 
     private void provisionEip(StackResource r, JsonNode props, ProvisionContext ctx) {
@@ -626,7 +605,8 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(addr.getPublicIp());
         r.getAttributes().put("AllocationId", addr.getAllocationId());
         r.getAttributes().put("PublicIp", addr.getPublicIp());
-        guarded(r, ctx, existing == null, () -> ec2Service.releaseAddress(ctx.region(), addr.getAllocationId()),
+        CfnRollback.guarded(r, ctx, existing == null,
+                () -> ec2Service.releaseAddress(ctx.region(), addr.getAllocationId()), () -> undoInPlace(r),
                 () -> applyTags(r, existing != null, addr.getAllocationId(), existing != null ? existing.getTags() : List.of(), props, ctx));
     }
 }

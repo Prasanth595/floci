@@ -82,7 +82,15 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS`
 
-A Docker call that gets no response within 5 minutes fails, on Unix-socket and TCP hosts alike. Requests that follow a container for as long as it runs (container waits, exec and attach output, followed logs, streamed stats, daemon events, image pulls and builds) have no such limit, since they can stay silent while healthy.
+A Docker call that gets no response within `api-timeout-seconds` fails, on Unix-socket and TCP hosts alike, so a hung daemon cannot block a request indefinitely. The limit applies to each attempt: a control-plane request that is safe to repeat is tried up to six times, so against a silent daemon it can take about six times the limit, plus backoff, to fail. It defaults to 300 seconds (5 minutes) for both pools and must be at least 1, since httpclient5 reads 0 as no limit. Requests that follow a container for as long as it runs (container waits, exec and attach output, followed logs, streamed stats, daemon events, image pulls and builds) have no such limit, since they can stay silent while healthy:
+
+```yaml
+floci:
+  docker:
+    api-timeout-seconds: 300
+```
+
+Environment variable: `FLOCI_DOCKER_API_TIMEOUT_SECONDS`
 
 ## Private Registry Authentication
 
@@ -313,6 +321,14 @@ What each setting does and why it is needed:
 All of Floci's short-lived docker calls (create/start/inspect/remove container, volume management, image operations) travel one shared daemon socket, and under fan-out load the daemon occasionally drops a connection mid-call with `java.io.IOException: Broken pipe`. Floci retries these transient failures centrally, at the docker transport layer, up to 6 attempts with a capped exponential backoff (500ms base, 8s cap); so every call site is covered without per-call configuration, and a genuine daemon rejection (a 4xx, a name conflict) still surfaces immediately.
 
 A request is only replayed when doing so cannot change semantics: requests carrying a one-shot upload stream (e.g. copying an archive into a container), bidirectional attach streams, and `exec` requests (which would re-run the command) are never retried. Log-follow connections use a separate transport that does not retry at all. Bodyless actions whose replay changes the outcome (unnamed container create, network create, container restart, network connect and disconnect) are not retried either. A tar-writer failure on the Floci host (for example an unreadable source file) is reported at once instead of retried.
+
+Archive uploads that use the shared tar-copy helper retry above the transport layer, rebuilding
+the upload stream for each attempt with the same six-attempt backoff. This includes user-data
+scripts, the container CA bundle, Verdaccio's configuration, SageMaker model data and training
+inputs, Flink log configuration and application properties, and EKS audit policies, IRSA
+signing keys, the containerd certificate-directory link and the Pod Identity manifest. Only the
+upload is retried, not script execution. Daemon rejections still stop immediately, and each
+caller keeps its existing failure handling after retries are exhausted.
 
 ## Full Reference
 

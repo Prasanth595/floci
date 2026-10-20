@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.firehose;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.OpenXJsonSerDe;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.OrcSerDe;
@@ -418,9 +419,6 @@ final class S3DestinationValidator {
     }
 
     private static AwsException constraintViolations(List<String> violations) {
-        String header = violations.size() == 1
-                ? "1 validation error detected: "
-                : violations.size() + " validation errors detected: ";
-        return new AwsException("ValidationException", header + String.join("; ", violations), 400);
+        return SmithyValidationErrors.validationException(violations);
     }
 }

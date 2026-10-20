@@ -73,6 +73,12 @@ public class SecretTargetAttachmentCfnProvisioner implements CfnResourceProvisio
         return Set.of(TYPE);
     }
 
+    /** An attachment is named by its secret's ARN. */
+    @Override
+    public boolean takesParentPhysicalId(String resourceType) {
+        return TYPE.equals(resourceType);
+    }
+
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         requireSupported(r.getResourceType());

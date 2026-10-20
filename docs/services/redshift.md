@@ -29,7 +29,7 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `DescribeClusterParameters` | Return the parameters of a group, with any values set by `ModifyClusterParameterGroup` |
 | `ModifyClusterParameterGroup` | Update parameter values on a group |
 | `DeleteClusterParameterGroup` | Remove a parameter group |
-| `CreateTags` | Add or overwrite tags on a cluster, snapshot, subnet group, parameter group or snapshot copy grant |
+| `CreateTags` | Add or overwrite tags on a cluster, snapshot, subnet group, parameter group, snapshot copy grant or snapshot schedule |
 | `DeleteTags` | Remove tags by key from a resource |
 | `DescribeTags` | List tagged resources and their tags |
 | `CreateClusterSubnetGroup` | Register a cluster subnet group (metadata only) |
@@ -42,6 +42,14 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `CreateSnapshotCopyGrant` | Register a snapshot copy grant, defaulting `KmsKeyId` to the AWS-managed Redshift key. `SnapshotCopyGrantName` must be 1-63 characters, start with a lowercase letter, and contain only lowercase letters, digits and non-consecutive hyphens |
 | `DescribeSnapshotCopyGrants` | List snapshot copy grants, optionally filtered by name, paged with `MaxRecords` and `Marker` |
 | `DeleteSnapshotCopyGrant` | Remove a snapshot copy grant |
+| `EnableSnapshotCopy` | Record cross-region snapshot copy on a cluster (`RetentionPeriod` defaults to 7, `ManualSnapshotRetentionPeriod` to -1); `DescribeClusters` then reports `ClusterSnapshotCopyStatus`. A `DestinationRegion` that is not an AWS region is refused with `UnknownSnapshotCopyRegionFault`. No snapshot is copied |
+| `DisableSnapshotCopy` | Clear a cluster's snapshot copy configuration |
+| `ModifySnapshotCopyRetentionPeriod` | Change the automated (or, with `Manual`, the manual) snapshot copy retention period |
+| `CreateSnapshotSchedule` | Store a snapshot schedule of `rate(...)` / `cron(...)` definitions with optional tags; a `ScheduleIdentifier` other than letters, digits and hyphens is refused with `InvalidParameterValue`. No snapshots are taken on it |
+| `ModifySnapshotSchedule` | Replace a schedule's definitions |
+| `DescribeSnapshotSchedules` | List schedules filtered by `ScheduleIdentifier`, `ClusterIdentifier`, `TagKeys` and `TagValues`, paged with `MaxRecords` and `Marker`, with their associated clusters |
+| `DeleteSnapshotSchedule` | Remove a schedule; refused with `InvalidClusterSnapshotScheduleState` while a cluster uses it |
+| `ModifyClusterSnapshotSchedule` | Associate a cluster with a schedule, or disassociate it with `DisassociateSchedule` |
 | `ModifyCluster` | Update node type, parameter group, security groups, Multi-AZ flag, or the master password |
 | `DescribeClusterVersions` | Return the single emulated engine version and its parameter group family |
 | `DescribeOrderableClusterOptions` | Return the static node types and cluster types, optionally filtered by `NodeType` or `ClusterVersion` |
@@ -329,6 +337,46 @@ Schemas created without a matching Glue database retain the legacy Phase 1 path 
 Its single-table query restrictions still apply. PostgreSQL materialization approximates Spectrum
 execution and does not reproduce AWS distributed planning or a cross-service transaction snapshot.
 
+### Glue-backed external table lifecycle
+
+Glue-backed schemas support these statements through the Simple Query protocol, JDBC Extended
+Query, and the Redshift Data API:
+
+```sql
+ALTER TABLE lake.events ADD IF NOT EXISTS
+PARTITION (dt='2026-10-17') LOCATION 's3://analytics/events/dt=2026-10-17/';
+
+DROP TABLE IF EXISTS lake.events;
+DROP SCHEMA IF EXISTS lake CASCADE;
+```
+
+`ADD PARTITION` registers partitions in Glue, preserves the declared partition-key order, refreshes
+`svv_external_partitions`, and invalidates cached rows. Multiple partition clauses are supported.
+The entire partition list is validated before registration. A duplicate partition fails unless
+`IF NOT EXISTS` is specified; that clause keeps the existing partition location unchanged.
+If registration or metadata refresh fails, Floci attempts to remove only the partitions created
+by that statement. A failed cleanup is logged while the original error remains the response.
+
+`DROP TABLE` removes the Glue table and its partitions, drops any materialized PostgreSQL table,
+and refreshes the external catalog views. The default `RESTRICT` preserves the Glue definition
+if a local view depends on its materialized table; `CASCADE` also drops those dependent objects.
+No S3 objects are deleted. `IF EXISTS` also removes a stale materialization if the Glue table
+has already been deleted.
+
+`DROP SCHEMA` unregisters the local external schema and clears its materializations and catalog
+view rows. It preserves the Glue database, Glue tables and partitions, and S3 objects. The default
+`RESTRICT` refuses a schema containing Glue tables, including tables that have never been queried.
+If the Glue database was already deleted, the remaining local schema can still be dropped.
+`CASCADE` removes the local schema and its dependent objects. `DROP EXTERNAL DATABASE` and
+multi-object DROP statements are outside this implementation.
+
+Run these catalog changes outside explicit transactions and Data API batches. Floci rejects them
+with SQLSTATE `25001` before changing Glue or PostgreSQL because it cannot roll back Glue changes
+with a PostgreSQL transaction. The schema transaction restriction is an emulator limitation.
+Glue and PostgreSQL updates do not form a distributed transaction: an infrastructure failure after
+one store changes can require retrying the command. The legacy Phase 1 catalog does not gain these
+lifecycle operations.
+
 ### COPY from S3
 
 `COPY <table> [(<columns>)] FROM 's3://<bucket>/<keyOrPrefix>' [options]` sent over the Simple
@@ -499,7 +547,7 @@ These views expose the documented Redshift column names, types, and ordering map
 - Multi-node clusters: `NodeType` and `NumberOfNodes` are stored as metadata; every cluster is a single PostgreSQL container.
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.
-- Resize, pause/resume, IAM authentication, snapshot schedules, and cross-region snapshot copy.
+- Resize, pause/resume, and IAM authentication. Snapshot schedules and cross-region snapshot copy are stored and reported, but no snapshot is taken on a schedule or copied to another region.
 - `IAM_ROLE default` and cross-account role ARNs are not supported for COPY or UNLOAD.
 - The auth proxy validates the master user's password and any live `GetClusterCredentials` credential. Other non-master users pass straight through to PostgreSQL, which remains the authority for their credentials.
 - A cluster using `ManageMasterPassword` keeps its generated password in sync with the

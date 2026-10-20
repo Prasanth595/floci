@@ -1,12 +1,10 @@
 package io.github.hectorvent.floci.services.cognito.verification;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
@@ -90,9 +88,13 @@ public final class VerificationCodeService {
             }
         }
 
-        String code = String.format("%06d", random.nextInt(1_000_000));
+        // Measured on AWS: the code of an email sign-in (USER_AUTH's EMAIL_OTP) has eight digits,
+        // a sign-up, forgotten-password or attribute verification code six.
+        String code = purpose == VerificationCode.Purpose.EMAIL_OTP
+            ? String.format("%08d", random.nextInt(100_000_000))
+            : String.format("%06d", random.nextInt(1_000_000));
         String salt = HexFormat.of().formatHex(randomBytes(SALT_BYTES));
-        String hash = sha256(code + salt);
+        String hash = Digests.sha256Hex(code + salt);
         Instant now = clock.instant();
 
         VerificationCode vc = new VerificationCode(
@@ -150,7 +152,7 @@ public final class VerificationCodeService {
                 "Invalid verification code provided, please try again");
         }
 
-        String expectedHash = sha256(code + vc.getSalt());
+        String expectedHash = Digests.sha256Hex(code + vc.getSalt());
         if (!constantTimeEquals(expectedHash, vc.getCodeHash())) {
             vc.decrementAttempts();
             if (vc.getAttemptsRemaining() <= 0) {
@@ -220,15 +222,6 @@ public final class VerificationCodeService {
         byte[] b = new byte[n];
         random.nextBytes(b);
         return b;
-    }
-
-    private String sha256(String s) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(md.digest(s.getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
     }
 
     private boolean constantTimeEquals(String a, String b) {

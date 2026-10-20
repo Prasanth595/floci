@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
+import io.github.hectorvent.floci.services.rds.export.RdsExportTaskService;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
@@ -19,6 +20,8 @@ import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.rds.model.EventSubscription;
+import io.github.hectorvent.floci.services.rds.model.ExportTask;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -32,6 +35,7 @@ import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -45,6 +49,7 @@ import static org.mockito.Mockito.*;
 class RdsQueryHandlerTest {
 
     private RdsService service;
+    private RdsExportTaskService exportTaskService;
     private DocDbQueryHandler docDbHandler;
     private NeptuneQueryHandler neptuneHandler;
     private RdsQueryHandler handler;
@@ -60,7 +65,123 @@ class RdsQueryHandlerTest {
         when(config.defaultAvailabilityZone()).thenReturn("us-east-1a");
         docDbHandler = mock(DocDbQueryHandler.class);
         neptuneHandler = mock(NeptuneQueryHandler.class);
-        handler = new RdsQueryHandler(service, config, docDbHandler, neptuneHandler);
+        exportTaskService = mock(RdsExportTaskService.class);
+        handler = new RdsQueryHandler(service, exportTaskService, config, docDbHandler, neptuneHandler);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CreateEventSubscription", "ModifyEventSubscription"})
+    void eventSubscriptionEnabledRejectsMalformedValuesBeforeServiceCalls(String action) {
+        for (String invalid : List.of("yes", "", " true ")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle("SubscriptionName", "events");
+            p.putSingle("SnsTopicArn", "arn:aws:sns:us-east-1:000000000000:events");
+            p.putSingle("Enabled", invalid);
+            Response response = handler.handle(action, p, "us-east-1");
+            assertEquals(400, response.getStatus());
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(body.contains("Enabled must be true or false."));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void createEventSubscriptionEnabledPreservesValuesAndOmission(String value) {
+        Boolean expected = value == null ? null : Boolean.valueOf(value);
+        when(service.createEventSubscription(eq("us-east-1"), eq("events"), isNull(), isNull(),
+                anyList(), anyList(), eq(expected), anyMap())).thenReturn(new EventSubscription());
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("SubscriptionName", "events");
+        if (value != null) {
+            p.putSingle("Enabled", value);
+        }
+        assertEquals(200, handler.handle("CreateEventSubscription", p, "us-east-1").getStatus());
+        verify(service).createEventSubscription(eq("us-east-1"), eq("events"), isNull(), isNull(),
+                anyList(), anyList(), eq(expected), anyMap());
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void modifyEventSubscriptionEnabledPreservesValuesAndOmission(String value) {
+        Boolean expected = value == null ? null : Boolean.valueOf(value);
+        when(service.modifyEventSubscription(eq("us-east-1"), eq("events"), isNull(), isNull(),
+                anyList(), eq(expected))).thenReturn(new EventSubscription());
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("SubscriptionName", "events");
+        if (value != null) {
+            p.putSingle("Enabled", value);
+        }
+        assertEquals(200, handler.handle("ModifyEventSubscription", p, "us-east-1").getStatus());
+        verify(service).modifyEventSubscription(eq("us-east-1"), eq("events"), isNull(), isNull(),
+                anyList(), eq(expected));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "ResetDBParameterGroup, DBParameterGroupName",
+            "ResetDBClusterParameterGroup, DBClusterParameterGroupName"
+    })
+    void parameterResetRejectsMalformedBooleanBeforeServiceCalls(String action, String nameParameter) {
+        DbParameterGroup instanceGroup = new DbParameterGroup();
+        instanceGroup.setDbParameterGroupName("custom-group");
+        DbClusterParameterGroup clusterGroup = new DbClusterParameterGroup();
+        clusterGroup.setDbClusterParameterGroupName("custom-group");
+        when(service.resetDbParameterGroup(any(), anyBoolean(), anyList(), any())).thenReturn(instanceGroup);
+        when(service.resetDbClusterParameterGroup(any(), anyBoolean(), anyList(), any())).thenReturn(clusterGroup);
+        for (String invalid : List.of("yes", "", "1", "0", " true", "false ", "not-a-boolean")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle(nameParameter, "custom-group");
+            p.putSingle("ResetAllParameters", invalid);
+            p.putSingle("Parameters.Parameter.1.ParameterName", "max_connections");
+
+            Response response = handler.handle(action, p, "us-west-2");
+
+            assertEquals(400, response.getStatus(), action + ": " + invalid);
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(body.contains("ResetAllParameters must be true or false."));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void parameterResetPreservesBooleanValuesAndOmission(String value) {
+        boolean resetAll = Boolean.parseBoolean(value);
+        DbParameterGroup instanceGroup = new DbParameterGroup();
+        instanceGroup.setDbParameterGroupName("custom-group");
+        DbClusterParameterGroup clusterGroup = new DbClusterParameterGroup();
+        clusterGroup.setDbClusterParameterGroupName("custom-group");
+        List<String> names = resetAll ? List.of() : List.of("max_connections");
+        when(service.resetDbParameterGroup("custom-group", resetAll, names, "us-west-2"))
+                .thenReturn(instanceGroup);
+        when(service.resetDbClusterParameterGroup("custom-group", resetAll, names, "us-west-2"))
+                .thenReturn(clusterGroup);
+        for (String nameParameter : List.of("DBParameterGroupName", "DBClusterParameterGroupName")) {
+            String action = nameParameter.equals("DBParameterGroupName")
+                    ? "ResetDBParameterGroup" : "ResetDBClusterParameterGroup";
+            MultivaluedMap<String, String> p = params();
+            p.putSingle(nameParameter, "custom-group");
+            if (value != null) {
+                p.putSingle("ResetAllParameters", value);
+            }
+            if (!resetAll) {
+                p.putSingle("Parameters.Parameter.1.ParameterName", "max_connections");
+            }
+
+            Response response = handler.handle(action, p, "us-west-2");
+
+            assertEquals(200, response.getStatus());
+            assertTrue(((String) response.getEntity()).contains("<" + nameParameter
+                    + ">custom-group</" + nameParameter + ">"));
+        }
+        verify(service).resetDbParameterGroup("custom-group", resetAll, names, "us-west-2");
+        verify(service).resetDbClusterParameterGroup("custom-group", resetAll, names, "us-west-2");
     }
 
     @ParameterizedTest
@@ -171,7 +292,7 @@ class RdsQueryHandlerTest {
     void describeEvents_reconcilesOnlyTheRequestedDbInstance() {
         DbInstance requested = makeInstance("requested");
         when(service.listDbInstances("requested", null)).thenReturn(List.of(requested));
-        when(service.describeEvents("requested", "db-instance", null, null, null))
+        when(service.describeEvents(null, "requested", "db-instance", null, null, null))
                 .thenReturn(List.of());
         MultivaluedMap<String, String> p = params();
         p.add("SourceIdentifier", "requested");
@@ -187,7 +308,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void describeEvents_doesNotReconcileInstancesForAnotherSourceType() {
-        when(service.describeEvents("cluster", "db-cluster", null, null, null))
+        when(service.describeEvents(null, "cluster", "db-cluster", null, null, null))
                 .thenReturn(List.of());
         MultivaluedMap<String, String> p = params();
         p.add("SourceIdentifier", "cluster");
@@ -617,6 +738,29 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void createDbClusterDeletesTheClusterWhenItsRolesAreRefused() {
+        DbCluster cluster = makeCluster("mycluster");
+        when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), anyBoolean()))
+                .thenReturn(cluster);
+        // Another request associated the role between the create and the roles being added.
+        when(service.addRolesToNewDbCluster(any(), eq("mycluster"), anyList()))
+                .thenThrow(new AwsException("DBClusterRoleAlreadyExists", "already associated", 400));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "mycluster");
+        p.add("Engine", "aurora-postgresql");
+        p.add("MasterUsername", "admin");
+        p.add("AssociatedRoles.DBClusterAssociatedRole.1.RoleArn", "arn:aws:iam::000000000000:role/s3");
+        Response response = handler.handle("CreateDBCluster", p);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>DBClusterRoleAlreadyExists</Code>"));
+        verify(service).deleteDbCluster(eq("mycluster"), any());
+    }
+
+    @Test
     void modifyDbClusterPassesManagedMasterUserSecretOptions() {
         DbCluster cluster = makeCluster("mycluster");
         when(service.modifyDbCluster(eq("mycluster"), isNull(), isNull(),
@@ -871,6 +1015,22 @@ class RdsQueryHandlerTest {
         assertEquals(200, response.getStatus());
         assertTrue(body.contains("<OrderableDBInstanceOption>"));
         assertTrue(body.contains("<DBInstanceClass>db.t4g.medium</DBInstanceClass>"));
+    }
+
+    @Test
+    void describeOrderableDbInstanceOptions_auroraMysqlReportsGeneralPublicLicense() {
+        when(service.describeOrderableDbInstanceOptions("aurora-mysql", null, null))
+                .thenReturn(List.of(Map.of(
+                        "engine", "aurora-mysql",
+                        "engineVersion", "8.0.mysql_aurora.3.05.2",
+                        "dbInstanceClass", "db.r5.large")));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Engine", "aurora-mysql");
+        String body = (String) handler.handle("DescribeOrderableDBInstanceOptions", p).getEntity();
+
+        assertTrue(body.contains("<LicenseModel>general-public-license</LicenseModel>"));
+        assertFalse(body.contains("postgresql-license"));
     }
 
     // ──────────────────────────── DBParameterGroups XML tag ──────────────────────
@@ -1592,6 +1752,58 @@ class RdsQueryHandlerTest {
                 eq(1800), eq(false), eq(Map.of()), eq("us-west-2"), isNull(), isNull());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"RequireTLS", "DebugLogging"})
+    void createDbProxyRejectsMalformedBooleanFlagsBeforeCallingService(String parameter) {
+        when(service.createDbProxy(any(), any(), anyBoolean(), anyBoolean(), any(), any(),
+                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(), any(), any()))
+                .thenReturn(new DbProxy());
+        for (String invalid : List.of("yes", "", "1", "0", " true", "false ", "not-a-boolean")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle("DBProxyName", "app-proxy");
+            p.putSingle("EngineFamily", "POSTGRESQL");
+            p.putSingle(parameter, invalid);
+
+            Response response = handler.handle("CreateDBProxy", p, "us-west-2");
+
+            assertEquals(400, response.getStatus(), parameter + "=" + invalid);
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(body.contains(parameter + " must be true or false."));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void createDbProxyBooleanFlagsPreserveValuesAndDefaults(String value) {
+        boolean enabled = Boolean.parseBoolean(value);
+        DbProxy proxy = new DbProxy();
+        proxy.setRequireTls(enabled);
+        proxy.setDebugLogging(enabled);
+        when(service.createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(enabled), eq(false),
+                isNull(), isNull(), eq(List.of()), eq(List.of()), eq(List.of()), eq(1800),
+                eq(enabled), eq(Map.of()), eq("us-west-2"), isNull(), isNull())).thenReturn(proxy);
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBProxyName", "app-proxy");
+        p.putSingle("EngineFamily", "POSTGRESQL");
+        if (value != null) {
+            p.putSingle("RequireTLS", value);
+            p.putSingle("DebugLogging", value);
+        }
+
+        Response response = handler.handle("CreateDBProxy", p, "us-west-2");
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<RequireTLS>" + enabled + "</RequireTLS>"));
+        assertTrue(body.contains("<DebugLogging>" + enabled + "</DebugLogging>"));
+        verify(service).createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(enabled), eq(false),
+                isNull(), isNull(), eq(List.of()), eq(List.of()), eq(List.of()), eq(1800),
+                eq(enabled), eq(Map.of()), eq("us-west-2"), isNull(), isNull());
+    }
+
     @Test
     void createDbProxyRejectsInvalidNetworkTypeValuesBeforeCallingService() {
         // TargetConnectionNetworkType has no DUAL value on real AWS (only EndpointNetworkType does).
@@ -2168,6 +2380,51 @@ class RdsQueryHandlerTest {
         verify(service, never()).startDbCluster(any(), any());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"yes", "", "not-a-boolean"})
+    void copyClusterSnapshotRejectsMalformedCopyTagsBeforeServiceCall(String value) {
+        DbClusterSnapshot snapshot = new DbClusterSnapshot();
+        snapshot.setDbClusterSnapshotIdentifier("target");
+        when(service.copyDbClusterSnapshot(anyString(), anyString(), anyBoolean(), anyMap(), isNull()))
+                .thenReturn(snapshot);
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("SourceDBClusterSnapshotIdentifier", "source");
+        p.putSingle("TargetDBClusterSnapshotIdentifier", "target");
+        p.putSingle("CopyTags", value);
+
+        Response response = handler.handle("CopyDBClusterSnapshot", p);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+        assertTrue(((String) response.getEntity()).contains("CopyTags must be true or false."));
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void copyClusterSnapshotPreservesCopyTagsValuesAndDefault(String value) {
+        DbClusterSnapshot snapshot = new DbClusterSnapshot();
+        snapshot.setDbClusterSnapshotIdentifier("target");
+        boolean copyTags = Boolean.parseBoolean(value);
+        when(service.copyDbClusterSnapshot(eq("source"), eq("target"), eq(copyTags),
+                eq(Map.of("owner", "team")), isNull())).thenReturn(snapshot);
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("SourceDBClusterSnapshotIdentifier", "source");
+        p.putSingle("TargetDBClusterSnapshotIdentifier", "target");
+        p.putSingle("Tags.Tag.1.Key", "owner");
+        p.putSingle("Tags.Tag.1.Value", "team");
+        if (value != null) {
+            p.putSingle("CopyTags", value);
+        }
+
+        Response response = handler.handle("CopyDBClusterSnapshot", p);
+
+        assertEquals(200, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<DBClusterSnapshotIdentifier>target"));
+        verify(service).copyDbClusterSnapshot("source", "target", copyTags, Map.of("owner", "team"), null);
+    }
+
     @Test
     void clusterSnapshotActions_dispatchAndRenderTheClusterSnapshot() {
         DbClusterSnapshot snapshot = new DbClusterSnapshot();
@@ -2256,10 +2513,122 @@ class RdsQueryHandlerTest {
                 eq(List.of("222222222222")), eq(List.of("111111111111")), isNull());
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "RestoreDBInstanceFromDBSnapshot, MultiAZ",
+            "RestoreDBInstanceFromDBSnapshot, EnableIAMDatabaseAuthentication",
+            "RestoreDBClusterFromSnapshot, EnableIAMDatabaseAuthentication",
+            "RestoreDBClusterToPointInTime, EnableIAMDatabaseAuthentication"
+    })
+    void restoreBooleanFlagsRejectMalformedValuesBeforeServiceCalls(String action, String parameter) {
+        when(service.restoreDbInstanceFromDbSnapshot(any(), any(), any(), any(), anyBoolean(),
+                any(), any(), any(), any(), any(), any())).thenReturn(makeInstance("restored"));
+        when(service.restoreDbClusterFromSnapshot(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any())).thenReturn(makeCluster("restored"));
+        when(service.restoreDbClusterToPointInTime(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any())).thenReturn(makeCluster("restored"));
+        for (String invalid : List.of("yes", "", "not-a-boolean")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle("DBInstanceIdentifier", "restored");
+            p.putSingle("DBSnapshotIdentifier", "source");
+            p.putSingle("DBClusterIdentifier", "restored");
+            p.putSingle("SnapshotIdentifier", "source");
+            p.putSingle("SourceDBClusterIdentifier", "source");
+            p.putSingle("Engine", "aurora-postgresql");
+            p.putSingle("UseLatestRestorableTime", "true");
+            p.putSingle(parameter, invalid);
+
+            Response response = handler.handle(action, p);
+
+            assertEquals(400, response.getStatus());
+            assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(((String) response.getEntity()).contains(parameter + " must be true or false."));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void restoreInstanceSnapshotPreservesMultiAzValuesAndDefault(String value) {
+        boolean enabled = Boolean.parseBoolean(value);
+        when(service.restoreDbInstanceFromDbSnapshot(eq("restored"), eq("source"), isNull(), isNull(),
+                eq(enabled), isNull(), eq(List.of()), eq(Map.of()), isNull(), isNull(), isNull()))
+                .thenReturn(makeInstance("restored"));
+        when(service.restoreDbInstanceFromDbSnapshot(eq("restored"), eq("source"), isNull(), isNull(),
+                eq(enabled), isNull(), eq(List.of()), eq(Map.of()), isNull(), eq(5433), isNull()))
+                .thenReturn(makeInstance("restored"));
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBInstanceIdentifier", "restored");
+        p.putSingle("DBSnapshotIdentifier", "source");
+        if (value != null) {
+            p.putSingle("MultiAZ", value);
+        }
+
+        assertEquals(200, handler.handle("RestoreDBInstanceFromDBSnapshot", p).getStatus());
+        verify(service).restoreDbInstanceFromDbSnapshot("restored", "source", null, null,
+                enabled, null, List.of(), Map.of(), null, null, null);
+        p.putSingle("Port", "5433");
+        assertEquals(200, handler.handle("RestoreDBInstanceFromDBSnapshot", p).getStatus());
+        verify(service).restoreDbInstanceFromDbSnapshot("restored", "source", null, null,
+                enabled, null, List.of(), Map.of(), null, 5433, null);
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void restoreInstanceSnapshotForwardsIamFlagWithAndWithoutPort(String value) {
+        Boolean enabled = value == null ? null : Boolean.parseBoolean(value);
+        when(service.restoreDbInstanceFromDbSnapshot(any(), any(), any(), any(), anyBoolean(),
+                any(), any(), any(), any(), any(), eq(enabled))).thenReturn(makeInstance("restored"));
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBInstanceIdentifier", "restored");
+        p.putSingle("DBSnapshotIdentifier", "source");
+        if (value != null) {
+            p.putSingle("EnableIAMDatabaseAuthentication", value);
+        }
+        assertEquals(200, handler.handle("RestoreDBInstanceFromDBSnapshot", p).getStatus());
+        verify(service).restoreDbInstanceFromDbSnapshot("restored", "source", null, null,
+                false, null, List.of(), Map.of(), null, null, enabled);
+        p.putSingle("Port", "5433");
+        assertEquals(200, handler.handle("RestoreDBInstanceFromDBSnapshot", p).getStatus());
+        verify(service).restoreDbInstanceFromDbSnapshot("restored", "source", null, null,
+                false, null, List.of(), Map.of(), null, 5433, enabled);
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void restoreClusterActionsPreserveIamValuesAndOmission(String value) {
+        Boolean enabled = value == null ? null : Boolean.parseBoolean(value);
+        when(service.restoreDbClusterFromSnapshot(eq("restored"), eq("snapshot"), eq("aurora-postgresql"),
+                isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), eq(enabled), isNull(),
+                eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
+        when(service.restoreDbClusterToPointInTime(eq("restored"), eq("source"), isNull(), isNull(),
+                isNull(), eq(true), isNull(), isNull(), isNull(), eq(enabled), isNull(),
+                eq(Map.of()), isNull())).thenReturn(makeCluster("restored"));
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBClusterIdentifier", "restored");
+        p.putSingle("SnapshotIdentifier", "snapshot");
+        p.putSingle("Engine", "aurora-postgresql");
+        if (value != null) {
+            p.putSingle("EnableIAMDatabaseAuthentication", value);
+        }
+
+        assertEquals(200, handler.handle("RestoreDBClusterFromSnapshot", p).getStatus());
+        verify(service).restoreDbClusterFromSnapshot("restored", "snapshot", "aurora-postgresql",
+                null, null, null, null, null, null, enabled, null, Map.of(), null);
+        p.putSingle("SourceDBClusterIdentifier", "source");
+        p.putSingle("UseLatestRestorableTime", "true");
+        assertEquals(200, handler.handle("RestoreDBClusterToPointInTime", p).getStatus());
+        verify(service).restoreDbClusterToPointInTime("restored", "source", null, null, null, true,
+                null, null, null, enabled, null, Map.of(), null);
+    }
+
     @Test
     void restoreDbInstanceFromDbSnapshot_success() {
         DbInstance instance = makeInstance("mydb");
-        when(service.restoreDbInstanceFromDbSnapshot(eq("mydb"), eq("mysnap"), eq("db.t3.large"), eq("us-east-1a"), eq(true), eq("my-subnets"), eq(List.of("sg-123")), eq(Map.of("Env", "Prod")), isNull()))
+        when(service.restoreDbInstanceFromDbSnapshot(eq("mydb"), eq("mysnap"), eq("db.t3.large"), eq("us-east-1a"), eq(true), eq("my-subnets"), eq(List.of("sg-123")), eq(Map.of("Env", "Prod")), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -2669,6 +3038,107 @@ class RdsQueryHandlerTest {
         OptionGroup group = new OptionGroup(name, "mysql", "8.0", "my og");
         group.setOptionGroupArn("arn:aws:rds:us-east-1:123456789012:og:" + name);
         return group;
+    }
+
+    @Test
+    void startExportTask_passesTheRequestAndAnswersWithTheTask() {
+        ExportTask task = exportTask("appdb-export", ExportTask.STATUS_STARTING);
+        when(exportTaskService.startExportTask(eq("appdb-export"), eq(task.getSourceArn()), eq("exports"),
+                eq("items/rds"), eq("arn:aws:iam::000000000000:role/export"), eq("alias/export"),
+                eq(List.of("appdb.public.items", "appdb.audit")), eq("us-east-1"))).thenReturn(task);
+        MultivaluedMap<String, String> params = params();
+        params.add("ExportTaskIdentifier", "appdb-export");
+        params.add("SourceArn", task.getSourceArn());
+        params.add("S3BucketName", "exports");
+        params.add("S3Prefix", "items/rds");
+        params.add("IamRoleArn", "arn:aws:iam::000000000000:role/export");
+        params.add("KmsKeyId", "alias/export");
+        params.add("ExportOnly.member.2", "appdb.audit");
+        params.add("ExportOnly.member.1", "appdb.public.items");
+
+        String body = (String) handler.handle("StartExportTask", params, "us-east-1").getEntity();
+
+        assertTrue(body.contains("<StartExportTaskResult><ExportTaskIdentifier>appdb-export</ExportTaskIdentifier>"), body);
+        assertTrue(body.contains("<ExportOnly><member>appdb.public.items</member></ExportOnly>"), body);
+        assertTrue(body.contains("<SourceType>SNAPSHOT</SourceType>"), body);
+        assertTrue(body.contains("<SnapshotTime>2026-10-13T08:00:00Z</SnapshotTime>"), body);
+        assertTrue(body.contains("<Status>STARTING</Status>"), body);
+        assertTrue(body.contains("<PercentProgress>0</PercentProgress>"), body);
+        assertTrue(body.contains("<TotalExtractedDataInGB>0</TotalExtractedDataInGB>"), body);
+        assertFalse(body.contains("<TaskEndTime>"), body);
+    }
+
+    @Test
+    void startExportTask_requiresTheRoleAndTheKey() {
+        MultivaluedMap<String, String> params = params();
+        params.add("ExportTaskIdentifier", "appdb-export");
+        params.add("SourceArn", "arn:aws:rds:us-east-1:000000000000:snapshot:snap");
+        params.add("S3BucketName", "exports");
+
+        String body = (String) handler.handle("StartExportTask", params, "us-east-1").getEntity();
+
+        assertTrue(body.contains("IamRoleArn"), body);
+        verifyNoInteractions(exportTaskService);
+    }
+
+    @Test
+    void describeExportTasks_listsEachTaskAndPassesFilters() {
+        when(exportTaskService.describeExportTasks(eq(null), eq(null), eq("SNAPSHOT"), any(), eq("us-east-1")))
+                .thenReturn(List.of(exportTask("one", ExportTask.STATUS_COMPLETE),
+                        exportTask("two", ExportTask.STATUS_IN_PROGRESS)));
+        MultivaluedMap<String, String> params = params();
+        params.add("SourceType", "SNAPSHOT");
+        params.add("Filters.Filter.1.Name", "status");
+        params.add("Filters.Filter.1.Values.Value.1", "complete");
+
+        String body = (String) handler.handle("DescribeExportTasks", params, "us-east-1").getEntity();
+
+        assertTrue(body.contains("<ExportTasks><ExportTask><ExportTaskIdentifier>one</ExportTaskIdentifier>"), body);
+        assertTrue(body.contains("<ExportTask><ExportTaskIdentifier>two</ExportTaskIdentifier>"), body);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, List<String>>> filters = ArgumentCaptor.forClass(Map.class);
+        verify(exportTaskService).describeExportTasks(eq(null), eq(null), eq("SNAPSHOT"), filters.capture(),
+                eq("us-east-1"));
+        assertEquals(Map.of("status", List.of("complete")), filters.getValue());
+    }
+
+    @Test
+    void cancelExportTask_answersCanceling() {
+        when(exportTaskService.cancelExportTask("appdb-export", "us-east-1"))
+                .thenReturn(exportTask("appdb-export", ExportTask.STATUS_CANCELING));
+        MultivaluedMap<String, String> params = params();
+        params.add("ExportTaskIdentifier", "appdb-export");
+
+        String body = (String) handler.handle("CancelExportTask", params, "us-east-1").getEntity();
+
+        assertTrue(body.contains("<CancelExportTaskResult>"), body);
+        assertTrue(body.contains("<Status>CANCELING</Status>"), body);
+    }
+
+    @Test
+    void exportTaskErrorsKeepTheirRdsCode() {
+        when(exportTaskService.cancelExportTask("missing", "us-east-1")).thenThrow(new AwsException(
+                "ExportTaskNotFound", "The export task with the ID missing doesn't exist.", 404));
+        MultivaluedMap<String, String> params = params();
+        params.add("ExportTaskIdentifier", "missing");
+
+        Response response = handler.handle("CancelExportTask", params, "us-east-1");
+
+        assertEquals(404, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>ExportTaskNotFound</Code>"));
+    }
+
+    private static ExportTask exportTask(String id, String status) {
+        ExportTask task = new ExportTask();
+        task.setExportTaskIdentifier(id);
+        task.setSourceArn("arn:aws:rds:us-east-1:000000000000:snapshot:appdb-snap");
+        task.setSourceType(ExportTask.SOURCE_TYPE_SNAPSHOT);
+        task.setExportOnly(List.of("appdb.public.items"));
+        task.setSnapshotTime(Instant.parse("2026-10-13T08:00:00Z"));
+        task.setTaskStartTime(Instant.parse("2026-10-13T09:00:00Z"));
+        task.setS3Bucket("exports");
+        task.setStatus(status);
+        return task;
     }
 
     private static MultivaluedMap<String, String> params() {

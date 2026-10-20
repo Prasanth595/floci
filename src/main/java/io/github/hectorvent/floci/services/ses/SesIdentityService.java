@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.route53.Route53Service;
@@ -45,6 +46,8 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class SesIdentityService implements SesTaggable {
 
+    public static final String DKIM_SIGNING_HOSTED_ZONE = "dkim.amazonses.com";
+
     private static final Logger LOG = Logger.getLogger(SesIdentityService.class);
 
     private static final Duration DKIM_LOOKUP_CACHE_TTL = Duration.ofSeconds(5);
@@ -55,7 +58,8 @@ public class SesIdentityService implements SesTaggable {
     private final Clock clock;
     private final ConcurrentHashMap<String, DkimLookupCacheEntry> dkimLookupCache = new ConcurrentHashMap<>();
     // Serializes every identity check-then-put (v2 CreateEmailIdentity, the v1 verify family, the
-    // CVET pending registration) so concurrent creators can't lose each other's writes
+    // CVET pending registration, and the notification settings, which SES also changes on its own
+    // when it cannot publish to a topic) so concurrent writers can't lose each other's writes
     // (InMemoryStorage only makes each individual operation thread-safe).
     private final Object identityCreationLock = new Object();
 
@@ -170,7 +174,12 @@ public class SesIdentityService implements SesTaggable {
         return refreshIdentityState(identity, region);
     }
 
-    /** True when the address itself or its parent domain is a verified identity. */
+    /**
+     * True when the address itself, its domain or one of that domain's parents is a verified
+     * identity: "if you create and verify an identity for example.com, you don't need to create
+     * separate identities for a.example.com, a.b.example.com, user@example.com, user@a.example.com".
+     * The walk stops before a bare top-level domain.
+     */
     public boolean isVerifiedSender(String fromEmail, String region) {
         if (fromEmail == null) {
             return false;
@@ -179,8 +188,20 @@ public class SesIdentityService implements SesTaggable {
             return true;
         }
         int at = fromEmail.indexOf('@');
-        return at >= 0 && at < fromEmail.length() - 1
-                && isIdentityVerified(fromEmail.substring(at + 1), region);
+        if (at < 0 || at == fromEmail.length() - 1) {
+            return false;
+        }
+        String domain = fromEmail.substring(at + 1);
+        while (true) {
+            if (isIdentityVerified(domain, region)) {
+                return true;
+            }
+            int dot = domain.indexOf('.');
+            if (dot < 0 || domain.indexOf('.', dot + 1) < 0) {
+                return false;
+            }
+            domain = domain.substring(dot + 1);
+        }
     }
 
     boolean isIdentityVerified(String identity, String region) {
@@ -330,9 +351,9 @@ public class SesIdentityService implements SesTaggable {
         if (behaviorOnMxFailure != null) {
             if (!"UseDefaultValue".equals(behaviorOnMxFailure)
                     && !"RejectMessage".equals(behaviorOnMxFailure)) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value at 'behaviorOnMXFailure' failed to satisfy "
-                                + "constraint: Member must satisfy enum value set: [RejectMessage, UseDefaultValue]", 400);
+                throw SmithyValidationErrors.validationError(
+                        "Value at 'behaviorOnMXFailure' failed to satisfy "
+                                + "constraint: Member must satisfy enum value set: [RejectMessage, UseDefaultValue]");
             }
             normalizedBehavior = behaviorOnMxFailure;
         }
@@ -380,15 +401,49 @@ public class SesIdentityService implements SesTaggable {
 
     public void setIdentityNotificationTopic(String identityValue, String notificationType,
                                              String snsTopic, String region) {
-        Identity identity = identityStore.get(identityKey(region, identityValue))
-                .orElseThrow(() -> new AwsException("InvalidParameterValue",
-                        "Identity does not exist: " + identityValue, 400));
-        if (snsTopic != null && !snsTopic.isBlank()) {
-            identity.getNotificationAttributes().put(notificationType + "Topic", snsTopic);
-        } else {
-            identity.getNotificationAttributes().remove(notificationType + "Topic");
+        synchronized (identityCreationLock) {
+            Identity identity = identityStore.get(identityKey(region, identityValue))
+                    .orElseThrow(() -> new AwsException("InvalidParameterValue",
+                            "Identity does not exist: " + identityValue, 400));
+            if (snsTopic != null && !snsTopic.isBlank()) {
+                identity.getNotificationAttributes().put(notificationType + "Topic", snsTopic);
+            } else {
+                identity.getNotificationAttributes().remove(notificationType + "Topic");
+            }
+            identityStore.put(identityKey(region, identityValue), identity);
         }
-        identityStore.put(identityKey(region, identityValue), identity);
+    }
+
+    /**
+     * What SES does when it cannot publish an identity's notification because the topic is gone or no
+     * longer lets SES publish to it: it "removes the configuration for that topic if it's been
+     * configured for bounces or complaints", leaves a delivery setting in place, and turns email
+     * feedback forwarding back on (SES Developer Guide, "Configuring Amazon SNS notifications for
+     * Amazon SES"). So every bounce or complaint setting of the identity that names {@code topicArn}
+     * goes, whichever notification failed, while one changed to another topic since is kept. SES also
+     * emails the owner about the change, which Floci does not send.
+     */
+    public void dropRefusedNotificationTopic(String identityValue, String topicArn, String region) {
+        String key = identityKey(region, identityValue);
+        synchronized (identityCreationLock) {
+            Identity identity = identityStore.get(key).orElse(null);
+            if (identity == null) {
+                return;
+            }
+            boolean removed = false;
+            for (String type : List.of("Bounce", "Complaint")) {
+                if (identity.getNotificationAttributes().remove(type + "Topic", topicArn)) {
+                    removed = true;
+                }
+            }
+            if (!removed) {
+                return;
+            }
+            identity.setFeedbackForwardingEnabled(true);
+            identityStore.put(key, identity);
+        }
+        LOG.infov("Removed topic {0}, which SES may not publish to, from the bounce and complaint settings of {1}"
+                + " and enabled feedback forwarding", topicArn, identityValue);
     }
 
     public Identity getIdentityNotificationAttributes(String identityValue, String region) {
@@ -396,12 +451,14 @@ public class SesIdentityService implements SesTaggable {
     }
 
     public void setFeedbackForwardingEnabled(String identityValue, boolean enabled, String region) {
-        Identity identity = identityStore.get(identityKey(region, identityValue))
-                .orElseThrow(() -> new AwsException("InvalidParameterValue",
-                        "Identity " + identityValue
-                                + " is invalid. Must be a verified email address or domain.", 400));
-        identity.setFeedbackForwardingEnabled(enabled);
-        identityStore.put(identityKey(region, identityValue), identity);
+        synchronized (identityCreationLock) {
+            Identity identity = identityStore.get(identityKey(region, identityValue))
+                    .orElseThrow(() -> new AwsException("InvalidParameterValue",
+                            "Identity " + identityValue
+                                    + " is invalid. Must be a verified email address or domain.", 400));
+            identity.setFeedbackForwardingEnabled(enabled);
+            identityStore.put(identityKey(region, identityValue), identity);
+        }
         LOG.infov("Updated feedback forwarding for {0}: enabled={1}", identityValue, enabled);
     }
 
@@ -412,17 +469,19 @@ public class SesIdentityService implements SesTaggable {
                     "NotificationType is required.", 400);
         }
         if (!NOTIFICATION_TYPES.contains(notificationType)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'notificationType' failed to satisfy "
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'notificationType' failed to satisfy "
                             + "constraint: Member must satisfy enum value set: "
-                            + NOTIFICATION_TYPES, 400);
+                            + NOTIFICATION_TYPES);
         }
-        Identity identity = identityStore.get(identityKey(region, identityValue))
-                .orElseThrow(() -> new AwsException("InvalidParameterValue",
-                        "Identity " + identityValue
-                                + " is invalid. It must be a verified email address or domain.", 400));
-        identity.getHeadersInNotificationsEnabled().put(notificationType, enabled);
-        identityStore.put(identityKey(region, identityValue), identity);
+        synchronized (identityCreationLock) {
+            Identity identity = identityStore.get(identityKey(region, identityValue))
+                    .orElseThrow(() -> new AwsException("InvalidParameterValue",
+                            "Identity " + identityValue
+                                    + " is invalid. It must be a verified email address or domain.", 400));
+            identity.getHeadersInNotificationsEnabled().put(notificationType, enabled);
+            identityStore.put(identityKey(region, identityValue), identity);
+        }
         LOG.infov("Updated headers-in-notifications for {0}: {1}={2}",
                 identityValue, notificationType, enabled);
     }
@@ -714,7 +773,7 @@ public class SesIdentityService implements SesTaggable {
 
     private boolean hasExpectedDkimRecord(String domain, String token) {
         String expectedName = normalizeDnsName(token + "._domainkey." + domain);
-        String expectedValue = normalizeDnsName(token + ".dkim.amazonses.com");
+        String expectedValue = normalizeDnsName(token + "." + DKIM_SIGNING_HOSTED_ZONE);
         for (HostedZone zone : route53Service.listHostedZones(null, Integer.MAX_VALUE)) {
             for (ResourceRecordSet recordSet : route53Service.listResourceRecordSets(zone.getId(), null, null,
                     Integer.MAX_VALUE)) {

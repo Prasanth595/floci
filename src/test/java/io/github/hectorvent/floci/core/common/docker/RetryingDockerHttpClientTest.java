@@ -5,11 +5,24 @@ import com.github.dockerjava.transport.DockerHttpClient.Request;
 import com.github.dockerjava.transport.DockerHttpClient.Response;
 import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.BindException;
+import java.net.SocketException;
+import java.net.StandardProtocolFamily;
+import java.net.URI;
+import java.net.UnixDomainSocketAddress;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -18,9 +31,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntFunction;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.mock;
 
 /**
@@ -113,30 +128,21 @@ class RetryingDockerHttpClientTest {
     }
 
     @Test
-    void injectsCanonicalCloseWhilePreservingRequestDataAndHeaders() {
+    void passesTheRequestToTheTransportUnchanged() {
+        // Catches: the wrapper rebuilding requests (it once forced Connection: close on each one, which
+        // stopped the pool from ever reusing a connection).
         Response ok = mock(Response.class);
         FakeTransport delegate = new FakeTransport(attempt -> ok);
         RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
-
-        byte[] body = "{\"Image\":\"busybox\"}".getBytes(StandardCharsets.UTF_8);
         Request create = Request.builder()
                 .method(Request.Method.POST)
-                .path("/containers/create")
-                .bodyBytes(body)
+                .path("/containers/create?name=floci-x")
+                .bodyBytes("{\"Image\":\"busybox\"}".getBytes(StandardCharsets.UTF_8))
                 .putHeader("Content-Type", "application/json")
-                .putHeader("connection", "keep-alive")
                 .build();
 
         assertSame(ok, client.execute(create));
-        Request effective = delegate.seenRequests.get(0);
-        assertEquals(create.method(), effective.method());
-        assertEquals(create.path(), effective.path());
-        assertSame(body, effective.bodyBytes());
-        assertEquals("application/json", effective.headers().get("Content-Type"));
-        assertEquals("close", effective.headers().get("Connection"));
-        assertEquals(1, effective.headers().entrySet().stream()
-                .filter(entry -> "Connection".equalsIgnoreCase(entry.getKey()))
-                .count(), "the transport must receive one unambiguous Connection header");
+        assertSame(create, delegate.seenRequests.get(0));
     }
 
     @Test
@@ -161,8 +167,7 @@ class RetryingDockerHttpClientTest {
         assertEquals(1, delegate.calls.get(),
                 "a one-shot stream body cannot be replayed; the transport must not retry it");
         assertSame(tar, delegate.seenRequests.get(0).body(),
-                "adding Connection: close must preserve the one-shot stream object");
-        assertEquals("close", delegate.seenRequests.get(0).headers().get("Connection"));
+                "the one-shot stream object must reach the transport");
     }
 
     @Test
@@ -205,8 +210,6 @@ class RetryingDockerHttpClientTest {
         assertThrows(RuntimeException.class, () -> startClient.execute(execStart));
         assertEquals(1, startDelegate.calls.get(),
                 "exec-start re-runs the command if replayed; it must surface after one attempt");
-        assertEquals("close", startDelegate.seenRequests.get(0).headers().get("Connection"),
-                "non-replayable exec control calls must still retire their connection");
 
         // The exclusion is contains("/exec"), not startsWith: exec-create
         // (POST /containers/{id}/exec) is also excluded, and this pins that breadth so a later
@@ -418,6 +421,95 @@ class RetryingDockerHttpClientTest {
                 assertThrows(IllegalStateException.class, () -> rejectedClient.execute(ping));
         assertSame(rejection, surfaced, "a daemon rejection must surface unchanged");
         assertEquals(1, rejectedDelegate.calls.get());
+    }
+
+    @Test
+    void execute_missingDockerSocket_failsWithoutRetry() {
+        RuntimeException missingSocket = new RuntimeException(new SocketException("No such file or directory"));
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            throw missingSocket;
+        });
+        RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+        Request list = Request.builder().method(Request.Method.GET).path("/containers/json").build();
+
+        RuntimeException thrown = assertThrows(RuntimeException.class, () -> client.execute(list));
+        assertSame(missingSocket, thrown);
+        assertEquals(1, delegate.calls.get(), "a missing docker socket must not be retried");
+    }
+
+    @Test
+    void execute_dockerSocketPermissionDenied_failsWithoutRetry() {
+        RuntimeException denied = new RuntimeException(new BindException("Permission denied"));
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            throw denied;
+        });
+        RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+        Request inspect = Request.builder().method(Request.Method.GET).path("/volumes/data").build();
+
+        RuntimeException thrown = assertThrows(RuntimeException.class, () -> client.execute(inspect));
+        assertSame(denied, thrown);
+        assertEquals(1, delegate.calls.get(), "a docker socket this process may not open must not be retried");
+    }
+
+    // Catches: the JDK or the docker client changing the text of a socket error that DockerRetry
+    // matches by message, which would bring back the retries while the tests above, which build
+    // the exceptions by hand, stay green. Not on Windows, where Docker uses a named pipe.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void execute_realClientOnMissingSocket_failsWithoutRetry(@TempDir Path dir) throws IOException {
+        Path missing = dir.resolve("docker.sock");
+
+        Throwable cause = realClientFailure(missing);
+
+        assertInstanceOf(SocketException.class, cause);
+        assertEquals("No such file or directory", cause.getMessage());
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void execute_realClientOnSocketItMayNotOpen_failsWithoutRetry(@TempDir Path dir) throws IOException {
+        Path socketPath = dir.resolve("docker.sock");
+        try (ServerSocketChannel server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)) {
+            server.bind(UnixDomainSocketAddress.of(socketPath));
+            Files.setPosixFilePermissions(socketPath, PosixFilePermissions.fromString("---------"));
+            assumeTrue(cannotConnect(socketPath), "root can open a socket without permissions");
+
+            Throwable cause = realClientFailure(socketPath);
+
+            assertInstanceOf(BindException.class, cause);
+            assertEquals("Permission denied", cause.getMessage());
+        }
+    }
+
+    /**
+     * Runs one call through a real {@link FlociDockerHttpClient} on {@code socketPath}, wrapped in
+     * {@link RetryingDockerHttpClient}, asserts the transport ran once, and returns the root cause.
+     */
+    private static Throwable realClientFailure(Path socketPath) throws IOException {
+        Request list = Request.builder().method(Request.Method.GET).path("/containers/json").build();
+        try (FlociDockerHttpClient real = new FlociDockerHttpClient.Builder()
+                .dockerHost(URI.create("unix://" + socketPath.toUri().getRawPath()))
+                .build()) {
+            FakeTransport delegate = new FakeTransport(attempt -> real.execute(list));
+            RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+
+            RuntimeException thrown = assertThrows(RuntimeException.class, () -> client.execute(list));
+            assertEquals(1, delegate.calls.get(), "an unusable docker socket must not be retried");
+            Throwable cause = thrown;
+            while (cause.getCause() != null && cause.getCause() != cause) {
+                cause = cause.getCause();
+            }
+            return cause;
+        }
+    }
+
+    private static boolean cannotConnect(Path socketPath) {
+        try (SocketChannel ignored = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))) {
+            return false;
+        } catch (IOException expected) {
+            // The socket cannot be opened, which is the state the test needs.
+            return true;
+        }
     }
 
     @Test

@@ -6,18 +6,26 @@ import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.WebIdentityToken;
 import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier;
+import io.github.hectorvent.floci.services.iam.model.DelegationRequest;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.testing.PartitionMatrix;
 import io.github.hectorvent.floci.testing.PartitionMatrix.PartitionCase;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 
 import java.security.interfaces.RSAPublicKey;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.regex.Matcher;
@@ -31,8 +39,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class StsQueryHandlerTest {
@@ -44,6 +55,7 @@ class StsQueryHandlerTest {
             Pattern.compile("<SessionToken>([^<]+)</SessionToken>");
 
     private static final Pattern ARN = Pattern.compile("<Arn>([^<]+)</Arn>");
+    private static final Pattern EXPIRATION = Pattern.compile("<Expiration>([^<]+)</Expiration>");
 
     private static StsQueryHandler newHandler() {
         IamRole role = new IamRole();
@@ -57,10 +69,25 @@ class StsQueryHandlerTest {
     }
 
     private static StsQueryHandler newHandlerForRegion(RegionResolver regionResolver) {
-        return newHandler(null, regionResolver);
+        return newHandler((IamRole) null, regionResolver);
     }
 
     private static StsQueryHandler newHandler(IamRole role, RegionResolver regionResolver) {
+        IamService iamService = mock(IamService.class);
+        when(iamService.findRole(anyString(), anyString())).thenReturn(Optional.ofNullable(role));
+        return newHandler(iamService, regionResolver);
+    }
+
+    private static StsQueryHandler newHandler(IamService iamService, RegionResolver regionResolver) {
+        return newHandler(iamService, regionResolver, Clock.systemUTC());
+    }
+
+    private static StsQueryHandler newHandler(IamService iamService, RegionResolver regionResolver, Clock clock) {
+        return newHandler(iamService, regionResolver, clock, mock(DelegationRequestService.class));
+    }
+
+    private static StsQueryHandler newHandler(IamService iamService, RegionResolver regionResolver,
+                                              Clock clock, DelegationRequestService delegation) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.IamServiceConfig iam = mock(EmulatorConfig.IamServiceConfig.class);
@@ -68,12 +95,9 @@ class StsQueryHandlerTest {
         when(services.iam()).thenReturn(iam);
         when(iam.enforcementEnabled()).thenReturn(false);
 
-        IamService iamService = mock(IamService.class);
-        when(iamService.findRole(anyString(), anyString())).thenReturn(Optional.ofNullable(role));
-
         return new StsQueryHandler(
                 iamService,
-                mock(AccountResolver.class),
+                new AccountResolver("000000000000"),
                 regionResolver,
                 config,
                 mock(AssumeRolePolicyEvaluator.class),
@@ -81,7 +105,59 @@ class StsQueryHandlerTest {
                 mock(WebIdentityTokenVerifier.class),
                 mock(OidcIssuerKeyLookup.class),
                 mock(SAMLProviderService.class),
-                mock(SAMLTrustPolicyEvaluator.class));
+                mock(SAMLTrustPolicyEvaluator.class),
+                delegation,
+                clock);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"ASIAtemporary, AKIAlongterm", "-, ASIAtemporary", "ASIAtemporary, -",
+            "blank, ASIAtemporary", "space, ASIAtemporary"})
+    void temporaryHeaderOrQueryCallerIsRejectedBeforeSessionRegistration(String headerKey, String queryKey) {
+        for (String action : new String[]{"GetSessionToken", "GetFederationToken"}) {
+            IamService service = mock(IamService.class);
+            StsQueryHandler handler = newHandler(service, new RegionResolver(REGION, "000000000000"));
+            setCaller(handler, headerKey, queryKey);
+            Response response = handler.handle(action, new MultivaluedHashMap<>());
+            assertEquals(403, response.getStatus());
+            assertTrue(response.getEntity().toString().contains("<Code>AccessDenied</Code>"));
+            assertTrue(response.getEntity().toString().contains("Cannot call " + action + " with session credentials"));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"AKIAlongterm, ASIAtemporary", "-, AKIAlongterm", "-, -",
+            "blank, AKIAlongterm", "space, AKIAlongterm", "blank, -", "space, -"})
+    void longTermAndAnonymousCompatibilityCallsKeepExistingIssuance(String headerKey, String queryKey) {
+        for (String action : new String[]{"GetSessionToken", "GetFederationToken"}) {
+            StsQueryHandler handler = newHandler();
+            setCaller(handler, headerKey, queryKey);
+            MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+            if ("GetFederationToken".equals(action)) {
+                params.putSingle("Name", "caller");
+            }
+            Response response = handler.handle(action, params);
+            assertEquals(200, response.getStatus());
+        }
+    }
+
+    private static void setCaller(StsQueryHandler handler, String headerKey, String queryKey) {
+        handler.headers = mock(HttpHeaders.class);
+        if (!"-".equals(headerKey)) {
+            String authorization = switch (headerKey) {
+                case "blank" -> "";
+                case "space" -> " ";
+                default -> "AWS4-HMAC-SHA256 Credential=" + headerKey + "/20261013/us-east-1/sts/aws4_request";
+            };
+            when(handler.headers.getHeaderString("Authorization")).thenReturn(authorization);
+        }
+        handler.uriInfo = mock(UriInfo.class);
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        if (!"-".equals(queryKey)) {
+            query.putSingle("X-Amz-Credential", queryKey + "/20261013/us-east-1/sts/aws4_request");
+        }
+        when(handler.uriInfo.getQueryParameters()).thenReturn(query);
     }
 
     @Test
@@ -179,22 +255,40 @@ class StsQueryHandlerTest {
     }
 
     @Test
+    void assumeRoleOnARoleArnFromAnotherPartitionRegistersTheAccountsOneRole() {
+        String storedArn = "arn:aws:iam::000000000000:role/TestRole";
+        IamService iamService = mock(IamService.class);
+        when(iamService.findRole("000000000000", "TestRole"))
+                .thenReturn(Optional.of(new IamRole("AROA-test", "TestRole", "/", storedArn, "{}")));
+        StsQueryHandler handler = newHandler(iamService, new RegionResolver(REGION, "000000000000"));
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws-cn:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+        verify(iamService).registerSession(anyString(), anyString(), anyString(), eq(storedArn), any(),
+                any(), eq("000000000000"), eq("test-session"), eq("AROA-test:test-session"));
+    }
+
+    @Test
     void roleArnMatchesValidatesPartitionsAndPaths() {
         IamRole role = new IamRole();
         role.setRoleName("TestRole");
         role.setPath("/team/");
         role.setArn("arn:aws:iam::000000000000:role/team/TestRole");
 
-        assertTrue(StsQueryHandler.roleArnMatches("arn:aws:iam::000000000000:role/team/TestRole", role));
-        assertTrue(StsQueryHandler.roleArnMatches("arn:aws-cn:iam::000000000000:role/team/TestRole", role));
-        assertTrue(StsQueryHandler.roleArnMatches("arn:aws-us-gov:iam::000000000000:role/team/TestRole", role));
+        assertTrue(IamService.roleArnMatches("arn:aws:iam::000000000000:role/team/TestRole", role));
+        assertTrue(IamService.roleArnMatches("arn:aws-cn:iam::000000000000:role/team/TestRole", role));
+        assertTrue(IamService.roleArnMatches("arn:aws-us-gov:iam::000000000000:role/team/TestRole", role));
 
-        assertFalse(StsQueryHandler.roleArnMatches("arn:aws:iam::000000000000:role/other/TestRole", role));
-        assertFalse(StsQueryHandler.roleArnMatches("arn:aws:iam::111111111111:role/team/TestRole", role));
-        assertFalse(StsQueryHandler.roleArnMatches("arn:aws:iam:us-east-1:000000000000:role/team/TestRole", role));
-        assertFalse(StsQueryHandler.roleArnMatches("arn:aws:s3:::bucket", role));
-        assertFalse(StsQueryHandler.roleArnMatches("not-an-arn", role));
-        assertFalse(StsQueryHandler.roleArnMatches(null, role));
+        assertFalse(IamService.roleArnMatches("arn:aws:iam::000000000000:role/other/TestRole", role));
+        assertFalse(IamService.roleArnMatches("arn:aws:iam::111111111111:role/team/TestRole", role));
+        assertFalse(IamService.roleArnMatches("arn:aws:iam:us-east-1:000000000000:role/team/TestRole", role));
+        assertFalse(IamService.roleArnMatches("arn:aws:s3:::bucket", role));
+        assertFalse(IamService.roleArnMatches("not-an-arn", role));
+        assertFalse(IamService.roleArnMatches(null, role));
     }
 
     @ParameterizedTest
@@ -470,7 +564,8 @@ class StsQueryHandlerTest {
 
         StsQueryHandler handler = new StsQueryHandler(iamService, mock(AccountResolver.class),
                 new RegionResolver(REGION, "000000000000"), config, mock(AssumeRolePolicyEvaluator.class),
-                trust, verifier, keys, mock(SAMLProviderService.class), mock(SAMLTrustPolicyEvaluator.class));
+                trust, verifier, keys, mock(SAMLProviderService.class), mock(SAMLTrustPolicyEvaluator.class),
+                mock(DelegationRequestService.class));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", requestedRoleArn);
         params.putSingle("RoleSessionName", "app");
@@ -520,9 +615,86 @@ class StsQueryHandlerTest {
         assertTrue(body.contains("<AssumedRoleId>AROAKX9OBMP2TSQJZ48H:my-session</AssumedRoleId>"), body);
     }
 
+    /**
+     * Smithy's date-time format carries at most millisecond precision and asks serializers to truncate
+     * anything finer, so the XML drops the sub-millisecond digits while the session keeps the full instant.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "2026-10-05T05:47:29.777826302Z, 2026-10-05T05:47:29.777Z",
+            "2026-10-05T05:47:29.010000000Z, 2026-10-05T05:47:29.010Z",
+            "2026-10-05T05:47:29.000999999Z, 2026-10-05T05:47:29Z",
+            "2026-10-05T05:47:29Z, 2026-10-05T05:47:29Z"
+    })
+    void assumeRoleWritesExpirationAtMillisecondPrecision(String expiresAt, String expected) {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        IamService iamService = mock(IamService.class);
+        when(iamService.findRole(anyString(), anyString())).thenReturn(Optional.of(role));
+        Instant expiration = Instant.parse(expiresAt);
+        Clock clock = Clock.fixed(expiration.minusSeconds(900), ZoneOffset.UTC);
+        StsQueryHandler handler = newHandler(iamService, new RegionResolver(REGION, "000000000000"), clock);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", role.getArn());
+        params.putSingle("RoleSessionName", "s");
+        params.putSingle("DurationSeconds", "900");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+        assertEquals(expected, extract(EXPIRATION, (String) response.getEntity()));
+        ArgumentCaptor<Instant> sessionExpiration = ArgumentCaptor.forClass(Instant.class);
+        verify(iamService).registerSession(anyString(), anyString(), anyString(), eq(role.getArn()),
+                sessionExpiration.capture(), isNull(), eq("000000000000"), eq("s"), anyString());
+        assertEquals(expiration, sessionExpiration.getValue());
+    }
+
     private static String extract(Pattern pattern, String body) {
         Matcher matcher = pattern.matcher(body);
         assertTrue(matcher.find(), "expected " + pattern + " in " + body);
         return matcher.group(1);
+    }
+
+    /**
+     * The delegated session is the customer's grant, so it is registered in the customer's
+     * account, as a delegated session carrying the identity that approved the request, and with no
+     * issuing key. The request names a different owner here: accepting one records the identity
+     * that called it and "this is the identity that gets mapped to the delegated credential", so a
+     * session carrying the owner would hand over the wrong permissions on every request that was
+     * forwarded for approval. A partner key that happened to name an IAM user would otherwise
+     * become the session's issuer and bound it to that user's own permissions, which is the
+     * opposite of what the delegation gave away, and registering the approver as an issued
+     * session's role ARN would have it resolved by name.
+     */
+    @Test
+    void theDelegatedSessionBelongsToTheCustomerAndCarriesItsApprover() {
+        DelegationRequest request = new DelegationRequest();
+        request.setDelegationRequestId("dr-0123456789abcdef01234567");
+        request.setOwnerAccountId("000000000002");
+        request.setOwnerId("arn:aws:iam::000000000002:user/claimant");
+        request.setApproverId("arn:aws:iam::000000000002:user/admin");
+        Instant expiry = Instant.parse("2026-01-01T02:00:00Z");
+        IamService iamService = mock(IamService.class);
+        DelegationRequestService delegation = mock(DelegationRequestService.class);
+        when(delegation.redeem("000000000001", "token-1"))
+                .thenReturn(new DelegationRequestService.Redeemed(request, expiry));
+        StsQueryHandler handler = newHandler(iamService, new RegionResolver(REGION, "000000000001"),
+                Clock.systemUTC(), delegation);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("TradeInToken", "token-1");
+        Response response = handler.handle("GetDelegatedAccessToken", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+        assertTrue(((String) response.getEntity()).contains(
+                "<AssumedPrincipal>arn:aws:iam::000000000002:user/admin</AssumedPrincipal>"),
+                (String) response.getEntity());
+        verify(iamService).registerDelegatedSession(anyString(), anyString(), anyString(),
+                eq("arn:aws:iam::000000000002:user/admin"), eq(expiry), isNull(),
+                eq("000000000002"));
+        verify(iamService, never()).registerIssuedSession(anyString(), anyString(), anyString(),
+                anyString(), any(), any(), anyString(), any());
     }
 }

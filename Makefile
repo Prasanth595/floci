@@ -14,6 +14,15 @@
 # published partition metadata (plus two CDK region rules) by tools/aws/regen_partitions.py.
 # src/main/resources/aws/dynamodb-request-shapes.json is generated from botocore's DynamoDB
 # model by tools/aws/regen_dynamodb_shapes.py.
+# src/main/resources/aws/redshift-serverless-request-shapes.json is generated from botocore's Redshift
+# Serverless model by tools/aws/regen_redshift_serverless_shapes.py.
+# API Gateway integration types come from the public service model via tools/aws/regen_apigateway_types.py.
+# src/main/resources/aws/sesv2-request-shapes.json is generated from botocore's SES v2 model
+# by tools/aws/regen_sesv2_shapes.py.
+# src/main/resources/aws/ecs-request-shapes.json is generated from botocore's ECS model
+# by tools/aws/regen_ecs_shapes.py.
+# src/test/resources/aws/rest-routes.json, the REST routes IamRestRouteCoverageTest checks, is
+# generated from botocore's models by tools/aws/regen_rest_routes.py.
 
 PYTHON ?= python3
 
@@ -46,7 +55,11 @@ PREFIX ?= $(HOME)/.local
         docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test \
         slr-check slr-table slr-audit slr-test \
         aws-data-sync aws-data-check aws-data-test \
-        iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test
+        iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test \
+        iam-action-resources-sync iam-action-resources-check iam-action-resources-verify \
+        iam-action-resources-test iam-authorized-actions-sync iam-authorized-actions-check \
+        cfn-property-types-sync cfn-property-types-check cfn-property-types-verify cfn-property-types-test \
+        iam-authorized-actions-verify iam-authorized-actions-test iam-data-verify
 
 help: ## List the targets below
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -84,11 +97,11 @@ run-native: ## Run the host binary from native-host on port 4566, state under ./
 	@file "$(NATIVE_BIN)" | grep -q ELF && [ "$$(uname -s)" != Linux ] && { echo "$(NATIVE_BIN) is a Linux binary from 'make native'; run 'make native-host' for this machine"; exit 1; } || true
 	$(NATIVE_BIN)
 
-native-install: ## Copy the host binary to $(PREFIX)/bin/floci (PREFIX defaults to ~/.local)
+native-install: ## Copy the host binary to $(PREFIX)/bin/floci-aws (PREFIX defaults to ~/.local); `floci` is the CLI
 	@test -n "$(NATIVE_BIN)" || { echo "no target/*-runner: run 'make native-host' first"; exit 1; }
 	mkdir -p $(PREFIX)/bin
-	cp "$(NATIVE_BIN)" $(PREFIX)/bin/floci
-	@echo "installed $(PREFIX)/bin/floci"
+	cp "$(NATIVE_BIN)" $(PREFIX)/bin/floci-aws
+	@echo "installed $(PREFIX)/bin/floci-aws"
 
 native-image: ## Package native/$(ARCH)/ as $(NATIVE_IMAGE) with docker/Dockerfile.native-package
 	@test -f native/$(ARCH)/application || { echo "native/$(ARCH)/application is missing: run 'make native' first"; exit 1; }
@@ -197,10 +210,18 @@ slr-audit: ## Print the service-linked role table, marking names that are not de
 slr-test: ## Run the service-linked role tooling's unit tests
 	$(PYTHON) -m pytest tools/slr -q
 
-aws-data-sync: ## Regenerate src/main/resources/aws/*.json from botocore, the CDK and Terraform (commit the result)
+aws-data-sync: ## Regenerate src/main/resources/aws/*.json and the IAM managed-policy catalog from local/aws (commit the result)
 	$(PYTHON) tools/aws/regen_partitions.py
 	$(PYTHON) tools/aws/regen_region_facts.py
 	$(PYTHON) tools/aws/regen_dynamodb_shapes.py
+	$(PYTHON) tools/aws/regen_redshift_serverless_shapes.py
+	$(PYTHON) tools/aws/regen_resource_groups_shapes.py
+	$(PYTHON) tools/aws/regen_apigateway_types.py
+	$(PYTHON) tools/aws/regen_sesv2_shapes.py
+	$(PYTHON) tools/aws/regen_ecs_shapes.py
+	$(PYTHON) tools/aws/regen_query_services.py
+	$(PYTHON) tools/aws/regen_rest_routes.py
+	$(PYTHON) tools/aws/regen_managed_policies.py
 
 aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 	@$(PYTHON) tools/aws/regen_partitions.py --check || { \
@@ -219,6 +240,50 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 		echo ""; \
 		echo "error: src/main/resources/aws/dynamodb-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_redshift_serverless_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/redshift-serverless-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_resource_groups_shapes.py --check || { \
+		echo "error: Resource Groups request shapes are out of date; run 'make aws-data-sync'."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_apigateway_types.py --check || { \
+		echo "error: API Gateway integration types are out of date; run 'make aws-data-sync'."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_sesv2_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/sesv2-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_ecs_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/ecs-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_query_services.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/query-services.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_rest_routes.py --check || { \
+		echo ""; \
+		echo "error: src/test/resources/aws/rest-routes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_managed_policies.py --check || { \
+		echo ""; \
+		echo "error: the IAM managed-policy catalog (src/main/resources/iam/managed-polic*) is out of date or malformed."; \
+		echo "       Run 'make aws-data-sync' with local/aws checked out and commit the result."; \
 		exit 1; \
 	}
 
@@ -251,3 +316,108 @@ iam-namespaces-verify: ## CI gate (online): every vendored IAM namespace must st
 
 iam-namespaces-test: ## Run the IAM namespace generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_service_namespaces.py -q
+
+iam-action-resources-sync: ## Regenerate src/main/resources/aws/iam-action-resources.json from AWS (commit the result)
+	$(PYTHON) tools/aws/regen_iam_action_resources.py
+
+iam-action-resources-check: ## CI gate (offline): the vendored IAM action resource map must be well-formed
+	@$(PYTHON) tools/aws/regen_iam_action_resources.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/iam-action-resources.json is malformed."; \
+		echo "       Run 'make iam-action-resources-sync' and commit the result."; \
+		exit 1; \
+	}
+
+iam-action-resources-verify: ## CI gate (online): every vendored IAM action resource must match AWS
+	@$(PYTHON) tools/aws/regen_iam_action_resources.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not reach AWS's IAM service reference, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: the vendored IAM action resource map claims a resource AWS does not use,"; \
+		echo "       so enforcement would authorize against the wrong thing."; \
+		echo "       Run 'make iam-action-resources-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS
+	@# Both halves run even when the first fails, so one file's drift cannot hide the other's
+	@# state. Sequential steps in CI stop at the first failure, which once left the action
+	@# resource gate unexercised while the namespace list was stale.
+	@namespaces=0; actions=0; authorized=0; \
+	$(MAKE) --no-print-directory iam-namespaces-verify || namespaces=$$?; \
+	$(MAKE) --no-print-directory iam-action-resources-verify || actions=$$?; \
+	$(MAKE) --no-print-directory iam-authorized-actions-verify || authorized=$$?; \
+	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ]; then \
+		echo ""; \
+		echo "error: vendored IAM data does not match upstream:"; \
+		if [ $$namespaces -ne 0 ]; then \
+			echo "       the service namespace list, see its message above"; \
+		fi; \
+		if [ $$actions -ne 0 ]; then \
+			echo "       the action resource map, see its message above"; \
+		fi; \
+		if [ $$authorized -ne 0 ]; then \
+			echo "       the map of operations to their IAM actions, see its message above"; \
+		fi; \
+		exit 1; \
+	fi
+
+iam-action-resources-test: ## Run the IAM action resource generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_iam_action_resources.py -q
+
+iam-authorized-actions-sync: ## Regenerate src/main/resources/aws/iam-authorized-actions.json from AWS (commit the result)
+	$(PYTHON) tools/aws/regen_iam_authorized_actions.py
+
+iam-authorized-actions-check: ## CI gate (offline): the vendored map of operations to their IAM actions must be well-formed
+	@$(PYTHON) tools/aws/regen_iam_authorized_actions.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/iam-authorized-actions.json is malformed."; \
+		echo "       Run 'make iam-authorized-actions-sync' and commit the result."; \
+		exit 1; \
+	}
+
+iam-authorized-actions-verify: ## CI gate (online): every vendored operation must still be authorized as AWS says
+	@$(PYTHON) tools/aws/regen_iam_authorized_actions.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not reach AWS's service reference, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: the vendored map authorizes an operation as an action AWS does not check for it."; \
+		echo "       Run 'make iam-authorized-actions-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+iam-authorized-actions-test: ## Run the IAM authorized-action generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_iam_authorized_actions.py -q
+
+cfn-property-types-sync: ## Regenerate src/main/resources/aws/cfn-property-types.json from AWS's resource schemas (commit the result)
+	$(PYTHON) tools/aws/regen_cfn_property_types.py
+
+cfn-property-types-check: ## CI gate (offline): the vendored CloudFormation property types must be well-formed
+	@$(PYTHON) tools/aws/regen_cfn_property_types.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/cfn-property-types.json is malformed."; \
+		echo "       Run 'make cfn-property-types-sync' and commit the result."; \
+		exit 1; \
+	}
+
+cfn-property-types-verify: ## CI gate (online): the vendored CloudFormation property types must still match AWS's schemas
+	@$(PYTHON) tools/aws/regen_cfn_property_types.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not read AWS's CloudFormation resource schemas, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: AWS has changed a resource schema the vendored property types come from."; \
+		echo "       Run 'make cfn-property-types-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+cfn-property-types-test: ## Run the CloudFormation property type generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_cfn_property_types.py -q

@@ -870,7 +870,7 @@ class CloudFormationIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(template))
         .when()
             .post("/")
         .then()
@@ -1556,7 +1556,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("ROLLBACK_COMPLETE"))
-            .body(containsString("FileSystemConfigs must be a list"));
+            .body(containsString("Property [FileSystemConfigs] expected type: JSONArray, found: JSONObject"));
     }
 
     private static String lambdaFileSystemTemplate(String functionName, String accessPointArn,
@@ -2765,8 +2765,10 @@ class CloudFormationIntegrationTest {
         return xml.substring(xml.lastIndexOf("<member>", idAt), xml.indexOf("</member>", idAt));
     }
 
+    // Measured against CloudFormation (eu-west-1, 2026-10-04): a change set the stack does not
+    // have, on a stack in REVIEW_IN_PROGRESS as on one in CREATE_COMPLETE, is deleted with success.
     @Test
-    void deleteChangeSet_nonExistentChangeSet_returnsError() {
+    void deleteChangeSet_nonExistentChangeSet_succeeds() {
         String template = """
             {
               "Resources": {
@@ -2793,7 +2795,6 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Attempt to delete a changeset that does not exist
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DeleteChangeSet")
@@ -2802,8 +2803,18 @@ class CloudFormationIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(400)
-            .body(containsString("ChangeSetNotFoundException"));
+            .statusCode(200)
+            .body(containsString("<DeleteChangeSetResult/>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", "cs-error-stack")
+            .formParam("ChangeSetName", "existing-changeset")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test
@@ -2930,7 +2941,7 @@ class CloudFormationIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(template))
         .when()
             .post("/")
         .then()
@@ -5433,7 +5444,7 @@ class CloudFormationIntegrationTest {
                     "FunctionName": { "Ref": "MyFunction" },
                     "Enabled": true,
                     "BatchSize": 100,
-                    "Topics": ["orders-topic", "events-topic"],
+                    "Topics": ["orders-topic"],
                     "SelfManagedEventSource": {
                       "Endpoints": {
                         "KAFKA_BOOTSTRAP_SERVERS": ["kafka-broker-1:9092", "kafka-broker-2:9092"]
@@ -5511,9 +5522,8 @@ class CloudFormationIntegrationTest {
 
         // Verify Topics
         JsonNode topics = esmNode.path("Topics");
-        assertTrue(topics.isArray() && topics.size() == 2);
+        assertTrue(topics.isArray() && topics.size() == 1);
         assertEquals("orders-topic", topics.get(0).asText());
-        assertEquals("events-topic", topics.get(1).asText());
 
         // Verify SelfManagedEventSource
         JsonNode smes = esmNode.path("SelfManagedEventSource");
@@ -7271,8 +7281,8 @@ class CloudFormationIntegrationTest {
      * resource's {@code Outputs.*} attributes right after the child's (synchronous, same-thread)
      * {@code executeTemplate} call returns. When the child's own resource loop fails, {@code
      * executeTemplate} never reaches its Outputs block at all: {@code rollbackFailedExecution}
-     * rewrites the child's status straight from {@code CREATE_FAILED} into {@code
-     * ROLLBACK_COMPLETE} before returning. {@code executeNestedStack} used to detect a failed
+     * settles the child in {@code ROLLBACK_COMPLETE} before returning, and the child's status is
+     * never {@code CREATE_FAILED}. {@code executeNestedStack} used to detect a failed
      * child only by checking for the literal strings {@code CREATE_FAILED}/{@code UPDATE_FAILED},
      * which a rolled-back create can never match, so the parent kept going and reported
      * {@code CREATE_COMPLETE} with its {@code Fn::GetAtt} on the child's outputs left unresolved:
@@ -7438,6 +7448,11 @@ class CloudFormationIntegrationTest {
 
     private static final String ECS_TARGET_PREFIX = "AmazonEC2ContainerServiceV20141113.";
     private static final String ECS_CONTENT_TYPE = "application/x-amz-json-1.1";
+    // The service's tasks must be able to start, since CloudFormation waits for them: an awsvpc
+    // task gets its ENI in a subnet and security group that exist, here the default VPC's.
+    private static final String ECS_SUBNET_A = Ec2Service.defaultSubnetId("us-east-1", "a");
+    private static final String ECS_SUBNET_B = Ec2Service.defaultSubnetId("us-east-1", "b");
+    private static final String ECS_SECURITY_GROUP = Ec2Service.defaultSecurityGroupId("us-east-1");
 
     private static String outputValue(String describeXml, String key) {
         return describeXml.split("<OutputKey>" + key + "</OutputKey>")[1]
@@ -7485,8 +7500,8 @@ class CloudFormationIntegrationTest {
                     "LaunchType": "FARGATE",
                     "NetworkConfiguration": {
                       "AwsvpcConfiguration": {
-                        "Subnets": ["subnet-aaa", "subnet-bbb"],
-                        "SecurityGroups": ["sg-123"],
+                        "Subnets": ["%1$s", "%2$s"],
+                        "SecurityGroups": ["%3$s"],
                         "AssignPublicIp": "ENABLED"
                       }
                     }
@@ -7502,7 +7517,7 @@ class CloudFormationIntegrationTest {
                 "ServiceArn": { "Value": { "Fn::GetAtt": ["EcsService", "ServiceArn"] } }
               }
             }
-            """;
+            """.formatted(ECS_SUBNET_A, ECS_SUBNET_B, ECS_SECURITY_GROUP);
 
         String stackName = "cfn-ecs-stack";
 
@@ -7572,8 +7587,8 @@ class CloudFormationIntegrationTest {
             .body("services[0].serviceName", equalTo("cfn-ecs-service"))
             .body("services[0].desiredCount", equalTo(2))
             .body("services[0].launchType", equalTo("FARGATE"))
-            .body("services[0].networkConfiguration.awsvpcConfiguration.subnets", hasItem("subnet-aaa"))
-            .body("services[0].networkConfiguration.awsvpcConfiguration.securityGroups", hasItem("sg-123"))
+            .body("services[0].networkConfiguration.awsvpcConfiguration.subnets", hasItem(ECS_SUBNET_A))
+            .body("services[0].networkConfiguration.awsvpcConfiguration.securityGroups", hasItem(ECS_SECURITY_GROUP))
             .body("services[0].networkConfiguration.awsvpcConfiguration.assignPublicIp", equalTo("ENABLED"));
     }
 
@@ -8393,13 +8408,14 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body("Items.findAll { it.ApiId == '" + apiId + "' }.Name", hasItem("cfn-apigwv2-api-v2"));
 
-        // Idempotent re-deploy with no changes is a no-op (criterion #3): counts/ids unchanged
+        // Re-deploying the same resources is a no-op for them (criterion #3): counts/ids unchanged.
+        // An identical template is refused outright, so a new output forces the update.
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody",
-                    template.formatted("cfn-apigwv2-api-v2", "https://example.com/v2", "GET /things", "true"))
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(
+                    template.formatted("cfn-apigwv2-api-v2", "https://example.com/v2", "GET /things", "true")))
         .when()
             .post("/")
         .then()
@@ -9998,10 +10014,10 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
-    void updateStack_unsupportedResourceRollbackRemainsExplicitlyFailed() {
+    void updateStack_ssmRollbackRestoresTheValueAndTemplate() {
         String suffix = Long.toString(System.nanoTime(), 36);
-        String stackName = "unsupported-update-rollback-" + suffix;
-        String parameterName = "/cfn/unsupported-update-rollback/" + suffix;
+        String stackName = "ssm-update-rollback-" + suffix;
+        String parameterName = "/cfn/ssm-update-rollback/" + suffix;
         String template = """
             {
               "Resources": {
@@ -10027,7 +10043,7 @@ class CloudFormationIntegrationTest {
                   "Type": "AWS::SecretsManager::Secret",
                   "DependsOn": "Parameter",
                   "Properties": {
-                    "Name": "unsupported-update-rollback-secret-%s",
+                    "Name": "ssm-update-rollback-secret-%s",
                     "SecretString": "explicit",
                     "GenerateSecretString": {"PasswordLength": 32}
                   }
@@ -10062,8 +10078,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<StackStatus>UPDATE_ROLLBACK_FAILED</StackStatus>"))
-            .body(containsString("Parameter"));
+            .body(containsString("<StackStatus>UPDATE_ROLLBACK_COMPLETE</StackStatus>"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10074,7 +10089,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<LogicalResourceId>Parameter</LogicalResourceId>"))
-            .body(containsString("<ResourceStatus>UPDATE_FAILED</ResourceStatus>"))
+            .body(not(containsString("<ResourceStatus>UPDATE_FAILED</ResourceStatus>")))
             .body(not(containsString("<LogicalResourceId>BadSecret</LogicalResourceId>")));
 
         given()
@@ -10085,7 +10100,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Parameter.Value", equalTo("updated"));
+            .body("Parameter.Value", equalTo("initial"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10095,7 +10110,8 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("updated"));
+            .body(containsString("initial"))
+            .body(not(containsString("BadSecret")));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10762,7 +10778,7 @@ class CloudFormationIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(template))
         .when()
             .post("/")
         .then()

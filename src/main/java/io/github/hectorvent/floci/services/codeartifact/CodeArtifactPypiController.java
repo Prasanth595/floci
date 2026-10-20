@@ -85,7 +85,8 @@ public class CodeArtifactPypiController {
         this.httpClient = httpClient;
     }
 
-    private record RepositoryHandle(String repoId, String baseUrl, String pathPrefix) {
+    private record RepositoryHandle(String repoId, String baseUrl, String pathPrefix, String region,
+                                     String owner) {
     }
 
     // No route for the bare "/simple/" project-list endpoint: AWS's CodeArtifact User Guide
@@ -163,6 +164,7 @@ public class CodeArtifactPypiController {
         }
         MultipartFormParser.ParsedForm form = MultipartFormParser.parse(content, boundary);
         String packageName = form.fields().get("name");
+        String version = form.fields().get("version");
         Optional<MultipartFormParser.FilePart> file = form.file();
         if (packageName == null || packageName.isBlank() || file.isEmpty()) {
             return Response.status(400).entity("Upload must include name and content fields.").build();
@@ -181,7 +183,29 @@ public class CodeArtifactPypiController {
                         .build();
             }
 
-            return forwardUpload(handle.baseUrl(), contentType, content);
+            // Snapshotted before the real write, not after: see
+            // CodeArtifactService#currentContainerBackedPackageFence's own javadoc for why the
+            // order matters.
+            long fenceSnapshot = service.currentContainerBackedPackageFence(handle.region(), domain, handle.owner(),
+                    repository, "pypi", null, packageName);
+            Response response = forwardUpload(handle.baseUrl(), contentType, content);
+            boolean uploadSucceeded = response.getStatus() == 200 || response.getStatus() == 201;
+            if (uploadSucceeded) {
+                service.recordContainerBackedAssetBytes(handle.region(), domain, handle.owner(), repository,
+                        "pypi", null, packageName, file.get().content().length, fenceSnapshot);
+            }
+            // Only for a real new publish, never the byte-identical-retry short-circuit above
+            // (nothing new was written there either): the "description" field is the real PyPI
+            // legacy upload API's form field for a distribution's long description, the only place
+            // this text is ever available (see CodeArtifactService#getPackageVersionReadme's own
+            // javadoc for why pypiserver itself can't answer for it later). A missing/blank version
+            // field means twine never named a version for this upload, so there is no package
+            // version coordinate to record the readme against.
+            if (uploadSucceeded && version != null && !version.isBlank()) {
+                service.recordPublishedPackageVersionReadme(handle.region(), domain, handle.owner(), repository,
+                        "pypi", null, packageName, version, form.fields().get("description"), fenceSnapshot);
+            }
+            return response;
         }
     }
 
@@ -314,6 +338,7 @@ public class CodeArtifactPypiController {
             throw new NotFoundException();
         }
         String baseUrl = pypiserver.ensureReady(repoId, null);
-        return new RepositoryHandle(repoId, baseUrl, "/codeartifact/pypi/" + domain + "/" + repository);
+        return new RepositoryHandle(repoId, baseUrl, "/codeartifact/pypi/" + domain + "/" + repository,
+                scope.region(), scope.owner());
     }
 }

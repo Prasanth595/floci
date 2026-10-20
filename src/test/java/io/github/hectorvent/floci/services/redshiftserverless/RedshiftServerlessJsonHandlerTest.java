@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.redshift.RedshiftIamDbUserResolver;
 import io.github.hectorvent.floci.services.redshift.TempCredential;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
@@ -76,10 +77,121 @@ class RedshiftServerlessJsonHandlerTest {
         iamDbUserResolver = mock(RedshiftIamDbUserResolver.class);
         when(iamDbUserResolver.resolveDbUser("AUTH")).thenReturn("IAM:alice");
         EmulatorConfig config = mock(EmulatorConfig.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-snapshots.json"),
+                any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
         when(config.storage().persistentPath()).thenReturn(System.getProperty("java.io.tmpdir"));
-        handler = new RedshiftServerlessJsonHandler(
-                new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config), mapper,
-                iamDbUserResolver);
+        when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-usagelimits.json"),
+                any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        stubAdministrationStores(storageFactory);
+        RedshiftServerlessService service =
+                new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config);
+        AcmService acmService = mock(AcmService.class);
+        RedshiftServerlessCustomDomainService customDomains =
+                new RedshiftServerlessCustomDomainService(storageFactory, service, acmService);
+        handler = new RedshiftServerlessJsonHandler(service, mapper, iamDbUserResolver,
+                new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, service),
+                new RedshiftServerlessAdminJsonHandler(mapper,
+                        new RedshiftServerlessResourcePolicyService(storageFactory, service, mapper),
+                        new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, service),
+                        customDomains,
+                        new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, service),
+                        new RedshiftServerlessScheduledActionService(storageFactory, service)),
+                customDomains);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static void stubAdministrationStores(StorageFactory storageFactory) {
+        for (String file : List.of("resourcepolicies", "endpointaccess", "customdomains", "snapshotcopyconfigurations", "scheduledactions")) {
+            when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-" + file + ".json"),
+                    any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
+                    AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        }
+    }
+
+    @Test
+    void usageLimitShapeFollowsTheApiModel() {
+        create("limit-ns");
+        String workgroupArn = body(handler.handle("CreateWorkgroup",
+                parse("{\"workgroupName\":\"limit-wg\",\"namespaceName\":\"limit-ns\"}"), REGION))
+                .get("workgroup").get("workgroupArn").textValue();
+
+        JsonNode created = body(handler.handle("CreateUsageLimit", parse("{\"resourceArn\":\"" + workgroupArn
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":60}"), REGION)).get("usageLimit");
+
+        assertTrue(created.get("amount").isIntegralNumber());
+        assertEquals(60, created.get("amount").longValue());
+        assertEquals("monthly", created.get("period").textValue());
+        assertEquals("log", created.get("breachAction").textValue());
+        assertEquals(workgroupArn, created.get("resourceArn").textValue());
+        assertTrue(created.get("usageLimitArn").textValue().contains(":usagelimit/"));
+        assertEquals(7, created.size());
+
+        String id = created.get("usageLimitId").textValue();
+        JsonNode updated = body(handler.handle("UpdateUsageLimit",
+                parse("{\"usageLimitId\":\"" + id + "\",\"amount\":90,\"breachAction\":\"deactivate\"}"), REGION))
+                .get("usageLimit");
+        assertEquals(90, updated.get("amount").longValue());
+        assertEquals("deactivate", updated.get("breachAction").textValue());
+
+        JsonNode listed = body(handler.handle("ListUsageLimits",
+                parse("{\"resourceArn\":\"" + workgroupArn + "\"}"), REGION));
+        assertEquals(1, listed.get("usageLimits").size());
+        assertFalse(listed.has("nextToken"));
+
+        assertEquals(id, body(handler.handle("DeleteUsageLimit", parse("{\"usageLimitId\":\"" + id + "\"}"),
+                REGION)).get("usageLimit").get("usageLimitId").textValue());
+        assertEquals(400, handler.handle("GetUsageLimit", parse("{\"usageLimitId\":\"" + id + "\"}"),
+                REGION).getStatus());
+    }
+
+    @Test
+    void usageLimitMembersOfTheWrongTypeAreRejectedNotIgnored() {
+        create("typed-ns");
+        String workgroupArn = body(handler.handle("CreateWorkgroup",
+                parse("{\"workgroupName\":\"typed-wg\",\"namespaceName\":\"typed-ns\"}"), REGION))
+                .get("workgroup").get("workgroupArn").textValue();
+        String base = "\"resourceArn\":\"" + workgroupArn + "\",\"usageType\":\"serverless-compute\",\"amount\":5";
+        assertEquals(400, handler.handle("CreateUsageLimit", parse("{" + base + ",\"period\":3}"), REGION).getStatus());
+        assertEquals(400, handler.handle("CreateUsageLimit", parse("{" + base + ",\"breachAction\":true}"),
+                REGION).getStatus());
+        assertEquals(400, handler.handle("CreateUsageLimit", parse(
+                "{\"resourceArn\":7,\"usageType\":\"serverless-compute\",\"amount\":5}"), REGION).getStatus());
+        // Nothing was stored by the rejected creates.
+        assertEquals(0, body(handler.handle("ListUsageLimits", parse("{}"), REGION)).get("usageLimits").size());
+
+        String id = body(handler.handle("CreateUsageLimit", parse("{" + base + "}"), REGION))
+                .get("usageLimit").get("usageLimitId").textValue();
+        assertEquals(400, handler.handle("UpdateUsageLimit",
+                parse("{\"usageLimitId\":\"" + id + "\",\"breachAction\":1}"), REGION).getStatus());
+        assertEquals(400, handler.handle("ListUsageLimits", parse("{\"resourceArn\":7}"), REGION).getStatus());
+        assertEquals(400, handler.handle("ListUsageLimits", parse("{\"usageType\":7}"), REGION).getStatus());
+        assertEquals(400, handler.handle("ListUsageLimits", parse("{\"nextToken\":7}"), REGION).getStatus());
+        assertEquals(400, handler.handle("GetUsageLimit", parse("{\"usageLimitId\":7}"), REGION).getStatus());
+        assertEquals("log", body(handler.handle("GetUsageLimit", parse("{\"usageLimitId\":\"" + id + "\"}"),
+                REGION)).get("usageLimit").get("breachAction").textValue());
+    }
+
+    @Test
+    void maxResultsMustBeAnIntegerThatFitsAnInt() {
+        assertEquals(400, handler.handle("ListUsageLimits", parse("{\"maxResults\":1.5}"), REGION).getStatus());
+        assertEquals(400, handler.handle("ListUsageLimits", parse("{\"maxResults\":3000000000}"), REGION).getStatus());
+        assertEquals(400, handler.handle("ListUsageLimits", parse("{\"maxResults\":\"1\"}"), REGION).getStatus());
+        assertEquals(200, handler.handle("ListUsageLimits", parse("{\"maxResults\":1}"), REGION).getStatus());
+    }
+
+    @Test
+    void usageLimitAmountMustBeAnInteger() {
+        assertEquals(400, handler.handle("CreateUsageLimit", parse(
+                "{\"resourceArn\":\"arn\",\"usageType\":\"serverless-compute\",\"amount\":\"60\"}"),
+                REGION).getStatus());
+        assertEquals(400, handler.handle("CreateUsageLimit", parse(
+                "{\"resourceArn\":\"arn\",\"usageType\":\"serverless-compute\",\"amount\":1.5}"),
+                REGION).getStatus());
+        assertEquals(400, handler.handle("CreateUsageLimit", parse(
+                "{\"resourceArn\":\"arn\",\"usageType\":\"serverless-compute\",\"amount\":18446744073709551621}"),
+                REGION).getStatus());
     }
 
     @Test
@@ -133,7 +245,26 @@ class RedshiftServerlessJsonHandlerTest {
     }
 
     @Test
-    void getCredentialsRejectsABadDurationAMissingWorkgroupAndACustomDomain() {
+    void getCredentialsAcceptsACustomDomainNameInPlaceOfWorkgroupName() {
+        create("cred-dom-ns");
+        body(handler.handle("CreateWorkgroup",
+                parse("{\"workgroupName\":\"cred-dom-wg\",\"namespaceName\":\"cred-dom-ns\"}"), REGION));
+        body(handler.handle("CreateCustomDomainAssociation",
+                parse("{\"workgroupName\":\"cred-dom-wg\",\"customDomainName\":\"db.example.com\","
+                        + "\"customDomainCertificateArn\":\"arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555\"}"),
+                REGION));
+
+        JsonNode credentials = body(handler.handle("GetCredentials",
+                parse("{\"customDomainName\":\"db.example.com\",\"dbName\":\"dev\",\"durationSeconds\":1800}"),
+                REGION, "AUTH"));
+
+        assertEquals("IAM:alice", credentials.get("dbUser").textValue());
+        assertEquals("tempPassword1", credentials.get("dbPassword").textValue());
+        assertEquals(1_800_000_000L, credentials.get("expiration").longValue());
+    }
+
+    @Test
+    void getCredentialsRejectsInvalidParametersAndUnknownTargets() {
         create("cred-err-ns");
         body(handler.handle("CreateWorkgroup",
                 parse("{\"workgroupName\":\"cred-err-wg\",\"namespaceName\":\"cred-err-ns\"}"), REGION));
@@ -147,14 +278,29 @@ class RedshiftServerlessJsonHandlerTest {
                 parse("{\"workgroupName\":\"cred-err-wg\",\"durationSeconds\":\"900\"}"), REGION, "AUTH");
         assertEquals(400, wrongType.getStatus());
 
-        Response missing = handler.handle("GetCredentials", parse("{\"workgroupName\":\"absent-wg\"}"), REGION, "AUTH");
-        assertEquals(404, missing.getStatus());
-        assertEquals("ResourceNotFoundException", errorType(missing));
+        Response missingWorkgroup = handler.handle("GetCredentials",
+                parse("{\"workgroupName\":\"absent-wg\"}"), REGION, "AUTH");
+        assertEquals(400, missingWorkgroup.getStatus());
+        assertEquals("ResourceNotFoundException", errorType(missingWorkgroup));
 
-        Response customDomain = handler.handle("GetCredentials",
-                parse("{\"customDomainName\":\"wg.example.com\"}"), REGION, "AUTH");
-        assertEquals(400, customDomain.getStatus());
-        assertEquals("ValidationException", errorType(customDomain));
+        Response missingDomain = handler.handle("GetCredentials",
+                parse("{\"customDomainName\":\"absent.example.com\"}"), REGION, "AUTH");
+        assertEquals(400, missingDomain.getStatus());
+        assertEquals("ResourceNotFoundException", errorType(missingDomain));
+
+        Response both = handler.handle("GetCredentials",
+                parse("{\"workgroupName\":\"cred-err-wg\",\"customDomainName\":\"wg.example.com\"}"), REGION, "AUTH");
+        assertEquals(400, both.getStatus());
+        assertEquals("ValidationException", errorType(both));
+
+        Response neither = handler.handle("GetCredentials", parse("{}"), REGION, "AUTH");
+        assertEquals(400, neither.getStatus());
+        assertEquals("ValidationException", errorType(neither));
+
+        Response badDomain = handler.handle("GetCredentials",
+                parse("{\"customDomainName\":\"-bad\"}"), REGION, "AUTH");
+        assertEquals(400, badDomain.getStatus());
+        assertEquals("ValidationException", errorType(badDomain));
     }
 
     @Test
@@ -225,7 +371,7 @@ class RedshiftServerlessJsonHandlerTest {
 
         assertEquals("DELETING", deleted.get("status").textValue());
         Response missing = handler.handle("GetWorkgroup", request("workgroupName", "del-shape-wg"), REGION);
-        assertEquals(404, missing.getStatus());
+        assertEquals(400, missing.getStatus());
         assertEquals("ResourceNotFoundException", errorType(missing));
     }
 
@@ -290,10 +436,57 @@ class RedshiftServerlessJsonHandlerTest {
 
     @Test
     void anUnknownActionIsReportedAsUnknownOperation() {
-        Response response = handler.handle("CreateScheduledAction", mapper.createObjectNode(), REGION);
+        Response response = handler.handle("NoSuchOperation", mapper.createObjectNode(), REGION);
 
         assertEquals(400, response.getStatus());
         assertEquals("UnknownOperationException", errorType(response));
+    }
+
+    @Test
+    void aModeledActionWithoutAnImplementationIsStillAnUnknownOperation() {
+        Response response = handler.handle("ConvertRecoveryPointToSnapshot", mapper.createObjectNode(), REGION);
+
+        assertEquals(400, response.getStatus());
+        assertEquals("UnknownOperationException", errorType(response));
+    }
+
+    @Test
+    void aRequestBreakingTheModelConstraintsIsRejectedWithoutChangingState() {
+        Response badEnum = handler.handle("CreateNamespace",
+                parse("{\"namespaceName\":\"state-ns\",\"logExports\":[\"nope\"]}"), REGION);
+        Response missingNamespace = handler.handle("CreateWorkgroup", parse("{\"workgroupName\":\"state-wg\"}"), REGION);
+        Response missingName = handler.handle("GetWorkgroup", parse("{}"), REGION);
+
+        assertEquals("ValidationException", errorType(badEnum));
+        assertEquals("ValidationException", errorType(missingNamespace));
+        assertEquals("ValidationException", errorType(missingName));
+        assertEquals("ResourceNotFoundException", errorType(
+                handler.handle("GetNamespace", parse("{\"namespaceName\":\"state-ns\"}"), REGION)));
+        assertEquals(0, body(handler.handle("ListWorkgroups", parse("{}"), REGION)).get("workgroups").size());
+    }
+
+    @Test
+    void aNonStringPageTokenIsRejectedInsteadOfRestartingTheListing() {
+        for (String action : new String[] {"ListNamespaces", "ListWorkgroups", "ListSnapshots", "ListUsageLimits"}) {
+            Response response = handler.handle(action, parse("{\"nextToken\":12345678}"), REGION);
+
+            assertEquals("ValidationException", errorType(response), action);
+        }
+    }
+
+    @Test
+    void aTagWithANonStringKeyOrValueIsRejectedInsteadOfCoerced() {
+        String arn = body(handler.handle("CreateNamespace", parse("{\"namespaceName\":\"tag-ns\"}"), REGION))
+                .get("namespace").get("namespaceArn").textValue();
+
+        for (String tag : new String[] {"{\"key\":123,\"value\":\"v\"}", "{\"key\":\"k\",\"value\":false}"}) {
+            Response response = handler.handle("TagResource",
+                    parse("{\"resourceArn\":\"" + arn + "\",\"tags\":[" + tag + "]}"), REGION);
+
+            assertEquals("ValidationException", errorType(response), tag);
+        }
+        assertEquals(0, body(handler.handle("ListTagsForResource", parse("{\"resourceArn\":\"" + arn + "\"}"), REGION))
+                .get("tags").size());
     }
 
     @Test
@@ -382,6 +575,29 @@ class RedshiftServerlessJsonHandlerTest {
             request.put(field, value);
         }
         return request;
+    }
+
+    @Test
+    void updateSnapshotReturnsTheUpdatedSnapshotAndRejectsABadRetention() {
+        create("upd-handler-ns");
+        body(handler.handle("CreateSnapshot",
+                parse("{\"snapshotName\":\"upd-handler\",\"namespaceName\":\"upd-handler-ns\",\"retentionPeriod\":7}"),
+                REGION));
+
+        JsonNode updated = body(handler.handle("UpdateSnapshot",
+                parse("{\"snapshotName\":\"upd-handler\",\"retentionPeriod\":45}"), REGION)).get("snapshot");
+        assertEquals("upd-handler", updated.get("snapshotName").textValue());
+        assertEquals(45, updated.get("snapshotRetentionPeriod").intValue());
+        assertEquals(45, updated.get("snapshotRemainingDays").intValue());
+
+        JsonNode indefinite = body(handler.handle("UpdateSnapshot",
+                parse("{\"snapshotName\":\"upd-handler\",\"retentionPeriod\":-1}"), REGION)).get("snapshot");
+        assertTrue(indefinite.path("snapshotRetentionPeriod").isMissingNode());
+
+        assertEquals(400, handler.handle("UpdateSnapshot",
+                parse("{\"snapshotName\":\"upd-handler\",\"retentionPeriod\":0}"), REGION).getStatus());
+        assertEquals(400, handler.handle("UpdateSnapshot",
+                parse("{\"snapshotName\":\"missing-snap\",\"retentionPeriod\":5}"), REGION).getStatus());
     }
 
     private JsonNode body(Response response) {

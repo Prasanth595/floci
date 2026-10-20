@@ -19,6 +19,7 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -125,6 +126,35 @@ class ApiGatewayPutRestApiMergeAuthorizationTest {
             {
               "openapi": "3.0.1",
               "info": {"title": "NoSecurity", "version": "2"},
+              "paths": {"/protected": {"get": {
+                "x-amazon-apigateway-integration": {"type": "MOCK"}
+              }}}
+            }
+            """;
+    private static final String API_KEY_SPEC = """
+            {
+              "openapi": "3.0.1",
+              "info": {"title": "ApiKeyProtected", "version": "1"},
+              "components": {"securitySchemes": {
+                "client_key": {"type": "apiKey", "name": "x-api-key", "in": "header"}
+              }},
+              "paths": {"/protected": {"get": {
+                "security": [{"client_key": []}],
+                "x-amazon-apigateway-integration": {"type": "MOCK"}
+              }}}
+            }
+            """;
+    private static final String ROOT_API_KEY_SPEC = """
+            {
+              "openapi": "3.0.1",
+              "info": {"title": "RootApiKeyProtected", "version": "1"},
+              "security": [{"client_key": []}],
+              "components": {"securitySchemes": {
+                "client_key": {
+                  "type": "apiKey", "name": "x-api-key", "in": "header",
+                  "x-amazon-apigateway-authtype": "apiKey"
+                }
+              }},
               "paths": {"/protected": {"get": {
                 "x-amazon-apigateway-integration": {"type": "MOCK"}
               }}}
@@ -295,7 +325,7 @@ class ApiGatewayPutRestApiMergeAuthorizationTest {
                     () -> assertEquals("COGNITO_USER_POOLS", authorizer.path("type").asText()),
                     () -> assertEquals(AUTHORIZER_URI, authorizer.path("authorizerUri").asText()));
 
-            when(lambdaService.invoke(eq("us-east-1"), eq(AUTHORIZER_FUNCTION), any(byte[].class),
+            when(lambdaService.invokeTarget(eq("us-east-1"), eq("arn:aws:lambda:us-east-1:000000000000:function:" + AUTHORIZER_FUNCTION), any(byte[].class),
                     eq(InvocationType.RequestResponse)))
                     .thenReturn(new InvokeResult(200, null, ALLOW_POLICY, null, "authorizer-request"));
             deploy(apiId, "mismatched-type");
@@ -399,6 +429,204 @@ class ApiGatewayPutRestApiMergeAuthorizationTest {
                     () -> verifyDenyInvocations(0));
         } finally {
             given().delete("/restapis/" + apiId).then().statusCode(202);
+        }
+    }
+
+    @Test
+    void importedPlainApiKeySecurityRequiresApiKeyForOperationAndRootSecurity() throws Exception {
+        for (String spec : List.of(API_KEY_SPEC, ROOT_API_KEY_SPEC)) {
+            String apiId = importApi(spec);
+            try {
+                JsonNode method = getJson(methodPath(apiId));
+                assertAll(
+                        () -> assertEquals("NONE", method.path("authorizationType").asText()),
+                        () -> assertTrue(method.path("apiKeyRequired").asBoolean()));
+            } finally {
+                given().delete("/restapis/" + apiId).then().statusCode(202);
+            }
+        }
+    }
+
+    @Test
+    void importedNonHeaderApiKeySchemesDoNotRequireApiKey() throws Exception {
+        List<String> nonApiGatewayKeySpecs = List.of(
+                API_KEY_SPEC.replace("\"name\": \"x-api-key\", \"in\": \"header\"",
+                        "\"name\": \"x-api-key\", \"in\": \"query\""),
+                API_KEY_SPEC.replace("\"name\": \"x-api-key\", \"in\": \"header\"",
+                        "\"name\": \"X-Custom-Key\", \"in\": \"header\""));
+        for (String spec : nonApiGatewayKeySpecs) {
+            String apiId = importApi(spec);
+            try {
+                JsonNode method = getJson(methodPath(apiId));
+                assertFalse(method.path("apiKeyRequired").asBoolean());
+            } finally {
+                given().delete("/restapis/" + apiId).then().statusCode(202);
+            }
+        }
+
+        String mixedCaseHeaderSpec = API_KEY_SPEC.replace("\"name\": \"x-api-key\", \"in\": \"header\"",
+                "\"name\": \"X-API-KEY\", \"in\": \"header\"");
+        String apiId = importApi(mixedCaseHeaderSpec);
+        try {
+            JsonNode method = getJson(methodPath(apiId));
+            assertTrue(method.path("apiKeyRequired").asBoolean());
+        } finally {
+            given().delete("/restapis/" + apiId).then().statusCode(202);
+        }
+
+        String authorizerApiKeySpec = API_KEY_SPEC.replace(
+                "\"client_key\": {\"type\": \"apiKey\", \"name\": \"x-api-key\", \"in\": \"header\"}",
+                "\"client_key\": {\"type\": \"apiKey\", \"name\": \"x-api-key\", \"in\": \"header\", "
+                        + "\"x-amazon-apigateway-authorizer\": {\"type\": \"token\", "
+                        + "\"authorizerUri\": \"" + AUTHORIZER_URI + "\"}}");
+        String authorizerApiId = importApi(authorizerApiKeySpec);
+        try {
+            JsonNode method = getJson(methodPath(authorizerApiId));
+            assertAll(
+                    () -> assertFalse(method.path("apiKeyRequired").asBoolean()),
+                    () -> assertEquals("CUSTOM", method.path("authorizationType").asText()));
+        } finally {
+            given().delete("/restapis/" + authorizerApiId).then().statusCode(202);
+        }
+    }
+
+    @Test
+    void importedApiKeysAreEnforcedForImportAndPutRestApi() throws Exception {
+        List<String> apiKeySpecs = List.of(API_KEY_SPEC, ROOT_API_KEY_SPEC);
+        List<String> modes = List.of("import", "merge", "overwrite");
+        int scenario = 0;
+        for (String mode : modes) {
+            for (String spec : apiKeySpecs) {
+                String apiId = "import".equals(mode) ? importApi(spec) : importApi();
+                String keyId = null;
+                String planId = null;
+                try {
+                    if (!"import".equals(mode)) {
+                        putSpec(apiId, mode, spec);
+                    }
+                    String stageName = "apikey-" + scenario++;
+                    deploy(apiId, stageName);
+
+                    keyId = given().contentType(ContentType.JSON)
+                            .body("{\"name\":\"imported-key-" + scenario + "\",\"enabled\":true}")
+                            .post("/apikeys").then().statusCode(201).extract().path("id");
+                    String keyValue = given().get("/apikeys/" + keyId + "?includeValue=true")
+                            .then().statusCode(200).extract().path("value");
+                    planId = given().contentType(ContentType.JSON)
+                            .body("{\"name\":\"imported-plan-" + scenario
+                                    + "\",\"apiStages\":[{\"apiId\":\"" + apiId
+                                    + "\",\"stage\":\"" + stageName + "\"}]}")
+                            .post("/usageplans").then().statusCode(201).extract().path("id");
+                    given().contentType(ContentType.JSON)
+                            .body("{\"keyId\":\"" + keyId + "\",\"keyType\":\"API_KEY\"}")
+                            .post("/usageplans/" + planId + "/keys").then().statusCode(201);
+
+                    assertAll(
+                            () -> assertEquals(403, invokeWithoutApiKey(apiId, stageName)),
+                            () -> assertEquals(403, invokeWithApiKey(apiId, stageName, "invalid-api-key")),
+                            () -> assertEquals(200, invokeWithApiKey(apiId, stageName, keyValue)));
+                } finally {
+                    if (planId != null) {
+                        given().delete("/usageplans/" + planId).then().statusCode(202);
+                    }
+                    if (keyId != null) {
+                        given().delete("/apikeys/" + keyId).then().statusCode(202);
+                    }
+                    given().delete("/restapis/" + apiId).then().statusCode(202);
+                }
+            }
+        }
+    }
+
+    @Test
+    void emptySecurityAlternativeDoesNotRemoveApiKeyRequirement() throws Exception {
+        String optionalOperationSecurity = API_KEY_SPEC.replace(
+                "\"security\": [{\"client_key\": []}]",
+                "\"security\": [{\"client_key\": []}, {}]");
+        String optionalRootSecurity = ROOT_API_KEY_SPEC.replace(
+                "\"security\": [{\"client_key\": []}]",
+                "\"security\": [{\"client_key\": []}, {}]");
+        for (String spec : List.of(optionalOperationSecurity, optionalRootSecurity)) {
+            String apiId = importApi(spec);
+            try {
+                JsonNode method = getJson(methodPath(apiId));
+                deploy(apiId, "optional-security");
+                assertAll(
+                        () -> assertTrue(method.path("apiKeyRequired").asBoolean()),
+                        () -> assertEquals("NONE", method.path("authorizationType").asText()),
+                        () -> assertEquals(403, invokeWithoutApiKey(apiId, "optional-security")));
+            } finally {
+                given().delete("/restapis/" + apiId).then().statusCode(202);
+            }
+        }
+
+        String optionalAuthorizerSecurity = COGNITO_SPEC.replace(
+                "\"security\": [{\"Guard\": []}]",
+                "\"security\": [{\"Guard\": []}, {}]");
+        String apiId = importApi(optionalAuthorizerSecurity);
+        try {
+            JsonNode method = getJson(methodPath(apiId));
+            assertAll(
+                    () -> assertFalse(method.path("apiKeyRequired").asBoolean()),
+                    () -> assertEquals("COGNITO_USER_POOLS", method.path("authorizationType").asText()),
+                    () -> assertTrue(method.hasNonNull("authorizerId")));
+        } finally {
+            given().delete("/restapis/" + apiId).then().statusCode(202);
+        }
+    }
+
+    @Test
+    void apiKeyAndAuthorizerAlternativesKeepBothRequirements() throws Exception {
+        String apiKeyAndAuthorizerSpec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "IncompatibleSecurity", "version": "1"},
+                  "components": {"securitySchemes": {
+                    "client_key": {"type": "apiKey", "name": "x-api-key", "in": "header"},
+                    "Guard": {
+                      "type": "apiKey", "name": "Authorization", "in": "header",
+                      "x-amazon-apigateway-authorizer": {
+                        "type": "token", "authorizerUri": "%s"
+                      }
+                    }
+                  }},
+                  "paths": {"/protected": {"get": {
+                    "security": [{"client_key": []}, {"Guard": []}],
+                    "x-amazon-apigateway-integration": {"type": "MOCK"}
+                  }}}
+                }
+                """.formatted(AUTHORIZER_URI);
+        String apiId = importApi(apiKeyAndAuthorizerSpec);
+        try {
+            denyAuthorizerRequests();
+            JsonNode method = getJson(methodPath(apiId));
+            deploy(apiId, "mixed-security");
+            assertAll(
+                    () -> assertTrue(method.path("apiKeyRequired").asBoolean()),
+                    () -> assertEquals("CUSTOM", method.path("authorizationType").asText()),
+                    () -> assertTrue(method.hasNonNull("authorizerId")),
+                    () -> assertEquals(403, invoke(apiId, "mixed-security")),
+                    () -> verifyDenyInvocations(1));
+        } finally {
+            given().delete("/restapis/" + apiId).then().statusCode(202);
+        }
+    }
+
+    @Test
+    void putRestApiPlainApiKeySecurityRequiresApiKeyForMergeAndOverwrite() throws Exception {
+        for (String mode : List.of("merge", "overwrite")) {
+            for (String spec : List.of(API_KEY_SPEC, ROOT_API_KEY_SPEC)) {
+                String apiId = importApi();
+                try {
+                    putSpec(apiId, mode, spec);
+                    JsonNode method = getJson(methodPath(apiId));
+                    assertAll(
+                            () -> assertEquals("NONE", method.path("authorizationType").asText()),
+                            () -> assertTrue(method.path("apiKeyRequired").asBoolean()));
+                } finally {
+                    given().delete("/restapis/" + apiId).then().statusCode(202);
+                }
+            }
         }
     }
 
@@ -621,6 +849,15 @@ class ApiGatewayPutRestApiMergeAuthorizationTest {
         return given().get("/execute-api/" + apiId + "/" + stageName + "/protected").statusCode();
     }
 
+    private static int invokeWithoutApiKey(String apiId, String stageName) {
+        return given().get("/execute-api/" + apiId + "/" + stageName + "/protected").statusCode();
+    }
+
+    private static int invokeWithApiKey(String apiId, String stageName, String keyValue) {
+        return given().header("x-api-key", keyValue)
+                .get("/execute-api/" + apiId + "/" + stageName + "/protected").statusCode();
+    }
+
     private static JsonNode getJson(String path) throws Exception {
         String body = given().get(path).then().statusCode(200).extract().asString();
         return MAPPER.readTree(body);
@@ -641,7 +878,7 @@ class ApiGatewayPutRestApiMergeAuthorizationTest {
     }
 
     private void denyAuthorizerRequests(String function) {
-        when(lambdaService.invoke(eq("us-east-1"), eq(function), any(byte[].class),
+        when(lambdaService.invokeTarget(eq("us-east-1"), eq("arn:aws:lambda:us-east-1:000000000000:function:" + function), any(byte[].class),
                 eq(InvocationType.RequestResponse)))
                 .thenReturn(new InvokeResult(200, null, DENY_POLICY, null, "authorizer-request"));
     }
@@ -651,7 +888,7 @@ class ApiGatewayPutRestApiMergeAuthorizationTest {
     }
 
     private void verifyDenyInvocations(String function, int count) {
-        verify(lambdaService, times(count)).invoke(eq("us-east-1"), eq(function),
+        verify(lambdaService, times(count)).invokeTarget(eq("us-east-1"), eq("arn:aws:lambda:us-east-1:000000000000:function:" + function),
                 any(byte[].class), eq(InvocationType.RequestResponse));
     }
 }

@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import org.h2.Driver;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
@@ -52,6 +54,97 @@ class RdsDataServiceTest {
     private static final String REGION = "us-east-1";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Test
+    void returnsTypedArraysThroughTheJdbcExecutionPath() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);
+        ObjectNode request = harness.request("""
+                select array[1,2,3], array['a','b'], array[true,false],
+                       array[cast(1.5 as double),cast(2.25 as double)],
+                       cast(null as integer array)
+                """);
+        request.put("includeResultMetadata", true);
+        ObjectNode response = harness.service.executeStatement(request, REGION);
+
+        assertEquals(objectMapper.readTree("""
+                [[{"arrayValue":{"longValues":[1,2,3]}},
+                  {"arrayValue":{"stringValues":["a","b"]}},
+                  {"arrayValue":{"booleanValues":[true,false]}},
+                  {"arrayValue":{"doubleValues":[1.5,2.25]}}, {"isNull":true}]]
+                """), objectMapper.readTree(response.get("records").toString()));
+        assertEquals(Types.INTEGER, response.path("columnMetadata").get(0).path("arrayBaseColumnType").asInt());
+    }
+
+    @Test
+    void rejectsMultidimensionalArrayResultsThroughTheJdbcExecutionPath() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);
+        AwsException error = assertThrows(AwsException.class, () -> harness.service.executeStatement(
+                harness.request("select array[array[1,2],array[3,4]]"), REGION));
+
+        assertEquals("UnsupportedResultException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals(0, harness.gate.held.get());
+    }
+
+    @Test
+    void rejectsMultipleStatementsBeforeEitherWriteRuns() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);
+        harness.createEventsTable();
+
+        AwsException error = assertThrows(AwsException.class, () -> harness.service.executeStatement(harness.request(
+                "insert into data_api_events(name) values ('first'); insert into data_api_events(name) values ('second')"),
+                REGION));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Multistatements aren't supported.", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals(0, harness.countEvents());
+    }
+
+    @Test
+    void rejectsMultipleStatementsInsideATransactionWithoutChangingItsData() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);
+        harness.createEventsTable();
+        String transactionId = harness.service.beginTransaction(harness.beginRequest(), REGION)
+                .path("transactionId").asText();
+        ObjectNode request = harness.request(
+                "insert into data_api_events(name) values ('first'); insert into data_api_events(name) values ('second')");
+        request.put("transactionId", transactionId);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(request, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Multistatements aren't supported.", error.getMessage());
+
+        harness.service.commitTransaction(harness.transactionRequest(transactionId), REGION);
+        assertEquals(0, harness.countEvents());
+    }
+
+    @Test
+    void batchRejectsMultipleStatementsBeforeAnyParameterSetRuns() throws Exception {
+        for (DatabaseEngine engine : List.of(DatabaseEngine.POSTGRES, DatabaseEngine.MYSQL)) {
+            TestHarness harness = new TestHarness(engine);
+            harness.createEventsTable();
+            ObjectNode request = harness.request(
+                    "insert into data_api_events(name) values (:name); insert into data_api_events(name) values ('second')");
+            request.set("parameterSets", parameterSets("first"));
+
+            AwsException error = assertThrows(AwsException.class,
+                    () -> harness.service.batchExecuteStatement(request, REGION));
+            assertEquals("ValidationException", error.getErrorCode());
+            assertEquals("Multistatements aren't supported.", error.getMessage());
+            assertEquals(0, harness.countEvents());
+        }
+    }
+
+    @Test
+    void executesSingleStatementsContainingLiteralAndCommentSemicolons() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);
+        ObjectNode response = harness.service.executeStatement(harness.request(
+                "select ';' as separator /* ignored; statement */; -- trailing; comment\n"), REGION);
+
+        assertEquals(";", response.path("records").get(0).get(0).path("stringValue").asText());
+    }
 
     @Test
     void executeStatementRejectsAResponseOverOneMebibyte() throws Exception {
@@ -1055,11 +1148,70 @@ class RdsDataServiceTest {
                 });
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"ExecuteStatement", "BatchExecuteStatement", "BeginTransaction"})
+    void optedInCallsRejectResumingBackendsBeforeOpeningJdbcAndSucceedOnRetry(String operation) throws Exception {
+        TestHarness harness = new TestHarness(true);
+        harness.createEventsTable();
+        harness.gate.resuming = true;
+
+        AwsException error = assertThrows(AwsException.class, () -> call(harness, operation));
+
+        assertEquals("DatabaseResumingException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals(0, harness.connectionsOpened.get());
+        assertEquals(0, harness.gate.held.get());
+
+        harness.gate.resuming = false;
+        call(harness, operation);
+        assertEquals(1, harness.connectionsOpened.get());
+        if ("BatchExecuteStatement".equals(operation)) {
+            assertEquals(1, harness.service.executeStatement(
+                    harness.request("select count(*) from data_api_events"), REGION)
+                    .path("records").get(0).get(0).path("longValue").asInt());
+        }
+        harness.service.shutdown();
+        assertEquals(0, harness.gate.held.get());
+    }
+
+    @Test
+    void defaultConfigurationStillWaitsForResumingBackends() {
+        TestHarness harness = new TestHarness();
+        harness.gate.resuming = true;
+
+        assertEquals(1, harness.service.executeStatement(harness.request("select 1"), REGION)
+                .path("records").get(0).get(0).path("longValue").asInt());
+        assertEquals(0, harness.gate.held.get());
+        harness.service.shutdown();
+    }
+
+    private void call(TestHarness harness, String operation) {
+        switch (operation) {
+            case "ExecuteStatement" -> harness.service.executeStatement(harness.request("select 1"), REGION);
+            case "BatchExecuteStatement" -> {
+                ObjectNode request = harness.request("insert into data_api_events(name) values ('retry')");
+                request.set("parameterSets", objectMapper.createArrayNode().add(objectMapper.createArrayNode()));
+                harness.service.batchExecuteStatement(request, REGION);
+            }
+            case "BeginTransaction" -> harness.service.beginTransaction(harness.beginRequest(), REGION);
+            default -> throw new AssertionError(operation);
+        }
+    }
+
     /** Counts the backends the Data API enters and the holds still open on them. */
     private static final class CountingGate implements RdsBackendGate {
         private final List<String> entered = new CopyOnWriteArrayList<>();
         private final AtomicInteger held = new AtomicInteger();
         private volatile IllegalStateException failure;
+        private boolean resuming;
+
+        @Override
+        public Lease enter(String host, int port, boolean waitForResume) {
+            if (!waitForResume && resuming) {
+                throw new ResumingException();
+            }
+            return enter(host, port);
+        }
 
         @Override
         public Lease enter(String host, int port) {
@@ -1082,10 +1234,15 @@ class RdsDataServiceTest {
         private final RdsDataResourceResolver resolver;
         private final RdsDataResourceResolver.DatabaseTarget target;
         private final CountingGate gate = new CountingGate();
+        private final AtomicInteger connectionsOpened = new AtomicInteger();
         private final RdsDataService service;
 
         private TestHarness() {
             this(DatabaseEngine.MYSQL, Duration.ofSeconds(60));
+        }
+
+        private TestHarness(boolean resumingExceptionEnabled) {
+            this(defaultSecrets(), DatabaseEngine.POSTGRES, Duration.ofSeconds(60), resumingExceptionEnabled);
         }
 
         private TestHarness(SecretsManagerService secrets) {
@@ -1105,6 +1262,11 @@ class RdsDataServiceTest {
         }
 
         private TestHarness(SecretsManagerService secrets, DatabaseEngine engine, Duration transactionTtl) {
+            this(secrets, engine, transactionTtl, false);
+        }
+
+        private TestHarness(SecretsManagerService secrets, DatabaseEngine engine, Duration transactionTtl,
+                            boolean resumingExceptionEnabled) {
             jdbcUrl = "jdbc:h2:mem:rdsdata_" + UUID.randomUUID() + ";MODE=" + h2Mode(engine)
                     + ";DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
             resolver = mock(RdsDataResourceResolver.class);
@@ -1120,10 +1282,12 @@ class RdsDataServiceTest {
                                 String username,
                                 String password,
                                 String database) throws SQLException {
+                    connectionsOpened.incrementAndGet();
                     return getConnection();
                 }
             };
-            service = new RdsDataService(resolver, secrets, objectMapper, connectionFactory, transactionTtl, gate);
+            service = new RdsDataService(resolver, secrets, objectMapper, connectionFactory,
+                    transactionTtl, gate, resumingExceptionEnabled);
         }
 
         private Connection getConnection() throws SQLException {

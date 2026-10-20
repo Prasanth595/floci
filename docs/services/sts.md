@@ -13,6 +13,30 @@
 | `GetSessionToken` | Get temporary credentials for an IAM user |
 | `GetFederationToken` | Get temporary credentials for a federated user |
 | `DecodeAuthorizationMessage` | Decode an encoded authorization failure message |
+| `GetDelegatedAccessToken` | Exchange a delegation request's trade-in token for temporary credentials |
+
+## Delegated Access Token
+
+`GetDelegatedAccessToken` takes the exchange token an IAM delegation request released and answers
+credentials in the customer's account, acting as the identity that approved the request, which is
+the `AssumedPrincipal` it returns. Accepting a request records the identity that called it, and
+that is the identity mapped to the delegated credential, so a request its owner forwarded to an
+administrator for approval hands over the administrator's access rather than the owner's. The
+credentials expire at the moment the customer released the token plus the request's
+`SessionDuration`, not at the exchange, so the same token can be exchanged repeatedly and every
+session it mints ends at the same time.
+
+The credentials carry the permissions of that identity. AWS bounds them by the permission policy it
+renders from the partner's registered policy template, which no API registers, so Floci bounds them
+by the approving identity's own permissions: a user's policies and boundary, the account's access
+where the account root approved the request, and nothing at all where that identity no longer
+exists.
+
+Only the account that filed the delegation request may exchange its token; any other account gets
+`AccessDenied`. A token past its window, and a token nothing matches, both answer
+`ExpiredTradeInTokenException`. `PackedPolicySize` is not returned, the model deprecating it and
+stating it is not populated for this operation. See the delegation request section of the
+[IAM service doc](iam.md) for the lifecycle that issues the token.
 
 ## Configuration
 
@@ -21,6 +45,11 @@
 | `FLOCI_SERVICES_STS_ENABLED` | `true` | Enable or disable the service |
 
 ## Session Token and Federation Token Permissions
+
+`GetSessionToken` and `GetFederationToken` reject temporary callers with `AccessDenied` before issuing credentials,
+including when IAM policy enforcement is disabled. Use a long-term IAM user or account key.
+For an authenticated temporary caller, `GetFederationToken` returns
+`Cannot call GetFederationToken with session credentials` with either enforcement setting.
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, credentials from `GetSessionToken` and `GetFederationToken`
 are evaluated as the identity whose long-term key signed the call, as on AWS:
@@ -110,5 +139,13 @@ For temporary credentials returned by an assumed-role action, its `Arn` and `Use
 the `AssumedRoleUser.Arn` and `AssumedRoleUser.AssumedRoleId` returned when the session was created.
 For `GetSessionToken` credentials they are those of the IAM user that minted them, and for `GetFederationToken`
 credentials the `FederatedUser.Arn` and `FederatedUser.FederatedUserId` (`<account>:<name>`).
+The response resolves both header and query-string credentials, including the query session token,
+so a presigned request reports the same caller identity. A nonblank Authorization header retains
+precedence over query credentials.
 
 When `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`, requests signed with the seeded `floci` access key return `arn:aws:iam::000000000000:user/floci-deployer`. Other unknown local credentials continue to return the account root ARN for backward compatibility.
+
+When `FLOCI_AUTH_VALIDATE_SIGNATURES=true`, the shared signature verifier checks presigned query
+credentials for STS operations, including `GetCallerIdentity`, `GetSessionToken`, `GetFederationToken`
+and `AssumeRole`. It checks the request signature, credential scope, expiry and session token before
+execution. Nonblank Authorization headers retain priority. See [signature checks](../configuration/multi-account.md#signature-validation).

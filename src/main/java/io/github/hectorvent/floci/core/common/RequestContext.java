@@ -15,6 +15,7 @@ public class RequestContext {
     private String partition;
     private String accessKeyId;
     private String sessionToken;
+    private Boolean iamGovernanceBypass;
 
     public String getAccountId() {
         return accountId;
@@ -59,5 +60,19 @@ public class RequestContext {
 
     public void setSessionToken(String sessionToken) {
         this.sessionToken = sessionToken;
+    }
+
+    /**
+     * IAM's decision on an S3 delete or retention change that sends
+     * {@code x-amz-bypass-governance-retention}: true when it overrides a governance lock and the caller
+     * may bypass it, false when it overrides none, so no bypass permission was checked, and null when
+     * IAM did not decide. S3Controller lets the operation bypass a lock only as far as this allows.
+     */
+    public Boolean getIamGovernanceBypass() {
+        return iamGovernanceBypass;
+    }
+
+    public void setIamGovernanceBypass(Boolean iamGovernanceBypass) {
+        this.iamGovernanceBypass = iamGovernanceBypass;
     }
 }

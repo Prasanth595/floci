@@ -493,6 +493,7 @@ class S3ServiceAnnotationsTest {
 
     @Test
     void governanceRetentionBlocksAnnotationDeleteWithoutBypass() {
+        s3Service.setBucketObjectLockEnabled(BUCKET);
         s3Service.putObject(BUCKET, "locked.txt", "body".getBytes(StandardCharsets.UTF_8),
                 null, null, new io.github.hectorvent.floci.services.s3.model.PutObjectOptions()
                         .withObjectLockMode("GOVERNANCE")
@@ -523,6 +524,7 @@ class S3ServiceAnnotationsTest {
 
     @Test
     void complianceRetentionBlocksAnnotationPutAndDelete() {
+        s3Service.setBucketObjectLockEnabled(BUCKET);
         s3Service.putObject(BUCKET, "compliance.txt", "body".getBytes(StandardCharsets.UTF_8),
                 null, null, new io.github.hectorvent.floci.services.s3.model.PutObjectOptions()
                         .withObjectLockMode("COMPLIANCE")

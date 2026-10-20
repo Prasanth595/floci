@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.elasticache;
 
+import io.github.hectorvent.floci.testing.DockerAvailability;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import org.junit.jupiter.api.AfterAll;
@@ -14,6 +16,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 
 import static io.restassured.RestAssured.given;
@@ -37,17 +40,21 @@ class ElastiCacheRedisClusterIntegrationTest {
     private static final int SOCKET_TIMEOUT_MS = 10_000;
 
     private static String nodeHost;
+
+    @TestHTTPResource("/")
+    static URI baseUri;
     private static int nodePort;
 
     @BeforeAll
-    static void requireDocker() {
-        Assumptions.assumeTrue(isDockerAvailable(), "Docker daemon must be available for ElastiCache integration tests");
+    static void requireDocker() throws InterruptedException {
+        Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker daemon must be available for ElastiCache integration tests");
     }
 
     @AfterAll
     static void cleanup() {
         try {
             given()
+                .port(baseUri.getPort())
                 .formParam("Action", "DeleteCacheCluster")
                 .formParam("CacheClusterId", CLUSTER_ID)
                 .header("Authorization", AUTH_HEADER)
@@ -173,15 +180,6 @@ class ElastiCacheRedisClusterIntegrationTest {
             .post("/")
         .then()
             .statusCode(404);
-    }
-
-    private static boolean isDockerAvailable() {
-        try {
-            Process process = new ProcessBuilder("docker", "info").start();
-            return process.waitFor() == 0;
-        } catch (Exception e) {
-            return false;
-        }
     }
 
     private static Socket openSocket(String host, int port) throws IOException {

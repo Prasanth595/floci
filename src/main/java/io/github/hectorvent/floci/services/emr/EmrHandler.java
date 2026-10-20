@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJson11Controller;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.emr.model.EmrBlockPublicAccess;
 import io.github.hectorvent.floci.services.emr.model.EmrCluster;
 import io.github.hectorvent.floci.services.emr.model.EmrInstanceFleet;
@@ -83,6 +84,9 @@ public class EmrHandler {
                 case "RemoveAutoTerminationPolicy" -> handleRemoveAutoTerminationPolicy(request);
                 case "PutAutoScalingPolicy" -> handlePutAutoScalingPolicy(request);
                 case "RemoveAutoScalingPolicy" -> handleRemoveAutoScalingPolicy(request);
+                case "ListReleaseLabels" -> handleListReleaseLabels(request);
+                case "DescribeReleaseLabel" -> handleDescribeReleaseLabel(request);
+                case "ListSupportedInstanceTypes" -> handleListSupportedInstanceTypes(request);
                 case "GetBlockPublicAccessConfiguration" -> handleGetBlockPublicAccessConfiguration(region);
                 case "PutBlockPublicAccessConfiguration" -> handlePutBlockPublicAccessConfiguration(request, region);
                 default -> Response.status(400)
@@ -327,6 +331,71 @@ public class EmrHandler {
     private Response handleDeleteSecurityConfiguration(JsonNode request) {
         service.deleteSecurityConfiguration(text(request, "Name"));
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    // ──────────────────────────── Release catalogue ────────────────────────────
+
+    private Response handleListReleaseLabels(JsonNode request) {
+        JsonNode filters = request.path("Filters");
+        PaginatedResult<String> page = service.listReleaseLabels(
+                filters.path("Prefix").asText(null), filters.path("Application").asText(null),
+                request.path("NextToken").asText(null), intOrNull(request.path("MaxResults")));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode labels = response.putArray("ReleaseLabels");
+        page.items().forEach(labels::add);
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeReleaseLabel(JsonNode request) {
+        // MaxResults and NextToken are "reserved for future use" and AWS answers every application.
+        EmrReleaseCatalog.Release release = service.describeReleaseLabel(request.path("ReleaseLabel").asText(null));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ReleaseLabel", release.label());
+        ArrayNode apps = response.putArray("Applications");
+        for (EmrReleaseCatalog.Application app : release.applications()) {
+            apps.addObject().put("Name", app.name()).put("Version", app.version());
+        }
+        ArrayNode os = response.putArray("AvailableOSReleases");
+        release.osReleases().forEach(label -> os.addObject().put("Label", label));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListSupportedInstanceTypes(JsonNode request) {
+        PaginatedResult<EmrReleaseCatalog.InstanceType> page = service.listSupportedInstanceTypes(
+                request.path("ReleaseLabel").asText(null), request.path("Marker").asText(null));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode types = response.putArray("SupportedInstanceTypes");
+        for (EmrReleaseCatalog.InstanceType t : page.items()) {
+            types.addObject()
+                    .put("Type", t.type())
+                    .put("MemoryGB", t.memoryGb())
+                    .put("StorageGB", t.storageGb())
+                    .put("VCPU", t.vcpu())
+                    .put("Is64BitsOnly", true)
+                    .put("InstanceFamilyId", t.instanceFamilyId())
+                    .put("EbsOptimizedAvailable", true)
+                    .put("EbsOptimizedByDefault", true)
+                    .put("NumberOfDisks", t.numberOfDisks())
+                    .put("EbsStorageOnly", t.ebsStorageOnly())
+                    .put("Architecture", t.architecture());
+        }
+        if (page.nextToken() != null) {
+            response.put("Marker", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private static Integer intOrNull(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.canConvertToInt()) {
+            throw new AwsException("InvalidRequestException", "MaxResults must be an integer.", 400);
+        }
+        return node.asInt();
     }
 
     private Response handleListSecurityConfigurations() {

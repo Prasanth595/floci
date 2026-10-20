@@ -40,6 +40,32 @@ class Ec2Tests {
     }
 
     @Test
+    @Order(-1)
+    void spotRequestsPreserveOriginalUserData() {
+        String encoded = "/w";
+        SpotInstanceRequest request = ec2.requestSpotInstances(RequestSpotInstancesRequest.builder()
+                .instanceCount(1)
+                .launchSpecification(RequestSpotLaunchSpecification.builder()
+                        .imageId("ami-0abcdef1234567890")
+                        .instanceType(InstanceType.T3_MICRO)
+                        .userData(encoded).build())
+                .build()).spotInstanceRequests().get(0);
+        try {
+            assertThat(request.launchSpecification().userData()).isEqualTo(encoded);
+            assertThat(ec2.describeSpotInstanceRequests(DescribeSpotInstanceRequestsRequest.builder()
+                    .spotInstanceRequestIds(request.spotInstanceRequestId()).build())
+                    .spotInstanceRequests().get(0).launchSpecification().userData()).isEqualTo(encoded);
+            assertThat(ec2.describeInstanceAttribute(DescribeInstanceAttributeRequest.builder()
+                    .instanceId(request.instanceId()).attribute(InstanceAttributeName.USER_DATA).build())
+                    .userData().value()).isEqualTo(encoded);
+        } finally {
+            ec2.terminateInstances(TerminateInstancesRequest.builder().instanceIds(request.instanceId()).build());
+            ec2.cancelSpotInstanceRequests(CancelSpotInstanceRequestsRequest.builder()
+                    .spotInstanceRequestIds(request.spotInstanceRequestId()).build());
+        }
+    }
+
+    @Test
     @Order(0)
     @DisplayName("DescribeVpnGateways - empty when none exist")
     void describeVpnGatewaysEmpty() {
@@ -450,7 +476,7 @@ class Ec2Tests {
         CreateSubnetResponse resp = ec2.createSubnet(CreateSubnetRequest.builder()
                 .vpcId(vpcId)
                 .cidrBlock("10.0.1.0/24")
-                .availabilityZone("us-east-1a")
+                .availabilityZone(TestFixtures.availabilityZone())
                 .tagSpecifications(
                         TagSpecification.builder()
                                 .resourceType(ResourceType.SUBNET)
@@ -1012,7 +1038,7 @@ class Ec2Tests {
         String endpointId = null;
         try {
             ownSubnetId = ec2.createSubnet(CreateSubnetRequest.builder()
-                    .vpcId(vpcId).cidrBlock("10.0.90.0/24").availabilityZone("us-east-1a")
+                    .vpcId(vpcId).cidrBlock("10.0.90.0/24").availabilityZone(TestFixtures.availabilityZone())
                     .build()).subnet().subnetId();
             ownGroupId = ec2.createSecurityGroup(CreateSecurityGroupRequest.builder()
                     .groupName("vpce-eni-sdk-test").description("endpoint interface ids")
@@ -1027,6 +1053,8 @@ class Ec2Tests {
                             .securityGroupIds(ownGroupId)
                             .build());
             endpointId = created.vpcEndpoint().vpcEndpointId();
+            assertThat(created.vpcEndpoint().ipAddressType()).isEqualTo(IpAddressType.IPV4);
+            assertThat(created.vpcEndpoint().stateAsString()).isEqualTo("available");
 
             // Asserted on the CREATE response and again on DESCRIBE, because Terraform
             // reads the ids from one and then re-reads them from the other between plan
@@ -1039,6 +1067,14 @@ class Ec2Tests {
             DescribeVpcEndpointsResponse described = ec2.describeVpcEndpoints(
                     DescribeVpcEndpointsRequest.builder().vpcEndpointIds(endpointId).build());
             VpcEndpoint ep = described.vpcEndpoints().get(0);
+            assertThat(ep.ipAddressType()).isEqualTo(IpAddressType.IPV4);
+            assertThat(ep.stateAsString()).isEqualTo("available");
+            ec2.modifyVpcEndpoint(ModifyVpcEndpointRequest.builder().vpcEndpointId(endpointId)
+                    .ipAddressType(IpAddressType.DUALSTACK).build());
+            assertThat(ec2.describeVpcEndpoints(DescribeVpcEndpointsRequest.builder()
+                    .vpcEndpointIds(endpointId).build()).vpcEndpoints().get(0).ipAddressType())
+                    .isEqualTo(IpAddressType.DUALSTACK);
+
 
             assertThat(ep.networkInterfaceIds())
                     .as("DescribeVpcEndpoints response")

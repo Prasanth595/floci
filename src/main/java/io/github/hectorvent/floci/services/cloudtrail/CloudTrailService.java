@@ -776,13 +776,14 @@ public class CloudTrailService {
         return key.startsWith(configKeyPart);
     }
 
-    // Package-private for unit testing.
+    // Package-private for unit testing. A read-only event is one that doesn't change a resource, so
+    // SelectObjectContent is one although it is sent as a POST.
     static boolean isReadOnlyEvent(String eventName) {
         if (eventName == null) return true;
         return switch (eventName) {
             case "GetObject", "HeadObject", "ListObjects", "ListObjectsV2",
-                 "GetObjectAcl", "GetObjectTagging", "ListMultipartUploads",
-                 "GetObjectAnnotation", "ListObjectAnnotations" -> true;
+                 "GetObjectAcl", "GetObjectTagging", "GetObjectAttributes", "ListMultipartUploads",
+                 "GetObjectAnnotation", "ListObjectAnnotations", "SelectObjectContent" -> true;
             default -> false;
         };
     }

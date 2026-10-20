@@ -2,9 +2,9 @@ package io.github.hectorvent.floci.services.elb;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
@@ -18,7 +18,6 @@ import io.github.hectorvent.floci.services.elb.model.ClassicListener;
 import io.github.hectorvent.floci.services.elb.model.ClassicLoadBalancer;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ServerCertificateReferenceProvider;
-import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -32,7 +31,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -63,10 +61,13 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final IamService iamService;
-    private final AcmService acmService;
+    private final CertificateReferenceResolver certificates;
 
     // region → load balancer name → record
     private Map<String, Map<String, ClassicLoadBalancer>> loadBalancers = new ConcurrentHashMap<>();
+
+    /** Serializes listener writes against each other; see {@link #createLoadBalancerListeners}. */
+    private final Object listenerLock = new Object();
 
     public ElbClassicService(Ec2Service ec2Service,
                              ElbClassicHealthChecker healthChecker,
@@ -97,7 +98,7 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
         this.config = config;
         this.regionResolver = regionResolver;
         this.iamService = iamService;
-        this.acmService = acmService;
+        this.certificates = new CertificateReferenceResolver(iamService, acmService);
     }
 
     @PostConstruct
@@ -165,9 +166,7 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
         Map<String, ClassicLoadBalancer> regionLbs =
                 loadBalancers.computeIfAbsent(region, k -> new ConcurrentHashMap<>());
         if (regionLbs.containsKey(name)) {
-            throw new AwsException("DuplicateLoadBalancerName",
-                    "Load balancer named " + name + " already exists and is not compatible with the "
-                            + "requested configuration.", 400);
+            throw duplicateLoadBalancerName(name);
         }
 
         String id = randomHex();
@@ -204,8 +203,18 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
             lb.setAvailabilityZones(new ArrayList<>(availabilityZones));
         }
 
-        regionLbs.put(name, lb);
-        loadBalancers.put(region, regionLbs);
+        whileCertificatesHeld(listeners, () -> {
+            // The certificate check again, and this is the one that counts. The one above it
+            // fails fast and keeps AWS's error precedence, but a check made before the lock says
+            // nothing about the moment of the write. The unique name is a separate problem that
+            // putIfAbsent settles on its own, lock or no lock: checked and then written as two
+            // steps, two creates of one name both pass and only the second survives.
+            requireCertificates(region, listeners);
+            if (regionLbs.putIfAbsent(name, lb) != null) {
+                throw duplicateLoadBalancerName(name);
+            }
+            loadBalancers.put(region, regionLbs);
+        });
         healthChecker.startMonitoring(lb);
         return lb;
     }
@@ -282,31 +291,46 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
             validateListener(listener);
         }
         requireCertificates(region, listeners);
-        for (ClassicListener listener : listeners) {
-            ClassicListener existing = lb.getListeners().stream()
-                    .filter(l -> l.getLoadBalancerPort().equals(listener.getLoadBalancerPort()))
-                    .findFirst()
-                    .orElse(null);
-            if (existing != null) {
-                // AWS accepts a repeat of an identical listener and rejects a conflicting one.
-                if (!sameListener(existing, listener)) {
-                    throw new AwsException("DuplicateListener",
-                            "A listener already exists for " + name + " with LoadBalancerPort "
-                                    + listener.getLoadBalancerPort()
-                                    + ", but with a different InstancePort, Protocol, or "
-                                    + "SSLCertificateId", 400);
+        whileCertificatesHeld(listeners, () -> {
+            requireCertificates(region, listeners);
+            // The port of an existing listener decides whether this one is added, so the walk and
+            // the add are one step. Two threads adding the same port would otherwise both find it
+            // absent and both add it, and a removal landing in between would drop a listener this
+            // call has already decided to keep.
+            synchronized (listenerLock) {
+                for (ClassicListener listener : listeners) {
+                    ClassicListener existing = lb.getListeners().stream()
+                            .filter(l -> l.getLoadBalancerPort().equals(listener.getLoadBalancerPort()))
+                            .findFirst()
+                            .orElse(null);
+                    if (existing != null) {
+                        // AWS accepts a repeat of an identical listener and rejects a conflicting one.
+                        if (!sameListener(existing, listener)) {
+                            throw new AwsException("DuplicateListener",
+                                    "A listener already exists for " + name + " with LoadBalancerPort "
+                                            + listener.getLoadBalancerPort()
+                                            + ", but with a different InstancePort, Protocol, or "
+                                            + "SSLCertificateId", 400);
+                        }
+                        continue;
+                    }
+                    lb.getListeners().add(listener);
                 }
-                continue;
+                persist(region);
             }
-            lb.getListeners().add(listener);
-        }
-        persist(region);
+        });
     }
 
     public void deleteLoadBalancerListeners(String region, String name, List<Integer> loadBalancerPorts) {
         ClassicLoadBalancer lb = requireLoadBalancer(region, name);
-        lb.getListeners().removeIf(l -> loadBalancerPorts.contains(l.getLoadBalancerPort()));
-        persist(region);
+        // Under the same monitor as the add, so a removal cannot land between that method's look
+        // at the port and its decision. No certificate lock: removing a listener can only drop a
+        // reference to a certificate, never record one, and a delete that reads the list while
+        // this runs reads a snapshot of it.
+        synchronized (listenerLock) {
+            lb.getListeners().removeIf(l -> loadBalancerPorts.contains(l.getLoadBalancerPort()));
+            persist(region);
+        }
     }
 
     // ── Health ────────────────────────────────────────────────────────────────
@@ -558,6 +582,13 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
         }
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Takes no monitor of this service, which is what keeps the ordering with IAM one way: the
+     * delete calls this while holding its certificate lock. Safe without one because both maps
+     * walked here are concurrent and the listener list iterates a snapshot.
+     */
     @Override
     public List<Reference> serverCertificateReferences() {
         List<Reference> references = new ArrayList<>();
@@ -575,44 +606,45 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
         return references;
     }
 
+    private static AwsException duplicateLoadBalancerName(String name) {
+        return new AwsException("DuplicateLoadBalancerName",
+                "Load balancer named " + name + " already exists and is not compatible with the "
+                        + "requested configuration.", 400);
+    }
+
+    /**
+     * Runs a listener write under {@link CertificateReferenceResolver#runWhileHeld}, so an IAM
+     * server certificate it records cannot be deleted between the check and the write. The
+     * callers re-check inside the guard: the fail-fast check above it keeps the error precedence
+     * AWS has, and only the one under the guard is atomic with the commit.
+     *
+     * <p>This class's own invariants do not ride on that lock. The unique load balancer name is
+     * carried by {@code putIfAbsent} and the listener list by {@link #listenerLock}, both of
+     * which hold whether or not IAM is present, which is what the unit tests build.
+     */
+    private void whileCertificatesHeld(List<ClassicListener> listeners, Runnable action) {
+        certificates.runWhileHeld(certificateIdsOf(listeners), action);
+    }
+
     private void requireCertificates(String region, List<ClassicListener> listeners) {
         for (ClassicListener listener : listeners) {
             String certificateId = listener.getSslCertificateId();
-            if (certificateId != null && !certificateId.isBlank() && !certificateExists(region, certificateId)) {
+            if (certificateId != null && !certificateId.isBlank()
+                    && !certificates.exists(region, certificateId)) {
                 throw new AwsException("CertificateNotFound",
                         "Server Certificate not found for the key: " + certificateId, 400);
             }
         }
     }
 
-    private boolean certificateExists(String region, String certificateArn) {
-        if (!AwsArnUtils.isArn(certificateArn)) {
-            return false;
+    private static List<String> certificateIdsOf(List<ClassicListener> listeners) {
+        List<String> certificateIds = new ArrayList<>();
+        for (ClassicListener listener : listeners) {
+            if (listener.getSslCertificateId() != null) {
+                certificateIds.add(listener.getSslCertificateId());
+            }
         }
-        AwsArnUtils.Arn arn = AwsArnUtils.parse(certificateArn);
-        return switch (arn.service()) {
-            case "iam" -> iamService == null || iamServerCertificate(arn, certificateArn).isPresent();
-            case "acm" -> acmService == null || acmCertificateExists(region, certificateArn);
-            default -> false;
-        };
-    }
-
-    private Optional<ServerCertificate> iamServerCertificate(AwsArnUtils.Arn arn, String certificateArn) {
-        if (!arn.resource().startsWith("server-certificate/")) {
-            return Optional.empty();
-        }
-        String name = arn.resource().substring(arn.resource().lastIndexOf('/') + 1);
-        return iamService.findServerCertificate(name)
-                .filter(certificate -> certificateArn.equals(certificate.getArn()));
-    }
-
-    private boolean acmCertificateExists(String region, String certificateArn) {
-        try {
-            return certificateArn.equals(acmService.describeCertificate(certificateArn, region).getArn());
-        } catch (AwsException e) {
-            LOG.debugv("ACM certificate {0} not usable in {1}: {2}", certificateArn, region, e.getMessage());
-            return false;
-        }
+        return certificateIds;
     }
 
     private static void validateListener(ClassicListener listener) {

@@ -217,15 +217,17 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     /**
      * Every property of a task definition is create-only, so an update registers a fresh revision
      * under the same family, as CloudFormation does on AWS; the physical id is the new revision's
-     * ARN, and the displaced revision is deregistered once the stack update commits.
+     * ARN, and the displaced revision is deregistered once the stack update commits. CloudFormation
+     * hands the properties to the ECS handler without template validation, and they are read as it
+     * reads them, failing the resource where its model validation does.
      */
-    private void provisionTaskDefinition(StackResource r, JsonNode props, ProvisionContext ctx) {
+    private void provisionTaskDefinition(StackResource r, JsonNode template, ProvisionContext ctx) {
+        JsonNode props = new CfnPropertyTypes.HandlerReader(ctx.engine()).read(TASK_DEFINITION, template);
         String family = ctx.resolveOptional(props, "Family");
         if (family == null || family.isBlank()) {
             family = ctx.generatePhysicalName(r.getLogicalId(), 255, false);
         }
-        List<ContainerDefinition> containerDefs =
-                parseContainerDefinitions(props != null ? props.get("ContainerDefinitions") : null, ctx);
+        List<ContainerDefinition> containerDefs = parseContainerDefinitions(props.get("ContainerDefinitions"), ctx);
         NetworkMode networkMode = parseEnum(NetworkMode.class, ctx.resolveOptional(props, "NetworkMode"));
         String cpu = ctx.resolveOptional(props, "Cpu");
         String memory = ctx.resolveOptional(props, "Memory");
@@ -245,7 +247,9 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
      * create time is read back from the {@code Name} attribute rather than the prior id. An update
      * that keeps the name and the cluster updates the service in place; a changed name or a
      * changed cluster (both create-only) is a replacement: the new service is created and the
-     * displaced one deleted once the stack update commits, through the replacement cleanup.
+     * displaced one deleted once the stack update commits, through the replacement cleanup. Either
+     * way the resource completes only once the service is stable, as CloudFormation's does; an
+     * in-place update that does not stabilize is put back on the prior configuration.
      */
     private void provisionService(StackResource r, JsonNode props, ProvisionContext ctx) {
         String clusterRef = ctx.resolveOptional(props, "Cluster");
@@ -267,8 +271,14 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         }
 
         EcsServiceModel svc;
-        if (ctx.isUpdate() && serviceName.equals(priorName)
-                && clusterName(clusterRef).equals(clusterOfServiceArn(ctx.priorPhysicalId()))) {
+        boolean inPlace = ctx.isUpdate() && serviceName.equals(priorName)
+                && clusterName(clusterRef).equals(clusterOfServiceArn(ctx.priorPhysicalId()));
+        // Read before updateService, which changes this same model in place.
+        EcsServiceModel prior = inPlace ? ecsService.serviceByArn(ctx.priorPhysicalId()) : null;
+        String priorTaskDefinition = prior != null ? prior.getTaskDefinition() : null;
+        Integer priorDesiredCount = prior != null ? prior.getDesiredCount() : null;
+        NetworkConfiguration priorNetworkConfiguration = prior != null ? prior.getNetworkConfiguration() : null;
+        if (inPlace) {
             svc = ecsService.updateService(clusterRef, serviceName, taskDefinition,
                     desiredCount, networkConfiguration, ctx.region());
         } else {
@@ -279,6 +289,73 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(svc.getServiceArn());
         r.getAttributes().put("Name", svc.getServiceName());
         r.getAttributes().put("ServiceArn", svc.getServiceArn());
+        if (inPlace) {
+            try {
+                ecsService.awaitServiceStable(svc);
+            } catch (RuntimeException failure) {
+                restoreInPlace(r, failure, () -> ecsService.awaitServiceStable(ecsService.updateService(clusterRef,
+                        svc.getServiceName(), priorTaskDefinition, priorDesiredCount, priorNetworkConfiguration,
+                        ctx.region())));
+                throw failure;
+            }
+        } else {
+            awaitCreatedServiceStable(r, svc, ctx);
+        }
+    }
+
+    /**
+     * Puts a service updated in place back on the task definition, desired count and network
+     * configuration it had, when the update does not stabilize, and waits for the restored
+     * configuration to stabilize, as CloudFormation's rollback does. CloudFormationService restores
+     * the prior resource record and reports the rollback complete unless told otherwise, so without
+     * this the stack would claim a rollback while ECS still runs the failed configuration. A
+     * restore that fails or does not stabilize is attached to the original failure and recorded as
+     * a rollback failure.
+     */
+    private void restoreInPlace(StackResource r, RuntimeException failure, Runnable restore) {
+        try {
+            restore.run();
+        } catch (RuntimeException restoreFailure) {
+            String reason = "Could not restore " + r.getPhysicalId() + " after a failed update: "
+                    + restoreFailure.getMessage();
+            LOG.warnv("{0}", reason);
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
+            if (restoreFailure != failure) {
+                failure.addSuppressed(restoreFailure);
+            }
+        }
+    }
+
+    /**
+     * Waits for a service this provision created to stabilize, as CloudFormation does before it
+     * reports the resource complete. The resource is marked as owned meanwhile, so a service that
+     * never stabilizes is deleted by the create rollback. A replacement created by a stack update
+     * is removed here instead: the engine restores the prior resource and never learns the new ARN.
+     */
+    private void awaitCreatedServiceStable(StackResource r, EcsServiceModel svc, ProvisionContext ctx) {
+        r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+        try {
+            ecsService.awaitServiceStable(svc);
+        } catch (RuntimeException failure) {
+            if (ctx.isUpdate()) {
+                unwindReplacement(r, ctx.region(), failure);
+            }
+            throw failure;
+        }
+        r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
+    }
+
+    private void unwindReplacement(StackResource r, String region, RuntimeException failure) {
+        try {
+            deleteService(r.getPhysicalId(), region);
+            r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
+        } catch (RuntimeException cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+            String reason = "Could not remove " + r.getPhysicalId() + ", the replacement created for "
+                    + r.getLogicalId() + " by a failed update: " + cleanupFailure.getMessage();
+            LOG.warnv("{0}", reason);
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
+        }
     }
 
     /** The cluster name a template value addresses: a name, an ARN's last segment, or the default. */
@@ -352,6 +429,12 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             def.setSecrets(parseSecrets(item.path("Secrets")));
             def.setLogConfiguration(parseLogConfiguration(item.path("LogConfiguration")));
             def.setFirelensConfiguration(parseFirelensConfiguration(item.path("FirelensConfiguration")));
+            Map<String, Object> linuxParameters = parseLinuxParameters(item.path("LinuxParameters"));
+            if (linuxParameters != null) {
+                Map<String, Object> unparsed = new LinkedHashMap<>();
+                unparsed.put("linuxParameters", linuxParameters);
+                def.setUnparsed(unparsed);
+            }
             if (item.path("Command").isArray()) {
                 def.setCommand(toStringList(item.path("Command")));
             }
@@ -370,6 +453,68 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         return new LogConfiguration(node.path("LogDriver").asText(),
                 parseOptions(node.path("Options")),
                 node.has("SecretOptions") ? parseSecrets(node.path("SecretOptions")) : null);
+    }
+
+    /**
+     * A container's {@code LinuxParameters}, read as the ECS handler reads them, in the shape
+     * RegisterTaskDefinition takes them, and kept where that path keeps them: among the
+     * definition's unparsed members, under {@code linuxParameters}. So DescribeTaskDefinition shows
+     * them and the Fargate rules on them apply, as for a definition registered through the API.
+     * The devices and tmpfs lists are always sent, empty when the template has none, as
+     * CloudFormation's handler sends them (measured).
+     */
+    private static Map<String, Object> parseLinuxParameters(JsonNode node) {
+        if (!node.isObject()) {
+            return null;
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        JsonNode capabilities = node.path("Capabilities");
+        if (capabilities.isObject()) {
+            Map<String, Object> kernelCapabilities = new LinkedHashMap<>();
+            putStringList(kernelCapabilities, "add", capabilities.path("Add"));
+            putStringList(kernelCapabilities, "drop", capabilities.path("Drop"));
+            result.put("capabilities", kernelCapabilities);
+        }
+        List<Map<String, Object>> devices = new ArrayList<>();
+        for (JsonNode item : node.path("Devices")) {
+            Map<String, Object> device = new LinkedHashMap<>();
+            putValue(device, "hostPath", item.path("HostPath"));
+            putValue(device, "containerPath", item.path("ContainerPath"));
+            putStringList(device, "permissions", item.path("Permissions"));
+            devices.add(device);
+        }
+        result.put("devices", devices);
+        putValue(result, "initProcessEnabled", node.path("InitProcessEnabled"));
+        putValue(result, "maxSwap", node.path("MaxSwap"));
+        putValue(result, "sharedMemorySize", node.path("SharedMemorySize"));
+        putValue(result, "swappiness", node.path("Swappiness"));
+        List<Map<String, Object>> mounts = new ArrayList<>();
+        for (JsonNode item : node.path("Tmpfs")) {
+            Map<String, Object> mount = new LinkedHashMap<>();
+            putValue(mount, "containerPath", item.path("ContainerPath"));
+            putStringList(mount, "mountOptions", item.path("MountOptions"));
+            putValue(mount, "size", item.path("Size"));
+            mounts.add(mount);
+        }
+        result.put("tmpfs", mounts);
+        return result;
+    }
+
+    /** A member the template sets, as the text, integer or boolean the handler converted it to. */
+    private static void putValue(Map<String, Object> target, String key, JsonNode value) {
+        if (value.isTextual()) {
+            target.put(key, value.textValue());
+        } else if (value.isInt()) {
+            target.put(key, value.intValue());
+        } else if (value.isBoolean()) {
+            target.put(key, value.booleanValue());
+        }
+    }
+
+    private static void putStringList(Map<String, Object> target, String key, JsonNode value) {
+        if (value.isArray()) {
+            target.put(key, toStringList(value));
+        }
     }
 
     private static FirelensConfiguration parseFirelensConfiguration(JsonNode node) {

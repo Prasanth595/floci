@@ -59,6 +59,11 @@ public interface CfnResourceProvisioner {
         return false;
     }
 
+    /** Whether a prior failed rollback must be retried before even an outputs-only update commits. */
+    default boolean requiresUpdateRecovery(StackResource resource) {
+        return false;
+    }
+
     /**
      * The physical id of the entity this update's replacement displaced, or null when this type
      * owes no replacement cleanup. {@code CloudFormationService} announces it as DELETE_IN_PROGRESS
@@ -79,6 +84,15 @@ public interface CfnResourceProvisioner {
     }
 
     /**
+     * Deletes entities displaced by an unfinished update before the stack itself is deleted.
+     * The default uses normal replacement cleanup. A provisioner may distinguish this operation
+     * from committing an update when it still carries configuration needed for rollback.
+     */
+    default UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
+        return completeUpdate(resource);
+    }
+
+    /**
      * Whether this update replaced the physical entity, so the stack has cleanup pending and enters
      * UPDATE_COMPLETE_CLEANUP_IN_PROGRESS. The default reports no replacement.
      */
@@ -87,11 +101,39 @@ public interface CfnResourceProvisioner {
     }
 
     /**
+     * Whether a resource of {@code resourceType} takes the physical id of the resource it depends
+     * on as its own, as a bucket policy takes its bucket's name. The stack then deletes one left
+     * behind before whatever else holds that id. The default is no.
+     */
+    default boolean takesParentPhysicalId(String resourceType) {
+        return false;
+    }
+
+    /**
+     * Whether a prefix of a {@code resourceType} physical id, up to a {@code /}, {@code :} or
+     * {@code |}, can be the physical id of the resource it belongs to, as {@code function|sid} is
+     * a Lambda permission's. The stack then deletes one left behind before that resource. The
+     * default is yes; a type whose id only joins parts of its own identity says no.
+     */
+    default boolean idPrefixCanNameParent(String resourceType) {
+        return true;
+    }
+
+    /**
      * Drops the bookkeeping the replacement cleanup kept on the resource, once the displaced entity
      * is gone or its deletion is given up on. The default has none to drop.
      */
     default void clearUpdate(StackResource resource) {
         // no-op by default: a type with no replacement cleanup records nothing to clear
+    }
+
+    /**
+     * Drops completed replacement cleanup during stack deletion. The default preserves the normal
+     * cleanup behavior; an override may keep rollback configuration until the managed entity is
+     * successfully deleted.
+     */
+    default void clearDeleteCleanup(StackResource resource) {
+        clearUpdate(resource);
     }
 
     /**

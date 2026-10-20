@@ -196,7 +196,8 @@ PUT, PATCH and DELETE).
   union of both). `HeaderBehavior` `none`, `whitelist`, `allViewer`,
   `allViewerAndWhitelistCloudFront` and `allExcept`, `CookieBehavior` and `QueryStringBehavior`
   `none`, `whitelist`, `allExcept` and `all` are evaluated. A cache policy that selects nothing and no
-  origin request policy forwards no viewer headers, cookies or query strings, as on AWS.
+  origin request policy forwards no viewer headers, cookies or query strings, as on AWS, apart from
+  the headers below that CloudFront forwards whatever the policies.
 - A cache behavior without a cache policy uses its legacy `ForwardedValues`: `QueryString=true`
   forwards every query string (`QueryStringCacheKeys` only narrows the cache key), cookies follow
   `Forward` `none`, `whitelist` (with `*` and `?` wildcards) or `all`, and viewer headers are
@@ -209,11 +210,13 @@ PUT, PATCH and DELETE).
   forwarded, appends the viewer address to `X-Forwarded-For`, adds a
   `Via: <viewer HTTP version> <distribution domain> (CloudFront)` hop and an `X-Amz-Cf-Id`.
   `Authorization` is always forwarded on POST, PUT, PATCH and DELETE, and on OPTIONS unless OPTIONS
-  is a cached method; `Content-Type` travels with a request body. Cache policy compression settings
-  normalize `Accept-Encoding` to `br,gzip`, `gzip`, `br` or `identity`. Forwarded cookies are sorted
-  by name, and cookies that are not `name=value` or whose name starts with `$` are dropped.
-  Hop-by-hop headers, `Expect`, `X-Edge-*`, `X-Real-IP`, `X-Forwarded-Proto` and viewer-supplied
-  `CloudFront-*` headers are never forwarded.
+  is a cached method; `Content-Type` travels with a request body; a GET or HEAD with a `Range`
+  carries the viewer's `Range` and `If-Range`, since CloudFront forwards a range GET to the origin,
+  and a HEAD can then report the range's length. Cache policy compression settings normalize
+  `Accept-Encoding` to `br,gzip`, `gzip`, `br` or `identity`.
+  Forwarded cookies are sorted by name, and cookies that are not `name=value` or whose name starts
+  with `$` are dropped. Hop-by-hop headers, `Expect`, `X-Edge-*`, `X-Real-IP`, `X-Forwarded-Proto`
+  and viewer-supplied `CloudFront-*` headers are never forwarded.
 - Of the CloudFront request headers, `CloudFront-Forwarded-Proto`, `CloudFront-Viewer-Address` and
   `CloudFront-Viewer-Http-Version` are generated when a policy names them, or when an `allExcept`
   header behavior does not exclude them (AWS documents Managed-AllViewerExceptHostHeader as adding
@@ -225,14 +228,31 @@ PUT, PATCH and DELETE).
   `CachingOptimized` and `CachingOptimizedForUncompressedObjects` but not `Amplify`,
   `Elemental-MediaPackage` or the `UseOriginCacheControlHeaders` policies.
 - In-process S3 origins do not apply forwarding settings: viewer query strings, cookies and headers
-  do not change the S3 read.
+  do not change the S3 read, apart from the viewer's `Range` and `If-Range` on a GET or HEAD.
 - Origin responses are streamed to the viewer, from in-process S3 origins and custom origins alike,
   so a large object is never held in memory. A custom origin's `Content-Length` is passed on, and a
   response it sends chunked stays chunked. Floci does not cache, so it serves objects larger than
   50 GB the way CloudFront does with caching disabled; with caching enabled, CloudFront refuses them.
+- Range GETs: an S3 origin serves the one byte range a viewer's `Range` asks for as 206 with its
+  `Content-Range`, and answers 416 when the range starts past the end of the object. Any other
+  `Range` gets the whole object: one CloudFront does not accept (ranges out of order or overlapping,
+  or a negative value), several ranges, which S3 does not serve in one request, or a last byte
+  before the first, as does a `Range` whose `If-Range` no longer describes the object, which S3
+  answers with the whole object. A HEAD is answered as S3's HeadObject answers a `Range`: a
+  satisfiable range changes only its `Content-Length`, and one past the end gets 416. A custom
+  origin gets the viewer's `Range` and `If-Range` on every GET or HEAD with a `Range`, whatever the
+  forwarding settings, and its answer (206, the whole object, or 416) is passed on. Floci does not
+  cache, so unlike CloudFront it cannot serve a later range request from an object the origin sent
+  whole. A custom error page is served whole, whatever the `Range` of the request it replaces.
 - Origin `Set-Cookie` headers always reach the viewer. With legacy `Forward=none`, AWS strips them
   from the response; Floci does not.
 - Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
+- A custom origin whose domain is a [Lambda Web Function](lambda-web-functions.md) endpoint of this Floci is
+  served by Floci itself, at the address the viewer reached. The origin names the endpoint's
+  `domainName` with or without its port, and its protocol and ports do not matter, so neither DNS nor
+  the private address check applies. A forwarded viewer `Host` is a 502, as on AWS, where the endpoint's
+  certificate does not name it. Origin access control does not sign these requests yet, so an
+  `IamAuth` endpoint answers them with its 403 page.
 - Response headers policies validate the AWS configuration shape and are applied after the origin
   response, including CORS preflight fields, origin override behavior, custom headers, security
   headers, allowed header removals, and sampled `Server-Timing` metrics. `Pragma: server-timing`
@@ -252,7 +272,7 @@ PUT, PATCH and DELETE).
 | Property | Env var | Default | Description |
 |---|---|---|---|
 | `floci.services.cloudfront.enabled` | `FLOCI_SERVICES_CLOUDFRONT_ENABLED` | `true` | Enable or disable the service |
-| `floci.services.cloudfront.domain-suffix` | `FLOCI_SERVICES_CLOUDFRONT_DOMAIN_SUFFIX` | `cloudfront.net` | Domain suffix for generated distribution domain names |
+| `floci.services.cloudfront.domain-suffix` | `FLOCI_SERVICES_CLOUDFRONT_DOMAIN_SUFFIX` | unset | Domain suffix for generated distribution domain names. Unset, it follows the request's partition: `cloudfront.net`, or `cloudfront.cn` in China. A configured suffix applies in every partition |
 | `floci.services.cloudfront.allowed-private-origin-hosts` | `FLOCI_SERVICES_CLOUDFRONT_ALLOWED_PRIVATE_ORIGIN_HOSTS` | `[]` | Exact custom-origin hosts permitted to resolve to private/non-routable addresses (comma-separated in the environment variable) |
 
 ## CLI Examples

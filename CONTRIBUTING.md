@@ -55,7 +55,7 @@ suites in Docker against it.
 
 ## Branching Model
 
-Floci uses a **tag-driven release model**. Merging a PR never publishes a release image. `main` is published once a day as the `nightly` channel, and a stable release is published only when a maintainer runs the "Release Cut" workflow (`.github/workflows/release-cut.yml`, `workflow_dispatch`). That workflow runs semantic-release, which bumps `pom.xml`, writes `CHANGELOG.md`, commits, and pushes the `X.Y.Z` tag. The tag then triggers `.github/workflows/release.yml`, which builds and publishes the release images to Docker Hub and public ECR.
+Floci uses a **tag-driven release model**. Merging a PR never publishes a release image. `main` is published once a day as the `nightly` channel, and a stable release is published only when the "Release Cut" workflow (`.github/workflows/release-cut.yml`) runs: on its schedule at 00:30 US Central time on the 15th and the last day of each month, or when a maintainer dispatches it. That workflow runs semantic-release, which bumps `pom.xml`, writes `CHANGELOG.md`, commits, and pushes the `X.Y.Z` tag. The tag then triggers `.github/workflows/release.yml`, which builds and publishes the release images to Docker Hub and public ECR.
 
 | Branch / tag | Purpose | Docker published? |
 |---|---|---|
@@ -277,11 +277,12 @@ Once your current pull requests are reviewed, merged, or closed, you are welcome
 
 ## Release Process (maintainers)
 
-Stable releases ship on the **1st and 3rd Tuesday of each month**. Merging to `main` does
-not cut a release: the change rides the next train, and reaches the `nightly` image on the
-next nightly build.
+Stable releases ship on the **15th and the last day of each month**. Merging to `main`
+does not cut a release: the change rides the next train, and reaches the `nightly` image on
+the next nightly build.
 
-Releases are cut from `main` with the **Release Cut** workflow
+Releases are cut from `main` by the **Release Cut** workflow, which runs on a schedule at
+00:30 US Central time (America/Chicago) on those days. Maintainers can also run it by hand
 (Actions → Release Cut → Run workflow). semantic-release analyzes the
 Conventional Commits since the last tag, bumps `pom.xml`, regenerates
 `CHANGELOG.md`, commits, tags, and publishes the GitHub Release; the tag
@@ -349,7 +350,31 @@ DNS suffix; a literal that really is partition-invariant goes in
 The partition catalog itself (`src/main/resources/aws/partitions.json`: ids, DNS suffixes,
 regions, opt-in flags, global endpoints) is generated from botocore's published data by
 `make aws-data-sync` and checked by `make aws-data-check` in CI; never hand-edit it. Bump
-`tools/aws/requirements.txt` when regenerating from a newer botocore.
+`tools/aws/requirements.txt` when regenerating from a newer botocore. The same target
+regenerates the IAM managed-policy catalog (`src/main/resources/iam/managed-polic*`) from the
+`local/aws/iam-dataset` checkout; without that checkout, as in CI, `make aws-data-check` only
+verifies the catalog's shape.
+
+### Botocore pin of record
+
+[tools/aws/requirements.txt](tools/aws/requirements.txt) is the botocore pin of record
+for AWS model audits and vendored AWS data. CI installs this file before running
+`make aws-data-check`. Use an isolated environment installed from this file when checking
+whether botocore models an operation, request member, endpoint, or partition.
+
+[compatibility-tests/sdk-test-python/requirements.txt](compatibility-tests/sdk-test-python/requirements.txt)
+pins the boto3 and botocore clients used by the Python compatibility suite. Those client
+versions can differ from the generator pin; they are not the model-audit reference.
+Updating a compatibility client alone does not change the vendored AWS data.
+
+Generators using `resolve_botocore_data`, including partitions and request shapes, prefer
+an explicit `--botocore-data` directory, then `local/aws/botocore/botocore/data`, then the
+installed botocore package. The region-facts generator instead requires its local sources
+(or explicit source paths); it does not fall back to the installed package, and `--check`
+only verifies shape when its sources are missing. When a local checkout or explicit
+directory is selected, ensure it matches the tools pin too: checking only the installed
+package version does not establish which data is being read.
+Keep a generator-pin change and its required regenerated data together, as described above.
 
 ## Reporting Security Issues
 

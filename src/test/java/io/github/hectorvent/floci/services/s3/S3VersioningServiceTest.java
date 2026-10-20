@@ -13,6 +13,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -179,6 +180,55 @@ class S3VersioningServiceTest {
     }
 
     @Test
+    void deleteBucketRejectsDeleteMarkerOnlyUntilPurged() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object version = s3Service.putObject("versioned-bucket", "key",
+                "data".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.deleteObject("versioned-bucket", "key");
+        s3Service.deleteObject("versioned-bucket", "key", version.getVersionId());
+
+        assertEquals(1, s3Service.listObjectVersions("versioned-bucket", null, 100, null).versions().size());
+        assertBucketNotEmptyThenPurgeAndDelete();
+    }
+
+    @Test
+    void deleteBucketRejectsSuspendedBucketWithOlderVersionUntilPurged() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putObject("versioned-bucket", "key",
+                "data".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.deleteObject("versioned-bucket", "key");
+        s3Service.putBucketVersioning("versioned-bucket", "Suspended");
+
+        assertBucketNotEmptyThenPurgeAndDelete();
+    }
+
+    @Test
+    void purgedBucketCanBeRecreatedWithoutResurrectingVersions() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putObject("versioned-bucket", "key",
+                "data".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.deleteObject("versioned-bucket", "key");
+
+        assertBucketNotEmptyThenPurgeAndDelete();
+        s3Service.createBucket("versioned-bucket", "us-east-1");
+        assertTrue(s3Service.listObjectVersions("versioned-bucket", null, 100, null).versions().isEmpty());
+    }
+
+    private void assertBucketNotEmptyThenPurgeAndDelete() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> s3Service.deleteBucket("versioned-bucket"));
+        assertEquals("BucketNotEmpty", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
+        List<S3Object> versions = s3Service.listObjectVersions("versioned-bucket", null, 100, null).versions();
+        assertFalse(versions.isEmpty());
+        for (S3Object version : versions) {
+            s3Service.deleteObject("versioned-bucket", version.getKey(), version.getVersionId());
+        }
+        assertTrue(s3Service.listObjectVersions("versioned-bucket", null, 100, null).versions().isEmpty());
+        assertDoesNotThrow(() -> s3Service.deleteBucket("versioned-bucket"));
+    }
+
+    @Test
     void getObjectWithNonExistentVersionIdThrowsNoSuchVersion() {
         s3Service.putBucketVersioning("versioned-bucket", "Enabled");
         s3Service.putObject("versioned-bucket", "test.txt",
@@ -292,6 +342,81 @@ class S3VersioningServiceTest {
         List<S3Object> objects = s3Service.listObjects("versioned-bucket", null, null, 100);
         assertEquals(1, objects.size());
         assertEquals("keep.txt", objects.get(0).getKey());
+    }
+
+    @Test
+    void taggingAVersionChangesOnlyThatVersion() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object v1 = s3Service.putObject("versioned-bucket", "key",
+                "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        S3Object v2 = s3Service.putObject("versioned-bucket", "key",
+                "v2".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        assertEquals(v2.getVersionId(),
+                s3Service.putObjectTagging("versioned-bucket", "key", null, Map.of("version", "current")));
+
+        assertEquals(v1.getVersionId(),
+                s3Service.putObjectTagging("versioned-bucket", "key", v1.getVersionId(), Map.of("version", "first")));
+        assertEquals(new S3Service.ObjectTaggingResult(v1.getVersionId(), Map.of("version", "first")),
+                s3Service.getObjectTaggingResult("versioned-bucket", "key", v1.getVersionId()));
+        assertEquals(new S3Service.ObjectTaggingResult(v2.getVersionId(), Map.of("version", "current")),
+                s3Service.getObjectTaggingResult("versioned-bucket", "key", null));
+
+        assertEquals(v1.getVersionId(), s3Service.deleteObjectTagging("versioned-bucket", "key", v1.getVersionId()));
+        assertEquals(Map.of(), s3Service.getObjectTaggingResult("versioned-bucket", "key", v1.getVersionId()).tags());
+        assertEquals(Map.of("version", "current"), s3Service.getObjectTagging("versioned-bucket", "key"));
+    }
+
+    @Test
+    void versionIdNullNamesTheNullVersionAndNoOther() {
+        // An object written before versioning is the null version.
+        s3Service.putObject("versioned-bucket", "old", "v0".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        assertNull(s3Service.putObjectTagging("versioned-bucket", "old", "null", Map.of("version", "null")));
+        assertEquals(new S3Service.ObjectTaggingResult(null, Map.of("version", "null")),
+                s3Service.getObjectTaggingResult("versioned-bucket", "old", "null"));
+
+        // A key written only with versioning on has no null version, and its current version is
+        // not one: a request naming the null version fails and leaves the current one alone.
+        s3Service.putObject("versioned-bucket", "new", "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putObjectTagging("versioned-bucket", "new", Map.of("version", "current"));
+        for (Runnable request : List.<Runnable>of(
+                () -> s3Service.getObjectTaggingResult("versioned-bucket", "new", "null"),
+                () -> s3Service.putObjectTagging("versioned-bucket", "new", "null", Map.of("version", "other")),
+                () -> s3Service.deleteObjectTagging("versioned-bucket", "new", "null"),
+                () -> s3Service.getObjectTagging("versioned-bucket", "new", "null"))) {
+            AwsException e = assertThrows(AwsException.class, request::run);
+            assertEquals("NoSuchVersion", e.getErrorCode());
+        }
+        assertEquals(Map.of("version", "current"), s3Service.getObjectTagging("versioned-bucket", "new"));
+
+        // An object written while versioning is suspended is the null version too, above the
+        // versions written before it.
+        s3Service.putBucketVersioning("versioned-bucket", "Suspended");
+        s3Service.putObject("versioned-bucket", "new", "v2".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        assertNull(s3Service.deleteObjectTagging("versioned-bucket", "new", "null"));
+        s3Service.putObjectTagging("versioned-bucket", "new", "null", Map.of("version", "suspended"));
+        assertEquals(Map.of("version", "suspended"), s3Service.getObjectTagging("versioned-bucket", "new"));
+    }
+
+    @Test
+    void taggingADeleteMarkerIsNotAllowed() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putObject("versioned-bucket", "key", "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        String markerId = s3Service.deleteObject("versioned-bucket", "key").getVersionId();
+
+        // The marker is refused whether the request names it or it is the current version.
+        for (String versionId : Arrays.asList(null, markerId)) {
+            Map<String, Runnable> requests = Map.of(
+                    "GET", () -> s3Service.getObjectTaggingResult("versioned-bucket", "key", versionId),
+                    "PUT", () -> s3Service.putObjectTagging("versioned-bucket", "key", versionId, Map.of("k", "v")),
+                    "DELETE", () -> s3Service.deleteObjectTagging("versioned-bucket", "key", versionId));
+            requests.forEach((method, request) -> {
+                AwsException e = assertThrows(AwsException.class, request::run);
+                assertEquals("MethodNotAllowed", e.getErrorCode());
+                assertEquals(405, e.getHttpStatus());
+                assertEquals(Map.of("Method", method, "ResourceType", "DeleteMarker"), e.getExtendedData());
+            });
+        }
     }
 
     @Test

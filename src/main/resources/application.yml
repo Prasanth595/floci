@@ -10,6 +10,10 @@ quarkus:
       "io.apicurio":
         level: WARN
 
+  tls:
+    # Keep AWS's TLS 1.2 minimum and preserve explicit legacy HTTP protocol restrictions.
+    protocols: ${quarkus.http.ssl.protocols:TLSv1.3,TLSv1.2}
+
   http:
     port: ${floci.port}
     # Loopback by default. Any other address (0.0.0.0, a LAN IP) also needs
@@ -31,10 +35,19 @@ quarkus:
       require-localhost: false
     limits:
       max-body-size: ${floci.protocols.max-request-size}M
+      # Lambda Web Functions accept a request head of up to 128 KiB and answer 431 past it.
+      max-header-size: 128K
   shutdown:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
     delay-enabled: true
+  index-dependency:
+    swagger-models-v2:
+      group-id: io.swagger
+      artifact-id: swagger-models
+    swagger-models-v3:
+      group-id: io.swagger.core.v3
+      artifact-id: swagger-models
   native:
     # quarkus-jdbc-mysql used to force this. Without it the image has only UTF-8, UTF-16,
     # ISO-8859-1 and US-ASCII, which breaks latin1 MySQL columns and non-UTF-8 mail bodies.
@@ -44,7 +57,8 @@ quarkus:
       # catalog (ec2/image-catalog.yaml), SageMaker reads its instance type
       # catalog (sagemaker/instance-type-catalog.yaml), KMS reads its AWS managed
       # key catalog (kms/aws-managed-keys.yaml), AppSync's GraphQL
-      # parser reads its message bundles, EC2 security group enforcement builds
+      # parser reads its message bundles, Lambda Web Functions copy their
+      # runtime (lambdaweb/index.mjs) into each environment, EC2 security group enforcement builds
       # its helper image from docker/*.Dockerfile, and API Gateway's Velocity
       # engine reads its default properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
@@ -59,6 +73,7 @@ quarkus:
         - pricing-snapshots/**
         - ui/*.html
         - appsync/*.mjs
+        - lambdaweb/*.mjs
         - ec2/*.yaml
         - docker/*.Dockerfile
         - sagemaker/*.yaml
@@ -69,19 +84,29 @@ quarkus:
         - cloudformation/*.json
         - redshift/*.sql
         - i18n/*.properties
+        - floci/version.properties
         - org/apache/velocity/runtime/defaults/*.properties
         # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
         # driver reads its time zone table at connect time.
         - META-INF/services/java.sql.Driver
+        # OpenAPIParser discovers the Swagger 2.0 converter through ServiceLoader.
+        - META-INF/services/io.swagger.v3.parser.core.extensions.SwaggerParserExtension
         - com/mysql/cj/util/TimeZoneMapping.properties
+        # JNA's dispatch library, which docker-java's named-pipe transport (Docker Desktop on
+        # Windows) loads. Only the Windows build includes it, with -Dfloci.native.windows-jni-include=*.
+        - com/sun/jna/win32-x86-64/${floci.native.windows-jni-include:none}
       # snappy-java registers 27 JNI libraries, one per platform. Only the one
-      # for the running platform loads, so 23 are dropped. Linux x86_64 and
-      # aarch64 cover the published images, Mac covers a local native build.
+      # for the running platform loads, so the others are dropped. Linux x86_64 and
+      # aarch64 cover the published images, Mac covers the macOS binaries. The
+      # Windows x86_64 library is kept only by the Windows build, which passes
+      # -Dfloci.native.windows-jni-exclude=none; every other build still excludes it.
       excludes:
         - org/xerial/snappy/native/AIX/**
         - org/xerial/snappy/native/FreeBSD/**
         - org/xerial/snappy/native/SunOS/**
-        - org/xerial/snappy/native/Windows/**
+        - org/xerial/snappy/native/Windows/aarch64/**
+        - org/xerial/snappy/native/Windows/x86/**
+        - org/xerial/snappy/native/Windows/x86_64/${floci.native.windows-jni-exclude:**}
         - org/xerial/snappy/native/Linux/android-aarch64/**
         - org/xerial/snappy/native/Linux/android-arm/**
         - org/xerial/snappy/native/Linux/arm/**
@@ -217,6 +242,9 @@ floci:
         flush-interval-ms: 5000
       codedeploy:
         flush-interval-ms: 5000
+      resource-groups:
+        mode: ${FLOCI_STORAGE_SERVICES_RESOURCE_GROUPS_MODE:}
+        flush-interval-ms: ${FLOCI_STORAGE_SERVICES_RESOURCE_GROUPS_FLUSH_INTERVAL_MS:5000}
       tagging:
         flush-interval-ms: 5000
       elasticbeanstalk:
@@ -295,6 +323,12 @@ floci:
     allow-unsafe-network-exposure: false
     allow-private-jwt-targets: false
 
+  init-hooks:
+    dir: /etc/floci/init           # FLOCI_INIT_HOOKS_DIR: root of boot.d, start.d, ready.d, stop.d, shutdown.d (a binary on the host points it elsewhere)
+    shell-executable: /bin/sh      # FLOCI_INIT_HOOKS_SHELL_EXECUTABLE: runs .sh hooks
+    timeout-seconds: 30
+    shutdown-grace-period-seconds: 2
+
   tls:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
     # cert-path: ""                    # FLOCI_TLS_CERT_PATH (PEM certificate file)
@@ -326,6 +360,11 @@ floci:
     # connection before failing, for both pools. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.connectionRequestTimeoutSeconds: a value set here WINS over the annotation.
     connection-request-timeout-seconds: 30
+    # FLOCI_DOCKER_API_TIMEOUT_SECONDS: how long a Docker call waits for the daemon's response before
+    # failing; long-lived streams (waits, followed logs, exec output, pulls) are exempt. It applies per
+    # attempt: a control-plane request that is safe to repeat is tried up to six times. Keep in step with
+    # the @WithDefault on EmulatorConfig.DockerConfig.apiTimeoutSeconds: a value set here WINS over the annotation.
+    api-timeout-seconds: 300
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
@@ -344,11 +383,16 @@ floci:
       max-message-size: 1048576
       clear-fifo-deduplication-cache-on-purge: false
       receipt-handle-secret: local-emulator-secret
+      # QueueUrl shape. floci is <base-url>/<account>/<name>,
+      # aws is https://sqs.<region>.<partition dns suffix>/<account>/<name>
+      endpoint-strategy: floci
     s3:
       enabled: true
       enforce-auth: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
+      lifecycle-sweep-enabled: true          # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED - apply lifecycle expiration rules in the background
+      lifecycle-sweep-interval-seconds: 60   # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS
     dynamodb:
       enabled: true
       vector-index-allocation-seconds: 4   # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS. Resource allocation phase of a vector index added by UpdateTable.
@@ -422,6 +466,13 @@ floci:
       default-image: "redpandadata/redpanda:latest"
       kafka-host-port-base: 9300
       kafka-host-port-max: 9399
+      # bootstrap-hostname: unset by default, so GetBootstrapBrokers returns the broker's
+      # Docker-network address. Only applies when Floci runs in a container: each broker then
+      # also has a host listener, published on a port from the kafka-host-port range and
+      # advertised as <this hostname, else localhost>:<port>. When set, GetBootstrapBrokers
+      # returns both listeners, <container-name>:9092,<hostname>:<port>, so clients on the
+      # Docker host and in sibling containers can each discover the broker.
+      # Env var: FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME=localhost
     amazonmq:
       enabled: true
       mock: false
@@ -483,9 +534,13 @@ floci:
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
+      database-resuming-exception-enabled: false # FLOCI_SERVICES_RDS_DATA_DATABASE_RESUMING_EXCEPTION_ENABLED
     redshift-data:
       enabled: true
       result-ttl-hours: 24
+      max-concurrent-statements: ${FLOCI_SERVICES_REDSHIFT_DATA_MAX_CONCURRENT_STATEMENTS:10}
+      queue-capacity: ${FLOCI_SERVICES_REDSHIFT_DATA_QUEUE_CAPACITY:100}
+      shutdown-timeout-seconds: ${FLOCI_SERVICES_REDSHIFT_DATA_SHUTDOWN_TIMEOUT_SECONDS:10}
     redshift-serverless:
       enabled: true
     neptune:
@@ -521,13 +576,15 @@ floci:
       list-shards-next-token-ttl-millis: 300000
     firehose:
       enabled: true
-      tick-interval-seconds: 10
+      tick-interval-seconds: 1
       flush-record-count: 0
       staging-bucket: floci-firehose-staging
     kms:
       enabled: true
     cognito:
       enabled: true
+      google-issuer: https://accounts.google.com
+      enforce-token-validity-limits: true
     stepfunctions:
       enabled: true
       allow-plaintext-http: false
@@ -577,6 +634,19 @@ floci:
       # single image (e.g. private registry mirror). When unset, the image is
       # picked from OpenSearchVersions.imageFor(EngineVersion).
       # default-image: "registry.example.com/opensearch:2.19.5"
+      # data-volume: optional data volume for the spawned domain containers; an absolute
+      # path is bind-mounted as <path>/<account-id>/<region>/<domain-name> (nested under a <namespace>
+      # subdirectory when docker.resource-namespace is set), any other value is a Docker
+      # volume name and each domain gets its own <name>-<namespace>-<account-id>-<region>-<domain-name> volume
+      # of it (no namespace segment when unset). Storage named here is never removed on
+      # domain delete, and a volume created when absent carries no Floci label, so no
+      # sweep of Floci-labelled volumes collects it. When unset, each domain gets a
+      # Floci-managed volume.
+      # Linux daemon paths starting with / keep their path syntax on Windows.
+      # Bind-directory ownership is prepared by a temporary root container using the
+      # selected image. Existing files are untouched; init failure aborts domain startup.
+      # data-volume: "opensearch-data"
+      # data-volume: "/srv/floci/opensearch"
       proxy-base-port: 9400
       proxy-max-port: 9499
       keep-running-on-shutdown: false
@@ -599,6 +669,11 @@ floci:
       volume-block-devices: true
       volume-helper-image: alpine:3.21
       mock: false
+      # Automatic public IPv4 address of a mock instance: none, documentation (203.0.113.0/24,
+      # routed nowhere) or fixed (mock-public-address, default 127.0.0.1). Instances with
+      # containers report the container's reachable address. FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES
+      mock-public-addresses: none
+      # mock-public-address: 127.0.0.1  # FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESS
       # Bound instance containers to their instance type's CPU and memory limits from the catalog.
       # FLOCI_SERVICES_EC2_INSTANCE_RESOURCE_LIMITS
       instance-resource-limits: true
@@ -653,7 +728,7 @@ floci:
       prefer-local-images: true
     ui:
       enabled: true
-      image: "floci/floci-ui:latest"
+      image: "floci/floci-ui:0.7.0"
       container-name: floci-ui
       port: 4500
       # bind-address: unset by default, so Docker publishes the console on every interface.
@@ -683,6 +758,7 @@ floci:
       backend: stub
       proxy:
         passthrough: false
+        error-body-timeout-millis: 1000
         # url: http://localhost:11434/v1
         # api-key: sk-...
         # default-model: llama3
@@ -811,6 +887,8 @@ floci:
       enabled: true
     cloudcontrol:
       enabled: true
+      create-worker-threads: 4             # Threads that run CreateResource provisioning
+      create-queue-capacity: 64            # Creates that may wait for a thread before ThrottlingException
     resourceexplorer2:
       enabled: true
     cloudfront:
@@ -908,6 +986,8 @@ floci:
       enabled: true
     lakeformation:
       enabled: true
+    resource-groups:
+      enabled: true
     tagging:
       enabled: true
     pipes:
@@ -932,6 +1012,7 @@ floci:
       enabled: true
     servicequotas:
       enabled: true
+      standard-on-demand-vcpus: 5
     verifiedpermissions:
       enabled: true
       # cedar-url: http://floci-cedar:8180  # set to skip sidecar container management
@@ -947,6 +1028,7 @@ floci:
       maven-image: "dzikoysk/reposilite:3.6.3"
       npm-image: "verdaccio/verdaccio:6.10.4"
       pypi-image: "pypiserver/pypiserver:v2.4.2"
+      nuget-image: "bagetter/bagetter:1.6.5"
     marketplace:
       enabled: true
     dms:

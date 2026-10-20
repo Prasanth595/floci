@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -21,15 +22,29 @@ import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
+import static io.github.hectorvent.floci.services.elbv2.ElbV2PublicationTestSupport.allowPublications;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -42,6 +57,7 @@ import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -53,6 +69,11 @@ class ElbV2ServiceTest {
 
     // Application Load Balancers require subnets in at least two Availability Zones.
     private static final List<String> ALB_SUBNETS = List.of("subnet-a", "subnet-b");
+
+    private static final String HELD_CERTIFICATE =
+            "arn:aws:iam::000000000000:server-certificate/held";
+    private static final String OTHER_CERTIFICATE =
+            "arn:aws:iam::000000000000:server-certificate/other";
 
     @Mock
     ElbV2DataPlane dataPlane;
@@ -68,11 +89,266 @@ class ElbV2ServiceTest {
     @BeforeEach
     void setUp() {
         service = new ElbV2Service();
+        allowPublications(dataPlane);
         service.dataPlane = dataPlane;
         service.healthChecker = healthChecker;
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.ec2Service = ec2Service;
         stubAlbSubnets(ec2Service);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void httpsCreateNeedsADefaultBeforeAllocatingAListener(List<String> certificates) {
+        String lb = service.createLoadBalancer(REGION, "https-default", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        AwsException refusal = assertThrows(AwsException.class, () -> service.createListener(REGION, lb,
+                "HTTPS", 9443, null, certificates, List.of(), List.of(), Map.of("scope", "refused")));
+        assertEquals("InvalidConfigurationRequest", refusal.getErrorCode());
+        assertTrue(service.describeListeners(REGION, lb, List.of()).isEmpty());
+        assertTrue(service.describeRules(REGION, null, List.of()).isEmpty());
+        Listener retry = service.createListener(REGION, lb, "HTTPS", 9443, null,
+                List.of(HELD_CERTIFICATE), List.of(), List.of(), Map.of());
+        assertEquals(List.of(HELD_CERTIFICATE), retry.getCertificates());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void httpsModifyNeedsAnEffectiveDefaultBeforeChangingTheListener(List<String> certificates) {
+        String lb = service.createLoadBalancer(REGION, "https-change", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        Listener listener = service.createListener(REGION, lb, "HTTP", 9080, null, List.of(), List.of(), List.of(), Map.of());
+        AwsException refusal = assertThrows(AwsException.class, () -> service.modifyListener(REGION,
+                listener.getListenerArn(), "HTTPS", 9443, "ELBSecurityPolicy-2016-08", certificates, null, null));
+        assertEquals("InvalidConfigurationRequest", refusal.getErrorCode());
+        assertEquals("HTTP", listener.getProtocol());
+        assertEquals(9080, listener.getPort());
+        assertEquals(List.of(), listener.getCertificates());
+        service.modifyListener(REGION, listener.getListenerArn(), "HTTPS", 9443, null,
+                List.of(HELD_CERTIFICATE), null, null);
+        assertEquals("HTTPS", listener.getProtocol());
+        assertEquals(List.of(HELD_CERTIFICATE), listener.getCertificates());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"HTTPS", "TLS"})
+    void defaultCertificateRemovalIsRefusedBeforeChangingTheList(String protocol) {
+        String lbArn = service.createLoadBalancer(REGION, "default-cert-lb", "internal",
+                "TLS".equals(protocol) ? "network" : "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String first = "arn:aws:iam::000000000000:server-certificate/first";
+        String additional = "arn:aws:iam::000000000000:server-certificate/additional";
+        String listenerArn = service.createListener(REGION, lbArn, protocol, 9443, null,
+                List.of(first, additional), List.of(), List.of(), Map.of()).getListenerArn();
+        clearInvocations(dataPlane);
+
+        AwsException rejected = assertThrows(AwsException.class,
+                () -> service.removeListenerCertificates(REGION, listenerArn, List.of(additional, first)));
+        assertEquals("OperationNotPermitted", rejected.getErrorCode());
+        assertEquals(List.of(first, additional), service.describeListenerCertificates(REGION, listenerArn));
+        verifyNoInteractions(dataPlane);
+
+        service.removeListenerCertificates(REGION, listenerArn, List.of(additional));
+        assertEquals(List.of(first), service.describeListenerCertificates(REGION, listenerArn));
+        assertThrows(AwsException.class,
+                () -> service.removeListenerCertificates(REGION, listenerArn, List.of(first)));
+        assertEquals(List.of(first), service.describeListenerCertificates(REGION, listenerArn));
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void missingHttpsDefaultIsRefusedEvenWithoutACertificateResolver(List<String> certificates) {
+        String lbArn = service.createLoadBalancer(REGION, "missing-create", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        clearInvocations(dataPlane);
+        AwsException rejected = assertThrows(AwsException.class, () -> service.createListener(
+                REGION, lbArn, "HTTPS", 9443, null, certificates, List.of(), List.of(), Map.of()));
+        assertEquals("InvalidConfigurationRequest", rejected.getErrorCode());
+        assertTrue(service.describeListeners(REGION, lbArn, List.of()).isEmpty());
+        assertTrue(service.describeRules(REGION, null, List.of()).isEmpty());
+        verifyNoInteractions(dataPlane);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void missingEffectiveDefaultCannotChangeAnHttpListener(List<String> certificates) {
+        String lbArn = service.createLoadBalancer(REGION, "missing-modify", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        Listener listener = service.createListener(REGION, lbArn, "HTTP", 8080, null,
+                List.of(), List.of(), List.of(), Map.of());
+        clearInvocations(dataPlane);
+        AwsException rejected = assertThrows(AwsException.class, () -> service.modifyListener(
+                REGION, listener.getListenerArn(), "HTTPS", 9443, "unchanged", certificates, null, null));
+        assertEquals("InvalidConfigurationRequest", rejected.getErrorCode());
+        assertEquals("HTTP", listener.getProtocol());
+        assertEquals(8080, listener.getPort());
+        assertTrue(listener.getCertificates().isEmpty());
+        verifyNoInteractions(dataPlane);
+    }
+
+    @Test
+    void removalCannotDeleteADefaultPublishedByConcurrentModification() throws Exception {
+        String lbArn = service.createLoadBalancer(REGION, "default-replacement-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String first = "arn:aws:iam::000000000000:server-certificate/first";
+        String additional = "arn:aws:iam::000000000000:server-certificate/additional";
+        String listener = service.createListener(REGION, lbArn, "HTTPS", 9443, null,
+                List.of(first, additional), List.of(), List.of(), Map.of()).getListenerArn();
+        CountDownLatch checkedOriginalDefault = new CountDownLatch(1);
+        CountDownLatch releaseRemoval = new CountDownLatch(1);
+        List<String> requested = new ArrayList<>(List.of(additional)) {
+            @Override
+            public boolean contains(Object value) {
+                boolean contains = super.contains(value);
+                checkedOriginalDefault.countDown();
+                try {
+                    assertTrue(releaseRemoval.await(5, TimeUnit.SECONDS), "removal was not released");
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("removal interrupted", failure);
+                }
+                return contains;
+            }
+        };
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> removal = worker.submit(() -> service.removeListenerCertificates(REGION, listener, requested));
+            assertTrue(checkedOriginalDefault.await(5, TimeUnit.SECONDS), "removal did not check the original default");
+            service.modifyListener(REGION, listener, null, null, null, List.of(additional), null, null);
+            assertEquals(List.of(additional), service.describeListenerCertificates(REGION, listener));
+            releaseRemoval.countDown();
+            ExecutionException refused = assertThrows(ExecutionException.class,
+                    () -> removal.get(5, TimeUnit.SECONDS));
+            assertEquals("OperationNotPermitted", ((AwsException) refused.getCause()).getErrorCode());
+            assertEquals(List.of(additional), service.describeListenerCertificates(REGION, listener));
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> service.removeListenerCertificates(REGION, listener, List.of(additional)));
+            assertEquals("OperationNotPermitted", rejected.getErrorCode());
+            assertEquals(List.of(additional), service.describeListenerCertificates(REGION, listener));
+        } finally {
+            releaseRemoval.countDown();
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void certificateMetadataOnAnHttpListenerKeepsItsExistingRemovalBehavior() {
+        String lbArn = service.createLoadBalancer(REGION, "http-cert-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String certificate = "arn:aws:iam::000000000000:server-certificate/metadata";
+        String listenerArn = service.createListener(REGION, lbArn, "HTTP", 8080, null,
+                List.of(certificate), List.of(), List.of(), Map.of()).getListenerArn();
+        service.removeListenerCertificates(REGION, listenerArn, List.of(certificate));
+        assertEquals(List.of(), service.describeListenerCertificates(REGION, listenerArn));
+    }
+
+    @Test
+    void modifyListenerProtocolAndCertificateRestartsListener() {
+        String lbArn = service.createLoadBalancer(
+                REGION, "tls-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String listenerArn = service.createListener(
+                REGION, lbArn, "HTTP", 9443, null, List.of(),
+                List.of(), List.of(), Map.of()).getListenerArn();
+        clearInvocations(dataPlane);
+
+        service.modifyListener(
+                REGION, listenerArn, "HTTPS", null, "ELBSecurityPolicy-TLS13-1-2-2021-06",
+                List.of("arn:aws:acm:us-west-2:000000000000:certificate/first"), null, null);
+
+        ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
+        verify(dataPlane).publishListener(listenerCaptor.capture(), eq(REGION), any(), any(), any(), any());
+        assertEquals("HTTPS", listenerCaptor.getValue().getProtocol());
+        assertEquals(List.of("arn:aws:acm:us-west-2:000000000000:certificate/first"),
+                listenerCaptor.getValue().getCertificates());
+        verify(dataPlane, never()).recompileRules(anyString(), any());
+    }
+
+    @Test
+    void identicalExplicitTlsModificationReappliesTheDataPlane() {
+        String lbArn = service.createLoadBalancer(
+                REGION, "tls-retry-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String first = "arn:aws:acm:us-west-2:000000000000:certificate/first";
+        String replacement = "arn:aws:acm:us-west-2:000000000000:certificate/replacement";
+        String listenerArn = service.createListener(REGION, lbArn, "HTTPS", 9443, null,
+                List.of(first), List.of(), List.of(), Map.of()).getListenerArn();
+        clearInvocations(dataPlane);
+
+        service.modifyListener(REGION, listenerArn, null, null, null, List.of(replacement), null, null);
+        assertEquals(List.of(replacement), service.describeListenerCertificates(REGION, listenerArn));
+        verify(dataPlane).publishListener(any(Listener.class), eq(REGION), any(), any(), any(), any());
+        service.modifyListener(REGION, listenerArn, null, null, null, List.of(replacement), null, null);
+
+        verify(dataPlane, times(2)).publishListener(any(Listener.class), eq(REGION), any(), any(), any(), any());
+        assertEquals(List.of(replacement), service.describeListenerCertificates(REGION, listenerArn));
+        verify(dataPlane, never()).recompileRules(anyString(), any());
+    }
+
+    @Test
+    void listenerCertificateLifecycleRefreshesDataPlane() {
+        String lbArn = service.createLoadBalancer(
+                REGION, "certificate-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String firstCertificate = "arn:aws:acm:us-west-2:000000000000:certificate/first";
+        String secondCertificate = "arn:aws:acm:us-west-2:000000000000:certificate/second";
+        String listenerArn = service.createListener(
+                REGION, lbArn, "HTTPS", 9443, null, List.of(firstCertificate),
+                List.of(), List.of(), Map.of()).getListenerArn();
+        clearInvocations(dataPlane);
+
+        service.addListenerCertificates(REGION, listenerArn, List.of(secondCertificate));
+        service.removeListenerCertificates(REGION, listenerArn, List.of(secondCertificate));
+
+        verify(dataPlane, times(2))
+                .publishListener(any(Listener.class), eq(REGION), any(), any(), any(), any());
+        assertEquals(List.of(firstCertificate),
+                service.describeListenerCertificates(REGION, listenerArn));
+    }
+
+    @Test
+    void defaultRemovalWithAdditionalCertificateDoesNotRefreshAndCanRemoveAdditional() {
+        String lbArn = service.createLoadBalancer(
+                REGION, "default-certificate-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String first = "arn:aws:acm:us-west-2:000000000000:certificate/default";
+        String additional = "arn:aws:acm:us-west-2:000000000000:certificate/additional";
+        String listener = service.createListener(REGION, lbArn, "HTTPS", 9443, null,
+                List.of(first, additional), List.of(), List.of(), Map.of()).getListenerArn();
+        clearInvocations(dataPlane);
+        AwsException rejected = assertThrows(AwsException.class,
+                () -> service.removeListenerCertificates(REGION, listener, List.of(first)));
+        assertEquals("OperationNotPermitted", rejected.getErrorCode());
+        assertEquals(List.of(first, additional), service.describeListenerCertificates(REGION, listener));
+        verifyNoInteractions(dataPlane);
+        service.removeListenerCertificates(REGION, listener, List.of(additional));
+        assertEquals(List.of(first), service.describeListenerCertificates(REGION, listener));
+        verify(dataPlane).publishListener(any(Listener.class), eq(REGION), any(), any(), any(), any());
+    }
+
+    @Test
+    void initializeStorageRestoresHttpsListenerCertificate() {
+        SharedStorageFactory storageFactory = new SharedStorageFactory();
+        ElbV2Service first = serviceWithStorage(
+                storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
+        String lbArn = first.createLoadBalancer(
+                REGION, "persisted-https-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String certificateArn = "arn:aws:acm:us-west-2:000000000000:certificate/persisted";
+        String listenerArn = first.createListener(
+                REGION, lbArn, "HTTPS", 9443, "ELBSecurityPolicy-TLS13-1-2-2021-06",
+                List.of(certificateArn), List.of(), List.of(), Map.of()).getListenerArn();
+
+        ElbV2DataPlane reloadedDataPlane = mock(ElbV2DataPlane.class);
+        ElbV2Service reloaded = serviceWithStorage(storageFactory, reloadedDataPlane, mock(ElbV2HealthChecker.class));
+        reloaded.restorePersistedRuntime();
+
+        ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
+        verify(reloadedDataPlane).publishListener(listenerCaptor.capture(), eq(REGION), any(), any(), any(), any());
+        assertEquals(listenerArn, listenerCaptor.getValue().getListenerArn());
+        assertEquals("HTTPS", listenerCaptor.getValue().getProtocol());
+        assertEquals(List.of(certificateArn), listenerCaptor.getValue().getCertificates());
     }
 
     @Test
@@ -91,13 +367,12 @@ class ElbV2ServiceTest {
                 REGION, listenerArn, null, null, null, null,
                 List.of(forwardAction(newTgArn)), null);
 
-        ArgumentCaptor<List<Rule>> rulesCaptor = ArgumentCaptor.captor();
+        ArgumentCaptor<Supplier<List<Rule>>> rulesCaptor = ArgumentCaptor.captor();
         verify(dataPlane).recompileRules(eq(listenerArn), rulesCaptor.capture());
-        verify(dataPlane, never()).stopListener(anyString());
-        verify(dataPlane, never()).startListener(any(Listener.class), anyString(), anyList());
-        verify(dataPlane, never()).restartListener(any(Listener.class), anyString(), anyList());
+        verify(dataPlane, never()).removeListener(anyString(), any(), any());
+        verify(dataPlane, never()).publishListener(any(Listener.class), anyString(), any(), any(), any(), any());
 
-        Rule defaultRule = rulesCaptor.getValue().stream()
+        Rule defaultRule = rulesCaptor.getValue().get().stream()
                 .filter(Rule::isDefault)
                 .findFirst()
                 .orElseThrow();
@@ -122,9 +397,8 @@ class ElbV2ServiceTest {
 
         service.modifyListener(REGION, listenerArn, null, 10000, null, null, null, null);
 
-        verify(dataPlane).restartListener(any(Listener.class), eq(REGION), anyList());
-        verify(dataPlane, never()).stopListener(anyString());
-        verify(dataPlane, never()).startListener(any(Listener.class), anyString(), anyList());
+        verify(dataPlane).publishListener(any(Listener.class), eq(REGION), any(), any(), any(), any());
+        verify(dataPlane, never()).removeListener(anyString(), any(), any());
     }
 
     @Test
@@ -272,7 +546,7 @@ class ElbV2ServiceTest {
         verify(reloadedHealthChecker).addTargets(eq(tgArn), targetsCaptor.capture(), any(TargetGroup.class));
         assertEquals("i-1234567890abcdef0", targetsCaptor.getValue().getFirst().getId());
         assertEquals(8080, targetsCaptor.getValue().getFirst().getPort());
-        verify(reloadedDataPlane).startListener(any(Listener.class), eq(REGION), anyList());
+        verify(reloadedDataPlane).publishListener(any(Listener.class), eq(REGION), any(), any(), any(), any());
 
         reloaded.removeTags(List.of(rule.getRuleArn()), List.of("env"));
         ElbV2Service updatedReload = serviceWithStorage(storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
@@ -309,7 +583,7 @@ class ElbV2ServiceTest {
         reloaded.restorePersistedRuntime();
 
         ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
-        verify(reloadedDataPlane).startListener(listenerCaptor.capture(), eq(REGION), anyList());
+        verify(reloadedDataPlane).publishListener(listenerCaptor.capture(), eq(REGION), any(), any(), any(), any());
         assertEquals(listenerArn, listenerCaptor.getValue().getListenerArn());
         verify(reloadedHealthChecker).startMonitoring(any(TargetGroup.class));
     }
@@ -330,7 +604,7 @@ class ElbV2ServiceTest {
         reloaded.restorePersistedRuntime();
 
         ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
-        verify(reloadedDataPlane).startListener(listenerCaptor.capture(), eq(REGION), anyList());
+        verify(reloadedDataPlane).publishListener(listenerCaptor.capture(), eq(REGION), any(), any(), any(), any());
         assertEquals(listenerArn, listenerCaptor.getValue().getListenerArn());
     }
 
@@ -428,7 +702,11 @@ class ElbV2ServiceTest {
         return condition;
     }
 
-    private static ElbV2Service serviceWithStorage(StorageFactory storageFactory,
+    static StorageFactory sharedStorageFactory() {
+        return new SharedStorageFactory();
+    }
+
+    static ElbV2Service serviceWithStorage(StorageFactory storageFactory,
                                                    ElbV2DataPlane dataPlane,
                                                    ElbV2HealthChecker healthChecker) {
         Ec2Service ec2Service = mock(Ec2Service.class);
@@ -436,11 +714,12 @@ class ElbV2ServiceTest {
         return serviceWithStorage(storageFactory, dataPlane, healthChecker, ec2Service);
     }
 
-    private static ElbV2Service serviceWithStorage(StorageFactory storageFactory,
+    static ElbV2Service serviceWithStorage(StorageFactory storageFactory,
                                                    ElbV2DataPlane dataPlane,
                                                    ElbV2HealthChecker healthChecker,
                                                    Ec2Service ec2Service) {
         ElbV2Service service = new ElbV2Service();
+        allowPublications(dataPlane);
         service.dataPlane = dataPlane;
         service.healthChecker = healthChecker;
         service.regionResolver = new RegionResolver(REGION, "000000000000");
@@ -451,6 +730,12 @@ class ElbV2ServiceTest {
     }
 
     private static void stubAlbSubnets(Ec2Service ec2Service) {
+        lenient().when(ec2Service.supplyWithSubnetReferencesHeld(anyString(), any()))
+                .thenAnswer(invocation -> invocation.<Supplier<?>>getArgument(1).get());
+        lenient().doAnswer(invocation -> {
+            invocation.<Runnable>getArgument(1).run();
+            return null;
+        }).when(ec2Service).runWithSubnetReferencesHeld(anyString(), any());
         Subnet subnetA = subnet("subnet-a", REGION + "a");
         Subnet subnetB = subnet("subnet-b", REGION + "b");
         lenient().when(ec2Service.requireSubnet(REGION, "subnet-a")).thenReturn(subnetA);
@@ -465,6 +750,25 @@ class ElbV2ServiceTest {
         subnet.setAvailabilityZone(availabilityZone);
         subnet.setVpcId("vpc-a");
         return subnet;
+    }
+
+    /** Files in a directory, so a second service reads back what the first wrote as JSON. */
+    private static final class PersistentStorageFactory extends StorageFactory {
+        private final Path dir;
+
+        private PersistentStorageFactory(Path dir) {
+            super(null, null);
+            this.dir = dir;
+        }
+
+        @Override
+        public <V> AccountAwareStorageBackend<V> create(String serviceName,
+                                                     String fileName,
+                                                     TypeReference<Map<String, V>> typeReference) {
+            PersistentStorage<String, V> files = new PersistentStorage<>(dir.resolve(fileName), typeReference);
+            files.load();
+            return new AccountAwareStorageBackend<>(files, null, "000000000000");
+        }
     }
 
     private static final class SharedStorageFactory extends StorageFactory {
@@ -507,5 +811,28 @@ class ElbV2ServiceTest {
         assertEquals(AwsRegionFacts.nlbHostedZoneId(REGION).orElseThrow(),
                 reloaded.describeLoadBalancers(REGION, null, List.of("stored-nlb"), null, null)
                         .getFirst().getCanonicalHostedZoneId());
+    }
+
+    @Test
+    void subnetAndVpcDependenciesComeFromPersistedLoadBalancersOnly(@TempDir Path dir) {
+        ElbV2Service first = serviceWithStorage(new PersistentStorageFactory(dir), dataPlane, healthChecker);
+        String arn = first.createLoadBalancer(REGION, "stored-dependency", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        String targetGroup = first.createTargetGroup(REGION, "independent-group", "HTTP", "HTTP1", 80,
+                "vpc-a", "instance", "HTTP", "traffic-port", true, "/", 30, 5, 5, 2, "200",
+                "ipv4", Map.of()).getTargetGroupArn();
+        ElbV2Service restored = serviceWithStorage(new PersistentStorageFactory(dir), dataPlane, healthChecker);
+        assertTrue(restored.hasSubnetDependency(REGION, "subnet-a"));
+        assertTrue(restored.hasSubnetDependency(REGION, "subnet-b"));
+        assertTrue(restored.hasVpcDependency(REGION, "vpc-a"));
+        assertFalse(restored.hasSubnetDependency("us-east-1", "subnet-a"));
+        assertFalse(restored.hasVpcDependency("us-east-1", "vpc-a"));
+        assertFalse(restored.hasSubnetDependency(REGION, "subnet-unrelated"));
+        restored.deleteLoadBalancer(REGION, arn);
+        ElbV2Service afterDelete = serviceWithStorage(new PersistentStorageFactory(dir), dataPlane, healthChecker);
+        assertFalse(afterDelete.hasSubnetDependency(REGION, "subnet-a"));
+        assertFalse(afterDelete.hasVpcDependency(REGION, "vpc-a"));
+        assertEquals(targetGroup, afterDelete.describeTargetGroups(REGION, null,
+                List.of(targetGroup), null).getFirst().getTargetGroupArn());
     }
 }

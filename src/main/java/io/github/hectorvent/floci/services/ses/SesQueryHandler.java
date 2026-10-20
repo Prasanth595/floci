@@ -7,7 +7,9 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.services.ses.address.SesAddressSyntax;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDestination;
@@ -271,6 +273,8 @@ public class SesQueryHandler {
                 .bccAddresses(bccAddresses)
                 .replyToAddresses(replyToAddresses)
                 .returnPath(returnPath)
+                .sourceArn(getParam(params, "SourceArn"))
+                .returnPathArn(getParam(params, "ReturnPathArn"))
                 .configurationSetName(configurationSetName)
                 .emailTags(emailTags)
                 .region(region)
@@ -295,6 +299,9 @@ public class SesQueryHandler {
         String messageId = sesService.sendEmail(SendEmailRequest.builder()
                 .source(source)
                 .toAddresses(destinations)
+                .sourceArn(getParam(params, "SourceArn"))
+                .fromArn(getParam(params, "FromArn"))
+                .returnPathArn(getParam(params, "ReturnPathArn"))
                 .configurationSetName(configurationSetName)
                 .emailTags(emailTags)
                 .region(region)
@@ -642,6 +649,8 @@ public class SesQueryHandler {
                 .bccAddresses(bccAddresses)
                 .replyToAddresses(replyToAddresses)
                 .returnPath(returnPath)
+                .sourceArn(getParam(params, "SourceArn"))
+                .returnPathArn(getParam(params, "ReturnPathArn"))
                 .configurationSetName(configurationSetName)
                 .emailTags(emailTags)
                 .region(region)
@@ -756,6 +765,8 @@ public class SesQueryHandler {
                     "Account sending is disabled.", 400);
         }
         String source = getParam(params, "Source");
+        SesAddressSyntax.requireBulkAddress(source);
+        SesAddressSyntax.requireBulkAddress(getParam(params, "ReturnPath"));
         List<String> replyToAddresses = extractMembers(params, "ReplyToAddresses");
         String templateName = getParam(params, "Template");
         String templateArn = getParam(params, "TemplateArn");
@@ -1031,10 +1042,9 @@ public class SesQueryHandler {
         // here so an invalid enum value yields the v1 ValidationError AWS returns rather than the
         // shared service's v2-style BadRequestException. Message verified against real AWS.
         if (tlsPolicy != null && !"Require".equals(tlsPolicy) && !"Optional".equals(tlsPolicy)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'deliveryOptions.tlsPolicy' failed to "
-                            + "satisfy constraint: Member must satisfy enum value set: [Optional, Require]",
-                    400);
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'deliveryOptions.tlsPolicy' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: [Optional, Require]");
         }
         // Mirror the V2 path: an all-null DeliveryOptions clears the block rather than
         // persisting an empty object. Normalize the value to the V2 canonical REQUIRE/OPTIONAL
