@@ -283,18 +283,22 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     }
 
     /**
-     * Every load balancer type takes {@code Subnets} or {@code SubnetMappings}, so a request with
-     * neither is refused before anything is created, with the message AWS gives an Application or a
-     * Network Load Balancer. A Gateway Load Balancer, which takes subnets the way a Network Load
-     * Balancer does, gets the Network one. This runs after the duplicate-name check, because a
-     * CloudFormation stack update finds the balancer it keeps through DuplicateLoadBalancerName,
-     * whatever subnets its template names.
+     * Every load balancer type takes {@code Subnets} or {@code SubnetMappings}, and an Application Load
+     * Balancer takes at least two, so a request with fewer is refused before anything is created, with
+     * the message AWS gives an Application or a Network Load Balancer. A Gateway Load Balancer, which
+     * takes subnets the way a Network Load Balancer does, gets the Network one. AWS counts before it
+     * looks a subnet up, so one subnet that does not exist gets this error too, not SubnetNotFound.
+     * This runs after the duplicate-name check, because a CloudFormation stack update finds the
+     * balancer it keeps through DuplicateLoadBalancerName, whatever subnets its template names.
      */
     private static void requireSubnets(String lbType, List<String> subnets) {
-        if (subnets == null || subnets.isEmpty()) {
-            throw new AwsException("ValidationError", "application".equals(lbType)
-                    ? "At least two subnets in two different Availability Zones must be specified"
-                    : "At least one subnet must be specified", 400);
+        int count = subnets == null ? 0 : subnets.size();
+        if ("application".equals(lbType) && count < 2) {
+            throw new AwsException("ValidationError",
+                    "At least two subnets in two different Availability Zones must be specified", 400);
+        }
+        if (count == 0) {
+            throw new AwsException("ValidationError", "At least one subnet must be specified", 400);
         }
     }
 
