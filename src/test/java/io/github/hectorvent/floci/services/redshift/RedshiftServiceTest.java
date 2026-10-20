@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
+import io.github.hectorvent.floci.services.redshift.model.SnapshotSchedule;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
@@ -61,6 +62,7 @@ class RedshiftServiceTest {
     private AccountAwareStorageBackend<ClusterParameterGroup> parameterGroupBackend;
     private AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroupBackend;
     private AccountAwareStorageBackend<SnapshotCopyGrant> snapshotCopyGrantBackend;
+    private AccountAwareStorageBackend<SnapshotSchedule> snapshotScheduleBackend;
     private AccountAwareStorageBackend<Integration> integrationBackend;
     private RedshiftContainerManager cm;
     private RegionResolver regionResolver;
@@ -81,6 +83,7 @@ class RedshiftServiceTest {
         parameterGroupBackend = mock(AccountAwareStorageBackend.class);
         subnetGroupBackend = mock(AccountAwareStorageBackend.class);
         snapshotCopyGrantBackend = mock(AccountAwareStorageBackend.class);
+        snapshotScheduleBackend = mock(AccountAwareStorageBackend.class);
         integrationBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
         proxyManager = mock(RedshiftProxyManager.class);
@@ -108,6 +111,7 @@ class RedshiftServiceTest {
         when(sf.<ClusterSubnetGroup>create(eq("redshift"), eq("redshift-subnet-groups.json"), any())).thenReturn(subnetGroupBackend);
         when(sf.<SnapshotCopyGrant>create(eq("redshift"), eq("redshift-snapshot-copy-grants.json"), any())).thenReturn(snapshotCopyGrantBackend);
         when(sf.<Integration>create(eq("redshift"), eq("redshift-integrations.json"), any())).thenReturn(integrationBackend);
+        when(sf.<SnapshotSchedule>create(eq("redshift"), eq("redshift-snapshot-schedules.json"), any())).thenReturn(snapshotScheduleBackend);
         when(clusterBackend.accountId()).thenReturn("111111111111");
 
         regionResolver = new RegionResolver("us-east-1", "111111111111");
@@ -1778,6 +1782,58 @@ class RedshiftServiceTest {
         // list SnapshotCopyGrantNotFoundFault, which the model pins at 400.
         assertEquals("ResourceNotFoundFault", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"cluster:res", "snapshot:res-cluster/res", "parametergroup:res",
+            "subnetgroup:res", "snapshotcopygrant:res", "snapshotschedule:res"})
+    void tagOperationsRejectForeignPartitionAccountOrRegionArn(String resource) {
+        stubLocalTaggableResources();
+        String local = "arn:aws:redshift:us-east-1:111111111111:" + resource;
+        String foreignAccount = "arn:aws:redshift:us-east-1:222222222222:" + resource;
+        String foreignRegion = "arn:aws:redshift:eu-west-1:111111111111:" + resource;
+        // Local region and account, wrong partition: only the partition check rejects it.
+        String foreignPartition = "arn:aws-cn:redshift:us-east-1:111111111111:" + resource;
+
+        for (String foreign : List.of(foreignAccount, foreignRegion, foreignPartition)) {
+            AwsException create = assertThrows(AwsException.class,
+                    () -> service.createTags(foreign, Map.of("env", "prod")), foreign);
+            assertEquals("ResourceNotFoundFault", create.getErrorCode());
+            assertEquals(404, create.getHttpStatus());
+            assertThrows(AwsException.class, () -> service.deleteTags(foreign, List.of("keep")), foreign);
+            assertThrows(AwsException.class, () -> service.listTagsForResource(foreign), foreign);
+            assertThrows(AwsException.class, () -> service.describeTags(foreign, null, null), foreign);
+        }
+        assertEquals(Map.of("keep", "me"), service.listTagsForResource(local),
+                "a foreign ARN changed the local resource's tags");
+
+        // Control: the same resource is reachable through the caller's own ARN, so the
+        // rejections above are about scope, not a stub that never resolves.
+        service.createTags(local, Map.of("env", "prod"));
+        assertEquals(Map.of("keep", "me", "env", "prod"), service.listTagsForResource(local));
+    }
+
+    /** Stubs one local resource of every taggable type, each named "res" and tagged keep=me. */
+    private void stubLocalTaggableResources() {
+        Map<String, String> current = new LinkedHashMap<>(Map.of("keep", "me"));
+        Cluster cluster = new Cluster();
+        Snapshot snapshot = new Snapshot();
+        ClusterParameterGroup parameterGroup = new ClusterParameterGroup();
+        ClusterSubnetGroup subnetGroup = new ClusterSubnetGroup();
+        SnapshotCopyGrant grant = new SnapshotCopyGrant("res", "key");
+        SnapshotSchedule schedule = new SnapshotSchedule();
+        cluster.setTags(current);
+        snapshot.setTags(current);
+        parameterGroup.setTags(current);
+        subnetGroup.setTags(current);
+        grant.setTags(current);
+        schedule.setTags(current);
+        when(clusterBackend.get("res")).thenReturn(Optional.of(cluster));
+        when(snapshotBackend.get("res")).thenReturn(Optional.of(snapshot));
+        when(parameterGroupBackend.get("res")).thenReturn(Optional.of(parameterGroup));
+        when(subnetGroupBackend.get("res")).thenReturn(Optional.of(subnetGroup));
+        when(snapshotCopyGrantBackend.get("res")).thenReturn(Optional.of(grant));
+        when(snapshotScheduleBackend.get("res")).thenReturn(Optional.of(schedule));
     }
 
     private static String extractResourceId(String arn) {

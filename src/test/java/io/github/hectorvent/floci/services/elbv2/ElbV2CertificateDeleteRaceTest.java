@@ -4,6 +4,9 @@ import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
+import io.restassured.config.EncoderConfig;
+import io.restassured.http.ContentType;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -36,8 +39,32 @@ class ElbV2CertificateDeleteRaceTest {
             "AWS4-HMAC-SHA256 Credential=test/20260427/us-east-1/elasticloadbalancing/aws4_request";
     private static final String IAM_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request";
+    private static final String ACM_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260427/us-east-1/acm/aws4_request";
     private static final CertificateGenerator GENERATOR = new CertificateGenerator();
     private static final int TRIALS = 30;
+
+    private static String createDefaultCertificate() {
+        return given().contentType("application/x-amz-json-1.1")
+                .config(RestAssured.config().encoderConfig(EncoderConfig.encoderConfig()
+                        .encodeContentTypeAs("application/x-amz-json-1.1", ContentType.TEXT)))
+                .header("Authorization", ACM_AUTH)
+                .header("X-Amz-Target", "CertificateManager.RequestCertificate")
+                .body("{\"DomainName\":\"elbv2.race.test.local\",\"ValidationMethod\":\"DNS\"}")
+                .when().post("/").then().statusCode(200).extract().path("CertificateArn");
+    }
+
+    private static void deleteDefaultCertificate(String defaultCertificateArn) {
+        if (defaultCertificateArn != null) {
+            given().contentType("application/x-amz-json-1.1")
+                    .config(RestAssured.config().encoderConfig(EncoderConfig.encoderConfig()
+                            .encodeContentTypeAs("application/x-amz-json-1.1", ContentType.TEXT)))
+                    .header("Authorization", ACM_AUTH)
+                    .header("X-Amz-Target", "CertificateManager.DeleteCertificate")
+                    .body("{\"CertificateArn\":\"" + defaultCertificateArn + "\"}")
+                    .when().post("/").then().statusCode(200);
+        }
+    }
 
     private static String suffix() {
         return Long.toString(System.nanoTime(), 36);
@@ -68,12 +95,13 @@ class ElbV2CertificateDeleteRaceTest {
                         + ".LoadBalancers.member.LoadBalancerArn");
     }
 
-    /** A listener carrying no certificate yet, so the race is only about the one being added. */
-    private static String listener(String lbArn) {
+    /** The stable ACM default is distinct from the IAM certificate raced by AddListenerCertificates. */
+    private static String listener(String lbArn, String defaultCertificateArn) {
         return given().header("Authorization", ELB_AUTH)
                 .formParam("Action", "CreateListener")
                 .formParam("LoadBalancerArn", lbArn)
                 .formParam("Protocol", "HTTPS")
+                .formParam("Certificates.member.1.CertificateArn", defaultCertificateArn)
                 .formParam("Port", "443")
                 .formParam("DefaultActions.member.1.Type", "fixed-response")
                 .formParam("DefaultActions.member.1.FixedResponseConfig.StatusCode", "200")
@@ -125,8 +153,13 @@ class ElbV2CertificateDeleteRaceTest {
 
     @Test
     void addingACertificateNeverLeavesAListenerHoldingADeletedOne() throws Exception {
-        race("the listener it was added to", ElbV2CertificateDeleteRaceTest::listener,
-                ElbV2CertificateDeleteRaceTest::addListenerCertificate);
+        String defaultCertificateArn = createDefaultCertificate();
+        try {
+            race("the listener it was added to", lbArn -> listener(lbArn, defaultCertificateArn),
+                    ElbV2CertificateDeleteRaceTest::addListenerCertificate);
+        } finally {
+            deleteDefaultCertificate(defaultCertificateArn);
+        }
     }
 
     @Test

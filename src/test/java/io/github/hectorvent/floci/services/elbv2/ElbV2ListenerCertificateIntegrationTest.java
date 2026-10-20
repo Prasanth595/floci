@@ -8,6 +8,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.config.EncoderConfig;
 import io.restassured.http.ContentType;
+import io.restassured.response.Response;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
@@ -17,6 +18,7 @@ import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -196,9 +198,47 @@ class ElbV2ListenerCertificateIntegrationTest {
     }
 
     @Test
-    void createListenerWithNoCertificateIsUntouched() {
-        // Nothing to resolve, so the check has nothing to say: a listener may carry none.
-        createListener(null).statusCode(200);
+    void missingHttpsDefaultIsRefusedWithoutPublishingAListenerAndCanRetry() {
+        String certificate = uploadCertificate();
+        String lb = loadBalancer();
+        Response refused = given().header("Authorization", ELB_AUTH).formParam("Action", "CreateListener")
+                .formParam("LoadBalancerArn", lb).formParam("Protocol", "HTTPS").formParam("Port", "443")
+                .formParam("DefaultActions.member.1.Type", "fixed-response")
+                .formParam("DefaultActions.member.1.FixedResponseConfig.StatusCode", "200")
+                .when().post("/");
+        List<String> listeners = given().header("Authorization", ELB_AUTH).formParam("Action", "DescribeListeners")
+                .formParam("LoadBalancerArn", lb).when().post("/").then().statusCode(200)
+                .extract().xmlPath().getList("DescribeListenersResponse.DescribeListenersResult.Listeners.member.ListenerArn");
+        assertAll(() -> assertEquals(400, refused.statusCode()),
+                () -> assertEquals("InvalidConfigurationRequest", refused.xmlPath().getString("ErrorResponse.Error.Code")),
+                () -> assertTrue(listeners.isEmpty(), "rejected request must leave no listener"));
+        given().header("Authorization", ELB_AUTH).formParam("Action", "CreateListener")
+                .formParam("LoadBalancerArn", lb).formParam("Protocol", "HTTPS").formParam("Port", "443")
+                .formParam("Certificates.member.1.CertificateArn", certificate)
+                .formParam("DefaultActions.member.1.Type", "fixed-response")
+                .formParam("DefaultActions.member.1.FixedResponseConfig.StatusCode", "200")
+                .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    void changingHttpToHttpsWithoutADefaultPreservesTheListenerAndCanRetry() {
+        String certificate = uploadCertificate();
+        String listener = listenerServing("HTTP", null);
+        Response refused = given().header("Authorization", ELB_AUTH).formParam("Action", "ModifyListener")
+                .formParam("ListenerArn", listener).formParam("Protocol", "HTTPS").formParam("Port", "444")
+                .when().post("/");
+        String protocol = listenerField(listener, "Protocol");
+        String port = listenerField(listener, "Port");
+        assertAll(() -> assertEquals(400, refused.statusCode()),
+                () -> assertEquals("InvalidConfigurationRequest", refused.xmlPath().getString("ErrorResponse.Error.Code")),
+                () -> assertEquals("HTTP", protocol), () -> assertEquals("443", port),
+                () -> assertTrue(listenerCertificates(listener).isEmpty()));
+        given().header("Authorization", ELB_AUTH).formParam("Action", "ModifyListener")
+                .formParam("ListenerArn", listener).formParam("Protocol", "HTTPS").formParam("Port", "444")
+                .formParam("Certificates.member.1.CertificateArn", certificate)
+                .when().post("/").then().statusCode(200);
+        assertEquals("HTTPS", listenerField(listener, "Protocol"));
+        assertEquals(List.of(certificate), listenerCertificates(listener));
     }
 
     @Test

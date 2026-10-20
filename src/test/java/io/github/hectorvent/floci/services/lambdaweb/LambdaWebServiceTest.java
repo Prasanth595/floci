@@ -50,8 +50,12 @@ class LambdaWebServiceTest {
     }
 
     private LambdaWebService service(StorageFactory storage) {
+        return service(storage, "http://localhost:4566");
+    }
+
+    private LambdaWebService service(StorageFactory storage, String baseUrl) {
         EmulatorConfig config = mock(EmulatorConfig.class);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        when(config.effectiveBaseUrl()).thenReturn(baseUrl);
         LambdaWebService service = new LambdaWebService(new RegionResolver(REGION, ACCOUNT_ID), storage, config, null,
                 mapper, null);
         service.initializeStorage();
@@ -567,6 +571,20 @@ class LambdaWebServiceTest {
                 "the LatestRevision endpoint moved to the newer revision and that move was written back");
         second.deleteEndpoint(REGION, "durable", "dev");
         assertTrue(second.locate(domain).isEmpty(), "a deleted endpoint's domain is gone");
+    }
+
+    @Test
+    void aCloudFrontOriginNamesAnEndpointDomainWithoutCaseTrailingDotOrPort() {
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://Floci.Example.:4566");
+        service.createFunction(REGION, createRequest("app"));
+        String domain = service.getEndpoint(REGION, "app", "dev").domainName;
+        assertTrue(domain.endsWith(".001.lambda-web.us-east-1.Floci.Example.:4566"), domain);
+        String host = domain.substring(0, domain.indexOf('.')) + ".001.lambda-web.us-east-1.floci.example";
+
+        assertEquals(domain, service.endpointDomain(host).orElseThrow());
+        assertTrue(service.endpointDomain("nope.001.lambda-web.us-east-1.floci.example").isEmpty());
+        service.deleteEndpoint(REGION, "app", "dev");
+        assertTrue(service.endpointDomain(host).isEmpty(), "a deleted endpoint's domain is gone");
     }
 
     private static final class MemoryStorageFactory extends StorageFactory {

@@ -1,6 +1,11 @@
 package io.github.hectorvent.floci.services.lambdaweb;
 
 import com.github.dockerjava.api.DockerClient;
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
+import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
+import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
+import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebEnvironmentManager.Environment;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
@@ -25,6 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,9 +45,11 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -118,6 +126,9 @@ class LambdaWebDataPlaneDockerIntegrationTest {
 
     @Inject
     LambdaWebMetrics metrics;
+
+    @Inject
+    CloudFrontService cloudFrontService;
 
     private String functionName;
 
@@ -205,6 +216,46 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 .body("headers.authorization", nullValue())
                 .body("headers.x-amz-security-token", nullValue())
                 .body("headers.x-amz-date", equalTo("20260101T000000Z"));
+    }
+
+    @Test
+    @Timeout(180)
+    void aCloudFrontDistributionReachesTheEndpointAsItsOrigin() throws Exception {
+        String domain = createFunction(30);
+        Origin origin = new Origin();
+        origin.setId("web");
+        origin.setDomainName(domain.substring(0, domain.lastIndexOf(':')));
+        Map<String, Object> customOriginConfig = new LinkedHashMap<>();
+        customOriginConfig.put("HTTPPort", "80");
+        customOriginConfig.put("HTTPSPort", "443");
+        customOriginConfig.put("OriginProtocolPolicy", "https-only");
+        origin.setCustomOriginConfig(customOriginConfig);
+        DefaultCacheBehavior behavior = new DefaultCacheBehavior();
+        behavior.setTargetOriginId("web");
+        behavior.setViewerProtocolPolicy("allow-all");
+        behavior.setCachePolicyId("4135ea2d-6df8-44a3-9df3-4b5a84be39ad");
+        behavior.setOriginRequestPolicyId("b689b0a8-53d0-40ab-baf2-68738e2966ac");
+        DistributionConfig config = new DistributionConfig();
+        config.setEnabled(true);
+        config.setOrigins(List.of(origin));
+        config.setDefaultCacheBehavior(behavior);
+        Distribution distribution = new Distribution();
+        distribution.setConfig(config);
+        Distribution created = cloudFrontService.createDistribution(distribution, Map.of());
+        try {
+            given().header("Host", created.getDomainName()).header("x-custom", "1").when().get("/a/b?x=1")
+                    .then().statusCode(200)
+                    .header("lambda-web-request-id", matchesPattern(REQUEST_ID))
+                    .header("lambda-web-logstream", notNullValue())
+                    .body("url", equalTo("/a/b?x=1"))
+                    .body("headers.host", equalTo(domain))
+                    .body("headers.x-custom", equalTo("1"))
+                    .body("headers.via", endsWith(" (CloudFront)"))
+                    .body("headers.x-amz-cf-id", notNullValue())
+                    .body("headers.lambda-web-endpoint-name", equalTo("dev"));
+        } finally {
+            cloudFrontService.removeDistribution(created.getId());
+        }
     }
 
     @Test

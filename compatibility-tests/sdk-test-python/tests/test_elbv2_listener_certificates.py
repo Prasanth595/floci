@@ -135,9 +135,18 @@ class TestELBv2ListenerCertificates:
 
         assert listeners.certificates_on(listener_arn) == {certificate_arn}
 
-    def test_create_listener_without_certificates_is_untouched(self, listeners):
-        """Test CreateListener with no certificates at all is accepted."""
-        assert listeners.create_listener()
+    def test_create_listener_requires_an_https_default(self, listeners, elbv2_client):
+        """A rejected HTTPS creation publishes nothing and can retry with a certificate."""
+        with pytest.raises(ClientError) as exc_info:
+            listeners.create_listener()
+        assert exc_info.value.response["Error"]["Code"] == "InvalidConfigurationRequest"
+        assert exc_info.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+        assert elbv2_client.describe_listeners(
+            LoadBalancerArn=listeners.load_balancer_arn
+        )["Listeners"] == []
+        certificate_arn = listeners.upload_certificate()
+        listener_arn = listeners.create_listener(certificate_arn)
+        assert listeners.certificates_on(listener_arn) == {certificate_arn}
 
     def test_http_listener_is_left_alone(self, listeners):
         """Test the check covers the protocols the Certificates member is bracketed for.

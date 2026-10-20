@@ -41,7 +41,7 @@ The `Lambda Web` service model (apiVersion 2025-03-07, `aws lambda-web` in the A
 - **ARNs** given as identifiers must name the request's region and the caller's account, as on AWS. A revision or endpoint ARN resolves by its id or name only.
 - **Page tokens** are base64 cursors that carry the request and the position of the page, not the UUIDs AWS issues. A token reused with other parameters gets the AWS "does not match the request" error, and any other token the "invalid or has expired" error.
 - **Domain names** take the form `<id>.001.lambda-web.<region>.<floci host>` and `<id>.lambda-web.global.<floci host>`, with the host and port of `floci.base-url`. A `PerRegion` endpoint gets one domain per region in `regionalEndpoints`.
-- **Not implemented yet:** SigV4a on `MultiRegion` endpoints, the check that a policy's principal exists, the automatic deletion of revisions past 50, the metadata API, and serving a `MultiRegion` or `PerRegion` endpoint in its other regions.
+- **Not implemented yet:** SigV4a on `MultiRegion` endpoints, the check that a policy's principal exists, the automatic deletion of revisions past 50, the metadata API, CloudFront origin access control, and serving a `MultiRegion` or `PerRegion` endpoint in its other regions.
 
 ### `aws lambda-web deploy`
 
@@ -63,6 +63,8 @@ curl -H "Host: <domainName>" http://localhost:4566/
 ```
 
 The `Host` must match the domain exactly, as on AWS: another case or another port is `404` with `lambda-web-error-type: Platform.InvalidEndpoint`.
+
+A CloudFront distribution of this Floci can use the endpoint as a custom origin, named by its `domainName` without the port as on AWS. See [CloudFront](cloudfront.md).
 
 An execution environment is a `public.ecr.aws/lambda/nodejs:24` container that a request starts when every environment of the endpoint is full. The code is the revision's S3 object unpacked into `/var/task`. Node starts `/var/runtime/index.js` with the flags AWS uses, as on AWS, and that runtime imports `index.js` or the file `AWS_LAMBDA_NODEJS_ENTRYPOINT` names. So `require.main` is not the app's module, as on AWS. The app sees `AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:3000`, `AWS_LAMBDA_INITIALIZATION_TYPE=native-http`, `AWS_EXECUTION_ENV`, `AWS_LAMBDA_FUNCTION_MEMORY_SIZE=2048`, `AWS_LAMBDA_LOG_LEVEL`, `AWS_ACCOUNT_ID`, `AWS_REGION`, credentials and `AWS_ENDPOINT_URL` for Floci, `NODE_PATH`, and its own variables. The server has 9 seconds to listen. An environment that sees no request for `floci.services.lambda.container-idle-timeout-seconds` is stopped with `SIGTERM` and one second, as on scale to zero. Node runs under Docker's init, so a server without a `SIGTERM` handler stops at once, as on AWS. A process that exits between requests is replaced by a fresh environment on the next request.
 
