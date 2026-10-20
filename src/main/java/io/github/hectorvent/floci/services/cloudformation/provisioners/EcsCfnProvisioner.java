@@ -129,20 +129,25 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         if (ReplacementCleanup.rollback(resource, this::delete)) {
             return true;
         }
-        String rawSnapshot = resource.getAttributes().get(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR);
-        if (rawSnapshot != null) {
-            JsonNode snapshot;
-            try {
-                snapshot = MAPPER.readTree(rawSnapshot);
-            } catch (JsonProcessingException e) {
-                throw new IllegalStateException("Unreadable ECS cluster settings snapshot for "
-                        + resource.getLogicalId(), e);
-            }
-            ecsService.updateClusterSettings(resource.getPhysicalId(),
-                    MAPPER.convertValue(snapshot.get("settings"), SETTINGS), snapshot.get("region").asText());
-            resource.getAttributes().remove(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR);
-        }
+        restoreSettingsSnapshot(resource);
         return CLUSTER.equals(resource.getResourceType());
+    }
+
+    private void restoreSettingsSnapshot(StackResource resource) {
+        String rawSnapshot = resource.getAttributes().get(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR);
+        if (rawSnapshot == null) {
+            return;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = MAPPER.readTree(rawSnapshot);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Unreadable ECS cluster settings snapshot for "
+                    + resource.getLogicalId(), e);
+        }
+        ecsService.updateClusterSettings(resource.getPhysicalId(),
+                MAPPER.convertValue(snapshot.get("settings"), SETTINGS), snapshot.get("region").asText());
+        resource.getAttributes().remove(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR);
     }
 
     /**
@@ -167,16 +172,46 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         EcsCluster cluster = ecsService.createCluster(clusterName, ctx.region());
+        r.setPhysicalId(cluster.getClusterName());
+        r.getAttributes().put("Arn", cluster.getClusterArn());
         if (!settings.isEmpty() && !settings.equals(cluster.getSettings())) {
-            if (ctx.reusesPriorEntity(clusterName)) {
+            boolean snapshotted = ctx.reusesPriorEntity(clusterName);
+            if (snapshotted) {
                 ObjectNode snapshot = MAPPER.createObjectNode().put("region", ctx.region());
                 snapshot.set("settings", MAPPER.valueToTree(cluster.getSettings()));
                 r.getAttributes().put(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR, snapshot.toString());
             }
-            ecsService.updateClusterSettings(clusterName, settings, ctx.region());
+            try {
+                ecsService.updateClusterSettings(clusterName, settings, ctx.region());
+            } catch (RuntimeException failure) {
+                if (snapshotted) {
+                    unwindSettings(r, failure);
+                }
+                throw failure;
+            }
         }
-        r.setPhysicalId(cluster.getClusterName());
-        r.getAttributes().put("Arn", cluster.getClusterArn());
+    }
+
+    /**
+     * A failed provision puts the resource the stack held before the attempt back in its place, and
+     * that object never carried the snapshot taken here, so the rollback walker skips
+     * {@link #rollbackUpdate}: the prior settings are put back here instead. A restore that fails
+     * too is recorded as a rollback failure, which ends the stack in UPDATE_ROLLBACK_FAILED, and is
+     * attached to the update's failure, which the stack still reports. The restore repeats the call
+     * that just failed, so it can come back with that very exception, which cannot be suppressed
+     * under itself.
+     */
+    private void unwindSettings(StackResource r, RuntimeException failure) {
+        try {
+            restoreSettingsSnapshot(r);
+        } catch (RuntimeException unwindFailure) {
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
+                    "Could not restore the settings of ECS cluster " + r.getPhysicalId() + ": "
+                            + unwindFailure.getMessage());
+            if (unwindFailure != failure) {
+                failure.addSuppressed(unwindFailure);
+            }
+        }
     }
 
     /**

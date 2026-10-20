@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -437,6 +438,47 @@ class EcsCfnProvisionerTest {
         assertTrue(provisioner.rollbackUpdate(r));
         verify(ecs).updateClusterSettings("web", priorSettings, REGION);
         assertFalse(r.getAttributes().containsKey(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aSettingsUpdateThatFailsPutsThePriorSettingsBackItself() {
+        List<ClusterSetting> priorSettings = List.of(new ClusterSetting("containerInsights", "disabled"));
+        EcsCluster prior = cluster("web");
+        prior.setSettings(priorSettings);
+        when(ecs.createCluster("web", REGION)).thenReturn(prior);
+        AwsException failure = new AwsException("ServerException", "write failed", 500);
+        when(ecs.updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "enhanced")), REGION))
+                .thenThrow(failure);
+        StackResource r = resource("AWS::ECS::Cluster", "Cluster");
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, clusterWithInsights("enhanced"), ctx("web")));
+
+        // The engine restores the resource it held before this attempt, which never carried the
+        // snapshot, so the rollback walker would not put these settings back.
+        assertSame(failure, thrown);
+        verify(ecs).updateClusterSettings("web", priorSettings, REGION);
+        assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aSettingsRestoreThatAlsoFailsIsRecordedAsARollbackFailure() {
+        EcsCluster prior = cluster("web");
+        prior.setSettings(List.of(new ClusterSetting("containerInsights", "disabled")));
+        when(ecs.createCluster("web", REGION)).thenReturn(prior);
+        AwsException failure = new AwsException("ServerException", "write failed", 500);
+        AwsException restoreFailure = new AwsException("ServerException", "still failing", 500);
+        when(ecs.updateClusterSettings(eq("web"), any(), eq(REGION))).thenThrow(failure, restoreFailure);
+        StackResource r = resource("AWS::ECS::Cluster", "Cluster");
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, clusterWithInsights("enhanced"), ctx("web")));
+
+        assertSame(failure, thrown);
+        assertEquals(List.of(restoreFailure), List.of(thrown.getSuppressed()));
+        assertEquals("Could not restore the settings of ECS cluster web: still failing",
+                r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
     }
 
     @Test
