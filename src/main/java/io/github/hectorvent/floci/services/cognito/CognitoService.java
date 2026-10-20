@@ -3674,7 +3674,12 @@ public class CognitoService implements ResourceProvider {
     }
 
     public Map<String, Object> verifySoftwareToken(String accessToken, String session, String userCode) {
-        return authFlowHandler.verifySoftwareToken(accessToken, session, userCode);
+        return verifySoftwareToken(accessToken, session, userCode, null);
+    }
+
+    public Map<String, Object> verifySoftwareToken(String accessToken, String session, String userCode,
+                                                   String friendlyDeviceName) {
+        return authFlowHandler.verifySoftwareToken(accessToken, session, userCode, friendlyDeviceName);
     }
 
     void beginSoftwareTokenMfa(String poolId, String username, String secret) {
@@ -3688,7 +3693,7 @@ public class CognitoService implements ResourceProvider {
     }
 
     boolean activateSoftwareTokenMfa(String poolId, String username, String expectedSecret,
-                                     String code, Instant now) {
+                                     String code, String friendlyDeviceName, Instant now) {
         synchronized (userLock(poolId, username)) {
             CognitoUser user = adminGetUser(poolId, username);
             String pending = user.getPendingSoftwareTokenMfaSecret();
@@ -3709,6 +3714,8 @@ public class CognitoService implements ResourceProvider {
                 return false;
             }
             user.setSoftwareTokenMfaSecret(pending);
+            user.setSoftwareTokenMfaDeviceName(friendlyDeviceName == null || friendlyDeviceName.isEmpty()
+                    ? null : friendlyDeviceName);
             user.setPendingSoftwareTokenMfaSecret(null);
             user.setPendingSoftwareTokenMfaAttemptsRemaining(null);
             user.setLastModifiedDate(System.currentTimeMillis() / 1000L);

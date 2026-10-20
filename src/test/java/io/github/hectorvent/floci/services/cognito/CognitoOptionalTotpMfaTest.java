@@ -155,6 +155,29 @@ class CognitoOptionalTotpMfaTest {
                         "TIMESTAMP", timestamp));
         assertEquals("SOFTWARE_TOKEN_MFA", verified.get("ChallengeName"));
         assertFalse(verified.containsKey("AuthenticationResult"));
+        assertEquals(Map.of("USER_ID_FOR_SRP", USERNAME), verified.get("ChallengeParameters"));
+    }
+
+    @Test
+    void softwareTokenChallengeNamesTheVerifiedDeviceUntilItIsReplaced() throws Exception {
+        String accessToken = accessToken();
+        String secret = (String) service.associateSoftwareToken(accessToken, null).get("SecretCode");
+        service.verifySoftwareToken(accessToken, null, CognitoTotp.code(secret, clock.instant()), "work-phone");
+        service.adminSetUserMFAPreference(pool.getId(), USERNAME, MfaSettingsUpdate.NONE, TOTP_PREFERRED);
+
+        Map<String, Object> challenged = service.adminInitiateAuth(pool.getId(), client.getClientId(),
+                "ADMIN_USER_PASSWORD_AUTH", Map.of("USERNAME", USERNAME, "PASSWORD", PASSWORD));
+        assertEquals("SOFTWARE_TOKEN_MFA", challenged.get("ChallengeName"));
+        assertEquals(Map.of("USER_ID_FOR_SRP", USERNAME, "FRIENDLY_DEVICE_NAME", "work-phone"),
+                challenged.get("ChallengeParameters"));
+        ObjectMapper mapper = new ObjectMapper();
+        CognitoUser restored = mapper.readValue(
+                mapper.writeValueAsBytes(service.adminGetUser(pool.getId(), USERNAME)), CognitoUser.class);
+        assertEquals("work-phone", restored.getSoftwareTokenMfaDeviceName());
+
+        String replacement = (String) service.associateSoftwareToken(accessToken, null).get("SecretCode");
+        service.verifySoftwareToken(accessToken, null, CognitoTotp.code(replacement, clock.instant()));
+        assertEquals(Map.of("USER_ID_FOR_SRP", USERNAME), passwordLogin().get("ChallengeParameters"));
     }
 
     @Test

@@ -7,7 +7,11 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.util.Base64;
 import java.util.UUID;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
@@ -18,6 +22,7 @@ import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -150,6 +155,100 @@ class CognitoOptionalTotpMfaIntegrationTest {
         assertTrue(challenged.path("AuthenticationResult").isMissingNode());
     }
 
+    @Test
+    void softwareTokenChallengeNamesTheSubAndDeviceOfAnEmailUsernameUser() throws Exception {
+        String poolId = cognitoJson("CreateUserPool", """
+                {"PoolName":"EmailTotpPool","UsernameAttributes":["email"]}
+                """).path("UserPool").path("Id").asText();
+        cognitoJson("SetUserPoolMfaConfig", """
+                {"UserPoolId":"%s","MfaConfiguration":"OPTIONAL",
+                 "SoftwareTokenMfaConfiguration":{"Enabled":true}}
+                """.formatted(poolId));
+        JsonNode client = cognitoJson("CreateUserPoolClient", """
+                {"UserPoolId":"%s","ClientName":"email-totp-client","GenerateSecret":true,
+                 "ExplicitAuthFlows":["ALLOW_ADMIN_USER_PASSWORD_AUTH","ALLOW_REFRESH_TOKEN_AUTH"]}
+                """.formatted(poolId)).path("UserPoolClient");
+        String clientId = client.path("ClientId").asText();
+        String clientSecret = client.path("ClientSecret").asText();
+        String email = "totp-" + UUID.randomUUID() + "@example.com";
+        String sub = cognitoJson("AdminCreateUser", """
+                {"UserPoolId":"%s","Username":"%s","MessageAction":"SUPPRESS",
+                 "UserAttributes":[{"Name":"email","Value":"%s"},{"Name":"email_verified","Value":"true"}]}
+                """.formatted(poolId, email, email)).path("User").path("Username").asText();
+        assertNotEquals(email, sub);
+        cognitoJson("AdminSetUserPassword", """
+                {"UserPoolId":"%s","Username":"%s","Password":"%s","Permanent":true}
+                """.formatted(poolId, email, PASSWORD));
+        String loginRequest = """
+                {"UserPoolId":"%s","ClientId":"%s","AuthFlow":"ADMIN_USER_PASSWORD_AUTH",
+                 "AuthParameters":{"USERNAME":"%s","PASSWORD":"%s","SECRET_HASH":"%s"}}
+                """.formatted(poolId, clientId, email, PASSWORD, secretHash(clientId, clientSecret, email));
+
+        String accessToken = cognitoJson("AdminInitiateAuth", loginRequest)
+                .path("AuthenticationResult").path("AccessToken").asText();
+        String secret = cognitoJson("AssociateSoftwareToken", accessTokenBody(accessToken))
+                .path("SecretCode").asText();
+        assertEquals("SUCCESS", cognitoJson("VerifySoftwareToken", """
+                {"AccessToken":"%s","UserCode":"%s","FriendlyDeviceName":"repro-device"}
+                """.formatted(accessToken, CognitoTotp.code(secret, clock.instant()))).path("Status").asText());
+        cognitoAction("AdminSetUserMFAPreference", """
+                {"UserPoolId":"%s","Username":"%s",
+                 "SoftwareTokenMfaSettings":{"Enabled":true,"PreferredMfa":true}}
+                """.formatted(poolId, email))
+                .then().statusCode(200);
+
+        JsonNode challenged = cognitoJson("AdminInitiateAuth", loginRequest);
+        assertEquals("SOFTWARE_TOKEN_MFA", challenged.path("ChallengeName").asText());
+        JsonNode parameters = challenged.path("ChallengeParameters");
+        assertEquals(sub, parameters.path("USER_ID_FOR_SRP").asText());
+        assertEquals("repro-device", parameters.path("FRIENDLY_DEVICE_NAME").asText());
+        assertEquals(2, parameters.size());
+
+        String userIdForSrp = parameters.path("USER_ID_FOR_SRP").asText();
+        JsonNode signedIn = cognitoJson("AdminRespondToAuthChallenge", """
+                {"UserPoolId":"%s","ClientId":"%s","ChallengeName":"SOFTWARE_TOKEN_MFA","Session":"%s",
+                 "ChallengeResponses":{"USERNAME":"%s","SECRET_HASH":"%s","SOFTWARE_TOKEN_MFA_CODE":"%s"}}
+                """.formatted(poolId, clientId, challenged.path("Session").asText(), userIdForSrp,
+                secretHash(clientId, clientSecret, userIdForSrp), CognitoTotp.code(secret, clock.instant())));
+        assertFalse(signedIn.path("AuthenticationResult").path("AccessToken").asText().isEmpty());
+    }
+
+    @Test
+    void softwareTokenChallengeOmitsTheDeviceNameWhenNoneWasGiven() throws Exception {
+        String poolId = createOptionalPool();
+        String clientId = createClient(poolId);
+        String username = "unnamed-" + UUID.randomUUID();
+        createUser(poolId, username);
+        String loginRequest = """
+                {"ClientId":"%s","AuthFlow":"USER_PASSWORD_AUTH",
+                 "AuthParameters":{"USERNAME":"%s","PASSWORD":"%s"}}
+                """.formatted(clientId, username, PASSWORD);
+        String accessToken = cognitoJson("InitiateAuth", loginRequest)
+                .path("AuthenticationResult").path("AccessToken").asText();
+        String secret = cognitoJson("AssociateSoftwareToken", accessTokenBody(accessToken))
+                .path("SecretCode").asText();
+        cognitoJson("VerifySoftwareToken", """
+                {"AccessToken":"%s","UserCode":"%s"}
+                """.formatted(accessToken, CognitoTotp.code(secret, clock.instant())));
+        cognitoAction("SetUserMFAPreference", """
+                {"AccessToken":"%s","SoftwareTokenMfaSettings":{"Enabled":true,"PreferredMfa":true}}
+                """.formatted(accessToken))
+                .then().statusCode(200);
+
+        JsonNode challenged = cognitoJson("InitiateAuth", loginRequest);
+        assertEquals("SOFTWARE_TOKEN_MFA", challenged.path("ChallengeName").asText());
+        JsonNode parameters = challenged.path("ChallengeParameters");
+        assertEquals(username, parameters.path("USER_ID_FOR_SRP").asText());
+        assertEquals(1, parameters.size());
+
+        JsonNode signedIn = cognitoJson("RespondToAuthChallenge", """
+                {"ClientId":"%s","ChallengeName":"SOFTWARE_TOKEN_MFA","Session":"%s",
+                 "ChallengeResponses":{"USERNAME":"%s","SOFTWARE_TOKEN_MFA_CODE":"%s"}}
+                """.formatted(clientId, challenged.path("Session").asText(),
+                parameters.path("USER_ID_FOR_SRP").asText(), CognitoTotp.code(secret, clock.instant())));
+        assertFalse(signedIn.path("AuthenticationResult").path("AccessToken").asText().isEmpty());
+    }
+
     private static String createOptionalPool() throws Exception {
         String poolId = cognitoJson("CreateUserPool", """
                 {"PoolName":"OptionalTotpPool","UserPoolTier":"ESSENTIALS",
@@ -184,5 +283,12 @@ class CognitoOptionalTotpMfaIntegrationTest {
         return """
                 {"AccessToken":"%s"}
                 """.formatted(accessToken);
+    }
+
+    private static String secretHash(String clientId, String clientSecret, String username) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(clientSecret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        return Base64.getEncoder().encodeToString(
+                mac.doFinal((username + clientId).getBytes(StandardCharsets.UTF_8)));
     }
 }

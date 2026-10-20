@@ -345,7 +345,8 @@ final class CognitoAuthFlowHandler {
         return result;
     }
 
-    Map<String, Object> verifySoftwareToken(String accessToken, String session, String userCode) {
+    Map<String, Object> verifySoftwareToken(String accessToken, String session, String userCode,
+                                            String friendlyDeviceName) {
         requireOneTotpCredential(accessToken, session);
         if (userCode == null || !userCode.matches("[0-9]{6}")) {
             throw new AwsException("InvalidParameterException", "UserCode must be a six-digit code", 400);
@@ -364,7 +365,7 @@ final class CognitoAuthFlowHandler {
             username = token.username();
         }
         if (!service.activateSoftwareTokenMfa(poolId, username, state == null ? null : state.secret(),
-                userCode, clock.instant())) {
+                userCode, friendlyDeviceName, clock.instant())) {
             throw new AwsException("CodeMismatchException",
                     "Invalid verification code provided, please try again.", 400);
         }
@@ -2213,9 +2214,15 @@ final class CognitoAuthFlowHandler {
                 phase, metadata, triggerSource, sessionExpiry(client, clock.instant()),
                 user.getSoftwareTokenMfaSecret()));
         Map<String, String> parameters = new HashMap<>();
-        parameters.put("USERNAME", user.getUsername());
         if (phase == TotpPhase.SETUP) {
+            parameters.put("USERNAME", user.getUsername());
             parameters.put("MFAS_CAN_SETUP", "[\"SOFTWARE_TOKEN_MFA\"]");
+        } else {
+            // As on AWS: the canonical username (never an alias) to answer with, and the authenticator's name.
+            parameters.put("USER_ID_FOR_SRP", user.getUsername());
+            if (user.getSoftwareTokenMfaDeviceName() != null) {
+                parameters.put("FRIENDLY_DEVICE_NAME", user.getSoftwareTokenMfaDeviceName());
+            }
         }
         result.put("ChallengeParameters", parameters);
         return result;
