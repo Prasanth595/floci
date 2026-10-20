@@ -50,6 +50,7 @@ import software.amazon.awssdk.services.databasemigration.DatabaseMigrationClient
 import software.amazon.awssdk.services.datasync.DataSyncClient;
 import software.amazon.awssdk.services.detective.DetectiveClient;
 import software.amazon.awssdk.services.dlm.DlmClient;
+import software.amazon.awssdk.services.dsql.DsqlClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.streams.DynamoDbStreamsClient;
 import software.amazon.awssdk.services.ec2.Ec2Client;
@@ -1255,6 +1256,14 @@ public final class TestFixtures {
         return hostedZoneId != null && hostedZoneId.startsWith(prefix)
                 ? hostedZoneId.substring(prefix.length())
                 : hostedZoneId;
+    }
+
+    public static DsqlClient dsqlClient() {
+        return DsqlClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
     }
 
     public static RdsClient rdsClient() {

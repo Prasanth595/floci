@@ -536,6 +536,9 @@ floci:
       enabled: true
       transaction-ttl-seconds: 180
       database-resuming-exception-enabled: false # FLOCI_SERVICES_RDS_DATA_DATABASE_RESUMING_EXCEPTION_ENABLED
+    dsql:
+      enabled: true
+      endpoint-suffix: localhost.floci.io         # FLOCI_SERVICES_DSQL_ENDPOINT_SUFFIX; endpoints are <id>.dsql.<region>.<suffix>
     redshift-data:
       enabled: true
       result-ttl-hours: 24
