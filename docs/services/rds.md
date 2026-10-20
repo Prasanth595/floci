@@ -557,15 +557,20 @@ Aurora MySQL versions such as `8.0.mysql_aurora.3.08.0` use the MySQL version in
 ## Parameter groups
 
 A MySQL or MariaDB database runs with its parameter group: an Aurora MySQL cluster with its DB
-cluster parameter group, a standalone instance with its DB parameter group. Floci passes each
-override to the server when it starts the database container, so a value set in the group is the
-engine's value. A later change to the group takes effect the next time the container starts:
-`RebootDBCluster` for a cluster, `RebootDBInstance` for a standalone instance, a stop and start,
-or a Floci restart. A parameter the server does not know, such as one only Aurora has, is skipped
-with a warning in the database log. A formula value such as `{DBInstanceClassMemory*3/4}` keeps
-the server's default, and so do `port`, `bind_address`, `socket`, `datadir` and
-`skip_networking`, which Floci needs to reach the database. PostgreSQL and SQL Server databases do
-not take parameter group values yet.
+cluster parameter group, with the writer instance's DB parameter group on top (so an
+instance-level value such as `max_connections` wins, as on AWS), and a standalone instance with
+its DB parameter group. Floci passes each override to the server when it starts the database
+container, so a value set in the group is the engine's value; creating a cluster's writer restarts
+the cluster's container when the writer's group changes anything. A later change to a group, or a
+new `DBClusterParameterGroupName` on `ModifyDBCluster` or `DBParameterGroupName` on
+`ModifyDBInstance`, takes effect the next time the container starts: `RebootDBCluster` for a
+cluster, `RebootDBInstance` for a standalone instance, a stop and start, or a Floci restart. A
+parameter the server does not know, such as one only Aurora has, is skipped with a warning in the
+database log. A formula value such as `{DBInstanceClassMemory*3/4}` keeps the server's default,
+and so do `port`, `bind_address`, `socket`, `datadir` and `skip_networking`, which Floci needs to
+reach the database, and `require_secure_transport` and `skip_grant_tables`, which would lock out
+Floci's proxy (it talks to the server without TLS). PostgreSQL and SQL Server databases do not
+take parameter group values yet.
 
 ## Option Groups
 

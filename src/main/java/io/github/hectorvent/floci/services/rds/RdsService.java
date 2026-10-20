@@ -881,6 +881,14 @@ public class RdsService implements Resettable, ResourceProvider {
                         throw new AwsException("InvalidDBClusterStateFault",
                                 "DB cluster is not available for member creation.", 400);
                     }
+                    if (!mock && currentCluster.resolveWriterIdentifier() == null) {
+                        try {
+                            applyWriterParameterGroup(currentCluster, paramGroupName, effectiveRegion);
+                        } catch (RuntimeException | Error e) {
+                            releaseProxyPort(proxyPort);
+                            throw e;
+                        }
+                    }
                     backendHost = currentCluster.getContainerHost();
                     backendPort = currentCluster.getContainerPort();
                     instance.setContainerId(currentCluster.getContainerId());
@@ -3093,10 +3101,26 @@ public class RdsService implements Resettable, ResourceProvider {
             String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
             DbInstanceSettings settings, Boolean publiclyAccessible,
             DbInstanceScalingChanges scaling, Boolean deletionProtection) {
+        return modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName,
+                vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
+                settings, publiclyAccessible, scaling, deletionProtection, null);
+    }
+
+    /**
+     * Like AWS, a new {@code dbParameterGroupName} is recorded at once and the engine runs with
+     * it from its next start, such as a reboot.
+     */
+    public DbInstance modifyDbInstance(
+            String id, String newPassword, Boolean iamEnabled,
+            String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
+            String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
+            DbInstanceSettings settings, Boolean publiclyAccessible,
+            DbInstanceScalingChanges scaling, Boolean deletionProtection,
+            String dbParameterGroupName) {
         return withInstancePublication(id, region, () -> doModifyDbInstance(
                 id, newPassword, iamEnabled, dbSubnetGroupName, vpcSecurityGroupIds,
                 optionGroupName, region, autoMinorVersionUpgrade,
-                settings, publiclyAccessible, scaling, deletionProtection));
+                settings, publiclyAccessible, scaling, deletionProtection, dbParameterGroupName));
     }
 
     private synchronized DbInstance doModifyDbInstance(
@@ -3104,7 +3128,8 @@ public class RdsService implements Resettable, ResourceProvider {
             String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
             String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
             DbInstanceSettings settings, Boolean publiclyAccessible,
-            DbInstanceScalingChanges scaling, Boolean deletionProtection) {
+            DbInstanceScalingChanges scaling, Boolean deletionProtection,
+            String dbParameterGroupName) {
         validateInstanceSettings(settings);
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
@@ -3124,7 +3149,15 @@ public class RdsService implements Resettable, ResourceProvider {
             effective = effective.withStorageType(null);
         }
         validateAutoscalingMinimum(instance, effective.maxAllocatedStorage());
+        boolean changesParameterGroup = dbParameterGroupName != null && !dbParameterGroupName.isBlank();
+        if (changesParameterGroup) {
+            validateInstanceParameterGroup(dbParameterGroupName, engineName(instance),
+                    instance.getEngineVersion(), effectiveRegion);
+        }
         instance.setStatus(DbInstanceStatus.AVAILABLE);
+        if (changesParameterGroup) {
+            instance.setParameterGroupName(dbParameterGroupName);
+        }
         if (optionGroupName != null && !optionGroupName.isBlank()) {
             validateInstanceOptionGroup(optionGroupName,
                     instance.getEngine() == null ? null : instance.getEngine().name().toLowerCase(),
@@ -3722,8 +3755,36 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setContainerPort(0);
     }
 
+    /**
+     * The first member of a cluster becomes its writer, whose DB parameter group is layered over
+     * the cluster's group. A running engine is restarted with it when that changes the options
+     * the engine runs with; one not started yet picks it up when it starts.
+     */
+    private void applyWriterParameterGroup(
+            DbCluster cluster, String writerParameterGroupName, String effectiveRegion) {
+        if (cluster.getContainerId() == null || cluster.getEndpoint() == null) {
+            return;
+        }
+        Map<String, String> withWriter = clusterEngineParameters(cluster, writerParameterGroupName);
+        if (RdsContainerManager.engineParameterOptions(cluster.getEngine(), withWriter).equals(
+                RdsContainerManager.engineParameterOptions(
+                        cluster.getEngine(), clusterEngineParameters(cluster, null)))) {
+            return;
+        }
+        String id = cluster.getDbClusterIdentifier();
+        String accountId = accountIdFromArn(cluster.getDbClusterArn());
+        stopDbClusterRuntime(cluster, id, effectiveRegion, accountId);
+        startClusterBackend(cluster, id, effectiveRegion, withWriter);
+        putClusterForScope(accountId, effectiveRegion, id, cluster);
+    }
+
     /** Brings a cluster's container up on its existing volume and its proxy with it. */
     private void startClusterBackend(DbCluster cluster, String id, String effectiveRegion) {
+        startClusterBackend(cluster, id, effectiveRegion, clusterEngineParameters(cluster));
+    }
+
+    private void startClusterBackend(DbCluster cluster, String id, String effectiveRegion,
+                                     Map<String, String> engineParameters) {
         if (cluster.getEndpoint() == null) {
             try {
                 ensureClusterBackend(id, effectiveRegion, false);
@@ -3742,7 +3803,7 @@ public class RdsService implements Resettable, ResourceProvider {
             handle = containerManager.tryStart(
                     cluster.getDbClusterArn(), id, storageResourceId, dockerVolumeName,
                     cluster.getEngine(), image, cluster.getMasterUsername(), cluster.getMasterPassword(),
-                    cluster.getDatabaseName(), clusterEngineParameters(cluster));
+                    cluster.getDatabaseName(), engineParameters);
         } catch (RuntimeException | Error e) {
             cluster.setStatus(DbInstanceStatus.FAILED);
             putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
@@ -4866,6 +4927,20 @@ public class RdsService implements Resettable, ResourceProvider {
                                      Integer serverlessV2SecondsUntilAutoPause,
                                      Boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
                                      String region) {
+        return modifyDbCluster(id, newPassword, iamEnabled, serverlessV2MinCapacity,
+                serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
+                manageMasterUserPassword, masterUserSecretKmsKeyId, null, region);
+    }
+
+    /**
+     * Like AWS, a new {@code dbClusterParameterGroupName} is recorded at once and the engine runs
+     * with it from its next start, such as a reboot.
+     */
+    public DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                     Integer serverlessV2SecondsUntilAutoPause,
+                                     Boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
+                                     String dbClusterParameterGroupName, String region) {
         String effectiveRegion = effectiveRegion(region);
         while (true) {
             DbCluster cluster = getDbCluster(id, effectiveRegion);
@@ -4877,7 +4952,8 @@ public class RdsService implements Resettable, ResourceProvider {
                     }
                     return doModifyDbCluster(id, newPassword, iamEnabled, serverlessV2MinCapacity,
                             serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, region);
+                            manageMasterUserPassword, masterUserSecretKmsKeyId,
+                            dbClusterParameterGroupName, region);
                 }
             }
         }
@@ -4887,9 +4963,15 @@ public class RdsService implements Resettable, ResourceProvider {
                                      Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                      Integer serverlessV2SecondsUntilAutoPause,
                                      Boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
-                                     String region) {
+                                     String dbClusterParameterGroupName, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = getDbCluster(id, effectiveRegion);
+        boolean changesParameterGroup = dbClusterParameterGroupName != null
+                && !dbClusterParameterGroupName.isBlank();
+        if (changesParameterGroup) {
+            validateClusterParameterGroup(dbClusterParameterGroupName, engineName(cluster),
+                    cluster.getEngineVersion(), effectiveRegion);
+        }
         boolean modifiesServerlessV2Scaling = serverlessV2MinCapacity != null
                 || serverlessV2MaxCapacity != null
                 || serverlessV2SecondsUntilAutoPause != null;
@@ -4965,6 +5047,9 @@ public class RdsService implements Resettable, ResourceProvider {
                 && masterUserSecretKmsKeyId != null
                 && !masterUserSecretKmsKeyId.equals(cluster.getMasterUserSecretKmsKeyId())) {
             rekeyManagedMasterUserSecret(cluster, masterUserSecretKmsKeyId, effectiveRegion);
+        }
+        if (changesParameterGroup) {
+            cluster.setParameterGroupName(dbClusterParameterGroupName);
         }
         if (modifiesServerlessV2Scaling) {
             cluster.setServerlessV2MinCapacity(effectiveMinCapacity);
@@ -9128,10 +9213,27 @@ public class RdsService implements Resettable, ResourceProvider {
                 ? Map.of() : new HashMap<>(group.getParameters());
     }
 
-    /** The overrides of a cluster's DB cluster parameter group, which its engine runs with. */
+    /**
+     * The overrides a cluster's engine runs with: those of its DB cluster parameter group, with
+     * those of its writer's DB parameter group on top, as an instance-level value such as
+     * {@code max_connections} overrides the cluster's on AWS.
+     */
     private Map<String, String> clusterEngineParameters(DbCluster cluster) {
-        return clusterEngineParameters(accountIdFromArn(cluster.getDbClusterArn()),
-                regionFromArn(cluster.getDbClusterArn()), cluster.getParameterGroupName());
+        String writerId = cluster.resolveWriterIdentifier();
+        DbInstance writer = writerId == null ? null : findInstanceForScope(
+                accountIdFromArn(cluster.getDbClusterArn()),
+                effectiveRegion(regionFromArn(cluster.getDbClusterArn())), writerId);
+        return clusterEngineParameters(cluster, writer == null ? null : writer.getParameterGroupName());
+    }
+
+    private Map<String, String> clusterEngineParameters(
+            DbCluster cluster, String writerParameterGroupName) {
+        String accountId = accountIdFromArn(cluster.getDbClusterArn());
+        String region = regionFromArn(cluster.getDbClusterArn());
+        Map<String, String> parameters = new HashMap<>(
+                clusterEngineParameters(accountId, region, cluster.getParameterGroupName()));
+        parameters.putAll(instanceEngineParameters(accountId, region, writerParameterGroupName));
+        return parameters;
     }
 
     /**

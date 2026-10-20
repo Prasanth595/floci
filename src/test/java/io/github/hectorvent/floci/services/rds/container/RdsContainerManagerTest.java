@@ -135,6 +135,21 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void parameterGroupCannotTurnOnSettingsThatLockTheProxyOut() {
+        Map<String, String> overrides = new LinkedHashMap<>();
+        overrides.put("require_secure_transport", "ON");
+        overrides.put("require-secure-transport", "1");
+        overrides.put("skip_grant_tables", "ON");
+        overrides.put("skip-grant-tables", "1");
+        overrides.put("max_connections", "500");
+
+        assertEquals(List.of("--loose-max_connections=500"),
+                RdsContainerManager.engineParameterOptions(DatabaseEngine.MYSQL, overrides));
+        assertEquals(List.of("--loose-max_connections=500"),
+                RdsContainerManager.engineParameterOptions(DatabaseEngine.MARIADB, overrides));
+    }
+
+    @Test
     void parameterGroupOverridesAreNotPassedToOtherEngines() {
         assertTrue(RdsContainerManager.buildContainerCmd(
                 DatabaseEngine.POSTGRES, "postgres:18", Map.of("max_connections", "500")).isEmpty());

@@ -1678,6 +1678,135 @@ class RdsServiceTest {
     }
 
     @Test
+    void auroraWriterDbParameterGroupIsLayeredOverTheClusterParameterGroup() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("cont-id", "id", "localhost", 3306));
+        rdsService.createDbClusterParameterGroup("app-cluster-params", "aurora-mysql8.0", "app");
+        rdsService.modifyDbClusterParameterGroup("app-cluster-params",
+                Map.of("max_connections", "500", "slow_query_log", "1"));
+        rdsService.createDbParameterGroup("writer-params", "aurora-mysql8.0", "writer");
+        rdsService.modifyDbParameterGroup("writer-params", Map.of("max_connections", "800"));
+        rdsService.createDbParameterGroup("reader-params", "aurora-mysql8.0", "reader");
+        rdsService.modifyDbParameterGroup("reader-params", Map.of("max_connections", "50"));
+        DbCluster cluster = rdsService.createDbCluster("app-cluster", "aurora-mysql",
+                "8.0.mysql_aurora.3.05.2", "admin", "password", null, false, "app-cluster-params");
+        Map<String, String> writerLayered = Map.of("max_connections", "800", "slow_query_log", "1");
+
+        // The writer's group reaches the database as soon as the writer exists.
+        rdsService.createDbInstance("writer", "aurora-mysql", "8.0.mysql_aurora.3.05.2", null, null, null,
+                "db.r6g.large", 0, false, "writer-params", null, "app-cluster");
+        verify(containerManager).tryStart(eq(cluster.getDbClusterArn()), eq("app-cluster"),
+                any(), any(), any(), any(), any(), any(), any(), eq(writerLayered));
+
+        // A reader's group does not, and the writer's survives a reboot.
+        rdsService.createDbInstance("reader", "aurora-mysql", "8.0.mysql_aurora.3.05.2", null, null, null,
+                "db.r6g.large", 0, false, "reader-params", null, "app-cluster");
+        rdsService.rebootDbCluster("app-cluster", "us-east-1");
+        verify(containerManager, times(2)).tryStart(eq(cluster.getDbClusterArn()), eq("app-cluster"),
+                any(), any(), any(), any(), any(), any(), any(), eq(writerLayered));
+        verify(containerManager, times(3))
+                .tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void auroraWriterWithoutOverridesDoesNotRestartTheClusterEngine() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("cont-id", "id", "localhost", 3306));
+        rdsService.createDbParameterGroup("writer-params", "aurora-mysql8.0", "writer");
+        rdsService.createDbCluster("app-cluster", "aurora-mysql",
+                "8.0.mysql_aurora.3.05.2", "admin", "password", null, false, null);
+
+        rdsService.createDbInstance("writer", "aurora-mysql", "8.0.mysql_aurora.3.05.2", null, null, null,
+                "db.r6g.large", 0, false, "writer-params", null, "app-cluster");
+
+        verify(containerManager, times(1))
+                .tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verify(containerManager, never()).stop(any());
+    }
+
+    @Test
+    void modifyDbInstanceSwitchesTheParameterGroupTheEngineRunsWithAfterAReboot() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("cont-id", "app-db", "localhost", 3306));
+        rdsService.createDbParameterGroup("old-params", "mysql8.0", "old");
+        rdsService.modifyDbParameterGroup("old-params", Map.of("max_connections", "300"));
+        rdsService.createDbParameterGroup("new-params", "mysql8.0", "new");
+        rdsService.modifyDbParameterGroup("new-params", Map.of("max_connections", "600"));
+        rdsService.createDbInstance("app-db", "mysql", "8.0.36", "admin", "password", "app",
+                "db.t3.micro", 20, false, "old-params", null, null);
+
+        DbInstance modified = rdsService.modifyDbInstance("app-db", null, null, null, null, null,
+                "us-east-1", null, DbInstanceSettings.unchanged(), null,
+                DbInstanceScalingChanges.unchanged(), null, "new-params");
+        assertEquals("new-params", modified.getParameterGroupName());
+        assertEquals("new-params", rdsService.getDbInstance("app-db").getParameterGroupName());
+
+        rdsService.rebootDbInstance("app-db");
+        verify(containerManager).tryStart(eq("arn:aws:rds:us-east-1:123456789012:db:app-db"), eq("app-db"),
+                any(), any(), eq(DatabaseEngine.MYSQL), any(), any(), any(), any(),
+                eq(Map.of("max_connections", "600")));
+    }
+
+    @Test
+    void modifyDbInstanceRefusesAMissingOrMismatchedParameterGroupAndChangesNothing() {
+        rdsService.createDbParameterGroup("pg-params", "postgres16", "pg");
+        rdsService.createDbInstance("app-db", "mysql", "8.0.36", "admin", "password", "app",
+                "db.t3.micro", 20, false, null, null, null);
+
+        AwsException missing = assertThrows(AwsException.class, () -> rdsService.modifyDbInstance(
+                "app-db", null, null, null, null, null, "us-east-1", null, DbInstanceSettings.unchanged(),
+                null, DbInstanceScalingChanges.unchanged(), true, "no-such-params"));
+        assertEquals("DBParameterGroupNotFound", missing.getErrorCode());
+        AwsException mismatched = assertThrows(AwsException.class, () -> rdsService.modifyDbInstance(
+                "app-db", null, null, null, null, null, "us-east-1", null, DbInstanceSettings.unchanged(),
+                null, DbInstanceScalingChanges.unchanged(), true, "pg-params"));
+        assertEquals("InvalidParameterCombination", mismatched.getErrorCode());
+
+        DbInstance unchanged = rdsService.getDbInstance("app-db");
+        assertNull(unchanged.getParameterGroupName());
+        assertFalse(unchanged.isDeletionProtection());
+    }
+
+    @Test
+    void modifyDbClusterSwitchesTheClusterParameterGroupTheEngineRunsWithAfterAReboot() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("cont-id", "id", "localhost", 3306));
+        rdsService.createDbClusterParameterGroup("new-cluster-params", "aurora-mysql8.0", "new");
+        rdsService.modifyDbClusterParameterGroup("new-cluster-params", Map.of("max_connections", "700"));
+        DbCluster cluster = rdsService.createDbCluster("app-cluster", "aurora-mysql",
+                "8.0.mysql_aurora.3.05.2", "admin", "password", null, false, null);
+
+        DbCluster modified = rdsService.modifyDbCluster("app-cluster", null, null, null, null, null,
+                null, null, "new-cluster-params", "us-east-1");
+        assertEquals("new-cluster-params", modified.getParameterGroupName());
+        assertEquals("new-cluster-params", rdsService.getDbCluster("app-cluster").getParameterGroupName());
+
+        rdsService.rebootDbCluster("app-cluster", "us-east-1");
+        verify(containerManager).tryStart(eq(cluster.getDbClusterArn()), eq("app-cluster"),
+                any(), any(), any(), any(), any(), any(), any(), eq(Map.of("max_connections", "700")));
+    }
+
+    @Test
+    void modifyDbClusterRefusesAMissingOrMismatchedClusterParameterGroupAndChangesNothing() {
+        rdsService.createDbClusterParameterGroup("pg-cluster-params", "aurora-postgresql16", "pg");
+        rdsService.createDbCluster("app-cluster", "aurora-mysql",
+                "8.0.mysql_aurora.3.05.2", "admin", "password", null, false, null);
+
+        AwsException missing = assertThrows(AwsException.class, () -> rdsService.modifyDbCluster(
+                "app-cluster", "NewPassword1!", null, null, null, null, null, null,
+                "no-such-params", "us-east-1"));
+        assertEquals("DBClusterParameterGroupNotFound", missing.getErrorCode());
+        AwsException mismatched = assertThrows(AwsException.class, () -> rdsService.modifyDbCluster(
+                "app-cluster", "NewPassword1!", null, null, null, null, null, null,
+                "pg-cluster-params", "us-east-1"));
+        assertEquals("InvalidParameterCombination", mismatched.getErrorCode());
+
+        DbCluster unchanged = rdsService.getDbCluster("app-cluster");
+        assertNull(unchanged.getParameterGroupName());
+        assertEquals("password", unchanged.getMasterPassword());
+    }
+
+    @Test
     void standaloneInstanceContainerRunsWithItsDbParameterGroup() {
         rdsService.createDbParameterGroup("app-params", "mysql8.0", "app");
         rdsService.modifyDbParameterGroup("app-params", Map.of("max_connections", "300"));

@@ -62,9 +62,15 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     private static final Logger LOG = Logger.getLogger(RdsContainerManager.class);
     private static final Pattern SAFE_STORAGE_COMPONENT = Pattern.compile("[A-Za-z0-9._-]+");
     private static final Pattern MYSQL_PARAMETER_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_.-]*");
-    /** Where the server listens and keeps its data: the proxy and the volume depend on these. */
-    private static final Set<String> FLOCI_CONTROLLED_MYSQL_PARAMETERS =
-            Set.of("bind_address", "datadir", "port", "skip_networking", "socket");
+    /**
+     * Where the server listens and keeps its data, which the proxy and the volume depend on, and
+     * the settings that would lock the proxy out: it talks to the server without TLS, so
+     * {@code require_secure_transport} refuses it, and {@code skip_grant_tables} turns
+     * networking off.
+     */
+    private static final Set<String> FLOCI_CONTROLLED_MYSQL_PARAMETERS = Set.of(
+            "bind_address", "datadir", "port", "require_secure_transport", "skip_grant_tables",
+            "skip_networking", "socket");
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -1230,9 +1236,10 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
      * does not have) is skipped with a warning instead of stopping the server. A value that is a
      * formula, such as {@code {DBInstanceClassMemory*3/4}}, is worked out by AWS from the
      * instance class and is left to the server's default, as are the parameters that decide
-     * where the server listens and keeps its data, which Floci controls.
+     * where the server listens and keeps its data, which Floci controls, and the ones that would
+     * lock Floci's proxy out.
      */
-    static List<String> engineParameterOptions(
+    public static List<String> engineParameterOptions(
             DatabaseEngine engine, Map<String, String> engineParameters) {
         if (engineParameters == null || engineParameters.isEmpty()
                 || (engine != DatabaseEngine.MYSQL && engine != DatabaseEngine.MARIADB)) {
