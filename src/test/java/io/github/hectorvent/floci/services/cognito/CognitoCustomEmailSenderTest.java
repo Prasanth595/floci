@@ -169,6 +169,36 @@ class CognitoCustomEmailSenderTest {
         verify(ses, never()).sendEmail(any());
     }
 
+    /**
+     * Measured (eu-west-1, 2026-10-20): SignUp, ResendConfirmationCode, ForgotPassword,
+     * GetUserAttributeVerificationCode and UpdateUserAttributes hand the function the request's
+     * ClientMetadata; a request without one gives it null (2026-10-16).
+     */
+    @Test
+    void theRequestsClientMetadataReachesTheFunction() throws Exception {
+        UserPool pool = pool(Map.of("KMSKeyID", keyArn, "CustomEmailSender", sender()), List.of("email"));
+        UserPoolClient client = client(pool);
+
+        service.signUp(client.getClientId(), "alice", "Passw0rd!", Map.of("email", "alice@example.com"), Map.of(),
+                Map.of("from", "SignUp"));
+        assertEquals(Map.of("from", "SignUp"), request(senderEvent()).get("clientMetadata"));
+        service.resendConfirmationCode(client.getClientId(), "alice", Map.of("from", "Resend"));
+        Map<String, Object> resent = senderEvent();
+        assertEquals(Map.of("from", "Resend"), request(resent).get("clientMetadata"));
+        service.confirmSignUp(client.getClientId(), "alice", decrypt(request(resent)).plaintext());
+        service.forgotPassword(client.getClientId(), "alice", Map.of("from", "ForgotPassword"));
+        assertEquals(Map.of("from", "ForgotPassword"), request(senderEvent()).get("clientMetadata"));
+
+        service.getUserAttributeVerificationCode(signIn(client, "alice", "Passw0rd!"), "email",
+                Map.of("from", "GetUserAttributeVerificationCode"));
+        assertEquals(Map.of("from", "GetUserAttributeVerificationCode"), request(senderEvent()).get("clientMetadata"));
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
+        service.adminSetUserPassword(pool.getId(), "bob", "Passw0rd!", true);
+        service.updateUserAttributes(signIn(client, "bob", "Passw0rd!"), Map.of("email", "bob@example.org"),
+                Map.of("from", "UpdateUserAttributes"));
+        assertEquals(Map.of("from", "UpdateUserAttributes"), request(senderEvent()).get("clientMetadata"));
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void attributeVerificationCodesGoToTheFunction() throws Exception {
@@ -218,7 +248,8 @@ class CognitoCustomEmailSenderTest {
         assertEquals("EMAIL_OTP", challenge.get("ChallengeName"));
         Map<String, Object> event = senderEvent();
         assertEquals("CustomEmailSender_Authentication", event.get("triggerSource"));
-        // Measured (eu-west-1, 2026-10-16): null for every source, InitiateAuth's ClientMetadata included.
+        // Measured (eu-west-1, 2026-10-20): a sign-in code's event carries no ClientMetadata, though
+        // InitiateAuth sends one.
         assertNull(request(event).get("clientMetadata"));
 
         Map<String, Object> result = service.respondToAuthChallenge(client.getClientId(), "EMAIL_OTP",

@@ -1038,7 +1038,8 @@ public class CognitoJsonHandler {
     private Response handleResendConfirmationCode(JsonNode request) {
         Map<String, String> deliveryDetails = service.resendConfirmationCode(
                 request.path("ClientId").asText(),
-                request.path("Username").asText()
+                request.path("Username").asText(),
+                clientMetadata(request)
         );
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode delivery = response.putObject("CodeDeliveryDetails");
@@ -1070,7 +1071,8 @@ public class CognitoJsonHandler {
     private Response handleForgotPassword(JsonNode request) {
         Map<String, Object> deliveryDetails = service.forgotPassword(
                 request.path("ClientId").asText(),
-                request.path("Username").asText()
+                request.path("Username").asText(),
+                clientMetadata(request)
         );
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode delivery = response.putObject("CodeDeliveryDetails");
@@ -1105,7 +1107,8 @@ public class CognitoJsonHandler {
     private Response handleGetUserAttributeVerificationCode(JsonNode request) {
         Map<String, Object> deliveryDetails = service.getUserAttributeVerificationCode(
                 request.path("AccessToken").asText(),
-                request.path("AttributeName").asText()
+                request.path("AttributeName").asText(),
+                clientMetadata(request)
         );
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode delivery = response.putObject("CodeDeliveryDetails");
@@ -1127,7 +1130,7 @@ public class CognitoJsonHandler {
     private Response handleUpdateUserAttributes(JsonNode request) {
         Map<String, String> attrs = readNameValuePairs(request, "UserAttributes");
         List<Map<String, Object>> deliveryDetails = service.updateUserAttributes(
-                request.path("AccessToken").asText(), attrs);
+                request.path("AccessToken").asText(), attrs, clientMetadata(request));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("CodeDeliveryDetailsList", objectMapper.valueToTree(deliveryDetails));
         return Response.ok(response).build();

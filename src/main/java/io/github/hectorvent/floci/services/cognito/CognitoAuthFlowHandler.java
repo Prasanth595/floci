@@ -1911,15 +1911,16 @@ final class CognitoAuthFlowHandler {
      * Hands an encrypted code to the pool's CustomEmailSender function, which delivers the email in
      * Cognito's place. Cognito invokes custom sender triggers asynchronously, so the function's own
      * outcome never reaches the caller; a function that cannot be invoked at all throws.
-     * {@code clientMetadata} is null for every source, even when InitiateAuth carries
-     * ClientMetadata (measured, eu-west-1, 2026-10-16).
+     * {@code clientMetadata} is the request's ClientMetadata, or null when it carries none; the
+     * caller passes null for a sign-in code, whose event Cognito sends without InitiateAuth's
+     * (measured, eu-west-1, 2026-10-16 and 2026-10-20).
      */
     void fireCustomEmailSender(UserPool pool, String clientId, CognitoUser user, String triggerSource,
-                               String encryptedCode) {
+                               String encryptedCode, Map<String, String> clientMetadata) {
         Map<String, Object> req = new HashMap<>();
         req.put("type", "customEmailSenderRequestV1");
         req.put("code", encryptedCode);
-        req.put("clientMetadata", null);
+        req.put("clientMetadata", clientMetadata == null || clientMetadata.isEmpty() ? null : clientMetadata);
         byte[] payload;
         try {
             payload = MAPPER.writeValueAsBytes(
@@ -2348,7 +2349,9 @@ final class CognitoAuthFlowHandler {
         Object v = cfg.get(triggerKey);
         if (v instanceof String s && !s.isBlank()) return s;
         // Custom sender triggers are configured as { LambdaArn, LambdaVersion }.
-        if (v instanceof Map<?, ?> m && m.get("LambdaArn") instanceof String arn && !arn.isBlank()) return arn;
+        if (v instanceof Map<?, ?> m && m.get("LambdaArn") instanceof String arn && !arn.isBlank()) {
+            return arn;
+        }
         // V2 form: PreTokenGeneration is configured under "PreTokenGenerationConfig"
         // as { LambdaArn, LambdaVersion } (UpdateUserPool / UpdateUserPoolClient
         // API). Fall through so callers using the V1 key still work, and pick up

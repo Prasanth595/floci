@@ -3416,7 +3416,7 @@ public class CognitoService implements ResourceProvider {
                         VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
                 if (!sendThroughCustomEmailSender(pool, client.getClientId(), triggerUser,
                         deliveryTarget.deliveryMedium(), "CustomEmailSender_SignUp",
-                        VerificationCode.Purpose.SIGNUP_CONFIRMATION, code)) {
+                        VerificationCode.Purpose.SIGNUP_CONFIRMATION, code, clientMetadata)) {
                     Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
                             pool, client, triggerUser, "CustomMessage_SignUp", clientMetadata);
                     messageDispatcher.dispatch(pool, triggerUser, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
@@ -3521,6 +3521,11 @@ public class CognitoService implements ResourceProvider {
     }
 
     public Map<String, String> resendConfirmationCode(String clientId, String username) {
+        return resendConfirmationCode(clientId, username, Map.of());
+    }
+
+    public Map<String, String> resendConfirmationCode(String clientId, String username,
+                                                      Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
                         400));
@@ -3549,7 +3554,7 @@ public class CognitoService implements ResourceProvider {
                     VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
             if (!sendThroughCustomEmailSender(pool, client.getClientId(), user,
                     deliveryTarget.deliveryMedium(), "CustomEmailSender_ResendCode",
-                    VerificationCode.Purpose.SIGNUP_CONFIRMATION, code)) {
+                    VerificationCode.Purpose.SIGNUP_CONFIRMATION, code, clientMetadata)) {
                 Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
                         pool, client, user, "CustomMessage_ResendCode", Map.of());
                 messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
@@ -3941,6 +3946,10 @@ public class CognitoService implements ResourceProvider {
     }
 
     public Map<String, Object> forgotPassword(String clientId, String username) {
+        return forgotPassword(clientId, username, Map.of());
+    }
+
+    public Map<String, Object> forgotPassword(String clientId, String username, Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
         UserPool pool = describeUserPool(client.getUserPoolId());
@@ -3956,7 +3965,7 @@ public class CognitoService implements ResourceProvider {
                     VerificationCode.Purpose.PASSWORD_RESET, Duration.ofHours(1));
             if (!sendThroughCustomEmailSender(pool, client.getClientId(), user,
                     deliveryTarget.deliveryMedium(), "CustomEmailSender_ForgotPassword",
-                    VerificationCode.Purpose.PASSWORD_RESET, code)) {
+                    VerificationCode.Purpose.PASSWORD_RESET, code, clientMetadata)) {
                 Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
                         pool, client, user, "CustomMessage_ForgotPassword", Map.of());
                 messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.PASSWORD_RESET, code,
@@ -4040,6 +4049,11 @@ public class CognitoService implements ResourceProvider {
     }
 
     public Map<String, Object> getUserAttributeVerificationCode(String accessToken, String attributeName) {
+        return getUserAttributeVerificationCode(accessToken, attributeName, Map.of());
+    }
+
+    public Map<String, Object> getUserAttributeVerificationCode(String accessToken, String attributeName,
+                                                                Map<String, String> clientMetadata) {
         VerifiedAccessToken token;
         try {
             token = verifyAccessToken(accessToken);
@@ -4055,12 +4069,13 @@ public class CognitoService implements ResourceProvider {
         String poolId = token.poolId();
 
         synchronized (userLock(poolId, username)) {
-            return getUserAttributeVerificationCodeUnderUserLock(poolId, username, token.clientId(), attributeName);
+            return getUserAttributeVerificationCodeUnderUserLock(poolId, username, token.clientId(), attributeName,
+                    clientMetadata);
         }
     }
 
     private Map<String, Object> getUserAttributeVerificationCodeUnderUserLock(
-            String poolId, String username, String clientId, String attributeName) {
+            String poolId, String username, String clientId, String attributeName, Map<String, String> clientMetadata) {
         if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
             throw new AwsException("InvalidParameterException",
                     "Invalid attribute name. Only phone_number and email can be verified.", 400);
@@ -4086,7 +4101,7 @@ public class CognitoService implements ResourceProvider {
             String code = verificationCodeService.issue(poolId, user.getUsername(),
                     purpose, Duration.ofHours(24));
             dispatchAttributeVerificationCode(pool, clientId, user, attributeName, destination, purpose, code,
-                    "CustomEmailSender_VerifyUserAttribute");
+                    "CustomEmailSender_VerifyUserAttribute", clientMetadata);
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
         }
@@ -4156,6 +4171,11 @@ public class CognitoService implements ResourceProvider {
     }
 
     public List<Map<String, Object>> updateUserAttributes(String accessToken, Map<String, String> attributes) {
+        return updateUserAttributes(accessToken, attributes, Map.of());
+    }
+
+    public List<Map<String, Object>> updateUserAttributes(String accessToken, Map<String, String> attributes,
+                                                          Map<String, String> clientMetadata) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
         requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
@@ -4172,12 +4192,13 @@ public class CognitoService implements ResourceProvider {
         }
 
         synchronized (userLock(poolId, username)) {
-            return updateUserAttributesUnderUserLock(poolId, username, token.clientId(), attributes);
+            return updateUserAttributesUnderUserLock(poolId, username, token.clientId(), attributes, clientMetadata);
         }
     }
 
     private List<Map<String, Object>> updateUserAttributesUnderUserLock(
-            String poolId, String username, String clientId, Map<String, String> attributes) {
+            String poolId, String username, String clientId, Map<String, String> attributes,
+            Map<String, String> clientMetadata) {
         UserPool pool = describeUserPool(poolId);
         CognitoUser currentUser = adminGetUser(poolId, username);
         validateEmailAttribute(attributes, true);
@@ -4221,7 +4242,7 @@ public class CognitoService implements ResourceProvider {
                 String verificationCode = verificationCodeService.issue(
                         poolId, currentUser.getUsername(), purpose, Duration.ofHours(24));
                 dispatchAttributeVerificationCode(pool, clientId, currentUser, attributeName, value,
-                        purpose, verificationCode, "CustomEmailSender_UpdateUserAttribute");
+                        purpose, verificationCode, "CustomEmailSender_UpdateUserAttribute", clientMetadata);
 
                 if (requiresVerificationBeforeUpdate(pool, attributeName)) {
                     updatedUser.getPendingAttributes().put(attributeName, value);
@@ -5955,11 +5976,12 @@ public class CognitoService implements ResourceProvider {
     private void dispatchAttributeVerificationCode(UserPool pool, String clientId, CognitoUser user,
                                                     String attributeName, String destination,
                                                     VerificationCode.Purpose purpose, String code,
-                                                    String customEmailSenderSource) {
+                                                    String customEmailSenderSource,
+                                                    Map<String, String> clientMetadata) {
         CognitoUser deliveryUser = MAPPER.convertValue(user, CognitoUser.class);
         deliveryUser.getAttributes().put(attributeName, destination);
         if (!sendThroughCustomEmailSender(pool, clientId, deliveryUser, deliveryMedium(attributeName),
-                customEmailSenderSource, purpose, code)) {
+                customEmailSenderSource, purpose, code, clientMetadata)) {
             messageDispatcher.dispatch(pool, deliveryUser, purpose, code,
                     List.of(deliveryMedium(attributeName)));
         }
@@ -5975,7 +5997,8 @@ public class CognitoService implements ResourceProvider {
      */
     private boolean sendThroughCustomEmailSender(UserPool pool, String clientId, CognitoUser user,
                                                  String deliveryMedium, String triggerSource,
-                                                 VerificationCode.Purpose purpose, String code) {
+                                                 VerificationCode.Purpose purpose, String code,
+                                                 Map<String, String> clientMetadata) {
         if (!"EMAIL".equals(deliveryMedium) || !authFlowHandler.hasCustomEmailSender(pool)) {
             return false;
         }
@@ -5996,7 +6019,7 @@ public class CognitoService implements ResourceProvider {
                             : "Unable to encrypt CustomEmailSender/CustomSMSSender code using the configured KMS Key");
         }
         try {
-            authFlowHandler.fireCustomEmailSender(pool, clientId, user, triggerSource, encryptedCode);
+            authFlowHandler.fireCustomEmailSender(pool, clientId, user, triggerSource, encryptedCode, clientMetadata);
         } catch (AwsException e) {
             // Measured: a function that is gone, or that Cognito may not invoke, answers this.
             LOG.warnv("Cannot invoke the CustomEmailSender of pool {0}: {1}", pool.getId(), e.getMessage());
@@ -6151,7 +6174,7 @@ public class CognitoService implements ResourceProvider {
         try {
             code = verificationCodeService.issue(pool.getId(), user.getUsername(), purpose, Duration.ofMinutes(5));
             if (!sendThroughCustomEmailSender(pool, client.getClientId(), user, deliveryMedium,
-                    "CustomEmailSender_Authentication", purpose, code)) {
+                    "CustomEmailSender_Authentication", purpose, code, null)) {
                 messageDispatcher.dispatch(pool, user, purpose, code, List.of(deliveryMedium), customMessageResponse);
             }
         } catch (VerificationCodeException e) {

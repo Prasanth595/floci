@@ -545,8 +545,9 @@ as in the [AWS example](https://docs.aws.amazon.com/cognito/latest/developerguid
 | `CustomEmailSender_VerifyUserAttribute` | `GetUserAttributeVerificationCode` for `email` |
 | `CustomEmailSender_Authentication` | the `EMAIL_OTP` sign-in code of `USER_AUTH` and managed login |
 
-`userAttributes` includes `cognito:user_status`, and `clientMetadata` is `null` for every source,
-the `ClientMetadata` of an `InitiateAuth` included, as in the events Cognito sends.
+`userAttributes` includes `cognito:user_status`, and `clientMetadata` is the request's
+`ClientMetadata`, or `null` when it carries none. A sign-in code's event carries none even when the
+`InitiateAuth` does, as in the events Cognito sends.
 `CreateUserPool` and `UpdateUserPool` refuse a custom sender trigger without a `KMSKeyID`, and
 `CreateUserPool` a key that does not exist. A key that cannot encrypt fails the request, a sign-in
 included, with `CodeDeliveryFailureException` ("Caller needs to enable the configured KMS Key" for a
