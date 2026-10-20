@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.rds.container;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.exception.NotFoundException;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
@@ -18,15 +19,18 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -34,6 +38,9 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -108,6 +115,103 @@ class RdsArchiveRetryTest {
         order.verify(uploads.commands.get(1)).exec();
         order.verify(lifecycle).startCreated(eq(CONTAINER), any());
         verify(docker, never()).execCreateCmd(anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 73, 8192})
+    void postgresRestoreRetriesBothEntriesBeforeRunningSql(int consumedBytes) throws Exception {
+        DockerArchiveUploadFixture uploads = failingUploads(consumedBytes, 1);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, 0, "", "");
+        String dump = "-- snapshot é\n".repeat(2048);
+
+        manager.restorePostgresSnapshot(CONTAINER, "admin", dump);
+
+        assertEquals(2, uploads.commands.size());
+        assertEquals(1, uploads.completed.size());
+        assertNotSame(uploads.streams.get(0), uploads.streams.get(1));
+        verify(uploads.commands.get(1)).withRemotePath("/tmp");
+        try (TarArchiveInputStream tar = new TarArchiveInputStream(new ByteArrayInputStream(uploads.completed.getFirst()))) {
+            assertTarEntry(tar, "dump.sql", dump);
+            assertTarEntry(tar, "restore.sh", RdsContainerManager.postgresRestoreScript());
+            assertNull(tar.getNextEntry());
+        }
+        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "admin")), commands);
+        InOrder order = inOrder(uploads.commands.get(1), docker);
+        order.verify(uploads.commands.get(1)).exec();
+        order.verify(docker).execCreateCmd(CONTAINER);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"MYSQL,false", "MARIADB,false", "MYSQL,true", "MARIADB,true"})
+    void failedGrantUploadCleansUpAndReleasesOwnership(DatabaseEngine engine, boolean permanent) {
+        DockerArchiveUploadFixture uploads = failingUploads(73, Integer.MAX_VALUE);
+        if (permanent) {
+            uploads.failure = new NotFoundException("container missing");
+        }
+
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> manager.start("db", "volume", engine, "test-image", "admin", "password", "db"));
+
+        assertSame(uploads.failure, failure.getCause());
+        assertEquals(permanent ? 1 : 6, uploads.commands.size());
+        verify(lifecycle, never()).startCreated(anyString(), any());
+        verify(lifecycle).stopAndRemoveStrict(CONTAINER, null);
+        verify(docker, never()).execCreateCmd(anyString());
+
+        uploads.failures = 0;
+        assertEquals(CONTAINER,
+                manager.start("db", "volume", engine, "test-image", "admin", "password", "db").getContainerId());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedRestoreUploadNeverRunsSql(boolean permanent) {
+        DockerArchiveUploadFixture uploads = failingUploads(73, Integer.MAX_VALUE);
+        if (permanent) {
+            uploads.failure = new NotFoundException("container missing");
+        }
+
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> manager.restorePostgresSnapshot(CONTAINER, "admin", "SELECT 1;"));
+
+        assertSame(uploads.failure, failure.getCause());
+        assertEquals(permanent ? 1 : 6, uploads.commands.size());
+        verify(docker, never()).execCreateCmd(anyString());
+    }
+
+    @Test
+    void sqlFailureDoesNotRetryUploadOrSql() {
+        DockerArchiveUploadFixture uploads = failingUploads(0, 0);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, 1, "", "invalid dump");
+
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> manager.restorePostgresSnapshot(CONTAINER, "admin", "SELECT 1;"));
+
+        assertTrue(failure.getMessage().contains("psql restore failed with exit code 1: invalid dump"));
+        assertEquals(1, uploads.commands.size());
+        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "admin")), commands);
+    }
+
+    @Test
+    void sqlTransportFailureDoesNotRetryUploadOrSql() {
+        DockerArchiveUploadFixture uploads = failingUploads(0, 0);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, 0, "", "");
+        RuntimeException transportFailure = new RuntimeException(new IOException("Connection reset"));
+        when(docker.execStartCmd(anyString())).thenThrow(transportFailure);
+
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> manager.restorePostgresSnapshot(CONTAINER, "admin", "SELECT 1;"));
+
+        assertSame(transportFailure, failure);
+        assertEquals(1, uploads.commands.size());
+        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "admin")), commands);
+    }
+
+    private static void assertTarEntry(TarArchiveInputStream tar, String name, String content) throws IOException {
+        TarArchiveEntry entry = tar.getNextEntry();
+        assertEquals(name, entry.getName());
+        assertEquals(0755, entry.getMode());
+        assertArrayEquals(content.getBytes(StandardCharsets.UTF_8), tar.readAllBytes());
     }
 
     private DockerArchiveUploadFixture failingUploads(int consumedBytes, int failures) {

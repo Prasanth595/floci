@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
@@ -960,21 +961,18 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
         try (Lease _ = holdContainer(containerId)) {
             String restoreScript = postgresRestoreScript();
 
-            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
-            try (org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar =
-                         new org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bos)) {
-                tar.setLongFileMode(org.apache.commons.compress.archivers.tar.TarArchiveOutputStream.LONGFILE_GNU);
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
+                tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
 
                 addTarEntry(tar, "dump.sql", sqlDump);
                 addTarEntry(tar, "restore.sh", restoreScript);
             }
 
-            try (java.io.InputStream tarStream = new java.io.ByteArrayInputStream(bos.toByteArray())) {
-                lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId)
-                        .withRemotePath("/tmp")
-                        .withTarInputStream(tarStream)
-                        .exec();
-            }
+            byte[] archive = bos.toByteArray();
+            RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId,
+                    "/tmp", "postgres-restore", out -> out.write(archive),
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
 
             String[] cmd = { "sh", "/tmp/restore.sh", effectiveUser };
 
