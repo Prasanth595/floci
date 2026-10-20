@@ -2336,7 +2336,7 @@ class CognitoLambdaTriggersTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void customMessageFiresWithResendCodeTriggerSourceOnResendConfirmationCode() throws Exception {
+    void customMessageFiresWithResendCodeTriggerSourceAndClientMetadataOnResendConfirmationCode() throws Exception {
         VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
         when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
                 .thenReturn("111222");
@@ -2355,15 +2355,16 @@ class CognitoLambdaTriggersTest {
                 payloadCaptor.capture(), eq(InvocationType.RequestResponse)))
                 .thenReturn(ok(Map.of()));
 
-        svc.resendConfirmationCode(client.getClientId(), "spike");
+        svc.resendConfirmationCode(client.getClientId(), "spike", Map.of("source", "resend"));
 
         Map<String, Object> event = MAPPER.readValue(payloadCaptor.getValue(), new TypeReference<>() {});
         assertEquals("CustomMessage_ResendCode", event.get("triggerSource"));
+        assertEquals(Map.of("source", "resend"), ((Map<String, Object>) event.get("request")).get("clientMetadata"));
     }
 
     @Test
     @SuppressWarnings("unchecked")
-    void customMessageFiresWithForgotPasswordTriggerSourceOnForgotPassword() throws Exception {
+    void customMessageFiresWithForgotPasswordTriggerSourceAndClientMetadataOnForgotPassword() throws Exception {
         VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
         when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.PASSWORD_RESET), any()))
                 .thenReturn("333444");
@@ -2383,10 +2384,70 @@ class CognitoLambdaTriggersTest {
                 payloadCaptor.capture(), eq(InvocationType.RequestResponse)))
                 .thenReturn(ok(Map.of()));
 
-        svc.forgotPassword(client.getClientId(), "spike");
+        svc.forgotPassword(client.getClientId(), "spike", Map.of("source", "forgot"));
 
         Map<String, Object> event = MAPPER.readValue(payloadCaptor.getValue(), new TypeReference<>() {});
         assertEquals("CustomMessage_ForgotPassword", event.get("triggerSource"));
+        assertEquals(Map.of("source", "forgot"), ((Map<String, Object>) event.get("request")).get("clientMetadata"));
+    }
+
+    /** Measured (eu-west-1, 2026-10-20): a request without ClientMetadata gives the event a null one, not {}. */
+    @Test
+    void customMessageWithoutClientMetadataCarriesANullOne() throws Exception {
+        VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
+                .thenReturn("246962");
+        CognitoService svc = createServiceWithMessaging(mock(SesService.class), mock(SnsService.class),
+                verificationCodeService);
+        UserPool pool = svc.createUserPool(Map.of(
+                "PoolName", "trigger-pool",
+                "AutoVerifiedAttributes", List.of("email"),
+                "LambdaConfig", Map.of("CustomMessage", "arn:aws:lambda:::custom-message")), "us-east-1");
+        UserPoolClient client = svc.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::custom-message"),
+                payloadCaptor.capture(), eq(InvocationType.RequestResponse)))
+                .thenReturn(ok(Map.of()));
+
+        svc.signUp(client.getClientId(), "spike", "Spike@Test1", Map.of("email", "spike@example.com"), Map.of(), Map.of());
+
+        JsonNode request = MAPPER.readTree(payloadCaptor.getValue()).path("request");
+        assertTrue(request.has("clientMetadata"));
+        assertTrue(request.path("clientMetadata").isNull());
+    }
+
+    /** Measured (eu-west-1, 2026-10-20): a sign-in code's event carries no ClientMetadata, though InitiateAuth sends one. */
+    @Test
+    void customMessageForASignInCodeCarriesANullClientMetadata() throws Exception {
+        VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), any()))
+                .thenReturn("555666");
+        CognitoService svc = createServiceWithMessaging(mock(SesService.class), mock(SnsService.class),
+                verificationCodeService);
+        Map<String, Object> poolRequest = new HashMap<>();
+        poolRequest.put("PoolName", "trigger-pool");
+        poolRequest.put("Policies", Map.of("SignInPolicy",
+                Map.of("AllowedFirstAuthFactors", List.of("PASSWORD", "EMAIL_OTP"))));
+        poolRequest.put("LambdaConfig", Map.of("CustomMessage", "arn:aws:lambda:::custom-message"));
+        UserPool pool = svc.createUserPool(poolRequest, "us-east-1");
+        UserPoolClient client = svc.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of(),
+                null, List.of(), null, List.of("ALLOW_USER_AUTH"), null, null, List.of(), null, List.of(), null,
+                null, null, List.of(), null, null);
+        svc.adminCreateUser(pool.getId(), "spike", Map.of("email", "spike@example.com", "email_verified", "true"), null);
+        svc.adminSetUserPassword(pool.getId(), "spike", "Spike@Test1", true);
+
+        ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::custom-message"),
+                payloadCaptor.capture(), eq(InvocationType.RequestResponse)))
+                .thenReturn(ok(Map.of()));
+
+        svc.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "spike", "PREFERRED_CHALLENGE", "EMAIL_OTP"), Map.of("app", "web"));
+
+        JsonNode event = MAPPER.readTree(payloadCaptor.getValue());
+        assertEquals("CustomMessage_Authentication", event.path("triggerSource").asText());
+        assertTrue(event.path("request").path("clientMetadata").isNull());
     }
 
     @Test
