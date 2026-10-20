@@ -121,6 +121,7 @@ class Ec2ImageCreationProvenanceIntegrationTest {
 
         assertProvenance(describe(EAST, captured), CATALOG, EAST, instance);
         assertTrue(filteredImageIds(EAST, "source-image-id", "ami-amazonlinux2").contains(captured));
+        assertTrue(filteredImageIds(EAST, "source-image-id", "ami-amazonlinux?").contains(captured));
         assertTrue(filteredImageIds(EAST, "source-image-id", CATALOG).contains(captured));
         assertFalse(filteredImageIds(EAST, "source-image-id", "ami-ubuntu2204").contains(captured));
     }
@@ -149,8 +150,9 @@ class Ec2ImageCreationProvenanceIntegrationTest {
 
         assertEquals(List.of(captured), filteredImageIds(EAST, "source-instance-id", instance));
         assertEquals(List.of(copied), filteredImageIds(WEST, "source-image-id", captured));
-        assertTrue(filteredImageIds(WEST, "source-image-region", EAST).contains(copied));
-        assertFalse(filteredImageIds(WEST, "source-image-region", EAST).contains(CATALOG));
+        List<String> fromEast = filteredImageIds(WEST, "source-image-region", EAST);
+        assertTrue(fromEast.contains(copied));
+        assertFalse(fromEast.contains(CATALOG));
         assertFalse(filteredImageIds(WEST, "source-image-region", WEST).contains(copied));
         assertEquals(List.of(), filteredImageIds(EAST, "source-image-id", "ami-0000000000000none"));
         assertEquals(List.of(captured), filteredImageIds(EAST, "source-instance-id",

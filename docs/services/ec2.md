@@ -286,7 +286,7 @@ private gateway lifecycles are not modelled.
 | CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
 | RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
 | CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns. |
-| DeregisterImage | Deregisters an AMI. Its snapshots are kept unless `DeleteAssociatedSnapshots=true`. |
+| DeregisterImage | Deregisters an AMI. Its snapshots are kept unless `DeleteAssociatedSnapshots=true`, and a snapshot another AMI still uses is kept either way. |
 
 Every resource EC2 creates is owned by the account the request resolves to, the same account
 [STS](sts.md) reports for those credentials, and that account is what `ownerId` and the resource ARN
