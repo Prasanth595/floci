@@ -219,6 +219,34 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
     }
 
     /**
+     * An update that keeps the Application Load Balancer and names one subnet moves it with SetSubnets,
+     * so the update fails with the ValidationError SetSubnets gives an Application Load Balancer on one
+     * subnet, and the balancer stays on both of its subnets.
+     */
+    @Test
+    void anUpdateThatMovesTheApplicationLoadBalancerOntoOneSubnetRollsBack() {
+        String stack = "alb-one-subnet-update-" + Long.toString(System.nanoTime(), 36);
+        try {
+            Map<String, String> created = createStack(stack,
+                    template(CIDR_B, false, List.of("SubnetA", "SubnetB"), ""));
+
+            Map<String, String> rolledBack = updateStack(stack,
+                    template(CIDR_B, false, List.of("SubnetA"), ""), "UPDATE_ROLLBACK_COMPLETE");
+
+            String events = request(CFN_AUTH, "DescribeStackEvents", "StackName", stack).statusCode(200)
+                    .extract().asString();
+            List<String> reasons = XmlParser.extractAll(events, "ResourceStatusReason");
+            assertTrue(reasons.stream().anyMatch(
+                    r -> r.contains("At least two subnets in two different Availability Zones must be specified")),
+                    String.join(" | ", reasons));
+            assertEquals(Set.of(created.get("SubnetA"), created.get("SubnetB")),
+                    Set.copyOf(loadBalancerSubnets(rolledBack.get("Alb"))));
+        } finally {
+            deleteStack(stack);
+        }
+    }
+
+    /**
      * The first rollback's move back fails, which leaves the load balancer on the subnet the update
      * added, so that subnet cannot be deleted either and the stack ends UPDATE_ROLLBACK_FAILED with
      * both owed. ContinueUpdateRollback walks them again in dependency order: the load balancer moves

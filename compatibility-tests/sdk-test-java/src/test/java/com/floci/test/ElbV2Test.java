@@ -260,6 +260,30 @@ class ElbV2Test {
                 .isInstanceOf(LoadBalancerNotFoundException.class);
     }
 
+    @Test
+    @Order(9)
+    @DisplayName("SetSubnets - an Application Load Balancer moved onto one subnet is a ValidationError")
+    void setApplicationLoadBalancerOntoOneSubnet() {
+        List<String> subnets = TestFixtures.defaultVpcSubnets();
+        String arn = elb.createLoadBalancer(r -> r.name(TestFixtures.uniqueName("sdk-set-one"))
+                .type(LoadBalancerTypeEnum.APPLICATION).subnets(subnets))
+                .loadBalancers().get(0).loadBalancerArn();
+        try {
+            assertThatThrownBy(() -> elb.setSubnets(r -> r.loadBalancerArn(arn).subnets(subnets.get(0))))
+                    .isInstanceOfSatisfying(ElasticLoadBalancingV2Exception.class, e -> {
+                        assertThat(e.statusCode()).isEqualTo(400);
+                        assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
+                        assertThat(e.awsErrorDetails().errorMessage())
+                                .isEqualTo("At least two subnets in two different Availability Zones must be specified");
+                    });
+            assertThat(elb.describeLoadBalancers(r -> r.loadBalancerArns(arn)).loadBalancers().get(0).availabilityZones())
+                    .extracting(zone -> zone.subnetId())
+                    .containsExactlyInAnyOrderElementsOf(subnets);
+        } finally {
+            elb.deleteLoadBalancer(r -> r.loadBalancerArn(arn));
+        }
+    }
+
     // ─── Target Groups ───────────────────────────────────────────────────────
 
     @Test

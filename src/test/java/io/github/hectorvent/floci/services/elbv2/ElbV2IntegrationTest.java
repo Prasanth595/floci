@@ -1363,16 +1363,144 @@ class ElbV2IntegrationTest {
                 .extract()
                 .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
 
+        // Two subnets, so the Application Load Balancer's subnet count passes and the lookup is reached.
         given()
                 .formParam("Action", "SetSubnets")
                 .formParam("LoadBalancerArn", setSubnetsLbArn)
-                .formParam("Subnets.member.1", "subnet-does-not-exist")
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
+                .formParam("Subnets.member.2", "subnet-does-not-exist")
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
             .then()
                 .statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("SubnetNotFound"));
+    }
+
+    /**
+     * SetSubnets counts the subnets the way CreateLoadBalancer does, so one subnet for an Application
+     * Load Balancer, in Subnets or in SubnetMappings, is the ValidationError CreateLoadBalancer gives,
+     * and the balancer stays on its subnets and in its VPC. The count comes before the subnet is
+     * looked up, so one that does not exist gets it too.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', nullValues = "NONE", value = {
+        "set-one-subnet|Subnets.member.1|a",
+        "set-one-mapping|SubnetMappings.member.1.SubnetId|a",
+        "set-one-missing-subnet|Subnets.member.1|NONE"
+    })
+    @Order(68)
+    void setSubnetsOntoOneSubnetIsAValidationErrorForAnApplicationLoadBalancer(String name, String parameter,
+                                                                                String zone) {
+        String subnetA = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String subnetB = Ec2Service.defaultSubnetId("us-east-1", "b");
+        String subnet = zone == null ? "subnet-does-not-exist" : Ec2Service.defaultSubnetId("us-east-1", zone);
+        String arn = given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", name)
+                .formParam("Type", "application")
+                .formParam("Subnets.member.1", subnetA)
+                .formParam("Subnets.member.2", subnetB)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+
+        given()
+                .formParam("Action", "SetSubnets")
+                .formParam("LoadBalancerArn", arn)
+                .formParam(parameter, subnet)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message",
+                        equalTo("At least two subnets in two different Availability Zones must be specified"));
+
+        given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("LoadBalancerArns.member.1", arn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
+                        contains(subnetA, subnetB))
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.VpcId",
+                        equalTo(Ec2Service.defaultVpcId("us-east-1")));
+
+        given()
+                .formParam("Action", "DeleteLoadBalancer")
+                .formParam("LoadBalancerArn", arn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+    }
+
+    /**
+     * A Network or Gateway Load Balancer can be in a single Availability Zone, so SetSubnets onto one
+     * subnet is taken: the Network Load Balancer leaves one of its two subnets, and the Gateway Load
+     * Balancer, which AWS lets add subnets but not drop them, is set onto the one it is on.
+     */
+    @ParameterizedTest
+    @CsvSource({"network,true", "gateway,false"})
+    @Order(69)
+    void setSubnetsOntoOneSubnetIsAllowedForNetworkAndGatewayLoadBalancers(String type, boolean onTwoSubnets) {
+        String subnetA = Ec2Service.defaultSubnetId("us-east-1", "a");
+        RequestSpecification create = given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "set-one-subnet-" + type)
+                .formParam("Type", type)
+                .formParam("Subnets.member.1", subnetA)
+                .header("Authorization", AUTH);
+        if (onTwoSubnets) {
+            create.formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"));
+        }
+        String arn = create
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+
+        given()
+                .formParam("Action", "SetSubnets")
+                .formParam("LoadBalancerArn", arn)
+                .formParam("Subnets.member.1", subnetA)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+        given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("LoadBalancerArns.member.1", arn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
+                        equalTo(subnetA));
+
+        given()
+                .formParam("Action", "DeleteLoadBalancer")
+                .formParam("LoadBalancerArn", arn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
     }
 
     /**
