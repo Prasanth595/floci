@@ -229,7 +229,7 @@ class ElbV2Test {
     }
 
     @Test
-    @Order(6)
+    @Order(8)
     @DisplayName("SetSubnets - neither Subnets nor SubnetMappings is a ValidationError")
     void setSubnetsWithoutSubnets() {
         List<String> subnets = TestFixtures.defaultVpcSubnets();
