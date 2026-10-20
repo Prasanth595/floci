@@ -7273,9 +7273,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public List<KeyPair> describeKeyPairs(String region, List<String> keyNames, List<String> keyPairIds) {
-        return describeKeyPairs(region, keyNames, keyPairIds, Map.of());
+        return describeKeyPairs(region, keyNames, keyPairIds, List.of());
     }
 
+    /** A convenience for filters of distinct names; a request's Filter.N goes through the ordered overload. */
     public List<KeyPair> describeKeyPairs(String region, List<String> keyNames, List<String> keyPairIds,
                                           Map<String, List<String>> filters) {
         return describeKeyPairs(region, keyNames, keyPairIds, List.copyOf(filters.entrySet()));

@@ -325,8 +325,8 @@ blank one is `MissingParameter`, and they answer any other with `InvalidParamete
 
 `DescribeKeyPairs` returns each key pair's `keyType` and `createTime`. It filters by `key-pair-id`,
 `key-name`, `fingerprint`, `tag-key` and `tag:<key>`, as AWS documents, and also by `key-type`,
-which AWS does not document; `*` and `?` are wildcards, filters are ANDed, a repeated name
-included, and the values of one filter ORed, and any other filter name is `InvalidParameterValue`.
+which AWS does not document; `*` and `?` are wildcards. Filters are ANDed, a repeated name
+included, and the values of one filter are ORed. Any other filter name is `InvalidParameterValue`.
 It omits the public key unless `IncludePublicKey=true`, read as `true` or `false` in any case and
 as `false` when empty or blank; any other value is `InvalidParameterValue`. When requested, it
 returns the OpenSSH public key with the key-pair name as its comment, whatever comment the key was
