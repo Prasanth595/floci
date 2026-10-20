@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.testutil.FreePorts;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -17,10 +18,13 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -305,6 +309,47 @@ class RdsProxyManagerTest {
     }
 
     @Test
+    void endpointResolutionWarningIsLoggedOnceUntilResolutionRecovers() throws Exception {
+        RdsContainerManager containerManager = mock(RdsContainerManager.class);
+        String runtimeId = "arn:aws:rds:us-east-1:123456789012:db:db-a";
+        IllegalStateException resolutionFailure = new IllegalStateException("Docker unavailable");
+        when(containerManager.resolveBackendEndpoint(runtimeId, DatabaseEngine.SQLSERVER))
+                .thenThrow(resolutionFailure)
+                .thenThrow(resolutionFailure)
+                .thenReturn(new EndpointInfo("127.0.0.1", 1433))
+                .thenThrow(resolutionFailure);
+        RdsProxyManager manager = new RdsProxyManager(
+                mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class),
+                testConfig(), RdsBackendGate.OPEN, containerManager);
+        try {
+            manager.startProxy("proxy", runtimeId, DatabaseEngine.SQLSERVER, false,
+                    FreePorts.anyInterfacePort(), "stale-address", 1, "localhost",
+                    "sa", "secret", null, (user, password) -> true, null);
+            RdsAuthProxy.BackendEndpointResolver resolver = endpointResolver(
+                    registry(manager).get("proxy"));
+
+            List<LogRecord> records = LogCapture.capture(RdsProxyManager.class, () -> {
+                assertThrows(IOException.class, resolver::resolve);
+                assertThrows(IOException.class, resolver::resolve);
+                assertDoesNotThrow(resolver::resolve);
+                assertThrows(IOException.class, resolver::resolve);
+            });
+
+            List<LogRecord> warnings = records.stream()
+                    .filter(record -> record.getLevel().intValue() >= Level.WARNING.intValue())
+                    .toList();
+            assertEquals(2, warnings.size());
+            assertTrue(warnings.stream().allMatch(record ->
+                    record.getMessage().contains("Could not resolve backend endpoint")));
+            assertTrue(warnings.stream().allMatch(record ->
+                    runtimeId.equals(record.getParameters()[0])));
+            assertSame(resolutionFailure, warnings.getFirst().getThrown());
+        } finally {
+            manager.stopAll();
+        }
+    }
+
+    @Test
     void dynamicProxyResolvesTheBackendForEveryConnection() throws Exception {
         RdsContainerManager containerManager = mock(RdsContainerManager.class);
         RdsBackendGate backendGate = mock(RdsBackendGate.class);
@@ -373,6 +418,13 @@ class RdsProxyManagerTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.services()).thenReturn(servicesConfig);
         return config;
+    }
+
+    private static RdsAuthProxy.BackendEndpointResolver endpointResolver(RdsAuthProxy proxy)
+            throws Exception {
+        Field field = RdsAuthProxy.class.getDeclaredField("backendEndpointResolver");
+        field.setAccessible(true);
+        return (RdsAuthProxy.BackendEndpointResolver) field.get(proxy);
     }
 
     private static String masterPassword(RdsAuthProxy proxy) throws Exception {

@@ -11,6 +11,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Registry of all active RDS auth proxies. One proxy per DB instance or cluster.
@@ -95,11 +96,17 @@ public class RdsProxyManager {
         if (containerManager == null) {
             throw new IllegalStateException("RDS container manager is required for dynamic backend resolution");
         }
+        AtomicBoolean endpointFailureLogged = new AtomicBoolean();
         RdsAuthProxy.BackendEndpointResolver endpointResolver = () -> {
             try {
                 EndpointInfo endpoint = containerManager.resolveBackendEndpoint(backendRuntimeId, engine);
+                endpointFailureLogged.set(false);
                 return new RdsAuthProxy.BackendEndpoint(endpoint.host(), endpoint.port());
             } catch (RuntimeException e) {
+                if (endpointFailureLogged.compareAndSet(false, true)) {
+                    LOG.warnv(e, "Could not resolve backend endpoint for RDS runtime {0}",
+                            backendRuntimeId);
+                }
                 throw new IOException(
                         "Could not resolve backend endpoint for RDS runtime " + backendRuntimeId, e);
             }
