@@ -1417,7 +1417,7 @@ class ElbV2IntegrationTest {
         "gateway|false|At least one subnet must be specified",
         "gateway|true|At least one subnet must be specified"
     })
-    @Order(78)
+    @Order(80)
     void setSubnetsWithNeitherSubnetsNorSubnetMappingsIsRefused(String type, boolean emptyLists, String message) {
         String subnetA = Ec2Service.defaultSubnetId("us-east-1", "a");
         String subnetB = Ec2Service.defaultSubnetId("us-east-1", "b");
