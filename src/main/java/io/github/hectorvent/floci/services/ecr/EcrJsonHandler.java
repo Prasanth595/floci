@@ -49,7 +49,9 @@ public class EcrJsonHandler {
     private static final Set<String> MODEL_CHECKED = Set.of(
             "PutRegistryPolicy", "GetRegistryPolicy", "DeleteRegistryPolicy",
             "PutReplicationConfiguration", "DescribeRegistry",
-            "PutRegistryScanningConfiguration", "GetRegistryScanningConfiguration");
+            "PutRegistryScanningConfiguration", "GetRegistryScanningConfiguration",
+            "CreateRepositoryCreationTemplate", "UpdateRepositoryCreationTemplate",
+            "DescribeRepositoryCreationTemplates", "DeleteRepositoryCreationTemplate");
 
     public Response handle(String action, JsonNode request, String region) {
         if (MODEL_CHECKED.contains(action)) {

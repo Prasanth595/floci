@@ -101,6 +101,10 @@ class EcrRepositoryCreationTemplatesIntegrationTest {
             call("CreateRepositoryCreationTemplate", body, region).statusCode(400)
                     .body("__type", equalTo("InvalidParameterException"));
         }
+        // The handler checks the request against the vendored model before the service sees it.
+        call("CreateRepositoryCreationTemplate", "{\"prefix\":\"prod\"}", region).statusCode(400)
+                .body("message", equalTo("Invalid parameter at 'appliedFor' failed to satisfy constraint: "
+                        + "'Member must not be null'"));
         call("DescribeRepositoryCreationTemplates", "{\"maxResults\":0}", region).statusCode(400)
                 .body("__type", equalTo("InvalidParameterException"));
         call("DescribeRepositoryCreationTemplates", "{}", region).statusCode(200)

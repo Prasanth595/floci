@@ -1500,36 +1500,12 @@ class EcrServiceTest {
         assertEquals("TemplateAlreadyExistsException", duplicate.getErrorCode());
     }
 
+    /** The rules the model can't state; the model's own are in {@code EcrRequestShapesTest}. */
     @Test
-    void creationTemplate_checksEachFieldAgainstTheModel() {
-        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(template("prod"), REGION));
-        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(template("Prod", "REPLICATION"), REGION));
-        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(
-                template("a".repeat(257), "REPLICATION"), REGION));
-        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(template("prod", "PULL"), REGION));
+    void creationTemplate_checksWhatTheModelCannotState() {
         RepositoryCreationTemplate noAppliedFor = template("prod");
         noAppliedFor.setAppliedFor(List.of());
         assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(noAppliedFor, REGION));
-
-        RepositoryCreationTemplate badEncryption = template("prod", "REPLICATION");
-        badEncryption.setEncryptionConfiguration(new RepositoryCreationTemplate.EncryptionConfiguration("RSA", null));
-        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(badEncryption, REGION));
-        RepositoryCreationTemplate badKey = template("prod", "REPLICATION");
-        badKey.setEncryptionConfiguration(new RepositoryCreationTemplate.EncryptionConfiguration("KMS", "alias/mine"));
-        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(badKey, REGION));
-        RepositoryCreationTemplate badMutability = template("prod", "REPLICATION");
-        badMutability.setImageTagMutability("FROZEN");
-        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(badMutability, REGION));
-        RepositoryCreationTemplate badFilter = template("prod", "REPLICATION");
-        badFilter.setImageTagMutabilityExclusionFilters(
-                List.of(new RepositoryCreationTemplate.ExclusionFilter("PREFIX_MATCH", "latest")));
-        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(badFilter, REGION));
-        RepositoryCreationTemplate badTag = template("prod", "REPLICATION");
-        badTag.setResourceTags(List.of(new RepositoryCreationTemplate.ResourceTag("team", null)));
-        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(badTag, REGION));
-        RepositoryCreationTemplate longDescription = template("prod", "REPLICATION");
-        longDescription.setDescription("d".repeat(257));
-        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(longDescription, REGION));
         RepositoryCreationTemplate badPolicy = template("prod", "REPLICATION");
         badPolicy.setRepositoryPolicy("[]");
         assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(badPolicy, REGION));
@@ -1574,6 +1550,24 @@ class EcrServiceTest {
     }
 
     @Test
+    void creationTemplate_filtersGoWhenAnUpdateLeavesAnExclusionMode() {
+        RepositoryCreationTemplate created = template("team/app", "REPLICATION");
+        created.setImageTagMutability("IMMUTABLE_WITH_EXCLUSION");
+        created.setImageTagMutabilityExclusionFilters(
+                List.of(new RepositoryCreationTemplate.ExclusionFilter("WILDCARD", "latest*")));
+        service.createRepositoryCreationTemplate(created, REGION);
+
+        RepositoryCreationTemplate otherMode = template("team/app");
+        otherMode.setImageTagMutability("MUTABLE_WITH_EXCLUSION");
+        assertEquals(1, service.updateRepositoryCreationTemplate(otherMode, REGION)
+                .getImageTagMutabilityExclusionFilters().size(), "an exclusion mode keeps them");
+
+        RepositoryCreationTemplate plain = template("team/app");
+        plain.setImageTagMutability("MUTABLE");
+        assertNull(service.updateRepositoryCreationTemplate(plain, REGION).getImageTagMutabilityExclusionFilters());
+    }
+
+    @Test
     void creationTemplate_describeFiltersAndPagesAndDeleteRemoves() {
         for (String prefix : List.of("c", "a", "b")) {
             service.createRepositoryCreationTemplate(template(prefix, "REPLICATION"), REGION);
@@ -1589,7 +1583,6 @@ class EcrServiceTest {
         // A prefix with no template is left out rather than refused.
         assertEquals(List.of("b"), service.describeRepositoryCreationTemplates(List.of("b", "missing"), null, null, REGION)
                 .items().stream().map(RepositoryCreationTemplate::getPrefix).toList());
-        assertInvalidTemplate(() -> service.describeRepositoryCreationTemplates(List.of("Bad"), null, null, REGION));
         assertInvalidTemplate(() -> service.describeRepositoryCreationTemplates(null, 1001, null, REGION));
 
         assertEquals("b", service.deleteRepositoryCreationTemplate("b", REGION).getPrefix());

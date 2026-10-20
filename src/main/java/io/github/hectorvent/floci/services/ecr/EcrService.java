@@ -78,13 +78,6 @@ public class EcrService implements ResourceProvider {
             "ecr", "ecr-public", "quay", "k8s", "docker-hub",
             "github-container-registry", "azure-container-registry",
             "gitlab-container-registry", "chainguard");
-    private static final Pattern TEMPLATE_KMS_KEY = Pattern.compile(
-            "|arn:" + AwsArnUtils.PARTITION_REGEX + ":kms:[a-z0-9-]+:[0-9]{12}:key/[a-z0-9-]+");
-    private static final Pattern EXCLUSION_FILTER = Pattern.compile("[0-9a-zA-Z._*-]{1,128}");
-    private static final Set<String> APPLIED_FOR = Set.of("REPLICATION", "PULL_THROUGH_CACHE", "CREATE_ON_PUSH");
-    private static final Set<String> ENCRYPTION_TYPES = Set.of("AES256", "KMS", "KMS_DSSE");
-    private static final Set<String> TAG_MUTABILITY = Set.of(
-            "MUTABLE", "IMMUTABLE", "IMMUTABLE_WITH_EXCLUSION", "MUTABLE_WITH_EXCLUSION");
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int MAX_REPO_NAME_LENGTH = 256;
     private static final int MAX_PULL_THROUGH_CACHE_PREFIX_LENGTH = 30;
@@ -345,10 +338,6 @@ public class EcrService implements ResourceProvider {
      */
     public RepositoryCreationTemplate createRepositoryCreationTemplate(RepositoryCreationTemplate requested,
                                                                        String region) {
-        validateTemplatePrefix(requested.getPrefix());
-        if (requested.getAppliedFor() == null) {
-            throw new AwsException("InvalidParameterException", "appliedFor is required", 400);
-        }
         validateTemplateFields(requested);
         String account = regionResolver.getAccountId();
         String key = templateKey(region, account, requested.getPrefix());
@@ -383,7 +372,6 @@ public class EcrService implements ResourceProvider {
         } else {
             templates = new ArrayList<>();
             for (String prefix : new LinkedHashSet<>(prefixes)) {
-                validateTemplatePrefix(prefix);
                 templateStore.get(templateKey(region, account, prefix)).ifPresent(templates::add);
             }
         }
@@ -394,19 +382,22 @@ public class EcrService implements ResourceProvider {
     /** Replaces each field the request sets; an empty string or list clears it. */
     public RepositoryCreationTemplate updateRepositoryCreationTemplate(RepositoryCreationTemplate requested,
                                                                        String region) {
-        validateTemplatePrefix(requested.getPrefix());
         validateTemplateFields(requested);
         String key = templateKey(region, regionResolver.getAccountId(), requested.getPrefix());
         RepositoryCreationTemplate template = templateStore.get(key)
                 .orElseThrow(() -> templateNotFound(requested.getPrefix()));
         applyTemplateFields(template, requested);
+        // Exclusion filters mean nothing outside a *_WITH_EXCLUSION mode. Terraform leaves the
+        // member out when the filters are removed, so they go when the mode no longer takes them.
+        if (!template.getImageTagMutability().endsWith("_WITH_EXCLUSION")) {
+            template.setImageTagMutabilityExclusionFilters(null);
+        }
         template.setUpdatedAt(Instant.now());
         templateStore.put(key, template);
         return template;
     }
 
     public RepositoryCreationTemplate deleteRepositoryCreationTemplate(String prefix, String region) {
-        validateTemplatePrefix(prefix);
         String key = templateKey(region, regionResolver.getAccountId(), prefix);
         RepositoryCreationTemplate template = templateStore.get(key).orElseThrow(() -> templateNotFound(prefix));
         templateStore.delete(key);
@@ -418,74 +409,22 @@ public class EcrService implements ResourceProvider {
         return regionResolver.getAccountId();
     }
 
-    private static void validateTemplatePrefix(String prefix) {
-        // The model's Prefix pattern is the one pull through cache rules use, with 1 to 256 characters.
-        if (prefix == null || prefix.isEmpty() || prefix.length() > 256
-                || !PULL_THROUGH_CACHE_PREFIX.matcher(prefix).matches()) {
-            throw new AwsException("InvalidParameterException",
-                    "prefix must be ROOT or a repository name prefix of 1 to 256 characters", 400);
-        }
-    }
-
-    /** Checks the fields a request sets against the model; null fields are not set. */
+    /**
+     * The template rules the ECR model can't state; {@code EcrRequestShapes} has already checked
+     * the request against the model's types, lengths, patterns and enums.
+     */
     private static void validateTemplateFields(RepositoryCreationTemplate t) {
-        if (t.getDescription() != null && t.getDescription().length() > 256) {
-            throw invalidTemplate("description must be at most 256 characters");
+        if (t.getAppliedFor() != null && t.getAppliedFor().isEmpty()) {
+            throw invalidTemplate("appliedFor must name at least one of REPLICATION, PULL_THROUGH_CACHE "
+                    + "or CREATE_ON_PUSH");
         }
-        if (t.getAppliedFor() != null) {
-            if (t.getAppliedFor().isEmpty()) {
-                throw invalidTemplate("appliedFor must name at least one of " + APPLIED_FOR);
-            }
-            for (String value : t.getAppliedFor()) {
-                if (!APPLIED_FOR.contains(value)) {
-                    throw invalidTemplate("appliedFor must be one of " + APPLIED_FOR + ", not " + value);
-                }
-            }
-        }
-        RepositoryCreationTemplate.EncryptionConfiguration encryption = t.getEncryptionConfiguration();
-        if (encryption != null) {
-            if (encryption.encryptionType() == null || !ENCRYPTION_TYPES.contains(encryption.encryptionType())) {
-                throw invalidTemplate("encryptionType must be one of " + ENCRYPTION_TYPES);
-            }
-            if (encryption.kmsKey() != null && (encryption.kmsKey().length() > 2048
-                    || !TEMPLATE_KMS_KEY.matcher(encryption.kmsKey()).matches())) {
-                throw invalidTemplate("kmsKey must be a KMS key ARN");
-            }
-        }
-        if (t.getImageTagMutability() != null && !TAG_MUTABILITY.contains(t.getImageTagMutability())) {
-            throw invalidTemplate("imageTagMutability must be one of " + TAG_MUTABILITY);
-        }
-        List<RepositoryCreationTemplate.ExclusionFilter> filters = t.getImageTagMutabilityExclusionFilters();
-        if (filters != null) {
-            if (filters.size() > 5) {
-                throw invalidTemplate("imageTagMutabilityExclusionFilters holds at most 5 filters");
-            }
-            for (RepositoryCreationTemplate.ExclusionFilter f : filters) {
-                if (!"WILDCARD".equals(f.filterType()) || f.filter() == null
-                        || !EXCLUSION_FILTER.matcher(f.filter()).matches()) {
-                    throw invalidTemplate("an image tag mutability exclusion filter must be a WILDCARD filter "
-                            + "of 1 to 128 letters, digits, '.', '_', '*' or '-'");
-                }
-            }
-        }
-        if (t.getResourceTags() != null) {
-            for (RepositoryCreationTemplate.ResourceTag tag : t.getResourceTags()) {
-                if (tag.key() == null || tag.value() == null) {
-                    throw invalidTemplate("each resource tag needs a Key and a Value");
-                }
-            }
-        }
-        validateTemplatePolicy(t.getRepositoryPolicy(), "repositoryPolicy", 10240);
-        validateTemplatePolicy(t.getLifecyclePolicy(), "lifecyclePolicy", 30720);
-        validateCustomRoleArn(t.getCustomRoleArn());
+        requireJsonObject(t.getRepositoryPolicy(), "repositoryPolicy");
+        requireJsonObject(t.getLifecyclePolicy(), "lifecyclePolicy");
     }
 
-    private static void validateTemplatePolicy(String text, String field, int maxLength) {
+    private static void requireJsonObject(String text, String field) {
         if (text == null || text.isEmpty()) {
             return;
-        }
-        if (text.length() > maxLength) {
-            throw invalidTemplate(field + " must be at most " + maxLength + " characters");
         }
         try {
             if (!JSON.readTree(text).isObject()) {
