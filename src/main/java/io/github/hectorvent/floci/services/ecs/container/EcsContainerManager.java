@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.SecurityGroupFirewallManager;
 import io.github.hectorvent.floci.services.ec2.SecurityGroupNftCompiler;
@@ -70,7 +71,6 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
@@ -1798,10 +1798,9 @@ public class EcsContainerManager {
             throw new AwsException("ClientException",
                     "unable to write FireLens config: " + e.getMessage(), 500);
         }
-        lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId)
-                .withRemotePath(remotePath)
-                .withTarInputStream(new ByteArrayInputStream(archive.toByteArray()))
-                .exec();
+        byte[] tarBytes = archive.toByteArray();
+        RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId,
+                remotePath, "firelens-config", out -> out.write(tarBytes));
     }
 
     private static void putTarEntry(TarArchiveOutputStream tar, String name, byte[] content) throws IOException {
