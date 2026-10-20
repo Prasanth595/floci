@@ -263,11 +263,14 @@ public class AwsConfigService {
         ConfigRule rule = new ConfigRule(ruleName, ruleArn, ruleId, requested.description(),
                 requested.scope(), requested.source(), requested.inputParameters(),
                 requested.maximumExecutionFrequency(), state, requested.createdBy(), evaluationModes);
-        store.put(ruleName, rule);
-        persistRegion(configRules, region);
+        // Tags first: a later Put finds the rule and skips them, so a rule stored before its tags
+        // and then a failed tag write could never get them back. This way a failed tag write leaves
+        // no rule and the retry creates both.
         if (existing == null && tagList != null && !tagList.isEmpty()) {
             applyTags(ruleArn, tagList);
         }
+        store.put(ruleName, rule);
+        persistRegion(configRules, region);
         return rule;
     }
 

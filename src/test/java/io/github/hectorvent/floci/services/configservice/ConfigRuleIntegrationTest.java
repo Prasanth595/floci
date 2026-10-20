@@ -9,6 +9,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.Collections;
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -472,6 +475,75 @@ class ConfigRuleIntegrationTest {
             .body("Tags[0].Value", equalTo("prod"));
 
         post("DeleteConfigRule", "{\"ConfigRuleName\": \"rule-tags-test\"}").then().statusCode(200);
+    }
+
+    /** PutConfigRule's TagsList (config/2014-11-12): at most 50 tags, Key 1-128, Value 0-256,
+     *  rejected with the operation's modelled InvalidParameterValueException and nothing stored. */
+    @Test
+    @Order(101)
+    void putConfigRuleRejectsInvalidTagsWithoutCreatingTheRule() {
+        String fiftyOne = String.join(",", Collections.nCopies(51, "{\"Key\": \"k\", \"Value\": \"v\"}"));
+        List<String> invalid = List.of(
+            "{\"Value\": \"v\"}",
+            "{\"Key\": \"\", \"Value\": \"v\"}",
+            "{\"Key\": \"" + "k".repeat(129) + "\", \"Value\": \"v\"}",
+            "{\"Key\": \"k\", \"Value\": \"" + "v".repeat(257) + "\"}",
+            "{\"Key\": 7, \"Value\": \"v\"}",
+            fiftyOne);
+        for (String tags : invalid) {
+            post("PutConfigRule", """
+                {
+                    "ConfigRule": {
+                        "ConfigRuleName": "rule-bad-tags",
+                        "Source": {"Owner": "AWS", "SourceIdentifier": "S3_BUCKET_VERSIONING_ENABLED"}
+                    },
+                    "Tags": [%s]
+                }
+                """.formatted(tags))
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"));
+        }
+        post("DescribeConfigRules", "{\"ConfigRuleNames\": [\"rule-bad-tags\"]}")
+            .then().statusCode(400)
+            .body("__type", equalTo("NoSuchConfigRuleException"));
+    }
+
+    /** Value is optional in the model, so a tag without one is accepted with an empty value. */
+    @Test
+    @Order(102)
+    void putConfigRuleAcceptsATagWithoutAValue() {
+        post("PutConfigRule", """
+            {
+                "ConfigRule": {
+                    "ConfigRuleName": "rule-keyonly-tag",
+                    "Source": {"Owner": "AWS", "SourceIdentifier": "S3_BUCKET_VERSIONING_ENABLED"}
+                },
+                "Tags": [{"Key": "owner"}]
+            }
+            """).then().statusCode(200);
+        String arn = post("DescribeConfigRules", "{\"ConfigRuleNames\": [\"rule-keyonly-tag\"]}")
+            .then().statusCode(200).extract().path("ConfigRules[0].ConfigRuleArn");
+        post("ListTagsForResource", "{\"ResourceArn\": \"" + arn + "\"}")
+            .then().statusCode(200)
+            .body("Tags", hasSize(1))
+            .body("Tags[0].Key", equalTo("owner"))
+            .body("Tags[0].Value", equalTo(""));
+        post("DeleteConfigRule", "{\"ConfigRuleName\": \"rule-keyonly-tag\"}").then().statusCode(200);
+    }
+
+    /** PutAggregationAuthorization takes the same TagsList and models the same error. */
+    @Test
+    @Order(103)
+    void putAggregationAuthorizationRejectsAnInvalidTag() {
+        post("PutAggregationAuthorization", """
+            {"AuthorizedAccountId": "444455556666", "AuthorizedAwsRegion": "eu-west-1",
+             "Tags": [{"Key": "", "Value": "v"}]}
+            """)
+            .then().statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+        post("DescribeAggregationAuthorizations", "{}")
+            .then().statusCode(200)
+            .body("AggregationAuthorizations.AuthorizedAccountId", not(hasItem("444455556666")));
     }
 
     private static Response post(String action, String body) {
