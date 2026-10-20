@@ -1,7 +1,5 @@
 # CodePipeline
 
-In `SUPERSEDED` mode, an execution superseded between stages stops without starting another stage or overwriting its terminal status. A worker waiting at a disabled transition exits when superseded; enabling the transition lets the newer execution proceed. Already-running stages are not interrupted by supersession.
-
 Floci implements the AWS CodePipeline JSON 1.1 API and a local pipeline execution engine.
 
 **Protocol:** `POST /` with `Content-Type: application/x-amz-json-1.1` and
@@ -26,6 +24,15 @@ Stages execute in declaration order. Actions with the same `runOrder` execute in
 `PARALLEL` restricted to V2 pipelines.
 A `QUEUED` or `PARALLEL` pipeline holds at most 50 active executions, as on AWS;
 `StartPipelineExecution` beyond that returns `ConcurrentPipelineExecutionsLimitExceededException`.
+
+In `SUPERSEDED` mode, a newer execution supersedes an older execution waiting at the same stage
+transition only when it catches up to that transition, not when it starts. If the newer execution
+fails before reaching that transition, the older execution can continue when the transition is enabled.
+A superseded worker exits without starting another stage or overwriting its terminal status;
+enabling the transition lets the newer execution proceed. Already-running stages are not interrupted.
+Execution age uses start time, with a persisted per-pipeline admission ordinal breaking equal-time
+ties. Legacy executions without an ordinal are conservatively left unordered when their start times
+are equal; neither supersedes the other solely on that tie.
 
 S3 source actions poll for source changes by default, matching AWS when `PollForSourceChanges` is
 omitted or set to `true`. Floci establishes a baseline for the configured object and starts one new

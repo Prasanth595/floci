@@ -277,6 +277,7 @@ public class CodePipelineService {
                         execution.setStatusSummary("Pipeline execution resumed after restart.");
                         execution.setStopRequested(false);
                         execution.setAbandon(false);
+                        execution.setWaitingStage(null);
                         execution.setActionExecutions(new ArrayList<>());
                         execution.setStageExecutionStatuses(new LinkedHashMap<>());
                         putExecution(execution);
@@ -598,7 +599,6 @@ public class CodePipelineService {
             throw new AwsException("ConcurrentPipelineExecutionsLimitExceededException",
                     "The pipeline has reached the limit for concurrent pipeline executions", 400);
         }
-        applyExecutionMode(execution);
         eventPublisher.pipelineStateChange(execution, "STARTED");
         try {
             executor.submit(() -> runExecution(pipeline, execution));
@@ -614,14 +614,15 @@ public class CodePipelineService {
     }
 
     private boolean persistExecutionIfSlotAvailable(CodePipelineExecution execution) {
-        if (!List.of("QUEUED", "PARALLEL").contains(execution.getExecutionMode())) {
-            putExecution(execution);
-            return true;
-        }
         return startLocks.withLock(lockKey(execution), () -> {
-            if (activeExecutionCount(execution) >= MAX_ACTIVE_EXECUTIONS) {
+            if (List.of("QUEUED", "PARALLEL").contains(execution.getExecutionMode())
+                    && activeExecutionCount(execution) >= MAX_ACTIVE_EXECUTIONS) {
                 return false;
             }
+            long lastOrdinal = executions(execution.getAccountId(), execution.getRegion(), execution.getPipelineName())
+                    .stream().map(CodePipelineExecution::getAdmissionOrdinal)
+                    .filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L);
+            execution.setAdmissionOrdinal(Math.incrementExact(lastOrdinal));
             putExecution(execution);
             return true;
         });
@@ -1050,7 +1051,6 @@ public class CodePipelineService {
         if (!persistExecutionIfSlotAvailable(rollback)) {
             throw pipelineBusy();
         }
-        applyExecutionMode(rollback);
         eventPublisher.pipelineStateChange(rollback, "STARTED");
         try {
             executor.submit(() -> runExecution(pipeline, rollback));
@@ -1527,15 +1527,7 @@ public class CodePipelineService {
             try {
                 runStagesFrom(pipeline, execution, 0, includeStagesFor(pipeline, execution));
             } catch (Exception e) {
-                synchronized (execution) {
-                    if (!isTerminal(execution.getStatus())) {
-                        if (execution.getCurrentStage() != null) {
-                            execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Failed");
-                        }
-                        execution.setStatus("Failed");
-                        execution.setStatusSummary(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
-                    }
-                }
+                failExecutionRun(execution, e);
                 LOG.errorf(e, "CodePipeline execution %s failed", execution.getPipelineExecutionId());
             } finally {
                 finishExecutionRun(execution);
@@ -1568,18 +1560,24 @@ public class CodePipelineService {
             }
             runStagesFrom(pipeline, execution, stageIndex + 1, includeStagesFor(pipeline, execution));
         } catch (Exception e) {
-            synchronized (execution) {
-                if (!isTerminal(execution.getStatus())) {
-                    if (execution.getCurrentStage() != null) {
-                        execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Failed");
-                    }
-                    execution.setStatus("Failed");
-                    execution.setStatusSummary(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
-                }
-            }
+            failExecutionRun(execution, e);
             LOG.errorf(e, "CodePipeline retry for execution %s failed", execution.getPipelineExecutionId());
         } finally {
             finishExecutionRun(execution);
+        }
+    }
+
+    private void failExecutionRun(CodePipelineExecution execution, Exception exception) {
+        synchronized (execution) {
+            execution.setWaitingStage(null);
+            if (!isTerminal(execution.getStatus())) {
+                if (execution.getCurrentStage() != null) {
+                    execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Failed");
+                }
+                execution.setStatus("Failed");
+                execution.setStatusSummary(exception.getMessage() == null
+                        ? exception.getClass().getSimpleName() : exception.getMessage());
+            }
         }
     }
 
@@ -1618,6 +1616,9 @@ public class CodePipelineService {
                                   String retryMode, Map<String, String> previousStatuses) {
         String stageName = stage.path("name").asText();
         synchronized (execution) {
+            // Wait clearing and stage entry share the supersession monitor: a newer arrival
+            // either supersedes this waiter first, or sees an active stage and leaves it alone.
+            execution.setWaitingStage(null);
             if (isTerminal(execution.getStatus())) {
                 return false;
             }
@@ -1828,7 +1829,10 @@ public class CodePipelineService {
     private void finishExecutionRun(CodePipelineExecution execution) {
         startLocks.withLock(lockKey(execution), () -> {
             try {
-                execution.setCurrentStage(null);
+                synchronized (execution) {
+                    execution.setWaitingStage(null);
+                    execution.setCurrentStage(null);
+                }
                 execution.setLastUpdateTime(now());
                 putExecution(execution);
                 boolean pipelineDeleted = pipelineStore.getForAccount(execution.getAccountId(),
@@ -2510,16 +2514,21 @@ public class CodePipelineService {
         state.setSummary("Action abandoned.");
     }
 
-    private void applyExecutionMode(CodePipelineExecution execution) {
-        if (!"SUPERSEDED".equals(execution.getExecutionMode())) {
+    private void supersedeOlderWaiters(CodePipelineExecution execution, String stageName) {
+        if (!"SUPERSEDED".equals(execution.getExecutionMode())
+                || !"InProgress".equals(execution.getStatus()) || execution.getStartTime() == null) {
             return;
         }
+        // Do not hold the arriving execution's monitor while acquiring another execution's monitor.
         executions(execution.getAccountId(), execution.getRegion(), execution.getPipelineName()).stream()
-                .filter(e -> !e.getPipelineExecutionId().equals(execution.getPipelineExecutionId()))
+                .filter(e -> isOlderExecution(e, execution))
                 .forEach(e -> {
                     synchronized (e) {
-                        if ("InProgress".equals(e.getStatus()) && e.getCurrentStage() == null) {
+                        if ("SUPERSEDED".equals(e.getExecutionMode())
+                                && "InProgress".equals(e.getStatus()) && e.getCurrentStage() == null
+                                && stageName.equals(e.getWaitingStage())) {
                             e.setStatus("Superseded");
+                            e.setWaitingStage(null);
                             e.setStatusSummary("Superseded by " + execution.getPipelineExecutionId());
                             e.setLastUpdateTime(now());
                             putExecution(e);
@@ -2528,10 +2537,37 @@ public class CodePipelineService {
                 });
     }
 
+    private boolean isOlderExecution(CodePipelineExecution candidate, CodePipelineExecution execution) {
+        if (candidate.getStartTime() == null || execution.getStartTime() == null) {
+            return false;
+        }
+        int timeOrder = Double.compare(candidate.getStartTime(), execution.getStartTime());
+        if (timeOrder != 0) {
+            return timeOrder < 0;
+        }
+        // Legacy equal-time executions have no reliable ordering. Do not guess from UUIDs or
+        // treat equality as older: either could otherwise supersede the other on worker arrival.
+        return candidate.getAdmissionOrdinal() != null && execution.getAdmissionOrdinal() != null
+                && candidate.getAdmissionOrdinal() < execution.getAdmissionOrdinal();
+    }
+
     private void waitForTransition(CodePipelinePipeline pipeline, CodePipelineExecution execution,
                                    String stageName) throws InterruptedException {
-        while (!pipeline.getTransitions().getOrDefault(stageName, enabledTransition()).isEnabled()) {
-            if (isTerminal(execution.getStatus()) || execution.isStopRequested()) {
+        while (true) {
+            boolean enabled = pipeline.getTransitions().getOrDefault(stageName, enabledTransition()).isEnabled();
+            synchronized (execution) {
+                if (isTerminal(execution.getStatus()) || execution.isStopRequested()) {
+                    execution.setWaitingStage(null);
+                    return;
+                }
+                if (!enabled && !stageName.equals(execution.getWaitingStage())) {
+                    execution.setWaitingStage(stageName);
+                    putExecution(execution);
+                }
+            }
+            // Arrival matters even when enabled: an older worker may still be polling its wait.
+            supersedeOlderWaiters(execution, stageName);
+            if (enabled) {
                 return;
             }
             TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);
@@ -2774,7 +2810,8 @@ public class CodePipelineService {
             node = mapper.valueToTree(execution);
         }
         node.remove(List.of("accountId", "region", "startTime", "lastUpdateTime",
-                "sourceRevisions", "sourceRevisionOverrides", "actionExecutions", "currentStage",
+                "sourceRevisions", "sourceRevisionOverrides", "actionExecutions", "currentStage", "waitingStage",
+                "admissionOrdinal",
                 "stopRequested", "abandon", "rollbackTargetPipelineExecutionId", "rollbackStageName",
                 "stageExecutionStatuses", "artifactsReleased", "ruleExecutions", "conditionOverrides"));
         if (execution.getRollbackTargetPipelineExecutionId() != null) {

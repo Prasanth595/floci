@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.codebuild.CodeBuildService;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
 import io.github.hectorvent.floci.services.codedeploy.model.Deployment;
+import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelinePipeline;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -32,12 +33,15 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -486,7 +490,7 @@ class CodePipelineServiceTest {
                     """);
             handle("DisableStageTransition", transition);
             String first = startExecution(service, pipeline);
-            await().atMost(Duration.ofSeconds(3)).until(() -> service.activeRuns.contains(ACCOUNT + ":" + first));
+            awaitWaitingStage(service, pipeline, first, "External");
             String second = startExecution(service, pipeline);
             waitForExecutionStatus(service, pipeline, first, "Superseded");
             await().atMost(Duration.ofSeconds(3)).until(() -> !service.activeRuns.contains(ACCOUNT + ":" + first));
@@ -507,6 +511,193 @@ class CodePipelineServiceTest {
         } finally {
             service.shutdown();
         }
+    }
+
+    @Test
+    void enabledTransitionCatchUpOnlySupersedesOlderWaitersAtThatTransition() throws Exception {
+        CapturingStorageFactory storage = new CapturingStorageFactory();
+        CodePipelineService catchUpService = new CodePipelineService(storage, mapper,
+                mock(CodeBuildService.class), mock(CodeDeployService.class),
+                mock(LambdaService.class), mock(S3Service.class));
+        String pipelineName = "enabled-catch-up";
+        try {
+            createExternalActionPipeline(catchUpService, pipelineName, """
+                    {"name":"Approve","actionTypeId":{
+                    "category":"Approval","owner":"AWS","provider":"Manual","version":"1"}}
+                    """);
+            CodePipelineExecution older = waitingExecution(storage, pipelineName, "older", 1.0, "External");
+            CodePipelineExecution newer = waitingExecution(storage, pipelineName, "newer", 2.0, null);
+            newer.setAdmissionOrdinal(2L);
+            CodePipelineExecution later = waitingExecution(storage, pipelineName, "later", 3.0, "External");
+            later.setAdmissionOrdinal(4L);
+            // Unsequenced legacy ties remain unordered; sequenced ties use admission order.
+            CodePipelineExecution sameTime = waitingExecution(storage, pipelineName, "same-time", 2.0, "External");
+            CodePipelineExecution sameTimeOlder = waitingExecution(
+                    storage, pipelineName, "same-time-older", 2.0, "External");
+            sameTimeOlder.setAdmissionOrdinal(1L);
+            CodePipelineExecution sameTimeNewer = waitingExecution(
+                    storage, pipelineName, "same-time-newer", 2.0, "External");
+            sameTimeNewer.setAdmissionOrdinal(3L);
+            CodePipelineExecution otherStage = waitingExecution(storage, pipelineName, "other-stage", 1.0, "Complete");
+            CodePipelineExecution active = waitingExecution(storage, pipelineName, "active", 1.0, "External");
+            active.setCurrentStage("External");
+            CodePipelineExecution terminal = waitingExecution(storage, pipelineName, "terminal", 1.0, "External");
+            terminal.setStatus("Failed");
+            CodePipelineExecution parallel = waitingExecution(storage, pipelineName, "parallel", 1.0, "External");
+            parallel.setExecutionMode("PARALLEL");
+
+            // Exercise arrival at an enabled transition while the older execution is still marked
+            // waiting (the window before its polling worker observes EnableStageTransition).
+            Method waitForTransition = CodePipelineService.class.getDeclaredMethod("waitForTransition",
+                    CodePipelinePipeline.class, CodePipelineExecution.class, String.class);
+            waitForTransition.setAccessible(true);
+            CodePipelinePipeline pipeline = storage.pipelineStore()
+                    .getForAccount(ACCOUNT, REGION + ":" + pipelineName).orElseThrow();
+            for (String mode : new String[] {"QUEUED", "PARALLEL"}) {
+                newer.setExecutionMode(mode);
+                waitForTransition.invoke(catchUpService, pipeline, newer, "External");
+                assertEquals("InProgress", older.getStatus(), mode + " must not supersede waiters");
+            }
+            newer.setExecutionMode("SUPERSEDED");
+            waitForTransition.invoke(catchUpService, pipeline, newer, "External");
+
+            assertEquals("Superseded", older.getStatus());
+            assertEquals("Superseded", sameTimeOlder.getStatus());
+            assertNull(older.getWaitingStage());
+            for (CodePipelineExecution untouched : new CodePipelineExecution[] {
+                    newer, later, sameTime, sameTimeNewer, otherStage, active, parallel}) {
+                assertEquals("InProgress", untouched.getStatus(), untouched.getPipelineExecutionId());
+            }
+            assertEquals("Failed", terminal.getStatus());
+            JsonNode response = handle(catchUpService, "GetPipelineExecution", """
+                    {"pipelineName":"%s","pipelineExecutionId":"later"}
+                    """.formatted(pipelineName));
+            assertFalse(response.path("pipelineExecution").has("waitingStage"),
+                    "Internal waiting identity must not leak into the public execution response");
+            assertFalse(response.path("pipelineExecution").has("admissionOrdinal"));
+        } finally {
+            catchUpService.shutdown();
+        }
+    }
+
+    @Test
+    void realAdmissionsPersistIncreasingOrdinalsDespiteEqualStartTimes() throws Exception {
+        CapturingStorageFactory storage = new CapturingStorageFactory();
+        // Force a wall-clock collision at the persistence boundary, without changing production now().
+        // Both real StartPipelineExecution calls still traverse normal admission and worker startup.
+        storage.fixedExecutionStartTime = 10.0;
+        CodePipelineService pipelineService = new CodePipelineService(storage, mapper,
+                mock(CodeBuildService.class), mock(CodeDeployService.class),
+                mock(LambdaService.class), mock(S3Service.class));
+        String pipeline = "ordinal-admission";
+        try {
+            createExternalActionPipeline(pipelineService, pipeline, """
+                    {"name":"Approve","actionTypeId":{
+                    "category":"Approval","owner":"AWS","provider":"Manual","version":"1"}}
+                    """);
+            CodePipelineExecution persisted = waitingExecution(storage, pipeline, "persisted", 1.0, null);
+            persisted.setStatus("Succeeded");
+            persisted.setAdmissionOrdinal(40L);
+            // A deserialized record must seed the next ordinal, just as after process restart.
+            storage.executionStore.putForAccount(ACCOUNT, REGION + ":" + pipeline + ":persisted",
+                    mapper.readValue(mapper.writeValueAsBytes(persisted), CodePipelineExecution.class));
+
+            String firstId = startExecution(pipelineService, pipeline);
+            String secondId = startExecution(pipelineService, pipeline);
+            CodePipelineExecution first = storage.executionStore
+                    .getForAccount(ACCOUNT, REGION + ":" + pipeline + ":" + firstId).orElseThrow();
+            CodePipelineExecution second = storage.executionStore
+                    .getForAccount(ACCOUNT, REGION + ":" + pipeline + ":" + secondId).orElseThrow();
+            assertEquals(first.getStartTime(), second.getStartTime());
+            assertEquals(Long.valueOf(41L), first.getAdmissionOrdinal());
+            assertEquals(Long.valueOf(42L), second.getAdmissionOrdinal());
+            synchronized (second) {
+                CodePipelineExecution restored = mapper.readValue(mapper.writeValueAsBytes(second),
+                        CodePipelineExecution.class);
+                assertEquals(second.getAdmissionOrdinal(), restored.getAdmissionOrdinal());
+            }
+
+            // Observe both actual workers reaching their first action before cleanup.
+            await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
+                for (String id : new String[] {firstId, secondId}) {
+                    assertFalse(handle(pipelineService, "ListActionExecutions", """
+                            {"pipelineName":"%s","filter":{"pipelineExecutionId":"%s"}}
+                            """.formatted(pipeline, id)).path("actionExecutionDetails").isEmpty());
+                }
+            });
+            stopExecution(pipelineService, pipeline, firstId, true);
+            stopExecution(pipelineService, pipeline, secondId, true);
+            waitForExecutionStatus(pipelineService, pipeline, firstId, "Stopped");
+            waitForExecutionStatus(pipelineService, pipeline, secondId, "Stopped");
+        } finally {
+            pipelineService.shutdown();
+        }
+    }
+
+    @Test
+    void equalTimeReverseWorkerArrivalCannotSupersedeNewerOrMutuallySupersede() throws Exception {
+        CapturingStorageFactory storage = new CapturingStorageFactory();
+        CodePipelineService pipelineService = new CodePipelineService(storage, mapper,
+                mock(CodeBuildService.class), mock(CodeDeployService.class),
+                mock(LambdaService.class), mock(S3Service.class));
+        String pipeline = "ordinal-reverse-arrival";
+        try {
+            createExternalActionPipeline(pipelineService, pipeline, """
+                    {"name":"Approve","actionTypeId":{
+                    "category":"Approval","owner":"AWS","provider":"Manual","version":"1"}}
+                    """);
+            CodePipelineExecution older = waitingExecution(storage, pipeline, "older", 10.0, "External");
+            older.setAdmissionOrdinal(1L);
+            CodePipelineExecution newer = waitingExecution(storage, pipeline, "newer", 10.0, "External");
+            newer.setAdmissionOrdinal(2L);
+            Method arrive = CodePipelineService.class.getDeclaredMethod("waitForTransition",
+                    CodePipelinePipeline.class, CodePipelineExecution.class, String.class);
+            arrive.setAccessible(true);
+            CodePipelinePipeline definition = storage.pipelineStore()
+                    .getForAccount(ACCOUNT, REGION + ":" + pipeline).orElseThrow();
+
+            // B has reached the transition before A's delayed worker catches up. A cannot kill B.
+            arrive.invoke(pipelineService, definition, older, "External");
+            assertEquals("InProgress", newer.getStatus());
+            assertEquals("InProgress", older.getStatus());
+            // B's next observation catches the older waiter; A's subsequent observation stays terminal.
+            arrive.invoke(pipelineService, definition, newer, "External");
+            assertEquals("Superseded", older.getStatus());
+            arrive.invoke(pipelineService, definition, older, "External");
+            assertEquals("InProgress", newer.getStatus());
+            assertEquals("Superseded", older.getStatus());
+            assertNull(older.getWaitingStage());
+        } finally {
+            pipelineService.shutdown();
+        }
+    }
+
+    private CodePipelineExecution waitingExecution(CapturingStorageFactory storage, String pipeline,
+                                                   String id, double start, String stage) {
+        CodePipelineExecution execution = new CodePipelineExecution();
+        execution.setAccountId(ACCOUNT);
+        execution.setRegion(REGION);
+        execution.setPipelineName(pipeline);
+        execution.setPipelineExecutionId(id);
+        execution.setStartTime(start);
+        execution.setStatus("InProgress");
+        execution.setExecutionMode("SUPERSEDED");
+        execution.setWaitingStage(stage);
+        storage.executionStore.putForAccount(ACCOUNT, REGION + ":" + pipeline + ":" + id, execution);
+        return execution;
+    }
+
+    private void awaitWaitingStage(CodePipelineService pipelineService, String pipeline,
+                                   String executionId, String stage) throws Exception {
+        Method requireExecution = CodePipelineService.class.getDeclaredMethod("requireExecution",
+                String.class, String.class, String.class, String.class);
+        requireExecution.setAccessible(true);
+        await().atMost(Duration.ofSeconds(3)).until(() -> {
+            CodePipelineExecution execution = (CodePipelineExecution) requireExecution.invoke(
+                    pipelineService, ACCOUNT, REGION, pipeline, executionId);
+            return stage.equals(execution.getWaitingStage())
+                    && pipelineService.activeRuns.contains(ACCOUNT + ":" + executionId);
+        });
     }
 
     @Test
@@ -643,6 +834,8 @@ class CodePipelineServiceTest {
 
     private static final class CapturingStorageFactory extends StorageFactory {
         private AccountAwareStorageBackend<CodePipelinePipeline> pipelineStore;
+        private AccountAwareStorageBackend<CodePipelineExecution> executionStore;
+        private Double fixedExecutionStartTime;
 
         private CapturingStorageFactory() {
             super(null, null);
@@ -655,6 +848,16 @@ class CodePipelineServiceTest {
             AccountAwareStorageBackend<V> store = AccountAwareStorageBackend.inMemory(ACCOUNT);
             if ("codepipeline-pipelines.json".equals(fileName)) {
                 pipelineStore = (AccountAwareStorageBackend<CodePipelinePipeline>) (AccountAwareStorageBackend<?>) store;
+            } else if ("codepipeline-executions.json".equals(fileName)) {
+                if (fixedExecutionStartTime != null) {
+                    store = spy(store);
+                    doAnswer(invocation -> {
+                        CodePipelineExecution execution = invocation.getArgument(2);
+                        execution.setStartTime(fixedExecutionStartTime);
+                        return invocation.callRealMethod();
+                    }).when(store).putForAccount(anyString(), anyString(), any());
+                }
+                executionStore = (AccountAwareStorageBackend<CodePipelineExecution>) (AccountAwareStorageBackend<?>) store;
             }
             return store;
         }
